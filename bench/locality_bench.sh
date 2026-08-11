@@ -11,7 +11,7 @@ AUTH=${BENCH_TOKEN:+-H "Authorization: Bearer $BENCH_TOKEN"}
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 sys_prompt() { # ~20KB deterministic per-app system prompt
-  python3 -c "import sys; print(('You are agent for APP-$1. ' + 'Follow the runbook carefully. ' * 40 + chr(65+$1) * 100)[:20000])"
+  python3 -c "import sys; print(('You are agent for APP-${SALT:-x}-$1. ' + 'Follow the runbook carefully. ' * 40 + chr(65+$1) * 100)[:20000])"
 }
 
 turn() { # app session turn -> one request, print "cached prompt wall"
