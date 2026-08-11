@@ -93,6 +93,8 @@ reasons, upstream up/probes/errors/requests, client disconnects — plus new:
 
 ## Roadmap
 
+See [ROADMAP.md](ROADMAP.md) for the tracked list. Summary below.
+
 1. **KV-event ground truth**: vLLM exposes `kv_events` (block stored/removed).
    Subscribe → replace the approximate index with the engine's actual block
    inventory (Dynamo does exactly this). Removes drift from evictions we

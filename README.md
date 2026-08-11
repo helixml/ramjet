@@ -28,3 +28,5 @@ DS4_MAX_TOKENS_STRIP (100000), DS4_ROUTE_ALPHA (4), DS4_ROUTE_CHUNK_BYTES
 
     go test ./...
     go build ./cmd/mini-dynamo
+
+See [ROADMAP.md](ROADMAP.md) and [AGENTS.md](AGENTS.md) (node06 test/bench workflow).
