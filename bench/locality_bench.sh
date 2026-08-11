@@ -10,7 +10,7 @@ APPS="${2:-2}"; SESSIONS="${3:-4}"; TURNS="${4:-3}"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 sys_prompt() { # ~20KB deterministic per-app system prompt
-  python3 -c "import sys; print(('You are agent for APP-${SALT:-x}-$1. ' + 'Follow the runbook carefully. ' * 40 + chr(65+$1) * 100)[:20000])"
+  python3 -c "print('You are coding agent for APP-${SALT:-x}-$1. ' + ('Follow the runbook carefully and cite file paths. ' * 1) * 1800 + 'APPSALT${SALT:-x}TAG$1' * 50)"
 }
 
 turn() { # app session turn -> one request, print "cached prompt wall"
