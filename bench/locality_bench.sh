@@ -7,7 +7,6 @@
 set -euo pipefail
 BASE="${1:-http://127.0.0.1:8006}"
 APPS="${2:-2}"; SESSIONS="${3:-4}"; TURNS="${4:-3}"
-AUTH=${BENCH_TOKEN:+-H "Authorization: Bearer $BENCH_TOKEN"}
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 sys_prompt() { # ~20KB deterministic per-app system prompt
@@ -23,7 +22,7 @@ turn() { # app session turn -> one request, print "cached prompt wall"
   done
   local start end
   start=$(date +%s.%N)
-  curl -s -m 300 $AUTH -H 'Content-Type: application/json' "$BASE/v1/chat/completions" -d "{
+  curl -s -m 300 -H "Authorization: Bearer ${BENCH_TOKEN:-none}" -H 'Content-Type: application/json' "$BASE/v1/chat/completions" -d "{
     \"model\": \"deepseek-v4-flash\",
     \"messages\": [{\"role\":\"system\",\"content\": $(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$sys")}$history,
       {\"role\":\"user\",\"content\":\"session $sess step $turn: describe part $turn briefly\"}],
