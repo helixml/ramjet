@@ -661,6 +661,19 @@ impl Proxy {
         elapsed: Duration,
         first_token: Option<Duration>,
     ) {
+        let cache_outcome = usage.cache_outcome();
+        self.inner
+            .metrics
+            .cache_requests
+            .with_label_values(&[endpoint, cache_outcome])
+            .inc();
+        if let Some(first_token) = first_token {
+            self.inner
+                .metrics
+                .cache_ttft
+                .with_label_values(&[endpoint, cache_outcome])
+                .observe(first_token.as_secs_f64());
+        }
         if usage.prompt.is_none() && usage.completion.is_none() {
             self.inner
                 .metrics
@@ -1062,6 +1075,42 @@ mod tests {
         assert_eq!(
             upstream_url(&base, &uri).as_str(),
             "http://engine:8000/prefix/v1/chat/completions?x=1"
+        );
+    }
+
+    #[test]
+    fn response_usage_records_bounded_cache_outcome_and_ttft() {
+        let proxy = proxy_for(&[Url::parse("http://127.0.0.1:1").unwrap()]);
+        let usage = Accumulator {
+            prompt: Some(100.0),
+            cached: Some(64.0),
+            completion: Some(10.0),
+            finish_reason: "stop".to_owned(),
+            ..Accumulator::default()
+        };
+
+        proxy.record_usage(
+            "chat",
+            &usage,
+            Duration::from_secs(2),
+            Some(Duration::from_millis(500)),
+        );
+
+        let requests = proxy
+            .inner
+            .metrics
+            .cache_requests
+            .with_label_values(&["chat", "partial"])
+            .get();
+        assert!((requests - 1.0).abs() < f64::EPSILON);
+        assert_eq!(
+            proxy
+                .inner
+                .metrics
+                .cache_ttft
+                .with_label_values(&["chat", "partial"])
+                .get_sample_count(),
+            1
         );
     }
 

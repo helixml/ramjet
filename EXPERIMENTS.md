@@ -1912,3 +1912,36 @@ or profiling identifies hash matching—not physical KV storage—as a material
 bottleneck. Any future audit should repeat the aggregate event probe first;
 the unit and group layout are runtime compatibility identity, not an assumed
 constant.
+
+## 2026-08-12 — issue #16 response-grounded cache scorecard, first slice
+
+The Rust LB now classifies completed responses from authoritative usage only:
+`cold` means zero reported cached prompt tokens, `partial` is greater than zero
+but below the reported prompt count, `full` covers the prompt count, and
+missing or nonsensical usage is `unknown`. The bounded outcome labels feed a
+request counter and, for streams where TTFT is observable, a cache-outcome TTFT
+histogram. Existing prompt/cached-token counters remain the token-weighted
+view; no prompt, fingerprint, ID, tenant, or session becomes a label.
+
+The focused loop took 4.85s for the first compile, 0.16s for the next test, and
+2.07s after adding the proxy recording assertion. The three-lane pre-push gate
+ran Rust, Go, and protocol validation concurrently. Strict Clippy rejected an
+exact float comparison after 2.04s; after the local fix, all 106 Rust tests,
+Clippy, and the release build passed in 23.49s. The independent Go and Python
+lanes had already passed in 0.55s and 0.10s, so they were not rerun. This keeps
+the critical path at the single Rust release lane rather than summing all three.
+
+This is instrumentation, not yet a cache SLO. The next #16 evidence must
+reconcile response-derived totals with native engine counters and run a
+fresh-salt working-set sweep before making a 95%+ cache-efficiency claim.
+
+The cached publisher built and transferred r24
+`rust-r24-cache-scorecard-bec4110` in 28.36s (22.31s build, 5.98s transfer).
+The stateless LB swap reached 2/2 healthy in 1.761s; engines and their KV caches
+were untouched. A fresh repeated 7.3K-token streaming prompt produced exactly
+one `cold` and one `partial` observation. Cold wall/TTFT were 2.742s/741ms;
+the repeated request was 405ms/380ms and reported 7,168 cached tokens. The
+token-weighted counters reconciled to 7,168 cached of 14,590 prompt tokens
+across the pair. Both requests returned 200, no upstream/client error counter
+appeared, and both exact inventories were trusted after one bounded event
+trigger per engine. r24 remains the node06 LB candidate/production image.

@@ -13,6 +13,21 @@ pub struct Accumulator {
 }
 
 impl Accumulator {
+    /// Classifies cache reuse using only the upstream's response usage.
+    ///
+    /// The labels are deliberately few and exact: `full` means the reported
+    /// cached count covers the complete reported prompt, not an inferred warm
+    /// threshold. Missing or nonsensical usage stays `unknown`.
+    #[must_use]
+    pub fn cache_outcome(&self) -> &'static str {
+        match (self.prompt, self.cached) {
+            (Some(prompt), Some(cached)) if prompt > 0.0 && cached >= prompt => "full",
+            (Some(prompt), Some(cached)) if prompt > 0.0 && cached > 0.0 => "partial",
+            (Some(prompt), Some(cached)) if prompt > 0.0 && cached == 0.0 => "cold",
+            _ => "unknown",
+        }
+    }
+
     pub fn feed_json(&mut self, data: &[u8]) {
         if let Ok(value) = serde_json::from_slice(data) {
             self.feed_value(&value);
@@ -225,5 +240,26 @@ mod tests {
         usage.feed_json(br#"{"usage":{"prompt_tokens":"bad","completion_tokens":null}}"#);
         assert_eq!(usage.prompt, Some(10.0));
         assert_eq!(usage.completion, Some(2.0));
+    }
+
+    #[test]
+    fn classifies_response_reported_cache_outcomes() {
+        for (prompt, cached, expected) in [
+            (None, None, "unknown"),
+            (Some(100.0), None, "unknown"),
+            (Some(0.0), Some(0.0), "unknown"),
+            (Some(100.0), Some(0.0), "cold"),
+            (Some(100.0), Some(64.0), "partial"),
+            (Some(100.0), Some(100.0), "full"),
+            (Some(100.0), Some(128.0), "full"),
+            (Some(100.0), Some(-1.0), "unknown"),
+        ] {
+            let usage = Accumulator {
+                prompt,
+                cached,
+                ..Accumulator::default()
+            };
+            assert_eq!(usage.cache_outcome(), expected);
+        }
     }
 }

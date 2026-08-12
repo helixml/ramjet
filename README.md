@@ -87,6 +87,17 @@ separate `placement` mode is explicitly enabled.
 contain counts only. Raw token IDs and hashes never enter logs, journals, or
 metrics.
 
+The cache scorecard uses upstream response usage as its authority.
+`ds4proxy_cache_requests_total{endpoint,outcome}` classifies each completed
+response as `cold` (reported cached tokens are zero), `partial` (greater than
+zero but less than prompt tokens), `full` (at least the reported prompt-token
+count), or `unknown` (missing/invalid usage). For streaming responses,
+`ds4proxy_cache_ttft_seconds` records TTFT under the same bounded labels. The
+existing prompt/cached-token counters remain the token-weighted view; compute
+their ratio in PromQL rather than averaging per-request percentages. These are
+observed response outcomes, not claims that every prompt token was cache
+eligible.
+
 `DS4_EXACT_ROUTE_MODE=shadow` moves admitted local tokenization before the
 approximate decision, then immediately scores the same load snapshot against
 all trusted exact inventories without changing candidate order. It requires
