@@ -44,9 +44,12 @@ response instead of reparsing the prompt for cache observation. In selective
 remote-shadow mode the same parsed object also derives a vLLM `/tokenize`
 payload. It enters a bounded non-blocking worker queue only after the client
 request completes, so queue pressure or tokenizer failure cannot delay or
-change placement. Next, this boundary feeds bounded local tokenizer CPU workers
-and exact per-engine KV indexes. Local tokenization work never runs on Tokio I/O
-workers.
+change placement. Local-shadow mode feeds Dynamo's native DeepSeek-V4 renderer
+and NVIDIA `fastokens` through bounded blocking CPU workers while the remote
+engine remains the exact-ID authority. Local tokenization work never runs on
+Tokio I/O workers. Admitted request classes must match remote IDs; known
+template-version gaps fail closed to remote-only observation. Next, this
+boundary feeds exact per-engine KV indexes.
 Exact state is fenced on event gaps and routing falls back automatically to
 the approximate chain-fingerprint index.
 

@@ -955,3 +955,58 @@ It validates the remote authority and backpressure seam, but exact IDs do not
 influence routing until the KV-event index has sequence-gap replay, generation
 fencing, and an automatic approximate fallback. Go rc7 remains the compose-
 default rollback.
+
+## 2026-08-12 — Rust r7-r9 local fastokens shadow
+
+The local tokenizer gate used `dynamo-renderer` 5.0.1's native DeepSeek-V4
+formatter and `dynamo-tokenizers` 1.8.0 / NVIDIA `fastokens` 0.3.1 against the
+active node06 tokenizer artifact. A release-mode development-host probe found
+identical Hugging Face and fastokens IDs at every size. Steady-state median
+encoding cost crossed over strongly in fastokens' favor:
+
+| Prompt tokens | Hugging Face | fastokens |
+|---:|---:|---:|
+| 4,180 | 3.03ms | 0.45ms |
+| 20,564 | 16.46ms | 0.86ms |
+| 82,004 | 90.28ms | 2.11ms |
+
+The active vLLM r34 template has newer reasoning semantics than Dynamo 5.0.1.
+Direct completion usage and `/tokenize` agreed in 13/13 cases and exposed four
+effective classes: `none`/`low` render 9 tokens, default/`minimal`/`medium`/
+`high` render 88, and `xhigh`/`max` render a newer 101-token "beyond maximum"
+preamble. The local profile maps only equivalence-proven classes and fences
+`xhigh`/`max` to remote authority. An initial r8 live matrix then found tool
+history differed at the ID level despite matching counts; r9 also fences any
+prior tool/function-call history while continuing to admit declared tools.
+
+The first r7 distroless launch failed immediately because the newly linked
+tokenizer stack required `libpcre2-8.so.0`. The restart loop was observed before
+serving a request and the LB was rolled back to r6 within seconds; both engines
+remained running and healthy. r8 added the exact runtime library and passed a
+standalone container startup with the real read-only tokenizer mount before the
+next LB-only swap.
+
+r9's fresh live matrix produced **10/10 exact local-ID matches**, three explicit
+remote-only fallbacks (tool history, `xhigh`, `max`), **zero mismatches**, and
+13/13 remote-authority successes. A separate 18,762-token cold request matched
+local IDs, remote IDs, and completion usage exactly. Across the subsequent
+long-prompt and same-app gate, 14/14 admitted observations matched with equal
+local/remote token sums of 254,844; local end-to-end worker time averaged
+6.26ms versus 34.68ms remote, including JSON decode/render and first-use cost.
+The queue returned to zero. Idle RSS is about 196MiB because the tokenizer is
+resident, versus 10.6MiB for remote-only r6.
+
+The 12-request same-app gate completed 12/12, split 6/6, and delivered 639
+tok/s. Three c24/max256 samples were 1,523.9, 1,629.1, and 1,605.6 tok/s
+(1,605.6 median), 1.9% below the r6 median and within the established shared-box
+run noise; all 72 requests succeeded and were below the tokenization size
+window. Both upstream probes remained up, all route load gauges returned to
+zero, and the engines were never restarted.
+
+The live node06 image is locally built
+`ghcr.io/helixml/ds4-loadbalancer:rust-r9-0c03f85`; GHCR rejected node06's
+stored credential, so this tag is not yet published. r9 remains observation
+only: exact IDs do not influence routing. Next gates are an automated public
+image publish, an Anthropic-input golden adapter, a versioned compatibility
+manifest, and the fenced KV-event shadow index. Go rc7 remains the compose-
+default rollback.

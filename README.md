@@ -28,7 +28,8 @@ DS4_MAX_TOKENS_STRIP (100000), DS4_ROUTE_ALPHA (4), DS4_ROUTE_CHUNK_BYTES
 (32), DS4_ROUTE_INDEX_CAPACITY (100000), DS4_ROUTE_LOAD_UNIT_BYTES (32768),
 DS4_ROUTE_MAX_LOAD_UNITS (8),
 DS4_AFFINITY (prefix|load), DS4_ROUTE_JOURNAL (false),
-DS4_TOKENIZER_MODE (off|remote-shadow), DS4_TOKENIZER_MIN_BYTES (32768),
+DS4_TOKENIZER_MODE (off|remote-shadow|local-shadow),
+DS4_TOKENIZER_PATH (required by local-shadow), DS4_TOKENIZER_MIN_BYTES (32768),
 DS4_TOKENIZER_MAX_BYTES (2097152), DS4_TOKENIZER_WORKERS (1),
 DS4_TOKENIZER_QUEUE_CAPACITY (8), DS4_TOKENIZER_TIMEOUT_MS (2000). `load` is an explicit baseline or an
 escape hatch for engines without reusable prefix state; hybrid KDA models such
@@ -42,6 +43,13 @@ endpoints, requests outside the configured byte window, a full queue, timeouts,
 and malformed responses all fall back to the existing approximate router.
 Shadow results expose only controlled outcome labels, duration, and token-count
 histograms; prompt text and token IDs are neither logged nor retained.
+
+`local-shadow` additionally renders DeepSeek-V4 prompts with Dynamo's native
+Rust formatter and encodes them with NVIDIA `fastokens` on bounded blocking CPU
+workers. The selected engine's authenticated `/tokenize` runs concurrently as
+the authority. Exact IDs are compared in memory and discarded; a template
+mismatch, unsupported tool-history or reasoning variant, worker failure, or
+missing remote authority cannot affect the approximate routing decision.
 
 Set `DS4_ROUTE_JOURNAL=true` to emit privacy-bounded versioned `start`/`finish`
 records to the process log. Records contain only process-local sequence IDs,
@@ -84,6 +92,7 @@ During the rewrite, keep both suites green:
 Measure the request-preparation hot path before and after tokenizer work:
 
     cargo run --release --locked --example preparation_bench
+    cargo run --release --locked --example local_tokenizer_probe -- /path/to/tokenizer.json
     go test ./pkg/proxy -run '^$' -bench BenchmarkPrepareLongPrompt -benchmem
 
 See [ROADMAP.md](ROADMAP.md), [EXPERIMENTS.md](EXPERIMENTS.md), and

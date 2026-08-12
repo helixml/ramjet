@@ -24,26 +24,30 @@ node06). The design rationale for each lives in DESIGN.md.
   `rust-*` images, then run locality, concurrent same-app, c24 aggregate, route
   telemetry, and occasional Helix workflow acceptance before promotion. Go
   remains the instant LB-only rollback; neither engine is restarted. r4 matched
-  Go at c16/c24, preserved locality, replayed 36/36 decisions, and is live.
+  Go at c16/c24, preserved locality, replayed 36/36 decisions, and established
+  the rollback baseline. r9 is live in exact-token local-shadow mode.
 - ✅ **Bounded remote tokenizer shadow.** The one-pass boundary selectively
   derives chat/completion `/tokenize` payloads, then submits them only after the
   user request completes. Authenticated calls use a bounded non-blocking queue,
   fixed workers/timeouts/response caps, controlled metrics, and unconditional
   approximate-routing fallback; raw token IDs and prompts never enter logs.
 - ✅ **Remote chat-template parity matrix.** Active vLLM completion usage and
-  `/tokenize` agreed exactly in 7/7 plain, multi-turn, tools, tool-history,
-  reasoning, thinking-disabled, and normalized-content cases; repeated token
-  IDs were stable in memory and never printed. Keep this as the remote
-  authority while local rendering is introduced.
-- ⬜ **Bounded local Rust tokenizer pool.** Load a validated model/template
-  bundle, run CPU-heavy Hugging Face or fastokens encoding outside Tokio I/O
-  workers, retain authenticated `/tokenize` as the parity/fallback authority,
-  and use exact lookup only for request classes whose measured value exceeds
-  tokenization cost.
-- ⬜ **Chat-template/token-ID golden matrix.** Compare local token IDs with the
+  `/tokenize` agreed exactly in 13/13 plain, multi-turn, tools, tool-history,
+  all seven reasoning levels, thinking-disabled, and normalized-content cases;
+  repeated token IDs were stable in memory and never printed.
+- ✅ **Bounded local Rust tokenizer pool.** The read-only model artifact feeds
+  Dynamo's native DeepSeek-V4 renderer and NVIDIA `fastokens` outside Tokio I/O
+  workers. Authenticated `/tokenize` runs concurrently as parity authority;
+  only controlled match/fallback metrics survive. Local IDs remain shadow-only.
+- 🔨 **Chat-template/token-ID golden matrix.** Compare local token IDs with the
   active vLLM `/tokenize` across OpenAI/Anthropic messages, tools, reasoning,
   content parts, special tokens, and `add_generation_prompt`; fail closed to
-  remote or approximate mode on any model/template mismatch.
+  remote or approximate mode on any model/template mismatch. The node06 OpenAI
+  matrix admits 10/10 exact classes; tool history and `max`/`xhigh` are fenced
+  remote-only because Dynamo 5.0.1 and vLLM r34 render them differently.
+- ⬜ **Versioned renderer compatibility manifest.** Bind model/tokenizer hashes,
+  renderer profile, engine image digest, admitted request classes, and golden
+  results so an engine or template update cannot silently widen local routing.
 - ⬜ **Exact KV-event shadow index.** Per-engine token-prefix/radix indexes,
   cache-group-aware block metadata, sequence-gap detection, bounded replay,
   generation fencing, reconnect backoff, and an automatic approximate-routing

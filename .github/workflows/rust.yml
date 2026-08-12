@@ -1,6 +1,7 @@
 name: rust
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main]
@@ -22,7 +23,7 @@ jobs:
       - run: cargo build --release --locked
 
   image:
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     needs: check
     runs-on: ubuntu-latest
     permissions:
