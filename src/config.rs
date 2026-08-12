@@ -32,6 +32,8 @@ pub struct Config {
     pub exact_route_manifest_sha256: Option<String>,
     pub exact_route_workers: usize,
     pub exact_route_timeout_ms: usize,
+    pub exact_route_min_gain_tokens: usize,
+    pub exact_route_max_load_delta: usize,
     pub kv_event_mode: KvEventMode,
     pub kv_event_sources: Vec<KvEventSourceConfig>,
     pub kv_event_replay_limit: usize,
@@ -63,6 +65,7 @@ pub enum TokenizerProfile {
 pub enum ExactRouteMode {
     Off,
     Shadow,
+    Placement,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +106,8 @@ struct ExactRouteSettings {
     manifest_sha256: Option<String>,
     workers: usize,
     timeout_ms: usize,
+    min_gain_tokens: usize,
+    max_load_delta: usize,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -180,7 +185,7 @@ impl Config {
         };
         let tokenizer = tokenizer_settings(&mut get)?;
         let kv_events = kv_event_settings(&mut get, upstreams.len())?;
-        let exact_route = exact_route_settings(&mut get, &tokenizer, &kv_events)?;
+        let exact_route = exact_route_settings(&mut get, &tokenizer, &kv_events, affinity)?;
 
         Ok(Self {
             upstreams,
@@ -215,6 +220,8 @@ impl Config {
             exact_route_manifest_sha256: exact_route.manifest_sha256,
             exact_route_workers: exact_route.workers,
             exact_route_timeout_ms: exact_route.timeout_ms,
+            exact_route_min_gain_tokens: exact_route.min_gain_tokens,
+            exact_route_max_load_delta: exact_route.max_load_delta,
             kv_event_mode: kv_events.mode,
             kv_event_sources: kv_events.sources,
             kv_event_replay_limit: kv_events.replay_limit,
@@ -230,15 +237,17 @@ fn exact_route_settings(
     get: &mut impl FnMut(&str) -> Option<String>,
     tokenizer: &TokenizerSettings,
     kv_events: &KvEventSettings,
+    affinity: Affinity,
 ) -> Result<ExactRouteSettings, ConfigError> {
     let mode = match get("DS4_EXACT_ROUTE_MODE").as_deref().unwrap_or("off") {
         "off" => ExactRouteMode::Off,
         "shadow" => ExactRouteMode::Shadow,
+        "placement" => ExactRouteMode::Placement,
         value => {
             return Err(invalid(
                 "DS4_EXACT_ROUTE_MODE",
                 value.to_owned(),
-                "off or shadow",
+                "off, shadow, or placement",
             ));
         }
     };
@@ -255,33 +264,45 @@ fn exact_route_settings(
             "a 64-character hexadecimal SHA-256",
         ));
     }
-    if mode == ExactRouteMode::Shadow {
+    if mode != ExactRouteMode::Off {
+        let mode_label = match mode {
+            ExactRouteMode::Shadow => "shadow",
+            ExactRouteMode::Placement => "placement",
+            ExactRouteMode::Off => unreachable!("off mode is excluded"),
+        };
         if tokenizer.mode != TokenizerMode::LocalShadow {
             return Err(invalid(
                 "DS4_EXACT_ROUTE_MODE",
-                "shadow".to_owned(),
-                "shadow requires DS4_TOKENIZER_MODE=local-shadow",
+                mode_label.to_owned(),
+                "exact routing requires DS4_TOKENIZER_MODE=local-shadow",
             ));
         }
         if kv_events.mode != KvEventMode::Shadow {
             return Err(invalid(
                 "DS4_EXACT_ROUTE_MODE",
-                "shadow".to_owned(),
-                "shadow requires DS4_KV_EVENT_MODE=shadow",
+                mode_label.to_owned(),
+                "exact routing requires DS4_KV_EVENT_MODE=shadow",
             ));
         }
         if manifest_path.is_none() {
             return Err(invalid(
                 "DS4_EXACT_ROUTE_MANIFEST_PATH",
                 String::new(),
-                "a compatibility manifest path in exact-route shadow mode",
+                "a compatibility manifest path when exact routing is enabled",
             ));
         }
         if manifest_sha256.is_none() {
             return Err(invalid(
                 "DS4_EXACT_ROUTE_MANIFEST_SHA256",
                 String::new(),
-                "the expected manifest SHA-256 in exact-route shadow mode",
+                "the expected manifest SHA-256 when exact routing is enabled",
+            ));
+        }
+        if mode == ExactRouteMode::Placement && affinity != Affinity::Prefix {
+            return Err(invalid(
+                "DS4_EXACT_ROUTE_MODE",
+                "placement".to_owned(),
+                "placement requires DS4_AFFINITY=prefix",
             ));
         }
     }
@@ -291,6 +312,13 @@ fn exact_route_settings(
         manifest_sha256,
         workers: positive(get, "DS4_EXACT_ROUTE_WORKERS", 4)?,
         timeout_ms: positive(get, "DS4_EXACT_ROUTE_TIMEOUT_MS", 250)?,
+        min_gain_tokens: positive(get, "DS4_EXACT_ROUTE_MIN_GAIN_TOKENS", 8_192)?,
+        max_load_delta: parse(
+            get,
+            "DS4_EXACT_ROUTE_MAX_LOAD_DELTA",
+            0_usize,
+            "a non-negative integer",
+        )?,
     })
 }
 
@@ -550,6 +578,8 @@ mod tests {
         assert!(config.exact_route_manifest_sha256.is_none());
         assert_eq!(config.exact_route_workers, 4);
         assert_eq!(config.exact_route_timeout_ms, 250);
+        assert_eq!(config.exact_route_min_gain_tokens, 8_192);
+        assert_eq!(config.exact_route_max_load_delta, 0);
         assert_eq!(config.kv_event_mode, KvEventMode::Off);
         assert!(config.kv_event_sources.is_empty());
         assert_eq!(config.kv_event_replay_limit, 1_024);
@@ -672,6 +702,34 @@ mod tests {
                 .exact_route_mode,
             ExactRouteMode::Shadow
         );
+    }
+
+    #[test]
+    fn exact_route_placement_is_explicit_and_parses_conservative_gates() {
+        let values = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1"),
+            ("DS4_TOKENIZER_MODE", "local-shadow"),
+            ("DS4_TOKENIZER_PATH", "/models/tokenizer.json"),
+            (
+                "DS4_TOKENIZER_SHA256",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            ("DS4_KV_EVENT_MODE", "shadow"),
+            ("DS4_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557"),
+            ("DS4_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558"),
+            ("DS4_EXACT_ROUTE_MODE", "placement"),
+            ("DS4_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
+            (
+                "DS4_EXACT_ROUTE_MANIFEST_SHA256",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+            ("DS4_EXACT_ROUTE_MIN_GAIN_TOKENS", "16384"),
+            ("DS4_EXACT_ROUTE_MAX_LOAD_DELTA", "1"),
+        ]);
+        let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(config.exact_route_mode, ExactRouteMode::Placement);
+        assert_eq!(config.exact_route_min_gain_tokens, 16_384);
+        assert_eq!(config.exact_route_max_load_delta, 1);
     }
 
     #[test]

@@ -195,4 +195,35 @@ mod tests {
         usage.feed_json(br#"{"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}"#);
         assert!(usage.generated);
     }
+
+    #[test]
+    fn extracts_anthropic_usage_cache_and_thinking() {
+        let mut usage = Accumulator::default();
+        usage.feed_json(br#"{"delta":{"thinking":"reason"},"message":{"usage":{"input_tokens":120,"cache_read_input_tokens":96,"output_tokens":7}},"stop_reason":"end_turn"}"#);
+        assert_eq!(usage.prompt, Some(120.0));
+        assert_eq!(usage.cached, Some(96.0));
+        assert_eq!(usage.completion, Some(7.0));
+        assert_eq!(usage.finish_reason, "end_turn");
+        assert!(usage.generated);
+    }
+
+    #[test]
+    fn extracts_responses_status_delta_and_usage() {
+        let mut usage = Accumulator::default();
+        usage.feed_json(br#"{"status":"completed","delta":"answer","usage":{"input_tokens":40,"output_tokens":9}}"#);
+        assert_eq!(usage.prompt, Some(40.0));
+        assert_eq!(usage.completion, Some(9.0));
+        assert_eq!(usage.finish_reason, "completed");
+        assert!(usage.generated);
+    }
+
+    #[test]
+    fn malformed_usage_is_ignored_without_erasing_prior_values() {
+        let mut usage = Accumulator::default();
+        usage.feed_json(br#"{"usage":{"prompt_tokens":10,"completion_tokens":2}}"#);
+        usage.feed_json(b"not-json");
+        usage.feed_json(br#"{"usage":{"prompt_tokens":"bad","completion_tokens":null}}"#);
+        assert_eq!(usage.prompt, Some(10.0));
+        assert_eq!(usage.completion, Some(2.0));
+    }
 }

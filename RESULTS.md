@@ -25,6 +25,7 @@ placement. Current measured landmarks:
 | r34 KV shadow qualification | **both engines; replay + 2,442-removal eviction soak; trusted** |
 | r19 exact-score shadow | **15 agree / 3 cold / 1 forced move; 14,336-token miss detected** |
 | r20 attested pre-route shadow | **15 agree / 3 cold; forced miss found 36,096 warm tokens before mutation** |
+| r21 isolated exact placement canary | **2 moves / 2 agrees; 32,768 cached tokens on all 4 forced-warm requests** |
 
 Two r34 candidates were explicitly rejected after rolling B-only trials:
 manual KV bytes gained just 1.16% capacity while bypassing runtime profiling;
@@ -77,6 +78,28 @@ A wrong-version negative control kept both attestation gauges at zero and
 served normally through the approximate fallback. Two matched short-prompt
 c16/max512 samples averaged 1,342 tok/s through r20 versus 1,350 through r19
 (-0.6%, inside shared-box noise). Exact placement remains disabled.
+
+r21 is currently an isolated, default-off placement canary; production remains
+on r20 shadow. A constructed four-request run warmed each fresh 228,791-byte
+prompt only on engine A. Exact placement retained two approximate agreements
+and corrected two approximate misses, sending all four requests to A where
+usage reported 32,768 cached tokens. Its matched 2-app locality gate was
+identical to r20 at 71.6%. c8 same-app was 395 versus 406 tok/s and c16/max256
+was 1,110 versus 1,147 tok/s, differences of about 3% inside shared-box noise.
+An independent negative-health canary reported one healthy replica as
+`degraded` and sent 4/4 requests only to that replica. All 97 Rust tests, both
+Drone triggers, and GitHub Actions passed; no production component changed.
+An intentional canary-only restart then served the first long request through
+the approximate fallback with `inventory_untrusted`. B replayed 943 retained
+batches; A remained fenced until its next full-block event and replayed 885.
+With both inventories trusted again, the same four-request gate reproduced two
+exact moves, two agreements, and 32,768 cached tokens on every request.
+The follow-up `718012c` shadow-policy canary then observed a constructed
+8,192-token/load-gated `would_move` while leaving the request on B with zero
+cached tokens, proving the counterfactual metric cannot affect placement. Two
+reverse-order c16/max256 pairs averaged 1,192 tok/s through the canary versus
+1,221 through r20 (-2.3%, within the shared-box noise band); all 64 requests
+succeeded.
 
 ## Cache locality — TIE (no regression, no win at this scale)
 

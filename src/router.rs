@@ -39,6 +39,7 @@ pub enum Outcome {
     Load,
     RoundRobin,
     Single,
+    Exact,
 }
 
 impl Outcome {
@@ -49,6 +50,7 @@ impl Outcome {
             Self::Load => "load",
             Self::RoundRobin => "rr",
             Self::Single => "single",
+            Self::Exact => "exact",
         }
     }
 }
@@ -567,6 +569,18 @@ mod tests {
         router.set_healthy(winner, false);
         let decision = router.route(&body);
         assert_eq!(decision.candidates.last(), Some(&winner));
+    }
+
+    #[test]
+    fn recovered_upstream_reenters_routing() {
+        let router = Router::new(config());
+        let body = chat(&"recovery ".repeat(100), "hello");
+        let home = router.route(&body).candidates[0];
+        router.observe(home, &router.fingerprints(&body));
+        router.set_healthy(home, false);
+        assert_ne!(router.route(&body).candidates[0], home);
+        router.set_healthy(home, true);
+        assert_eq!(router.route(&body).candidates[0], home);
     }
 
     #[test]
