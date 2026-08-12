@@ -268,6 +268,7 @@ impl Proxy {
                     streaming,
                     fingerprints,
                     tokenizer_body,
+                    prepare_tokenizer_body,
                     decision,
                     load_guard,
                     inflight_guard,
@@ -292,6 +293,7 @@ impl Proxy {
         streaming: bool,
         fingerprints: Vec<u64>,
         tokenizer_body: Option<Vec<u8>>,
+        tokenizer_selected: bool,
         decision: Decision,
         _load_guard: RoutedLoad,
         _inflight_guard: InflightGuard,
@@ -367,9 +369,11 @@ impl Proxy {
             if status == StatusCode::OK && endpoint != Endpoint::Other {
                 self.record_usage(endpoint_label, &usage, started.elapsed(), first_token);
                 self.inner.router.observe(upstream, &fingerprints);
-                self.inner
-                    .tokenizer
-                    .submit(endpoint, upstream, tokenizer_body);
+                if tokenizer_selected {
+                    self.inner
+                        .tokenizer
+                        .submit(endpoint, upstream, tokenizer_body);
+                }
             }
         }
         self.record_upstream_request(upstream, status);
