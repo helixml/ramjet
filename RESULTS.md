@@ -56,12 +56,13 @@ matched c16/max512 runs had a 1,343.4 tok/s r19 median versus 1,362.1 for r12
 (-1.4%, within box noise); the matched long-prompt pair had identical 112,128
 cached tokens and overlapping warm latency.
 
-Public r19 is now the production LB with event publishers enabled on
-container-only ports. The LB-only promotion left both engine processes and KV
-caches intact. Late-subscriber replay restored both authoritative inventories;
-the post-deploy gates passed at 64.8% locality, 568 tok/s for a 6/6 c12
-same-app split, and 1,351.9 tok/s for c16/max512, with every request HTTP 200.
-Exact state remains telemetry-only.
+Public r20 is now the production LB with event publishers enabled on
+container-only ports and manifest-attested exact routing in shadow mode. The
+LB-only promotion left both engine processes and KV caches intact. Both runtime
+identities attested and late-subscriber replay restored both authoritative
+inventories. The post-deploy gates passed at 71.6% locality, 578 tok/s for a
+6/6 c12 same-app split, and 1,370.3 tok/s for c16/max512, with every request
+HTTP 200. Exact state remains telemetry-only and cannot change placement.
 
 r20 removes the concurrency ambiguity without enabling exact placement. A
 SHA-pinned manifest replays ten local token-vector goldens at startup and

@@ -1419,7 +1419,7 @@ or an inventory revision change drops only the observation.
 The committed manifest was generated twice from direct authenticated r34
 `/tokenize` calls per case; all IDs were stable and only vector digests were
 persisted. Loading the real node06 tokenizer artifact then passed all ten local
-goldens before the test binary bound a port. The full local gate passed **83
+goldens before the test binary bound a port. The full local gate passed **84
 Rust tests**, formatting, strict all-target/all-feature Clippy, release build,
 the retained Go tests/vet/build and formatting, Python syntax, and
 `git diff --check`.
@@ -1460,9 +1460,24 @@ full-block event; a fresh long prefill then triggered bounded replay of roughly
 436–523 retained batches per engine and restored trust. This is a safe readiness
 property and should remain visible in rollout checks.
 
+Production was then swapped LB-only to the exact commit image
+`rust-r20-attested-shadow-195ea1f` (manifest-list digest
+`sha256:53bdca913af8b48c76e5af76e5b938ad90a7efa003ea5baa29c9a4336150a08e`).
+Both engine containers retained their original start times and zero restart
+counts. The new LB started at 2026-08-12T13:54:46Z with both runtime identity
+gauges attested and both event inventories connected and trusted. A fresh
+2-app × 2-session × 2-turn locality gate returned 8/8 at 71.6% cache hit with
+six exact/approximate agreements and two cold decisions. The c12 same-app gate
+returned 12/12, split 6/6, at 578 tok/s; c16/max512 returned 16/16 at
+1,370.3 tok/s. Across the startup trigger and gates, pre-route shadow admitted
+17 requests, reported six `agree` and 11 `all_zero`, and fell back three times
+under CPU-permit pressure. All containers remained at zero restarts and the LB
+logged no error, panic, or fatal. The exact placement mode remains absent;
+rollback is the stateless r19 LB image or `DS4_EXACT_ROUTE_MODE=off`.
+
 Verdict: r20 proves exact IDs and exact KV overlap can be joined before cache
 mutation with bounded single-digit-millisecond frontend cost and independent
-fail-closed fences. It is safe to promote only in `shadow` mode at the 32KiB
+fail-closed fences. It was promoted only in `shadow` mode at the 32KiB
 threshold with eight pre-route permits. Exact placement remains disabled until
 production shadow distributions cover move gain, load conflict, attestation
 transitions, and event recovery long enough to set a conservative route gate.

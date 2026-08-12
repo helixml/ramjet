@@ -24,9 +24,9 @@ node06). The design rationale for each lives in DESIGN.md.
   `rust-*` images, then run locality, concurrent same-app, c24 aggregate, route
   telemetry, and occasional Helix workflow acceptance before promotion. Go
   remains an LB-only rollback; neither engine is restarted for proxy trials.
-  Public r19 is live with both r34 publishers and exact state observation-only.
-  r20 has now qualified manifest-attested pre-route exact scoring on an
-  isolated canary without exposing exact state to placement.
+  Public r20 is live with both r34 publishers and manifest-attested pre-route
+  exact scoring in observation-only shadow mode. Exact state is not exposed to
+  placement.
 - ✅ **Bounded remote tokenizer shadow.** The one-pass boundary selectively
   derives chat/completion `/tokenize` payloads, then submits them only after the
   user request completes. Authenticated calls use a bounded non-blocking queue,
