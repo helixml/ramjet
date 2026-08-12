@@ -475,7 +475,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_live_and_libzmq_streaming_replay_interoperate() {
         let mut publisher = PubSocket::new();
         let live_endpoint = publisher.bind("tcp://127.0.0.1:0").await.unwrap();
