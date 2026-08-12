@@ -64,11 +64,15 @@ node06). The design rationale for each lives in DESIGN.md.
   free prefix lookup, atomic capacity failure, tombstone pruning, conservative
   main-attention/tier/namespace filtering, and generation-safe replay
   integration. A 3.883M-token synthetic inventory used 21.4MiB and served
-  80.9K-token lookups in 50.3µs; eight readers reached 102K lookups/s. Next
-  wire these pieces to per-engine ZMQ consumers with
-  cache-group-aware block metadata, sequence-gap detection, bounded replay,
-  generation fencing, reconnect backoff, and an automatic approximate-routing
-  fallback. Raw token IDs, block hashes, and prompts remain out of logs.
+  80.9K-token lookups in 50.3µs; eight readers reached 102K lookups/s. The
+  pure-Rust ZMTP transport now validates exact SUB/DEALER frame shapes, applies
+  one total replay deadline and bounded requested/tail batches, and rejects
+  missing, duplicate, or out-of-order sequences. A CPU-only node06 probe passed
+  against Python `pyzmq` using the r34 live/replay protocol without touching
+  either engine. Next construct one supervised consumer per engine, add
+  reconnect/backoff and trust-state metrics, and qualify real shadow events
+  before enabling any exact placement. Raw token IDs, block hashes, and prompts
+  remain out of logs.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
   vectors rather than restarting; benchmark memory, p99 preparation latency,

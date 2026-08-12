@@ -171,6 +171,14 @@ is the reference for the failure semantics below:
   lookup-budget failure clears and fences the generation. Non-local, non-GPU,
   non-main-attention, LoRA, cache-salted, and extra-key events stay out of the
   exact inventory until request-side namespace parity exists.
+- `src/kv_transport.rs` implements the vLLM PUB/ROUTER boundary with pure-Rust
+  ZMTP, so the distroless proxy does not acquire a native `libzmq` dependency.
+  Live messages use SUB and replay uses DEALER because vLLM streams multiple
+  responses to one request. Exact frame/topic/sequence validation, a single
+  replay deadline, requested-range and newer-tail bounds, and privacy-safe
+  errors make malformed or partial recovery fail closed. The wire shape has
+  been cross-checked on node06 against Python `pyzmq`; supervised per-engine
+  consumers and operational metrics are still required before shadow rollout.
 - Exact request lookup requires the rendered token sequence. Calling r34's
   `/tokenize` for every request costs 3.7ms at 299 tokens, 8.4ms at 4.3K,
   41ms at 21K, and 203ms at 83.7K, while returning up to 419KB of token IDs.

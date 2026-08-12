@@ -1113,3 +1113,29 @@ ZMQ queueing/recovery and real event-shape qualification remain the next gate.
 
 This code is not constructed by the running binary and exact IDs still never
 influence placement. No node06 container or engine configuration changed.
+
+## 2026-08-12 — bounded pure-Rust ZMQ transport interoperability
+
+`src/kv_transport.rs` adds a pure-Rust vLLM event source: SUB receives the
+three-frame live stream and DEALER consumes the ROUTER replay stream because
+one replay request has multiple responses. It validates exact frame counts,
+topic and unsigned big-endian sequence fields, applies the existing bounded
+MessagePack decoder, and enforces one total replay deadline plus explicit
+requested-batch and newer-tail limits. Missing, duplicate, out-of-order, early
+tail, malformed, or incomplete replay fails closed without rendering payload,
+hash, or token values in errors. The release probe links only the standard C,
+math, and compiler runtime libraries; it has no native `libzmq` dependency.
+
+A temporary node06 CPU-only container from the already-local r34 image exposed
+Python `pyzmq` PUB and ROUTER sockets with the exact vLLM framing. The standalone
+Rust release probe received live sequence 3, requested inclusive replay 1–3,
+and validated all three batches plus the `-1` end marker. The Python peer
+confirmed the DEALER request arrived as identity, empty delimiter, and starting
+sequence. The probe binary and temporary container were removed after the run.
+
+All **62 Rust tests**, Rust formatting, and strict all-target/all-feature
+Clippy pass. Both production engines and the live Rust r11 load balancer stayed
+up with zero restarts and both readiness gauges at one. This transport is not
+yet constructed by the serving binary, so exact IDs still cannot affect
+routing. The next gate is a supervised per-engine shadow consumer with bounded
+reconnect backoff, trust/gap/replay metrics, and real-feed observation.

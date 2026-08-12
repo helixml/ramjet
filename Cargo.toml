@@ -31,6 +31,7 @@ tokio-stream = "0.1.17"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 url = "2.5.8"
+zeromq = { version = "0.6.0", default-features = false, features = ["tcp-transport", "tokio-runtime"] }
 
 [profile.release]
 codegen-units = 1
