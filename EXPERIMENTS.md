@@ -2257,3 +2257,16 @@ inventories were trusted at both snapshots. The public
 `sha256:1a6c56820991f5fcdf3f6af2bdd0ec867967e9b84f7ce8f61e0985453a7a428f`;
 promotion reused all but the binary layer and took 2.84s. The canonical
 node06 Compose pins this qualified digest.
+
+The final public-digest LB-only roll took 0.99s and again left both engines'
+start times and restart counts unchanged. B restored on its first replay. A's
+first replay and the one permitted automatic retry both exceeded the
+20-second drain deadline; the consumer then stopped retrying and remained
+fail-closed as designed. One subsequent A allocation opened the live-event
+gate, and its 3,666-batch replay completed successfully, restoring both
+inventories to trusted state. A final public-image scorecard completed 4/4,
+split 2/2, reconciled with zero spread and zero preemptions, preserved trusted
+inventory boundaries, and reached 98.07% reuse-wave token hits in 1.56s. This
+qualifies both the bounded failure path and live-event recovery, while also
+leaving replay-drain throughput as a follow-up optimization rather than hiding
+it behind unbounded retries.
