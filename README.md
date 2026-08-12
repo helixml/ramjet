@@ -12,6 +12,11 @@ requests remain on the other engine. See DESIGN.md for the full story and
 roadmap (NVIDIA Dynamo, Kimi K3/KDA, and DwarfStar are the acknowledged
 influences).
 
+The canonical node06 stack is
+`deploy/node06/dspark_0731/docker-compose.yaml`. Its adjacent README documents
+validation, the generated infra mirror, and safe LB-only deployment. The infra
+copy is operational convenience only; do not edit it independently.
+
 ## Run
 
     DS4_UPSTREAM=http://engine-a:8000,http://engine-b:8000 \

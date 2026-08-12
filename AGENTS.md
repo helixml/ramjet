@@ -106,6 +106,9 @@ Layout on the box:
 - `/home/luke/inference/dspark_0731/` — the whole serving stack (compose:
   `ds4-loadbalancer` + `dspark-0731` + `dspark-0731-b`), plus `.env`
   (`VLLM_API_KEY=<caddy bearer>`, mode 0600) and the bench scripts.
+- `deploy/node06/dspark_0731/docker-compose.yaml` in this repository is the
+  canonical Compose source. The infra repository and node06 file are mirrors;
+  edit here first and use `sync-compose.sh` to update the infra copy.
 - Ports (loopback): LB API `:8006`, LB metrics `:8007`, engines `:8012`/`:8013`.
 - The bearer token used by clients AND for engine probes:
   `grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head -1 | cut -d' ' -f2`
@@ -364,8 +367,11 @@ EXPERIMENTS.md — add yours there too):
    regressions that synthetic benches miss.
 6. **Record**: append the run to EXPERIMENTS.md (config, numbers, verdict),
    update RESULTS.md if it changes a headline, and either promote the tag in
-   the infra compose (`LB_IMAGE` default) or note why not.
-7. **Watch after promote**: Grafana `ds4-flash-serving` for 10-15 min
+   the canonical mini-dynamo Compose (`LB_IMAGE` default) or note why not.
+7. **Mirror a promoted config**: validate the canonical Compose file, run
+   `deploy/node06/dspark_0731/sync-compose.sh ../infra`, and commit the infra
+   mirror. Never hand-edit the infra copy.
+8. **Watch after promote**: Grafana `ds4-flash-serving` for 10-15 min
    (5xx, TTFT p95, upstream split) — rollback is one `LB_IMAGE` flip.
 
 ## Guardrails

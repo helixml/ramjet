@@ -1,0 +1,202 @@
+# Canonical source: helixml/mini-dynamo/deploy/node06/dspark_0731/docker-compose.yaml
+# The infra repository and node06 checkout contain generated mirrors; edit here first.
+# DeepSeek-V4-Flash-0731 + DSpark on RTX PRO 6000 Blackwell (SM120), x86.
+# Based on jacklarmer/deepseek-v4-flash-0731-sm120 (measured: 231.5 tok/s
+# single-stream decode, ~749 tok/s aggregate @8-way on 4 GPUs, prose/pessimistic).
+# Requires driver >=590 (cu132 images) — node06 upgraded to 595.84 2026-08-11.
+#
+# Deltas vs upstream recipe compose:
+#   - no privileged, no host networking: loopback publish like the rest of the
+#     stack (fall back to their exact settings only if SparkInfer's PCIe
+#     allreduce turns out to need them)
+#   - GPUs parameterized; trial instance on 0-3 (:8012) while SGLang keeps
+#     serving on 4-7
+#   - disable-custom-all-reduce retained via ALLREDUCE_MODE=nccl. A node06 A/B
+#     rejected b12x for unified serving; a later matched A/B promoted NCCL PCIe
+#     peer access (`NCCL_P2P_DISABLE=0`) on this specific topology.
+#
+# Known-good/known-bad (from the recipe): kv fp8_ds_mla ONLY; DCP must be 1;
+# num_speculative_tokens >= 5; VLLM_USE_B12X_FP8_GEMM must be 0; block 256.
+# The WHOLE serving stack lives in this one compose project: both engines and
+# the load balancer shares the project network, so it reaches engines by
+# service name — no manual `docker network connect`/aliases. Put the Caddy
+# bearer in ./.env on the box (VLLM_API_KEY=...) and `docker compose up -d`
+# brings up everything.
+services:
+  # Load balancer: sticky conversation affinity with failover, Zed
+  # compat shims, /v1/models context-margin rewrite, Prometheus metrics
+  # (:8007 -> Caddy :9105) and engine-native metrics passthrough.
+  ds4-loadbalancer:
+    image: ${LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-r25-cache-churn-873a201@sha256:ab10fd4476a1b49f3052e3fc0cd122db6d9ebf3775965f377461b3f222d36db1}
+    container_name: ds4-loadbalancer
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8006:8000"
+      - "127.0.0.1:8007:9090"
+    volumes:
+      # Read-only tokenizer artifact for the opt-in Rust local-shadow mode.
+      - ${MODEL_DIR:-/prod/models/sglang/DeepSeek-V4-Flash-0731}/tokenizer.json:/models/tokenizer.json:ro
+    environment:
+      DS4_UPSTREAM: ${DS4_UPSTREAM:-http://dspark-0731:8000,http://dspark-0731-b:8000}
+      DS4_UPSTREAM_TOKEN: ${VLLM_API_KEY:-dspark-local}
+      DS4_ADVERTISE_CTX_MARGIN: ${DS4_ADVERTISE_CTX_MARGIN:-131072}
+      DS4_ROUTE_ALPHA: ${DS4_ROUTE_ALPHA:-4}
+      DS4_ROUTE_LOAD_UNIT_BYTES: ${DS4_ROUTE_LOAD_UNIT_BYTES:-32768}
+      DS4_ROUTE_MAX_LOAD_UNITS: ${DS4_ROUTE_MAX_LOAD_UNITS:-8}
+      DS4_ROUTE_MAX_PREFIX_BYTES: ${DS4_ROUTE_MAX_PREFIX_BYTES:-2097152}
+      DS4_ROUTE_MAX_OVERLAP_BLOCKS: ${DS4_ROUTE_MAX_OVERLAP_BLOCKS:-32}
+      # Privacy-bounded decision snapshots for offline alpha/cap replay.
+      DS4_ROUTE_JOURNAL: ${DS4_ROUTE_JOURNAL:-true}
+      # Exact tokenization is telemetry-only until the KV-event index is fenced.
+      DS4_TOKENIZER_MODE: ${DS4_TOKENIZER_MODE:-local-shadow}
+      DS4_TOKENIZER_PATH: ${DS4_TOKENIZER_PATH:-/models/tokenizer.json}
+      # Versioned local-renderer admission: update only with a fresh golden run.
+      DS4_TOKENIZER_PROFILE: ${DS4_TOKENIZER_PROFILE:-deepseek-v4-r34}
+      DS4_TOKENIZER_SHA256: ${DS4_TOKENIZER_SHA256:-8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf}
+      DS4_TOKENIZER_MIN_BYTES: ${DS4_TOKENIZER_MIN_BYTES:-32768}
+      DS4_TOKENIZER_MAX_BYTES: ${DS4_TOKENIZER_MAX_BYTES:-2097152}
+      DS4_TOKENIZER_WORKERS: ${DS4_TOKENIZER_WORKERS:-1}
+      DS4_TOKENIZER_QUEUE_CAPACITY: ${DS4_TOKENIZER_QUEUE_CAPACITY:-8}
+      DS4_TOKENIZER_TIMEOUT_MS: ${DS4_TOKENIZER_TIMEOUT_MS:-2000}
+      # Pre-route exact IDs and KV lookup remain counterfactual-only. The
+      # manifest is embedded in the immutable LB image and SHA-pinned here.
+      DS4_EXACT_ROUTE_MODE: ${DS4_EXACT_ROUTE_MODE:-shadow}
+      DS4_EXACT_ROUTE_MANIFEST_PATH: ${DS4_EXACT_ROUTE_MANIFEST_PATH:-/compat/deepseek-v4-r34.json}
+      DS4_EXACT_ROUTE_MANIFEST_SHA256: ${DS4_EXACT_ROUTE_MANIFEST_SHA256:-4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa}
+      DS4_EXACT_ROUTE_WORKERS: ${DS4_EXACT_ROUTE_WORKERS:-8}
+      DS4_EXACT_ROUTE_TIMEOUT_MS: ${DS4_EXACT_ROUTE_TIMEOUT_MS:-250}
+      # Native KV inventory remains observation-only. Shadow mode and the
+      # matching per-engine r34 publishers are now the qualified defaults.
+      DS4_KV_EVENT_MODE: ${DS4_KV_EVENT_MODE:-shadow}
+      DS4_KV_EVENT_LIVE_ENDPOINTS: ${DS4_KV_EVENT_LIVE_ENDPOINTS:-tcp://dspark-0731:5557,tcp://dspark-0731-b:5557}
+      DS4_KV_EVENT_REPLAY_ENDPOINTS: ${DS4_KV_EVENT_REPLAY_ENDPOINTS:-tcp://dspark-0731:5558,tcp://dspark-0731-b:5558}
+      DS4_KV_EVENT_TOPIC: "${DS4_KV_EVENT_TOPIC:-}"
+      # Production inventories now exceed 1K batches. A 2K replay window with
+      # a 20s fail-closed timeout recovers both engines after an LB-only roll.
+      DS4_KV_EVENT_REPLAY_LIMIT: ${DS4_KV_EVENT_REPLAY_LIMIT:-2048}
+      DS4_KV_EVENT_REPLAY_TAIL_LIMIT: ${DS4_KV_EVENT_REPLAY_TAIL_LIMIT:-64}
+      DS4_KV_EVENT_TIMEOUT_MS: ${DS4_KV_EVENT_TIMEOUT_MS:-20000}
+
+  dspark-0731:
+    image: ${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}
+    container_name: ${NAME:-dspark-0731}
+    entrypoint: ["/usr/local/bin/serve-ds4-flash.sh"]
+    restart: unless-stopped
+    ipc: host
+    init: true
+    shm_size: 32gb
+    # GPUs 0-3 are local to NUMA node 0. First-touch memory allocation follows
+    # these CPUs, avoiding cross-socket host/PCIe traffic.
+    cpuset: "0-11,24-35"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8012}:8000"
+    volumes:
+      - ${MODEL_DIR:-/prod/models/sglang/DeepSeek-V4-Flash-0731}:/workspace/model:ro
+      - /prod/sglang-cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1", "2", "3"]
+              capabilities: [gpu]
+    environment:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "0,1,2,3"
+      PORT: "8000"
+      MODEL_ROOT: /workspace/model
+      SERVED_MODEL_NAME: deepseek-v4-flash
+      MODE: dspark
+      # K5 beat r34's K7 default on node06 at code and prose concurrency.
+      DSPARK_TOKENS: ${DSPARK_TOKENS:-5}
+      DSPARK_DEPTH_MODE: ${DSPARK_DEPTH_MODE_A:-fixed}
+      # Opt-in aggregate controller diagnostics; zero avoids steady-state log
+      # volume. Per-engine controls keep rolling dynamic-depth trials isolated.
+      DSPARK_CAPACITY_LOG_INTERVAL: ${DSPARK_CAPACITY_LOG_INTERVAL_A:-0}
+      DSPARK_STS_LOG_INTERVAL: ${DSPARK_STS_LOG_INTERVAL_A:-0}
+      # A16 MoE kernels win 5-16% on code and 7-10% on prose decode; keep
+      # VLLM_USE_B12X_FP8_GEMM=0 because the drafter cannot use that path.
+      BACKEND: ${BACKEND:-b12x-a16}
+      TP_SIZE: "4"
+      DCP_SIZE: "1"
+      ALLREDUCE_MODE: ${ALLREDUCE_MODE:-nccl}
+      # node06's PCIe P2P path passed direct decode/mixed/200K-context A/B.
+      NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-0}
+      GPU_MEM_UTIL: "0.90"
+      MAX_MODEL_LEN: "393216"
+      # Parameterized for rolling concurrency/graph-memory qualification.
+      MAX_NUM_SEQS: ${MAX_NUM_SEQS:-16}
+      # Scheduler quantum; parameterized for rolling mixed-prefill A/B tests.
+      MAX_NUM_BATCHED_TOKENS: ${MAX_NUM_BATCHED_TOKENS:-4096}
+      BLOCK_SIZE: "256"
+      # Native CPU KV offload is disabled by default; qualify only as a
+      # rolling one-engine experiment because node06 host RAM is constrained.
+      KV_OFFLOADING_SIZE: ${KV_OFFLOADING_SIZE:-}
+      # Qualified native KV publisher by default; keep A/B independently
+      # overridable for rolling trials and event-off rollback.
+      EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_A---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}}'
+      VLLM_USE_B12X_FP8_GEMM: "0"
+      VLLM_API_KEY: ${VLLM_API_KEY:-dspark-local}
+
+  # Second instance, GPUs 4-7. Both are joined to ds4_flash_default with
+  # aliases dspark / dspark-b for the load balancer's sticky routing (launch order:
+  # docker network connect --alias dspark-b ds4_flash_default dspark-0731-b).
+  dspark-0731-b:
+    image: ${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}
+    container_name: dspark-0731-b
+    entrypoint: ["/usr/local/bin/serve-ds4-flash.sh"]
+    restart: unless-stopped
+    ipc: host
+    init: true
+    shm_size: 32gb
+    # GPUs 4-7 are local to NUMA node 1.
+    cpuset: "12-23,36-47"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    ports:
+      - "127.0.0.1:8013:8000"
+    volumes:
+      - ${MODEL_DIR:-/prod/models/sglang/DeepSeek-V4-Flash-0731}:/workspace/model:ro
+      - /prod/sglang-cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["4", "5", "6", "7"]
+              capabilities: [gpu]
+    environment:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "0,1,2,3"
+      PORT: "8000"
+      MODEL_ROOT: /workspace/model
+      SERVED_MODEL_NAME: deepseek-v4-flash
+      MODE: dspark
+      DSPARK_TOKENS: ${DSPARK_TOKENS:-5}
+      DSPARK_DEPTH_MODE: ${DSPARK_DEPTH_MODE_B:-fixed}
+      DSPARK_CAPACITY_LOG_INTERVAL: ${DSPARK_CAPACITY_LOG_INTERVAL_B:-0}
+      DSPARK_STS_LOG_INTERVAL: ${DSPARK_STS_LOG_INTERVAL_B:-0}
+      BACKEND: ${BACKEND:-b12x-a16}
+      TP_SIZE: "4"
+      DCP_SIZE: "1"
+      ALLREDUCE_MODE: ${ALLREDUCE_MODE:-nccl}
+      NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-0}
+      GPU_MEM_UTIL: "0.90"
+      MAX_MODEL_LEN: "393216"
+      MAX_NUM_SEQS: ${MAX_NUM_SEQS:-16}
+      MAX_NUM_BATCHED_TOKENS: ${MAX_NUM_BATCHED_TOKENS:-4096}
+      BLOCK_SIZE: "256"
+      KV_OFFLOADING_SIZE: ${KV_OFFLOADING_SIZE:-}
+      EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_B---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}}'
+      VLLM_USE_B12X_FP8_GEMM: "0"
+      VLLM_API_KEY: ${VLLM_API_KEY:-dspark-local}
