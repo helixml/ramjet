@@ -2560,12 +2560,13 @@ post-recovery request through the LB returned HTTP 200 in 171ms and health
 remained 2/2 with both exact generations trusted.
 
 The review-hardened image
-`ghcr.io/helixml/ds4-loadbalancer:rust-r31-streaming-replay-99da044`
+`ghcr.io/helixml/mini-dynamo:rust-r31-streaming-replay-99da044`
 (`sha256:5c560e5b8a56c8ff40f43b17baff33edb53eab5b4610d00292e26967ed2b750b`)
-was built and transferred in 28.30s total (22.38s build, 5.92s transfer). Its
-LB-only final canary retained the qualified 10,000/20s settings, re-established
-both exact inventories two seconds after the direct event triggers, and left
-both engine restart counts at zero.
+was built and transferred under an equivalent staging tag in 28.30s total
+(22.38s build, 5.92s transfer), then published byte-identically to the public
+package above. Its LB-only final canary retained the qualified 10,000/20s
+settings, re-established both exact inventories two seconds after the direct
+event triggers, and left both engine restart counts at zero.
 
 Verdict: promote the streaming replay path and set node06's deployment replay
 limit to the publisher's 10,000-step retention. Keep the existing 20-second
