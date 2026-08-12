@@ -2069,3 +2069,21 @@ thrashed completely. The next router experiment should price persistent KV
 residency or cold-app placement balance, not merely instantaneous inflight
 load. Repeat the 52/64 cells three times after that candidate; do not define a
 95% cache SLO from these single boundary observations.
+
+## 2026-08-12 — issue #13 cold-residency counterfactual
+
+The 64-app cliff motivates a narrow extension to the already fenced exact
+pre-route evaluator. For an all-zero lookup only, it snapshots each healthy,
+trusted inventory's resident token-ID count under the same generation/revision
+checks as exact prefix matching. It reports `would_balance` only when the
+approximate choice holds at least one whole prompt more resident token IDs than
+the least-occupied replica and that replica passes the existing load-delta
+gate. Smaller deltas and excess target load receive explicit bounded outcomes.
+The residency delta is a histogram, never an upstream or request identifier.
+
+This path is telemetry-only even if warm-prefix exact placement mode is active:
+the decision and candidate order are unchanged. Unit tests prove both shadow
+and placement modes cannot move an all-zero request, the one-prompt threshold
+holds, and the load gate fails closed. Strict Clippy and all 111 Rust tests pass;
+the focused edit/compile/test loop took under four seconds after the first
+incremental build.

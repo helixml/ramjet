@@ -212,8 +212,11 @@ node06). The design rationale for each lives in DESIGN.md.
   request still hit despite 20.56% block churn; at 64×512KiB, a 30/34 app
   placement split produced 30 partial hits and 34 cold reuses, 46.81%
   reuse-wave token hit, and a 35.04s cold p95. Next make cold placement
-  capacity-aware so a small balance error cannot strand reusable capacity,
-  then repeat the 52/64 boundary three times before defining any 95%+ SLO.
+  capacity-aware so a small balance error cannot strand reusable capacity.
+  The first implementation is deliberately telemetry-only: exact all-zero
+  requests compare fenced resident token counts, require at least one prompt's
+  delta, and retain the load gate. Qualify that shadow signal, then repeat the
+  52/64 boundary three times before defining any 95%+ SLO.
 - 🔨 **Production-shaped DeepSeek-V4 agent/DSML gate (#10).** The versioned
   synthetic v1 JSONL corpus and privacy-safe runner now cover stream/non-stream,
   automatic/required/parallel tool calls, split deltas and DSML leaks, every
