@@ -249,6 +249,15 @@ node06). The design rationale for each lives in DESIGN.md.
   `EXPERIMENTS.md`; measure deterministic code, prose, shared-app, cold/warm
   prefill, and mixed prefill+decode separately. Never report speculative decode
   without workload, temperature, prompt/output lengths, and acceptance data.
+- ✅ **Fail-fast resumable engine qualification.** The Infernal r4 correctness
+  failure is now an ordering invariant rather than a post-hoc lesson:
+  `candidate_gate.py` binds immutable receipt/process/plan identity to a
+  five-request deterministic agent smoke, then an optional code/prose c8 scout
+  and only then the full matrix. Every boundary rejects restart drift and late
+  JIT/CUDA/NCCL/OOM/Xid/runtime markers; successful stages resume only under
+  the identical hashed plan. A live r34 direct-engine smoke passed 5/5 in
+  2.99s and resumed without GPU traffic in 0.09s. This would have rejected r4
+  before its 204-request performance matrix.
 - ✅ **node06 DSpark depth sweep (K5 vs K7).** K5 passed 10/10 gates and beat
   K7 by 6.5% on code and 12.2% on prose at c8; promoted in the infra compose.
 - ✅ **DSpark dynamic-depth/capacity gate (retain fixed K5).** r34's supported
@@ -415,8 +424,15 @@ node06). The design rationale for each lives in DESIGN.md.
   matched the resident index. The Infernal canary's LB roll later reproduced
   the remaining recovery boundary: fresh B re-armed from sequence zero, while
   long-lived A was beyond replay history and correctly remained fenced. Do not
-  restart a healthy engine only to recover shadow telemetry; add Dynamo-style
-  snapshot/tree-dump recovery. Compare exact versus approximate decisions in
+  restart a healthy engine only to recover shadow telemetry. A read-only
+  follow-up found that A still retained a complete sparse sequence 0–9,392
+  replay, but its 8,380 event-bearing messages occupy 408.6MB serialized and
+  exceed the current 8,192 fence. Do not merely raise the limit: stream a full
+  replay into a scratch inventory, validate its end/cursor, and atomically swap
+  it so decoded overlapping token vectors are never accumulated in one giant
+  `Vec`. This can recover within vLLM's 10,000-step window; add Dynamo-style
+  snapshot/tree-dump recovery for histories older than that. Compare exact
+  versus approximate decisions in
   telemetry before the router may consume this state; Dynamo's additional
   tree-dump recovery remains the scale-out reference.
 - ✅ **True TTFT instrumentation.** rc6's journal and Prometheus histogram

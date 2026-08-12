@@ -260,6 +260,16 @@ provenance; `bench/agent_matrix.sh` runs deterministic/official-agentic,
 short/long-prefix, cold/warm, and c1/c8/c16 cells. Narrow its environment lists
 for development and reserve `AGENT_RUNS=3` for final qualification.
 
+`bench/candidate_gate.py` turns engine qualification into a fail-fast,
+resumable state machine. It binds a five-case deterministic agent correctness
+smoke, a code/prose c8 scout, and the full direct-engine matrix to one immutable
+image/process/plan identity. Each boundary rejects a restart, receipt mismatch,
+late JIT compilation, or CUDA/NCCL/OOM/Xid/runtime marker before more GPU work
+is scheduled. Its JSONL journal is content-free; existing privacy-safe child
+results are stored as hashed mode-0600 artifacts. `bench/engine_matrix.sh`
+accepts `ENGINE_WORKLOADS`, `ENGINE_CONCURRENCIES`, and `ENGINE_RUNS` for the
+scout while preserving the original six-cell defaults.
+
 `bench/route_replay.py` sweeps router policies over privacy-bounded live
 decision records and splits observed warm/cold outcome latency. For native
 KV-event feasibility, `bench/tokenize_bench.py` measures the exact-tokenization
