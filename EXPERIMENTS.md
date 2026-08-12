@@ -1945,3 +1945,57 @@ token-weighted counters reconciled to 7,168 cached of 14,590 prompt tokens
 across the pair. Both requests returned 200, no upstream/client error counter
 appeared, and both exact inventories were trusted after one bounded event
 trigger per engine. r24 remains the node06 LB candidate/production image.
+
+## 2026-08-12 — issue #16 reconciled working-set runner
+
+`cachebench.py` turns the cache scorecard into a repeatable gate. It generates
+only synthetic prefixes, schedules a cold wave across apps before reuse, and
+emits content-free request coordinates and summaries. Each cell snapshots the
+LB plus both engines and fails closed when response usage, LB prompt/cache and
+cache-outcome counters, native prompt/cache counters, native prefix query/hit
+counters, or engine request samples differ. `engine_metrics.py` now also
+reports cached tokens, prefix queries/hits, and their token hit ratio.
+Twenty-eight GPU-free Python tests pass in under 0.1s. The full parallel gate
+then passed: Rust/Clippy/106 tests/release in 22.04s, Go in 0.44s, and the
+corpus plus Python suite in 0.16s.
+
+The first four-request 8KiB smoke reconciled exactly at 9,552 prompt and 6,912
+cached tokens, with zero preemptions and 0.03ms mean queue time. An initial
+broader run grouped same-app sessions and accidentally phase-locked every cold
+request to round-robin engine A. That was a workload-order artifact: the
+runner now round-robins apps before the next session/turn, and a unit test fixes
+the coordinate order.
+
+The corrected, fresh-salt 32KiB sweep completed 52/52 requests:
+
+| apps | requests | route split A/B | reuse distance max | token hit | request reuse | TTFT p50/p95 | native queue mean |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 4 | 4/0 | 0 | 72.99% | 75% | 380/1,183ms | 0.04ms |
+| 4 | 16 | 8/8 | 3 | 72.99% | 75% | 378/1,239ms | 0.05ms |
+| 8 | 32 | 16/16 | 7 | 72.99% | 75% | 375/1,067ms | 0.05ms |
+
+Every cell had zero reconciliation spread and zero preemptions. The aggregate
+prompt/cached totals were respectively 36,828/26,880; 147,312/107,520; and
+294,624/215,040 tokens. This qualifies counter semantics and the low working-
+set regime only; the largest synthetic prefix set was 0.25MiB of source text,
+far below either engine's 3.84M-token KV capacity. No 95%+ capacity/SLO claim
+is made. The next capacity experiment must increase both app count and prefix
+size until evictions or hit degradation become observable, while preserving
+the zero-spread contamination gate.
+
+The new per-outcome report was then checked with a second four-app cell. Cold
+TTFT was 1,054/1,289ms p50/p95 and partial-hit TTFT was 383/396ms, with an 8/8
+route split and zero reconciliation spread. The immediately preceding cell had
+one transient 6.26s cold tail that did not repeat and had only 0.05ms native
+queue time. Therefore even the low-working-set cold p95 is not yet an SLA;
+retain the roadmap's three-run variance requirement.
+
+Iteration follow-up: Cargo's implicit package file set had made Python and
+operational-document edits invalidate the local Rust package fingerprint and
+pay an unnecessary roughly 18s thin-LTO relink. The crate is not published, so
+its manifest now explicitly packages only `src/`, `examples/`, `compat/`, and
+the Cargo manifests, with the implicit README disabled. `cargo package
+--allow-dirty --list` confirms `bench/` and operational Markdown are absent;
+the warm release check after the manifest change took 0.16s. After changing
+these experiment/agent documents again, the release check remained warm at
+0.15s instead of relinking, proving the intended inner-loop effect.

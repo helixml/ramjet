@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""Privacy-bounded prefix-cache working-set and counter reconciliation bench.
+
+The workload is synthetic. Output contains only ordinal workload coordinates,
+token counts, timings, route ordinals, and aggregate Prometheus deltas.
+"""
+
+import argparse
+import collections
+import json
+import os
+import statistics
+import sys
+import time
+import urllib.error
+import urllib.request
+
+from agentbench import Assembly, SSEDecoder, percentile, token_counts
+from engine_metrics import COUNTERS as ENGINE_COUNTERS
+from engine_metrics import delta as engine_delta
+from engine_metrics import fetch as fetch_engine_metrics
+from engine_metrics import metric_value
+
+
+LB_COUNTERS = {
+    "prompt_tokens": "ds4proxy_prompt_tokens_total",
+    "cached_prompt_tokens": "ds4proxy_cached_prompt_tokens_total",
+    "cache_requests": "ds4proxy_cache_requests_total",
+    "cache_ttft_samples": "ds4proxy_cache_ttft_seconds_count",
+}
+
+
+def parse_apps(value):
+    try:
+        apps = [int(item) for item in value.split(",")]
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("apps must be comma-separated integers") from error
+    if not apps or any(item < 1 for item in apps) or len(set(apps)) != len(apps):
+        raise argparse.ArgumentTypeError("apps must be unique positive integers")
+    return apps
+
+
+def fetch_lb_metrics(url, timeout=10):
+    if not url:
+        return None
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        body = response.read().decode("utf-8", "replace")
+    return {key: metric_value(body, name) for key, name in LB_COUNTERS.items()}
+
+
+def nonnegative_delta(before, after, keys):
+    if before is None or after is None:
+        return None
+    result = {}
+    for key in keys:
+        left = before.get(key)
+        right = after.get(key)
+        result[key] = (
+            None if left is None or right is None or right < left else right - left
+        )
+    return result
+
+
+def aggregate_engine_delta(before, after):
+    if not before or not after or len(before) != len(after):
+        return None
+    cells = [engine_delta(left, right) for left, right in zip(before, after)]
+    if any(cell is None for cell in cells):
+        return None
+    aggregate = {}
+    for key in ENGINE_COUNTERS:
+        values = [cell[key] for cell in cells]
+        aggregate[key] = None if any(value is None for value in values) else sum(values)
+    queue_samples = aggregate["queue_samples"]
+    prefill_samples = aggregate["prefill_samples"]
+    prefix_queries = aggregate["prefix_queries"]
+    prefix_hits = aggregate["prefix_hits"]
+    aggregate["queue_ms_mean"] = (
+        round(1000 * aggregate["queue_seconds_sum"] / queue_samples, 2)
+        if queue_samples and aggregate["queue_seconds_sum"] is not None
+        else None
+    )
+    aggregate["prefill_ms_mean"] = (
+        round(1000 * aggregate["prefill_seconds_sum"] / prefill_samples, 2)
+        if prefill_samples and aggregate["prefill_seconds_sum"] is not None
+        else None
+    )
+    aggregate["prefix_hit_pct"] = (
+        round(100 * prefix_hits / prefix_queries, 2)
+        if prefix_queries and prefix_hits is not None
+        else None
+    )
+    return aggregate
+
+
+def cache_outcome(prompt, cached):
+    if prompt <= 0 or cached < 0:
+        return "unknown"
+    if cached == 0:
+        return "cold"
+    if cached >= prompt:
+        return "full"
+    return "partial"
+
+
+def reconcile(records, lb, engine, tolerance=0):
+    good = [record for record in records if record["ok"]]
+    response_prompt = sum(record["prompt_tokens"] for record in good)
+    response_cached = sum(record["cached_tokens"] for record in good)
+    expected = {
+        "prompt_tokens": {
+            "response_usage": response_prompt,
+            "load_balancer": None if lb is None else lb["prompt_tokens"],
+            "engine_prompt": None if engine is None else engine["prompt_tokens"],
+            "engine_prefix_queries": None if engine is None else engine["prefix_queries"],
+        },
+        "cached_prompt_tokens": {
+            "response_usage": response_cached,
+            "load_balancer": None if lb is None else lb["cached_prompt_tokens"],
+            "engine_cached": None if engine is None else engine["cached_prompt_tokens"],
+            "engine_prefix_hits": None if engine is None else engine["prefix_hits"],
+        },
+        "requests": {
+            "responses": len(good),
+            "load_balancer": None if lb is None else lb["cache_requests"],
+            "load_balancer_ttft": None if lb is None else lb["cache_ttft_samples"],
+            "engine_queue_samples": None if engine is None else engine["queue_samples"],
+            "engine_prefill_samples": None if engine is None else engine["prefill_samples"],
+        },
+    }
+    consistent = True
+    max_spread = 0
+    for values in expected.values():
+        present = [value for value in values.values() if value is not None]
+        if len(present) != len(values):
+            consistent = False
+            continue
+        spread = max(present) - min(present)
+        max_spread = max(max_spread, spread)
+        consistent &= spread <= tolerance
+    return {
+        "consistent": consistent,
+        "tolerance": tolerance,
+        "max_spread": max_spread,
+        "values": expected,
+    }
+
+
+def synthetic_prefix(app, prefix_kib, salt):
+    target = prefix_kib * 1024
+    unit = f"Synthetic cache app {salt}-{app}; stable shared context. "
+    return (unit * (target // len(unit.encode()) + 1)).encode()[:target].decode(
+        "utf-8", "ignore"
+    )
+
+
+def messages_for(app, session, turn, prefix_kib, salt):
+    messages = [
+        {"role": "system", "content": synthetic_prefix(app, prefix_kib, salt)}
+    ]
+    for prior in range(1, turn):
+        messages.extend(
+            [
+                {
+                    "role": "user",
+                    "content": f"session {session} synthetic step {prior}",
+                },
+                {
+                    "role": "assistant",
+                    "content": f"synthetic answer {prior} for session {session}",
+                },
+            ]
+        )
+    messages.append(
+        {
+            "role": "user",
+            "content": f"session {session} synthetic step {turn}; answer briefly",
+        }
+    )
+    return messages
+
+
+def workload_coordinates(apps, sessions, turns):
+    """Round-robin apps so cold placement and reuse distance are not phase-biased."""
+    for turn in range(1, turns + 1):
+        for session in range(sessions):
+            for app in range(apps):
+                yield app, session, turn
+
+
+def execute_request(base, model, token, messages, max_tokens, timeout):
+    body = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    request = urllib.request.Request(
+        base.rstrip("/") + "/v1/chat/completions",
+        data=json.dumps(body, separators=(",", ":")).encode(),
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+    )
+    started = time.perf_counter()
+    assembly = Assembly()
+    route = None
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            route = response.headers.get("X-Mini-Dynamo-Upstream")
+            decoder = SSEDecoder(assembly)
+            for line in response:
+                decoder.feed(line, time.perf_counter())
+            decoder.finish()
+    except urllib.error.HTTPError as error:
+        error.read(4096)
+        return {"ok": False, "error": f"HTTP {error.code}"}
+    except Exception as error:  # benchmark failures are structured, never payload dumps
+        return {"ok": False, "error": type(error).__name__}
+    ended = time.perf_counter()
+    result = assembly.result()
+    prompt, cached, completion = token_counts(result["usage"])
+    ttft = assembly.generated_at[0] - started if assembly.generated_at else None
+    return {
+        "ok": prompt > 0,
+        "error": None if prompt > 0 else "missing_usage",
+        "route": route,
+        "prompt_tokens": prompt,
+        "cached_tokens": cached,
+        "completion_tokens": completion,
+        "cache_outcome": cache_outcome(prompt, cached),
+        "ttft_ms": None if ttft is None else round(1000 * ttft, 1),
+        "wall_ms": round(1000 * (ended - started), 1),
+    }
+
+
+def latency_by_outcome(records, field):
+    grouped = collections.defaultdict(list)
+    for record in records:
+        value = record.get(field)
+        if record.get("ok") and value is not None:
+            grouped[record["cache_outcome"]].append(value)
+    return {
+        outcome: {
+            "count": len(values),
+            "p50": round(statistics.median(values), 1),
+            "p95": percentile(values, 0.95),
+        }
+        for outcome, values in sorted(grouped.items())
+    }
+
+
+def summarize(records, apps, sessions, turns, prefix_kib, elapsed, lb, engine, tolerance):
+    good = [record for record in records if record["ok"]]
+    prompt = sum(record["prompt_tokens"] for record in good)
+    cached = sum(record["cached_tokens"] for record in good)
+    completion = sum(record["completion_tokens"] for record in good)
+    outcomes = collections.Counter(record["cache_outcome"] for record in good)
+    routes = collections.Counter(record["route"] or "unknown" for record in good)
+    ttfts = [record["ttft_ms"] for record in good if record["ttft_ms"] is not None]
+    walls = [record["wall_ms"] for record in good]
+    last_seen = {}
+    reuse_distances = []
+    for position, record in enumerate(records):
+        app = record["app"]
+        if app in last_seen:
+            reuse_distances.append(position - last_seen[app] - 1)
+        last_seen[app] = position
+    return {
+        "type": "cache_working_set",
+        "apps": apps,
+        "sessions": sessions,
+        "turns": turns,
+        "prefix_kib": prefix_kib,
+        "synthetic_working_set_mib": round(apps * prefix_kib / 1024, 2),
+        "requests": len(records),
+        "successful": len(good),
+        "outcomes": dict(sorted(outcomes.items())),
+        "route_split": dict(sorted(routes.items())),
+        "prompt_tokens": prompt,
+        "cached_tokens": cached,
+        "completion_tokens": completion,
+        "cache_hit_pct": round(100 * cached / prompt, 2) if prompt else None,
+        "request_reuse_pct": round(100 * (len(good) - outcomes["cold"]) / len(good), 2)
+        if good
+        else None,
+        "ttft_ms_p50": round(statistics.median(ttfts), 1) if ttfts else None,
+        "ttft_ms_p95": percentile(ttfts, 0.95),
+        "ttft_ms_by_outcome": latency_by_outcome(good, "ttft_ms"),
+        "wall_ms_p50": round(statistics.median(walls), 1) if walls else None,
+        "wall_ms_p95": percentile(walls, 0.95),
+        "wall_ms_by_outcome": latency_by_outcome(good, "wall_ms"),
+        "elapsed_seconds": round(elapsed, 3),
+        "output_tok_s": round(completion / elapsed, 1) if elapsed else None,
+        "total_tok_s": round((prompt + completion) / elapsed, 1) if elapsed else None,
+        "reuse_distance_requests_p50": round(statistics.median(reuse_distances), 1)
+        if reuse_distances
+        else None,
+        "reuse_distance_requests_max": max(reuse_distances) if reuse_distances else None,
+        "lb_metrics_delta": lb,
+        "engine_metrics_delta": engine,
+        "reconciliation": reconcile(records, lb, engine, tolerance),
+    }
+
+
+def run_cell(args, apps, token):
+    salt = f"{args.salt}-a{apps}"
+    lb_before = fetch_lb_metrics(args.metrics_url)
+    engine_before = [fetch_engine_metrics(url) for url in args.engine_metrics]
+    records = []
+    started = time.perf_counter()
+    for app, session, turn in workload_coordinates(apps, args.sessions, args.turns):
+        result = execute_request(
+            args.base,
+            args.model,
+            token,
+            messages_for(app, session, turn, args.prefix_kib, salt),
+            args.max_tokens,
+            args.timeout,
+        )
+        record = {"app": app, "session": session, "turn": turn, **result}
+        records.append(record)
+        if args.emit_requests:
+            print(json.dumps({"type": "cache_request", **record}, sort_keys=True))
+    elapsed = time.perf_counter() - started
+    time.sleep(args.settle_seconds)
+    lb_after = fetch_lb_metrics(args.metrics_url)
+    engine_after = [fetch_engine_metrics(url) for url in args.engine_metrics]
+    lb = nonnegative_delta(lb_before, lb_after, LB_COUNTERS)
+    engine = aggregate_engine_delta(engine_before, engine_after)
+    return summarize(
+        records,
+        apps,
+        args.sessions,
+        args.turns,
+        args.prefix_kib,
+        elapsed,
+        lb,
+        engine,
+        args.reconcile_tolerance,
+    )
+
+
+def parser():
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("base")
+    result.add_argument("model")
+    result.add_argument("--apps", type=parse_apps, default=parse_apps("1,4,8"))
+    result.add_argument("--sessions", type=int, default=2)
+    result.add_argument("--turns", type=int, default=2)
+    result.add_argument("--prefix-kib", type=int, default=32)
+    result.add_argument("--max-tokens", type=int, default=8)
+    result.add_argument("--salt", default=str(time.time_ns()))
+    result.add_argument("--metrics-url")
+    result.add_argument("--engine-metrics", action="append", default=[])
+    result.add_argument("--timeout", type=float, default=300)
+    result.add_argument("--settle-seconds", type=float, default=0.25)
+    result.add_argument("--reconcile-tolerance", type=float, default=0)
+    result.add_argument("--require-reconciled", action="store_true")
+    result.add_argument("--emit-requests", action="store_true")
+    return result
+
+
+def main():
+    args = parser().parse_args()
+    if args.sessions < 1 or args.turns < 1 or args.prefix_kib < 1 or args.max_tokens < 1:
+        raise SystemExit("sessions, turns, prefix-kib, and max-tokens must be positive")
+    token = os.environ.get("BENCH_TOKEN") or os.environ.get("VLLM_API_KEY")
+    if not token:
+        raise SystemExit("set BENCH_TOKEN or VLLM_API_KEY")
+    failed = False
+    for apps in args.apps:
+        summary = run_cell(args, apps, token)
+        print(json.dumps(summary, sort_keys=True))
+        failed |= summary["successful"] != summary["requests"]
+        if args.require_reconciled:
+            failed |= not summary["reconciliation"]["consistent"]
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
