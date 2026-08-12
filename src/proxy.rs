@@ -10,6 +10,7 @@ use axum::{
     http::{HeaderMap, HeaderName, Method, Request, Response, StatusCode, Uri},
 };
 use futures_util::StreamExt;
+use serde::Serialize;
 use tokio::{sync::mpsc, time::Instant};
 use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
@@ -43,6 +44,23 @@ struct Inner {
     router: Arc<Router>,
     journal: RouteJournal,
     tokenizer: TokenizerObserver,
+}
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    healthy_replicas: usize,
+    total_replicas: usize,
+    replicas: Vec<ReplicaHealth>,
+}
+
+#[derive(Serialize)]
+struct ReplicaHealth {
+    index: usize,
+    healthy: bool,
+    inflight: usize,
+    load_units: usize,
+    approximate_index_entries: usize,
 }
 
 struct InflightGuard(GaugeHandle);
@@ -117,6 +135,52 @@ impl Proxy {
         proxy.serve(request).await
     }
 
+    /// Reports aggregate readiness and every replica's serving state without
+    /// exposing upstream hostnames. One healthy replica is sufficient to
+    /// serve, but the response is marked degraded until all are healthy.
+    #[allow(clippy::unused_async)] // Axum handlers return futures.
+    pub async fn health(State(proxy): State<Self>) -> Response<Body> {
+        let replicas = (0..proxy.inner.config.upstreams.len())
+            .filter_map(|index| {
+                proxy.inner.router.state(index).map(
+                    |(inflight, load_units, approximate_index_entries, healthy)| ReplicaHealth {
+                        index,
+                        healthy,
+                        inflight,
+                        load_units,
+                        approximate_index_entries,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let healthy_replicas = replicas.iter().filter(|replica| replica.healthy).count();
+        let status = match healthy_replicas {
+            0 => "unhealthy",
+            healthy if healthy == replicas.len() => "ok",
+            _ => "degraded",
+        };
+        let response = HealthResponse {
+            status,
+            healthy_replicas,
+            total_replicas: replicas.len(),
+            replicas,
+        };
+        let code = if healthy_replicas == 0 {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::OK
+        };
+        let body = serde_json::to_vec(&response).unwrap_or_else(|_| {
+            br#"{"status":"unhealthy","healthy_replicas":0,"total_replicas":0,"replicas":[]}"#
+                .to_vec()
+        });
+        Response::builder()
+            .status(code)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap_or_else(|_| Response::new(Body::from("health response unavailable")))
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn serve(&self, request: Request<Body>) -> Response<Body> {
         let started = Instant::now();
@@ -146,12 +210,13 @@ impl Proxy {
         } else {
             None
         };
-        let decision = prepared.route(&self.inner.router);
+        let mut decision = prepared.route(&self.inner.router);
         if let Some(tokens) = &pre_route_tokens {
             self.inner
                 .tokenizer
-                .observe_pre_route(endpoint, tokens, &decision);
+                .route_pre_route(endpoint, tokens, &mut decision);
         }
+        let pre_route_tokens = pre_route_tokens.map(|tokens| tokens.tokens);
         let exact_route_snapshot =
             prepare_tokenizer_body.then(|| self.inner.tokenizer.capture_route(&decision));
         let fingerprints = if endpoint == Endpoint::Other {
@@ -174,9 +239,21 @@ impl Proxy {
                 .journal
                 .start(endpoint_label, body.len(), &decision, &self.inner.config);
 
+        let serving_candidates = decision
+            .candidates
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                decision
+                    .candidate_state
+                    .iter()
+                    .find(|state| state.index == *candidate)
+                    .is_some_and(|state| state.healthy)
+            })
+            .collect::<Vec<_>>();
         let mut last_error = None;
         let mut selected = None;
-        for (rank, &candidate) in decision.candidates.iter().enumerate() {
+        for (attempt, &candidate) in serving_candidates.iter().enumerate() {
             let url = upstream_url(&self.inner.config.upstreams[candidate], &parts.uri);
             let mut outbound = self
                 .inner
@@ -186,7 +263,8 @@ impl Proxy {
             outbound = outbound.headers(filtered_headers(&parts.headers));
             let units = decision
                 .candidate_state
-                .get(rank)
+                .iter()
+                .find(|state| state.index == candidate)
                 .map_or(decision.load_units, |state| state.request_load_units);
             let load = self.acquire(candidate, units);
             match outbound.send().await {
@@ -194,14 +272,14 @@ impl Proxy {
                     if matches!(
                         response.status(),
                         StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE
-                    ) && rank + 1 < decision.candidates.len() =>
+                    ) && attempt + 1 < serving_candidates.len() =>
                 {
                     self.inner.router.set_healthy(candidate, false);
                     self.record_upstream_request(candidate, response.status());
                     drop(load);
                 }
                 Ok(response) => {
-                    if rank > 0 {
+                    if attempt > 0 {
                         tracing::warn!(
                             from = decision.candidates[0],
                             to = candidate,
@@ -220,11 +298,11 @@ impl Proxy {
         }
 
         let Some((upstream, response, load_guard)) = selected else {
-            let reason = last_error.unwrap_or("protocol");
-            let status = if reason == "timeout" {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::BAD_GATEWAY
+            let reason = last_error.unwrap_or("no_healthy_upstream");
+            let status = match reason {
+                "timeout" => StatusCode::GATEWAY_TIMEOUT,
+                "no_healthy_upstream" => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::BAD_GATEWAY,
             };
             self.record_error(endpoint_label, reason, status, started.elapsed());
             self.inner.journal.finish(
@@ -849,7 +927,10 @@ fn unix_seconds() -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use axum::{Router as AxumRouter, routing::any};
     use prometheus::Registry;
@@ -1099,6 +1180,134 @@ mod tests {
         );
         healthy_task.abort();
         failing_task.abort();
+    }
+
+    #[tokio::test]
+    async fn known_unhealthy_replica_never_receives_serving_traffic() {
+        let unhealthy_requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&unhealthy_requests);
+        let unhealthy = AxumRouter::new().fallback(any(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::OK, "should not be called")
+            }
+        }));
+        let healthy = AxumRouter::new().fallback(any(|| async {
+            (
+                StatusCode::OK,
+                [("content-type", "application/json")],
+                r#"{"ok":true}"#,
+            )
+        }));
+        let (healthy_url, healthy_task) = start_upstream(healthy).await;
+        let (unhealthy_url, unhealthy_task) = start_upstream(unhealthy).await;
+        let proxy = proxy_for(&[healthy_url, unhealthy_url]);
+        proxy.router().set_healthy(1, false);
+
+        for _ in 0..4 {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .body(Body::from(
+                    r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap();
+            let response = proxy.serve(request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-mini-dynamo-upstream"], "0");
+            let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        }
+        assert_eq!(unhealthy_requests.load(Ordering::Relaxed), 0);
+        healthy_task.abort();
+        unhealthy_task.abort();
+    }
+
+    #[tokio::test]
+    async fn health_reports_each_replica_and_requires_one_healthy() {
+        let proxy = proxy_for(&[
+            Url::parse("http://127.0.0.1:1").unwrap(),
+            Url::parse("http://127.0.0.1:2").unwrap(),
+        ]);
+        proxy.router().set_healthy(1, false);
+        let response = Proxy::health(State(proxy.clone())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(health["status"], "degraded");
+        assert_eq!(health["healthy_replicas"], 1);
+        assert_eq!(health["total_replicas"], 2);
+        assert_eq!(health["replicas"][0]["healthy"], true);
+        assert_eq!(health["replicas"][1]["healthy"], false);
+
+        proxy.router().set_healthy(0, false);
+        let response = Proxy::health(State(proxy)).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(health["status"], "unhealthy");
+        assert_eq!(health["healthy_replicas"], 0);
+    }
+
+    #[tokio::test]
+    async fn successful_probe_restores_a_failed_replica() {
+        let available = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let state = Arc::clone(&available);
+        let upstream = AxumRouter::new().fallback(any(move || {
+            let state = Arc::clone(&state);
+            async move {
+                if state.load(Ordering::Acquire) {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"data":[{"id":"model"}]}"#,
+                    )
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [("content-type", "application/json")],
+                        r#"{"error":"unavailable"}"#,
+                    )
+                }
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let proxy = proxy_for(&[url]);
+        proxy.probe(0).await;
+        assert!(!proxy.router().state(0).unwrap().3);
+        available.store(true, Ordering::Release);
+        proxy.probe(0).await;
+        assert!(proxy.router().state(0).unwrap().3);
+        let response = Proxy::health(State(proxy)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn no_healthy_replica_returns_503_without_dialing_upstream() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let upstream = AxumRouter::new().fallback(any(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                StatusCode::OK
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let proxy = proxy_for(&[url]);
+        proxy.router().set_healthy(0, false);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+            ))
+            .unwrap();
+        let response = proxy.serve(request).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(requests.load(Ordering::Relaxed), 0);
+        task.abort();
     }
 
     #[tokio::test]

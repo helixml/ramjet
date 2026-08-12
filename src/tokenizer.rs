@@ -24,7 +24,7 @@ use url::Url;
 use crate::{
     compat::{CompatibilityManifest, RuntimeOutcome, sha256_hex, token_ids_sha256},
     config::{Config, ExactRouteMode, TokenizerMode, TokenizerProfile},
-    exact_shadow::{ExactRouteShadow, ExactRouteSnapshot},
+    exact_shadow::{ExactPlacementPolicy, ExactRouteShadow, ExactRouteSnapshot},
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
     router::Decision,
@@ -46,6 +46,8 @@ pub struct TokenizerObserver {
     exact_shadow: ExactRouteShadow,
     pre_route: Option<PreRouteTokenizer>,
     attestation: Option<RuntimeAttestation>,
+    exact_route_mode: ExactRouteMode,
+    exact_placement: ExactPlacementPolicy,
 }
 
 #[derive(Debug)]
@@ -112,6 +114,11 @@ pub(crate) struct ExactTokens {
     token_ids: Vec<u32>,
 }
 
+pub(crate) struct PreRouteTokens {
+    pub(crate) tokens: ExactTokens,
+    attestation_revision: u64,
+}
+
 #[derive(Debug, Deserialize)]
 struct TokenizeResponse {
     count: usize,
@@ -167,6 +174,7 @@ impl TokenizerObserver {
     ///
     /// Returns an error when explicit local-shadow mode cannot load its
     /// tokenizer or DeepSeek-V4 formatter. Off and remote-shadow cannot fail.
+    #[allow(clippy::too_many_lines)]
     pub fn new(
         config: &Config,
         client: reqwest::Client,
@@ -212,7 +220,7 @@ impl TokenizerObserver {
                     tokenizer,
                     formatter,
                 });
-                if config.exact_route_mode == ExactRouteMode::Shadow {
+                if config.exact_route_mode != ExactRouteMode::Off {
                     let manifest_path = config
                         .exact_route_manifest_path
                         .as_deref()
@@ -268,6 +276,11 @@ impl TokenizerObserver {
             exact_shadow,
             pre_route,
             attestation,
+            exact_route_mode: config.exact_route_mode,
+            exact_placement: ExactPlacementPolicy {
+                min_gain_tokens: config.exact_route_min_gain_tokens,
+                max_load_delta: config.exact_route_max_load_delta,
+            },
         })
     }
 
@@ -301,7 +314,7 @@ impl TokenizerObserver {
         &self,
         endpoint: Endpoint,
         body: Option<&Bytes>,
-    ) -> Option<ExactTokens> {
+    ) -> Option<PreRouteTokens> {
         let Some(pre_route) = &self.pre_route else {
             return None;
         };
@@ -359,7 +372,10 @@ impl TokenizerObserver {
                     .with_label_values(&[LOCAL_BACKEND, endpoint.label()])
                     .observe(usize_to_f64(tokens.token_ids.len()));
                 self.record_pre_route(endpoint, "tokenized");
-                Some(tokens)
+                Some(PreRouteTokens {
+                    tokens,
+                    attestation_revision,
+                })
             }
             Err(error) => {
                 self.record_pre_route(endpoint, error.label());
@@ -368,14 +384,23 @@ impl TokenizerObserver {
         }
     }
 
-    pub(crate) fn observe_pre_route(
+    pub(crate) fn route_pre_route(
         &self,
         endpoint: Endpoint,
-        tokens: &ExactTokens,
-        decision: &Decision,
+        tokens: &PreRouteTokens,
+        decision: &mut Decision,
     ) {
+        let Some(attestation) = &self.attestation else {
+            return;
+        };
+        if !attestation.still_ready(tokens.attestation_revision) {
+            self.record_pre_route(endpoint, "attestation_changed");
+            return;
+        }
+        let placement =
+            (self.exact_route_mode == ExactRouteMode::Placement).then_some(self.exact_placement);
         self.exact_shadow
-            .observe_pre_route(endpoint, &tokens.token_ids, decision);
+            .route_pre_route(endpoint, &tokens.tokens.token_ids, decision, placement);
     }
 
     pub async fn attest_upstream(&self, upstream: usize, models_body: &[u8]) {

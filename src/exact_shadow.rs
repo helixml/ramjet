@@ -10,7 +10,7 @@ use std::{sync::Arc, time::Instant};
 use crate::{
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
-    router::{CandidateState, Decision},
+    router::{CandidateState, Decision, Outcome},
     shims::Endpoint,
 };
 
@@ -26,6 +26,19 @@ pub struct ExactRouteShadow {
 pub struct ExactRouteSnapshot {
     decision: Decision,
     markers: Vec<Option<InventoryMarker>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExactPlacementPolicy {
+    pub min_gain_tokens: usize,
+    pub max_load_delta: usize,
+}
+
+#[derive(Clone, Debug)]
+struct PreRouteResult {
+    shadow: ShadowResult,
+    overlaps: Vec<Option<usize>>,
+    winner: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -145,9 +158,15 @@ impl ExactRouteShadow {
     }
 
     /// Compare the approximate decision with one revision-stable exact lookup
-    /// before the selected engine can mutate its cache. The result is telemetry
-    /// only and never changes `decision.candidates`.
-    pub fn observe_pre_route(&self, endpoint: Endpoint, token_ids: &[u32], decision: &Decision) {
+    /// before the selected engine can mutate its cache. Placement remains
+    /// unchanged unless an explicit conservative policy is supplied.
+    pub fn route_pre_route(
+        &self,
+        endpoint: Endpoint,
+        token_ids: &[u32],
+        decision: &mut Decision,
+        placement: Option<ExactPlacementPolicy>,
+    ) {
         let started = Instant::now();
         let result = self.evaluate_pre_route(token_ids, decision);
         self.metrics
@@ -156,9 +175,22 @@ impl ExactRouteShadow {
             .observe(started.elapsed().as_secs_f64());
         self.metrics
             .exact_route_preroute
-            .with_label_values(&[endpoint.label(), result.outcome.label()])
+            .with_label_values(&[endpoint.label(), result.shadow.outcome.label()])
             .inc();
-        self.record_result(endpoint, &result);
+        self.record_result(endpoint, &result.shadow);
+        if let Some(policy) = placement {
+            let outcome = apply_placement(
+                token_ids.len(),
+                decision,
+                &result,
+                policy,
+                self.max_overlap_units,
+            );
+            self.metrics
+                .exact_route_placement
+                .with_label_values(&[endpoint.label(), outcome])
+                .inc();
+        }
     }
 
     fn record_result(&self, endpoint: Endpoint, result: &ShadowResult) {
@@ -186,11 +218,15 @@ impl ExactRouteShadow {
         }
     }
 
-    fn evaluate_pre_route(&self, token_ids: &[u32], decision: &Decision) -> ShadowResult {
-        let failure = |outcome| ShadowResult {
-            outcome,
-            selected_tokens: 0,
-            best_tokens: 0,
+    fn evaluate_pre_route(&self, token_ids: &[u32], decision: &Decision) -> PreRouteResult {
+        let failure = |outcome| PreRouteResult {
+            shadow: ShadowResult {
+                outcome,
+                selected_tokens: 0,
+                best_tokens: 0,
+            },
+            overlaps: Vec::new(),
+            winner: None,
         };
         if self.inventories.is_empty() {
             return failure(ShadowOutcome::NoInventories);
@@ -263,14 +299,26 @@ impl ExactRouteShadow {
                 return failure(ShadowOutcome::InventoryChanged);
             }
         }
-        classify(
+        let shadow = classify(
             selected,
             token_ids.len(),
             &overlaps,
             decision,
             self.alpha,
             self.max_overlap_units,
-        )
+        );
+        let winner = unique_winner(
+            token_ids.len(),
+            &overlaps,
+            decision,
+            self.alpha,
+            self.max_overlap_units,
+        );
+        PreRouteResult {
+            shadow,
+            overlaps,
+            winner,
+        }
     }
 
     fn evaluate(
@@ -436,6 +484,168 @@ fn classify(
         selected_tokens,
         best_tokens,
     }
+}
+
+fn unique_winner(
+    prompt_tokens: usize,
+    overlaps: &[Option<usize>],
+    decision: &Decision,
+    alpha: f64,
+    max_overlap_units: usize,
+) -> Option<usize> {
+    let eligible = decision
+        .candidate_state
+        .iter()
+        .filter(|candidate| candidate.healthy)
+        .filter_map(|candidate| {
+            overlaps
+                .get(candidate.index)
+                .copied()
+                .flatten()
+                .map(|tokens| (candidate, tokens))
+        })
+        .collect::<Vec<_>>();
+    let best_score = eligible
+        .iter()
+        .map(|(candidate, tokens)| {
+            exact_score(
+                candidate,
+                *tokens,
+                prompt_tokens,
+                decision.total_blocks,
+                alpha,
+                max_overlap_units,
+            )
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+    let best_tokens = eligible
+        .iter()
+        .filter(|(candidate, tokens)| {
+            #[allow(clippy::float_cmp)]
+            {
+                exact_score(
+                    candidate,
+                    *tokens,
+                    prompt_tokens,
+                    decision.total_blocks,
+                    alpha,
+                    max_overlap_units,
+                ) == best_score
+            }
+        })
+        .map(|(_, tokens)| *tokens)
+        .max()?;
+    let mut winners = eligible.iter().filter(|(candidate, tokens)| {
+        #[allow(clippy::float_cmp)]
+        {
+            exact_score(
+                candidate,
+                *tokens,
+                prompt_tokens,
+                decision.total_blocks,
+                alpha,
+                max_overlap_units,
+            ) == best_score
+                && *tokens == best_tokens
+        }
+    });
+    let winner = winners.next()?.0.index;
+    winners.next().is_none().then_some(winner)
+}
+
+fn exact_score(
+    candidate: &CandidateState,
+    tokens: usize,
+    prompt_tokens: usize,
+    total_units: usize,
+    alpha: f64,
+    max_overlap_units: usize,
+) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let affinity = overlap_units(tokens, prompt_tokens, total_units).min(max_overlap_units) as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let load = candidate.load_units as f64;
+    affinity - alpha * load
+}
+
+fn apply_placement(
+    prompt_tokens: usize,
+    decision: &mut Decision,
+    exact: &PreRouteResult,
+    policy: ExactPlacementPolicy,
+    max_overlap_units: usize,
+) -> &'static str {
+    if exact.shadow.outcome != ShadowOutcome::WouldMove {
+        return match exact.shadow.outcome {
+            ShadowOutcome::Agree => "kept_agree",
+            ShadowOutcome::Tie => "kept_tie",
+            ShadowOutcome::AllZero => "kept_all_zero",
+            _ => "fallback",
+        };
+    }
+    let Some(selected) = decision.candidates.first().copied() else {
+        return "fallback";
+    };
+    let Some(winner) = exact.winner else {
+        return "kept_ambiguous";
+    };
+    if winner == selected {
+        return "kept_agree";
+    }
+    let selected_tokens = exact.overlaps.get(selected).copied().flatten().unwrap_or(0);
+    let winner_tokens = exact.overlaps.get(winner).copied().flatten().unwrap_or(0);
+    if winner_tokens.saturating_sub(selected_tokens) < policy.min_gain_tokens {
+        return "kept_gain_gate";
+    }
+    let Some(selected_state) = decision
+        .candidate_state
+        .iter()
+        .find(|candidate| candidate.index == selected)
+    else {
+        return "fallback";
+    };
+    let Some(winner_state) = decision
+        .candidate_state
+        .iter()
+        .find(|candidate| candidate.index == winner)
+    else {
+        return "fallback";
+    };
+    if winner_state.load_units
+        > selected_state
+            .load_units
+            .saturating_add(policy.max_load_delta)
+    {
+        return "kept_load_gate";
+    }
+
+    decision.candidates.retain(|candidate| *candidate != winner);
+    decision.candidates.insert(0, winner);
+    let candidate_order = decision.candidates.clone();
+    decision.candidate_state.sort_by_key(|candidate| {
+        candidate_order
+            .iter()
+            .position(|index| *index == candidate.index)
+            .unwrap_or(usize::MAX)
+    });
+    for (rank, candidate) in decision.candidate_state.iter_mut().enumerate() {
+        candidate.rank = rank;
+        let exact_tokens = exact
+            .overlaps
+            .get(candidate.index)
+            .copied()
+            .flatten()
+            .unwrap_or(0);
+        candidate.overlap_blocks =
+            overlap_units(exact_tokens, prompt_tokens, decision.total_blocks);
+        candidate.affinity_blocks = candidate.overlap_blocks.min(max_overlap_units);
+    }
+    let winner_state = &mut decision.candidate_state[0];
+    decision.overlap_blocks = winner_state.overlap_blocks;
+    decision.affinity_blocks = winner_state.affinity_blocks;
+    decision.load_units = winner_state.request_load_units;
+    decision.outcome = Outcome::Exact;
+    "moved"
 }
 
 fn overlap_units(tokens: usize, prompt_tokens: usize, total_units: usize) -> usize {
@@ -610,11 +820,103 @@ mod tests {
             1.0,
             8,
         );
-        shadow.observe_pre_route(Endpoint::Chat, &[1, 2, 3, 4], &decision());
+        let mut route = decision();
+        shadow.route_pre_route(Endpoint::Chat, &[1, 2, 3, 4], &mut route, None);
         assert!(
             (metrics
                 .exact_route_preroute
                 .with_label_values(&["chat", "would_move"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn placement_moves_only_for_a_unique_gated_exact_win() {
+        let selected = trusted_inventory(Vec::new());
+        let alternative = trusted_inventory(vec![store(&[1, 2, 3, 4])]);
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+        );
+        let mut route = decision();
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4],
+            &mut route,
+            Some(ExactPlacementPolicy {
+                min_gain_tokens: 4,
+                max_load_delta: 0,
+            }),
+        );
+        assert_eq!(route.candidates, [1, 0]);
+        assert_eq!(route.candidate_state[0].index, 1);
+        assert_eq!(route.candidate_state[0].rank, 0);
+        assert_eq!(route.outcome, Outcome::Exact);
+        assert!(
+            (metrics
+                .exact_route_placement
+                .with_label_values(&["chat", "moved"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn placement_gain_and_load_gates_keep_the_approximate_choice() {
+        let selected = trusted_inventory(Vec::new());
+        let alternative = trusted_inventory(vec![store(&[1, 2, 3, 4])]);
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+        );
+        let mut gain_gated = decision();
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4],
+            &mut gain_gated,
+            Some(ExactPlacementPolicy {
+                min_gain_tokens: 5,
+                max_load_delta: 0,
+            }),
+        );
+        assert_eq!(gain_gated.candidates, [0, 1]);
+
+        let mut load_gated = decision();
+        load_gated.candidate_state[1].load_units = 1;
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4],
+            &mut load_gated,
+            Some(ExactPlacementPolicy {
+                min_gain_tokens: 4,
+                max_load_delta: 0,
+            }),
+        );
+        assert_eq!(load_gated.candidates, [0, 1]);
+        assert!(
+            (metrics
+                .exact_route_placement
+                .with_label_values(&["chat", "kept_gain_gate"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (metrics
+                .exact_route_placement
+                .with_label_values(&["chat", "kept_load_gate"])
                 .get()
                 - 1.0)
                 .abs()

@@ -36,6 +36,7 @@ pub struct Metrics {
     pub tokenizer_queue_depth: Gauge,
     pub exact_route_shadow: CounterVec,
     pub exact_route_preroute: CounterVec,
+    pub exact_route_placement: CounterVec,
     pub exact_route_preroute_duration: HistogramVec,
     pub exact_route_overlap: HistogramVec,
     pub exact_route_gain: HistogramVec,
@@ -281,6 +282,11 @@ impl Metrics {
                 "Pre-route exact-token shadow attempts by endpoint and bounded outcome",
                 &["endpoint", "outcome"],
             )?,
+            exact_route_placement: counter(
+                "ds4proxy_exact_route_placement_total",
+                "Opt-in exact placement decisions by endpoint and bounded outcome",
+                &["endpoint", "outcome"],
+            )?,
             exact_route_preroute_duration: histogram(
                 "ds4proxy_exact_route_preroute_duration_seconds",
                 "Latency added by bounded pre-route tokenization and exact lookup",
@@ -403,6 +409,7 @@ impl Metrics {
             Box::new(self.tokenizer_queue_depth.clone()),
             Box::new(self.exact_route_shadow.clone()),
             Box::new(self.exact_route_preroute.clone()),
+            Box::new(self.exact_route_placement.clone()),
             Box::new(self.exact_route_preroute_duration.clone()),
             Box::new(self.exact_route_overlap.clone()),
             Box::new(self.exact_route_gain.clone()),
@@ -417,5 +424,66 @@ impl Metrics {
             Box::new(self.kv_event_reconnects.clone()),
             Box::new(self.kv_event_replay_batches.clone()),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registers_core_serving_tokenizer_and_exact_route_metrics() {
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry).unwrap();
+        metrics
+            .requests
+            .with_label_values(&["chat", "200", "false"])
+            .inc();
+        metrics
+            .upstream_up
+            .with_label_values(&["upstream-0"])
+            .set(1.0);
+        metrics.prompt_tokens.with_label_values(&["chat"]).inc();
+        metrics.cached_tokens.with_label_values(&["chat"]).inc();
+        metrics.completion_tokens.with_label_values(&["chat"]).inc();
+        metrics
+            .tokenizer_shadow
+            .with_label_values(&["fastokens", "chat", "match"])
+            .inc();
+        metrics
+            .exact_route_preroute
+            .with_label_values(&["chat", "agree"])
+            .inc();
+        metrics
+            .exact_route_placement
+            .with_label_values(&["chat", "moved"])
+            .inc();
+        metrics
+            .compat_attested
+            .with_label_values(&["upstream-0"])
+            .set(1.0);
+        metrics
+            .kv_event_trusted
+            .with_label_values(&["upstream-0"])
+            .set(1.0);
+        let names = registry
+            .gather()
+            .into_iter()
+            .map(|family| family.name().to_owned())
+            .collect::<std::collections::HashSet<_>>();
+        for expected in [
+            "ds4proxy_requests_total",
+            "ds4proxy_upstream_up",
+            "ds4proxy_prompt_tokens_total",
+            "ds4proxy_cached_prompt_tokens_total",
+            "ds4proxy_completion_tokens_total",
+            "ds4proxy_tokenizer_shadow_total",
+            "ds4proxy_exact_route_preroute_total",
+            "ds4proxy_exact_route_placement_total",
+            "ds4proxy_compat_attested",
+            "ds4proxy_kv_event_trusted",
+        ] {
+            assert!(names.contains(expected), "missing metric family {expected}");
+        }
     }
 }

@@ -17,7 +17,13 @@ influences).
     DS4_UPSTREAM=http://engine-a:8000,http://engine-b:8000 \
     DS4_UPSTREAM_TOKEN=<bearer for engine probes> \
     ./mini-dynamo
-    # API :8000, Prometheus :9090 (/metrics, /metrics/upstream/{i})
+    # API :8000 (/health), Prometheus :9090 (/metrics, /metrics/upstream/{i})
+
+`GET /health` returns every opaque replica ordinal with its serving health,
+inflight count, load units, and approximate-index size. It is `200 ok` when all
+replicas are healthy, `200 degraded` when at least one can still serve, and
+`503 unhealthy` when none can serve. Known-unhealthy replicas are excluded
+from request attempts, including the final failover slot.
 
 Successful proxied responses include `X-Mini-Dynamo-Upstream: 0|1` for
 opaque per-request route correlation; internal upstream names are not exposed.
@@ -33,9 +39,10 @@ DS4_TOKENIZER_PATH, DS4_TOKENIZER_SHA256 (both required by local-shadow),
 DS4_TOKENIZER_PROFILE (deepseek-v4-r34), DS4_TOKENIZER_MIN_BYTES (32768),
 DS4_TOKENIZER_MAX_BYTES (2097152), DS4_TOKENIZER_WORKERS (1),
 DS4_TOKENIZER_QUEUE_CAPACITY (8), DS4_TOKENIZER_TIMEOUT_MS (2000),
-DS4_EXACT_ROUTE_MODE (off|shadow), DS4_EXACT_ROUTE_MANIFEST_PATH,
+DS4_EXACT_ROUTE_MODE (off|shadow|placement), DS4_EXACT_ROUTE_MANIFEST_PATH,
 DS4_EXACT_ROUTE_MANIFEST_SHA256, DS4_EXACT_ROUTE_WORKERS (4),
-DS4_EXACT_ROUTE_TIMEOUT_MS (250),
+DS4_EXACT_ROUTE_TIMEOUT_MS (250), DS4_EXACT_ROUTE_MIN_GAIN_TOKENS (8192),
+DS4_EXACT_ROUTE_MAX_LOAD_DELTA (0),
 DS4_KV_EVENT_MODE (off|shadow), DS4_KV_EVENT_LIVE_ENDPOINTS,
 DS4_KV_EVENT_REPLAY_ENDPOINTS, DS4_KV_EVENT_TOPIC (empty),
 DS4_KV_EVENT_REPLAY_LIMIT (1024), DS4_KV_EVENT_REPLAY_TAIL_LIMIT (64), and
@@ -73,11 +80,12 @@ cache hit comes from response usage, while every alternative lookup requires
 the same trusted generation and inventory revision captured at approximate
 decision time. This avoids counting KV blocks created by the request itself and
 rejects a moving alternative under concurrent traffic. The existing
-approximate decision and load snapshot remain authoritative; exact state cannot
-change placement. `ds4proxy_exact_route_shadow_total` reports bounded
-`agree`, `would_move`, `tie`, `all_zero`, and fail-closed outcomes, while the
-overlap/gain histograms contain counts only. Raw token IDs and hashes never
-enter logs, journals, or metrics.
+approximate decision and load snapshot remain authoritative unless the
+separate `placement` mode is explicitly enabled.
+`ds4proxy_exact_route_shadow_total` reports bounded `agree`, `would_move`,
+`tie`, `all_zero`, and fail-closed outcomes, while the overlap/gain histograms
+contain counts only. Raw token IDs and hashes never enter logs, journals, or
+metrics.
 
 `DS4_EXACT_ROUTE_MODE=shadow` moves admitted local tokenization before the
 approximate decision, then immediately scores the same load snapshot against
@@ -94,6 +102,17 @@ drops only the observation. The live approximate route remains authoritative.
 `ds4proxy_compat_attested` expose controlled results. Generate a fresh manifest
 after an engine/template update with `bench/tokenizer_manifest.py`; it never
 prints or persists raw token IDs.
+
+`DS4_EXACT_ROUTE_MODE=placement` is an explicit default-off canary mode. It may
+promote only one unique exact-score winner, requires at least
+`DS4_EXACT_ROUTE_MIN_GAIN_TOKENS` additional cached tokens, and by default will
+not move to an engine with any more load than the approximate choice. All
+manifest attestation, tokenizer admission, event trust, inventory revision,
+health, CPU-permit, and timeout fences remain mandatory; any failure preserves
+the approximate route. `ds4proxy_exact_route_placement_total` distinguishes
+actual moves from gain/load gates and fail-closed fallbacks. Production remains
+in `shadow` until a representative counterfactual distribution and isolated
+node06 canary justify promotion.
 
 Set `DS4_ROUTE_JOURNAL=true` to emit privacy-bounded versioned `start`/`finish`
 records to the process log. Records contain only process-local sequence IDs,
@@ -132,6 +151,11 @@ failover, route correlation, usage streaming, and model metadata rewriting.
 During the rewrite, keep both suites green:
 
     go test ./... && go vet ./... && test -z "$(gofmt -l .)"
+
+GitHub Actions and Drone both run the Rust format, strict Clippy, test, and
+release-build gates on pull requests; Drone also keeps the Go parity oracle
+green. The image publisher runs only after the post-merge Rust gate succeeds
+and requires GHCR package write permission for this repository.
 
 Measure the request-preparation hot path before and after tokenizer work:
 

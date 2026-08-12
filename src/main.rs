@@ -58,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
     .context("initialize mini-dynamo proxy")?;
 
     let api = Router::new()
+        .route("/health", get(Proxy::health))
         .fallback(any(Proxy::handle))
         .with_state(proxy.clone());
     let metrics_api = Router::new()
@@ -134,6 +135,8 @@ fn log_startup(config: &Config) {
         exact_route_mode = ?config.exact_route_mode,
         exact_route_workers = config.exact_route_workers,
         exact_route_timeout_ms = config.exact_route_timeout_ms,
+        exact_route_min_gain_tokens = config.exact_route_min_gain_tokens,
+        exact_route_max_load_delta = config.exact_route_max_load_delta,
         exact_route_manifest = config.exact_route_manifest_path.is_some(),
         kv_event_mode = ?config.kv_event_mode,
         kv_event_sources = config.kv_event_sources.len(),
