@@ -1035,3 +1035,37 @@ published publicly as `ghcr.io/helixml/mini-dynamo:rust-r11-8e38ec7`
 An anonymous manifest read succeeded, node06 pulled that public tag, and the
 post-swap 18,762-token observation matched local/remote/usage with both probes
 up. CI now targets the repository-owned package.
+
+## 2026-08-12 — r34 KV-event wire decoder and CI publish boundary
+
+The exact installed vLLM r34 source on node06 defines a three-frame PUB feed:
+topic, unsigned 8-byte big-endian sequence, and a MessagePack `KVEventBatch`
+array. Events are tagged maps. `BlockStored` includes bytes-or-integer block
+hashes, parent hash, exact token IDs, block size, and optional cache-group/spec
+metadata; the replay ROUTER streams the same batches from an inclusive starting
+sequence and terminates with sequence `-1`. No engine configuration changed
+while inspecting this source.
+
+`src/kv_wire.rs` now provides a transport-independent bounded decoder. A
+synthetic fixture was encoded inside the active r34 container from its actual
+`msgspec` classes, then checked into the Rust test without production hashes or
+token IDs. Five tests cover exact decoding, payload and aggregate limits,
+unknown-event fail-closed behavior, and block/token shape validation. Decoder
+errors contain invariant names only. Strict Clippy, all **45 Rust tests**, all
+retained Go tests, `go vet`, and both format gates pass. Sockets, event ports,
+cache indexes, and routing remain untouched.
+
+Manual workflow run
+[`31579218509`](https://github.com/helixml/mini-dynamo/actions/runs/31579218509)
+passed fmt, strict Clippy, tests, release compilation, and the complete
+distroless image build. GHCR rejected only the final push with
+`permission_denied: write_package`. GitHub's documented package model requires
+the private repository to be added separately under **Manage Actions access**
+when a granular package was created by a manual push; repository linkage alone
+is insufficient. The package remains public and node06 remains on immutable
+`rust-r11-8e38ec7`. No package was deleted/recreated and no long-lived personal
+token was added as an Actions secret.
+
+A final read-only node06 check found the Rust LB and both engines running with
+zero restarts, both probe gauges at one, all inflight/load gauges at zero, and
+the tokenizer queue at zero. The engines were not restarted.

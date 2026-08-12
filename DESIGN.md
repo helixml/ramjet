@@ -157,6 +157,11 @@ is the reference for the failure semantics below:
   startup is observation-only, a full clear/snapshot begins a trusted
   generation, gaps request an inclusive bounded replay, and invalid or
   oversized recovery increments the generation and disables exact placement.
+- `src/kv_wire.rs` decodes only the MessagePack payload frame behind explicit
+  byte/event/hash/token/block bounds. Its fixture was emitted by the exact r34
+  `msgspec` classes on node06 and covers bytes/integer hashes, cache-group/spec
+  metadata, removals, and a full clear. Unknown event types and malformed
+  shapes fail closed; errors never render token IDs, hashes, or payload bytes.
 - Exact request lookup requires the rendered token sequence. Calling r34's
   `/tokenize` for every request costs 3.7ms at 299 tokens, 8.4ms at 4.3K,
   41ms at 21K, and 203ms at 83.7K, while returning up to 419KB of token IDs.

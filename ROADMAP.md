@@ -54,8 +54,11 @@ node06). The design rationale for each lives in DESIGN.md.
 - 🔨 **Exact KV-event shadow index.** The transport-independent sequence fence
   now starts untrusted, requests bounded contiguous replay on gaps, increments
   generations on restart/unrecoverable recovery, and admits exact state only
-  after an authoritative clear/snapshot boundary. Next wire it to per-engine
-  ZMQ consumers and token-prefix/radix indexes with
+  after an authoritative clear/snapshot boundary. A bounded, privacy-safe
+  MessagePack decoder now matches an exact synthetic fixture emitted by the
+  node06 vLLM r34 classes and validates event, hash, token, group, and block
+  shape limits. Next wire both pieces to per-engine ZMQ consumers and
+  token-prefix/radix indexes with
   cache-group-aware block metadata, sequence-gap detection, bounded replay,
   generation fencing, reconnect backoff, and an automatic approximate-routing
   fallback. Raw token IDs, block hashes, and prompts remain out of logs.
@@ -143,11 +146,12 @@ node06). The design rationale for each lives in DESIGN.md.
   Retain automatic sizing and do not jump to the profiler's full-memory value.
 
 - 🔨 **CI + package publishing.** Rust fmt/clippy/test/release checks and an
-  amd64 distroless image publisher are present on the rewrite branch. Validate
-  the first `ghcr.io/helixml/mini-dynamo` workflow and public GHCR pull, then
-  mark complete. The legacy `ds4-loadbalancer` package rejects this repository's
-  Actions token, so Rust uses the repository-owned package rather than sharing
-  that package permission boundary.
+  amd64 distroless image publisher are present on the rewrite branch. The first
+  workflow passed all code/build gates but GHCR denied the final push: because
+  `mini-dynamo` was created by a manual push, repository linkage did not grant
+  Actions access. Add `helixml/mini-dynamo` under the package's **Manage Actions
+  access**, rerun the failed job, and verify an anonymous pull before marking
+  complete. Do not replace this one-time ACL with a long-lived PAT secret.
 - ⬜ **Secure post-deploy Helix acceptance.** The retired plaintext key now
   returns 401 and has been removed from both node06 guides. Confirm revocation,
   clean Git history if policy requires it, and inject a current smoke-test key
