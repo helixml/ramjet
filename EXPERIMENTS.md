@@ -1369,8 +1369,20 @@ parity, zero queue depth, and no KV reconnect.
 
 All **76 Rust tests**, strict all-target/all-feature Clippy, Rust release build,
 the retained Go tests/vet/build, both format gates, Python bench syntax, and
-`git diff --check` pass locally. Production remains dual-engine r12 while the
-r19 branch and CI are published. Exact placement remains disabled. The next
-architectural gate is selective pre-route tokenization plus a versioned
-renderer/engine attestation; pre-route lookup is required to observe useful
-counterfactuals under concurrent cache mutation.
+`git diff --check` pass locally and the GitHub Actions check passed. The public
+r19 manifest-list digest is
+`sha256:0e04dca9cc2f44733ccb31b09820cc96f81b70550be7228ca9021f4296aacc95`.
+
+After CI, production was swapped LB-only from r12 to r19 with both engines and
+their KV caches untouched. Late-subscriber replay recovered 348 A batches and
+430 B batches; both generation-zero inventories became trusted with one
+connection and no reconnect. Post-deploy gates were 8/8 locality at 64.8%
+(six `agree`, two `all_zero`), c12 same-app 12/12 with a 6/6 split at 568
+tok/s, and c16/max512 16/16 at 1,351.9 tok/s. One c12 tokenizer job exceeded
+the bounded queue and was dropped without affecting any user request. Infra
+now persists public r19, both container-only publishers, and event shadow mode
+as the recreate-safe defaults. Exact placement remains disabled; r12 plus
+event mode off is the LB-only rollback. The next architectural gate is
+selective pre-route tokenization plus a versioned renderer/engine attestation;
+pre-route lookup is required to observe useful counterfactuals under concurrent
+cache mutation.

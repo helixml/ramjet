@@ -55,6 +55,13 @@ matched c16/max512 runs had a 1,343.4 tok/s r19 median versus 1,362.1 for r12
 (-1.4%, within box noise); the matched long-prompt pair had identical 112,128
 cached tokens and overlapping warm latency.
 
+Public r19 is now the production LB with event publishers enabled on
+container-only ports. The LB-only promotion left both engine processes and KV
+caches intact. Late-subscriber replay restored both authoritative inventories;
+the post-deploy gates passed at 64.8% locality, 568 tok/s for a 6/6 c12
+same-app split, and 1,351.9 tok/s for c16/max512, with every request HTTP 200.
+Exact state remains telemetry-only.
+
 ## Cache locality — TIE (no regression, no win at this scale)
 
 Realistic ~18.5k-token system prompts, 2-3 apps × 4 sessions × 2-3 turns,
