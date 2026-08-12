@@ -110,6 +110,27 @@ impl KvEventFence {
 
         let Some(expected) = self.next_sequence else {
             self.next_sequence = Some(sequence.saturating_add(1));
+            if sequence == 0 {
+                // vLLM's publisher sequence is process-local and starts at
+                // zero. Seeing its first batch proves the initially empty
+                // generation has been observed in full.
+                self.trusted = true;
+                return IngestAction::Apply;
+            }
+            let count = sequence.saturating_add(1);
+            if count <= self.replay_limit {
+                // A retained replay beginning at zero is equivalent to a full
+                // generation snapshot even when it contains no explicit clear.
+                self.pending = Some(PendingReplay {
+                    from: 0,
+                    through: sequence,
+                    restore_trust: true,
+                });
+                return IngestAction::Replay {
+                    from: 0,
+                    through: sequence,
+                };
+            }
             return IngestAction::ObserveOnly;
         };
         if sequence < expected {
@@ -195,14 +216,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startup_is_observation_only_until_authoritative_clear() {
+    fn startup_sequence_zero_establishes_authoritative_generation() {
         let mut fence = KvEventFence::new(16);
-        assert_eq!(fence.ingest(40, false), IngestAction::ObserveOnly);
-        assert_eq!(fence.ingest(41, false), IngestAction::ObserveOnly);
-        assert!(!fence.trusted());
-        assert_eq!(fence.ingest(42, true), IngestAction::ResetAndApply);
+        assert_eq!(fence.ingest(0, false), IngestAction::Apply);
         assert!(fence.trusted());
-        assert_eq!(fence.ingest(43, false), IngestAction::Apply);
+        assert_eq!(fence.ingest(1, false), IngestAction::Apply);
+    }
+
+    #[test]
+    fn startup_replays_from_zero_to_recover_complete_generation() {
+        let mut fence = KvEventFence::new(16);
+        assert_eq!(
+            fence.ingest(3, false),
+            IngestAction::Replay {
+                from: 0,
+                through: 3
+            }
+        );
+        assert!(!fence.trusted());
+        assert_eq!(
+            fence.accept_replay(&[0, 1, 2, 3], false),
+            ReplayAction::Recovered
+        );
+        assert!(fence.trusted());
     }
 
     #[test]
@@ -247,6 +283,8 @@ mod tests {
     #[test]
     fn live_events_extend_pending_replay_without_restoring_startup_trust() {
         let mut fence = KvEventFence::new(8);
+        // Too old for a bounded startup replay, so this generation remains
+        // observation-only before the later gap.
         fence.ingest(10, false);
         assert_eq!(
             fence.ingest(12, false),

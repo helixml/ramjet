@@ -53,8 +53,8 @@ pub enum KvTransportError {
     TopicMismatch,
     #[error("KV-event message has an invalid sequence frame")]
     InvalidSequence,
-    #[error("KV-event payload is invalid")]
-    InvalidPayload,
+    #[error("KV-event payload is invalid: {0}")]
+    InvalidPayload(DecodeError),
     #[error("KV-event replay endpoint is not configured")]
     ReplayUnavailable,
     #[error("KV-event replay request exceeds its configured batch limit")]
@@ -66,8 +66,25 @@ pub enum KvTransportError {
 }
 
 impl From<DecodeError> for KvTransportError {
-    fn from(_: DecodeError) -> Self {
-        Self::InvalidPayload
+    fn from(error: DecodeError) -> Self {
+        Self::InvalidPayload(error)
+    }
+}
+
+impl KvTransportError {
+    #[must_use]
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::Socket => "socket_error",
+            Self::InvalidFrameCount => "invalid_frame_count",
+            Self::TopicMismatch => "topic_mismatch",
+            Self::InvalidSequence => "invalid_sequence",
+            Self::InvalidPayload(error) => error.reason(),
+            Self::ReplayUnavailable => "replay_unavailable",
+            Self::ReplayTooLarge => "replay_too_large",
+            Self::ReplayTimeout => "replay_timeout",
+            Self::InvalidReplay => "invalid_replay",
+        }
     }
 }
 

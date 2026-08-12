@@ -26,8 +26,10 @@ node06). The design rationale for each lives in DESIGN.md.
   remains the instant LB-only rollback; neither engine is restarted. r4 matched
   Go at c16/c24, preserved locality, replayed 36/36 decisions, and established
   the rollback baseline. Locally built r12 is live in exact-token local-shadow
-  mode with the new KV-event consumers default-off; public r11 remains the
-  immediate LB-only rollback while GHCR Actions access is pending.
+  mode with KV events default-off; public r11 remains the immediate LB-only
+  rollback while GHCR Actions access is pending. A rolling r34 B-only publisher
+  trial has now qualified the Rust consumer against the real feed without
+  exposing exact state to routing.
 - ✅ **Bounded remote tokenizer shadow.** The one-pass boundary selectively
   derives chat/completion `/tokenize` payloads, then submits them only after the
   user request completes. Authenticated calls use a bounded non-blocking queue,
@@ -55,8 +57,9 @@ node06). The design rationale for each lives in DESIGN.md.
   golden attestation before exact IDs can influence routing.
 - 🔨 **Exact KV-event shadow index.** The transport-independent sequence fence
   now starts untrusted, requests bounded contiguous replay on gaps, increments
-  generations on restart/unrecoverable recovery, and admits exact state only
-  after an authoritative clear/snapshot boundary. A bounded, privacy-safe
+  generations on restart/unrecoverable recovery, and admits exact state after
+  either publisher sequence zero or a complete bounded replay from zero. A
+  bounded, privacy-safe
   MessagePack decoder now matches an exact synthetic fixture emitted by the
   node06 vLLM r34 classes and validates event, hash, token, group, and block
   shape limits. Release-mode decode on the development host sustains about
@@ -76,10 +79,19 @@ node06). The design rationale for each lives in DESIGN.md.
   generation fencing, bounded replay, graceful shutdown, and controlled
   connection/trust/index metrics. A second CPU-only node06 lifecycle test
   proved reconnect, authoritative-clear trust, and immediate disconnect
-  fencing. Next enable the real feed on one engine during a rolling A/B,
-  observe event shapes/gaps/index growth, then repeat on the other engine before
-  enabling any exact placement. Raw token IDs, block hashes, and prompts remain
-  out of logs.
+  fencing. The first real r34 B-only feed then exposed two undocumented hybrid
+  details and drove fail-closed fixes: non-main sliding-window groups may omit
+  masked hashes, and 4-token partial MLA events can reference internal parent
+  hashes that the publisher never emits. The decoder now defers geometry to
+  semantic group filtering; the index conservatively filters only orphaned
+  blocks smaller than that group's observed canonical root geometry. A fresh
+  r17 consumer replayed sequences 0–37, became trusted, indexed 650 blocks /
+  166,400 token IDs, and then applied 14 live batches under c8 load with no
+  reconnect or index error. Exact inventories remain disconnected from the
+  router. Next repeat the rolling publisher qualification on A, add per-filter
+  reason metrics and a longer eviction/removal soak, then run exact-score
+  shadow comparisons against approximate choices before enabling placement.
+  Raw token IDs, block hashes, and prompts remain out of logs.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
   vectors rather than restarting; benchmark memory, p99 preparation latency,
@@ -251,8 +263,11 @@ node06). The design rationale for each lives in DESIGN.md.
   degrade safely when replay is too old, and avoid persisting the exact token
   IDs carried by `BlockStored`. The isolated publisher gate is complete: 49
   consecutive batches had zero gaps, and same-engine publisher-on/off results
-  were within -1.4% to +2.0%. Next build the privacy-bounded shadow consumer;
-  Dynamo's additional tree-dump recovery is the reference for reconnects.
+  were within -1.4% to +2.0%. The Rust shadow consumer has now passed a complete
+  real replay plus live-update qualification on B. Repeat on A, soak removals
+  and evictions, and compare exact versus approximate decisions in telemetry
+  before the router may consume this state; Dynamo's additional tree-dump
+  recovery remains the scale-out reference.
 - ✅ **True TTFT instrumentation.** rc6's journal and Prometheus histogram
   time the first SSE response byte, which may be a role-only chunk. Journal v3
   code now records both first byte and first generated token/tool-call delta;

@@ -83,6 +83,7 @@ pub enum FilterReason {
     NonMainAttention,
     UnknownAttentionKind,
     UnlearnedAttentionGroup,
+    UnsupportedPartialBlock,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +96,8 @@ pub enum ApplyOutcome {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ExactIndexError {
+    #[error("exact KV store has inconsistent block and token counts")]
+    InconsistentBlockShape,
     #[error("exact KV store references an unknown parent")]
     ParentNotFound,
     #[error("exact KV store contains a duplicate or self-referencing hash")]
@@ -105,6 +108,20 @@ pub enum ExactIndexError {
     CapacityExceeded,
     #[error("exact KV lookup work budget was exceeded")]
     LookupBudgetExceeded,
+}
+
+impl ExactIndexError {
+    #[must_use]
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::InconsistentBlockShape => "index_inconsistent_block_shape",
+            Self::ParentNotFound => "index_parent_not_found",
+            Self::DuplicateHash => "index_duplicate_hash",
+            Self::ConflictingPath => "index_conflicting_path",
+            Self::CapacityExceeded => "index_capacity_exceeded",
+            Self::LookupBudgetExceeded => "index_lookup_budget_exceeded",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -179,6 +196,13 @@ impl ExactKvIndex {
     /// bounded resident capacity would be exceeded. No mutation occurs on an
     /// error.
     pub fn store(&mut self, event: &BlockStored) -> Result<usize, ExactIndexError> {
+        if event.block_size == 0
+            || event.token_ids.is_empty()
+            || event.block_hashes.is_empty()
+            || event.token_ids.len().div_ceil(event.block_size) != event.block_hashes.len()
+        {
+            return Err(ExactIndexError::InconsistentBlockShape);
+        }
         let parent_id = match event.parent_block_hash.as_ref() {
             Some(parent) => self
                 .by_external_hash
@@ -409,6 +433,7 @@ impl AttentionKind {
 pub struct ExactKvInventory {
     index: ExactKvIndex,
     group_kinds: HashMap<(u32, u32), AttentionKind>,
+    group_block_sizes: HashMap<(u32, u32), usize>,
 }
 
 impl ExactKvInventory {
@@ -417,6 +442,7 @@ impl ExactKvInventory {
         Self {
             index: ExactKvIndex::new(limits),
             group_kinds: HashMap::new(),
+            group_block_sizes: HashMap::new(),
         }
     }
 
@@ -427,6 +453,7 @@ impl ExactKvInventory {
     pub fn reset_generation(&mut self) {
         self.index.clear();
         self.group_kinds.clear();
+        self.group_block_sizes.clear();
     }
 
     #[must_use]
@@ -452,9 +479,17 @@ impl ExactKvInventory {
                 if let Some(reason) = filter_store(stored, data_parallel_rank, &self.group_kinds) {
                     return Ok(ApplyOutcome::Filtered(reason));
                 }
-                self.index
-                    .store(stored)
-                    .map(|blocks| ApplyOutcome::Stored { blocks })
+                match self.index.store(stored) {
+                    Ok(blocks) => Ok(ApplyOutcome::Stored { blocks }),
+                    Err(ExactIndexError::ParentNotFound)
+                        if self.is_unsupported_partial(data_parallel_rank, stored) =>
+                    {
+                        Ok(ApplyOutcome::Filtered(
+                            FilterReason::UnsupportedPartialBlock,
+                        ))
+                    }
+                    Err(error) => Err(error),
+                }
             }
             KvEvent::BlockRemoved(removed) => {
                 if let Some(reason) = filter_remove(removed, data_parallel_rank, &self.group_kinds)
@@ -503,6 +538,21 @@ impl ExactKvInventory {
         };
         self.group_kinds
             .insert((rank, group), AttentionKind::from_wire(kind));
+        if stored.parent_block_hash.is_none() {
+            self.group_block_sizes
+                .entry((rank, group))
+                .and_modify(|size| *size = (*size).max(stored.block_size))
+                .or_insert(stored.block_size);
+        }
+    }
+
+    fn is_unsupported_partial(&self, rank: u32, stored: &BlockStored) -> bool {
+        let Some(group) = stored.group_idx else {
+            return false;
+        };
+        self.group_block_sizes
+            .get(&(rank, group))
+            .is_some_and(|canonical| stored.block_size < *canonical)
     }
 }
 
@@ -868,6 +918,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_masked_shape_if_it_reaches_main_attention_index() {
+        let mut index = ExactKvIndex::new(ExactIndexLimits::default());
+        let malformed = store_event(&[1], None, &[1, 2, 3], 2);
+        assert_eq!(
+            index.store(&malformed),
+            Err(ExactIndexError::InconsistentBlockShape)
+        );
+        assert_eq!(index.stats(), ExactIndexStats::default());
+    }
+
+    #[test]
     fn capacity_failure_does_not_partially_apply_event() {
         let limits = ExactIndexLimits {
             max_nodes: 2,
@@ -932,6 +993,47 @@ mod tests {
             ApplyOutcome::Filtered(FilterReason::Namespaced)
         );
         assert_eq!(inventory.stats(), ExactIndexStats::default());
+    }
+
+    #[test]
+    fn inventory_filters_masked_non_main_shape_before_exact_index() {
+        let mut inventory = ExactKvInventory::new(ExactIndexLimits::default());
+        let mut sliding = store_event(&[1], None, &[1, 2, 3], 2);
+        sliding.group_idx = Some(1);
+        sliding.kv_cache_spec_kind = Some("sliding_window_mla".to_owned());
+        assert_eq!(
+            inventory
+                .apply_event(0, &KvEvent::BlockStored(sliding))
+                .unwrap(),
+            ApplyOutcome::Filtered(FilterReason::NonMainAttention)
+        );
+        assert_eq!(inventory.stats(), ExactIndexStats::default());
+    }
+
+    #[test]
+    fn inventory_filters_only_orphaned_smaller_partial_geometry() {
+        let mut inventory = ExactKvInventory::new(ExactIndexLimits::default());
+        let mut root = store_event(&[1], None, &[1, 2, 3, 4], 4);
+        root.kv_cache_spec_kind = Some("mla_attention".to_owned());
+        inventory
+            .apply_event(0, &KvEvent::BlockStored(root))
+            .unwrap();
+
+        let mut partial = store_event(&[2], Some(99), &[5, 6], 2);
+        partial.kv_cache_spec_kind = Some("mla_attention".to_owned());
+        assert_eq!(
+            inventory
+                .apply_event(0, &KvEvent::BlockStored(partial))
+                .unwrap(),
+            ApplyOutcome::Filtered(FilterReason::UnsupportedPartialBlock)
+        );
+
+        let mut missing_full_parent = store_event(&[3], Some(99), &[5, 6, 7, 8], 4);
+        missing_full_parent.kv_cache_spec_kind = Some("mla_attention".to_owned());
+        assert_eq!(
+            inventory.apply_event(0, &KvEvent::BlockStored(missing_full_parent)),
+            Err(ExactIndexError::ParentNotFound)
+        );
     }
 
     #[test]

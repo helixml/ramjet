@@ -111,6 +111,25 @@ pub enum DecodeError {
     InvalidGroupIndex,
 }
 
+impl DecodeError {
+    #[must_use]
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::PayloadTooLarge => "payload_too_large",
+            Self::InvalidMessagePack => "invalid_messagepack",
+            Self::InvalidTimestamp => "invalid_timestamp",
+            Self::InvalidDataParallelRank => "invalid_data_parallel_rank",
+            Self::TooManyEvents => "too_many_events",
+            Self::TooManyBlockHashes => "too_many_block_hashes",
+            Self::TooManyTokenIds => "too_many_token_ids",
+            Self::InvalidBlockHash => "invalid_block_hash",
+            Self::InvalidBlockSize => "invalid_block_size",
+            Self::InconsistentBlockShape => "inconsistent_block_shape",
+            Self::InvalidGroupIndex => "invalid_group_index",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct RawBatch(f64, Vec<RawEvent>, #[serde(default)] Option<i64>);
 
@@ -214,13 +233,11 @@ fn convert_stored(
     token_count: &mut usize,
 ) -> Result<KvEvent, DecodeError> {
     validate_block_size(raw.block_size, limits.max_block_size)?;
-    if raw.block_hashes.is_empty() || raw.token_ids.is_empty() {
-        return Err(DecodeError::InconsistentBlockShape);
-    }
-    let expected_blocks = raw.token_ids.len().div_ceil(raw.block_size);
-    if expected_blocks != raw.block_hashes.len() {
-        return Err(DecodeError::InconsistentBlockShape);
-    }
+    // Hybrid non-main attention groups can intentionally omit masked hashes
+    // (including all hashes) while retaining the contiguous token slice.
+    // Decode those batches so the semantic group filter can discard them
+    // before they reach the exact main-attention index, where non-empty
+    // one-hash-per-chunk validation belongs.
     *hash_count = checked_total(
         *hash_count,
         raw.block_hashes.len(),
@@ -397,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_inconsistent_block_shape() {
+    fn decodes_masked_hybrid_block_shape_for_semantic_filtering() {
         let fixture = rmp_serde::to_vec(&(
             1.0,
             vec![serde_json::json!({
@@ -410,10 +427,12 @@ mod tests {
             })],
         ))
         .unwrap();
-        assert_eq!(
-            decode_batch(&fixture, KvWireLimits::default()),
-            Err(DecodeError::InconsistentBlockShape)
-        );
+        let decoded = decode_batch(&fixture, KvWireLimits::default()).unwrap();
+        let KvEvent::BlockStored(stored) = &decoded.events[0] else {
+            panic!("expected stored event");
+        };
+        assert_eq!(stored.block_hashes.len(), 1);
+        assert_eq!(stored.token_ids.len(), 3);
     }
 
     #[test]

@@ -200,8 +200,9 @@ async fn consume_connection(
             }
             result = source.recv_live_activity() => result,
         };
-        let Ok(activity) = received else {
-            return Some(("live_error", made_progress));
+        let activity = match received {
+            Ok(activity) => activity,
+            Err(error) => return Some((error.reason(), made_progress)),
         };
         let live = match activity {
             LiveActivity::Connected => {
@@ -223,8 +224,9 @@ async fn consume_connection(
                 }
                 result = source.replay(from, through) => result,
             };
-            let Ok(replayed) = replayed else {
-                return Some(("replay_error", made_progress));
+            let replayed = match replayed {
+                Ok(replayed) => replayed,
+                Err(error) => return Some((error.reason(), made_progress)),
             };
             metrics
                 .kv_event_replay_batches
@@ -284,7 +286,7 @@ fn ingest_live(
         Ok(LiveBatchOutcome::Duplicate) => ("duplicate", None),
         Ok(LiveBatchOutcome::Replay { from, through }) => ("replay", Some((from, through))),
         Ok(LiveBatchOutcome::Fenced) => ("fenced", None),
-        Err(_) => ("index_error", None),
+        Err(error) => (error.reason(), None),
     };
     metrics
         .kv_event_batches
@@ -309,7 +311,7 @@ fn ingest_replay(
         Ok(ReplayBatchOutcome::Applied(_)) => "applied",
         Ok(ReplayBatchOutcome::ObserveOnly) => "observe_only",
         Ok(ReplayBatchOutcome::Invalid) => "invalid",
-        Err(_) => "index_error",
+        Err(error) => error.reason(),
     };
     metrics
         .kv_event_batches
@@ -368,7 +370,7 @@ mod tests {
     use crate::kv_wire::{KvEvent, KvEventBatch};
 
     #[test]
-    fn live_shadow_starts_untrusted_and_clear_establishes_generation() {
+    fn live_shadow_requests_startup_replay_and_clear_establishes_generation() {
         let registry = Registry::new();
         let metrics = Metrics::new(&registry).unwrap();
         let inventory = Arc::new(RwLock::new(FencedExactKvInventory::new(
@@ -385,7 +387,7 @@ mod tests {
         };
         assert_eq!(
             ingest_live(&inventory, &metrics, "engine", &observed),
-            Ok(None)
+            Ok(Some((0, 4)))
         );
         assert!(!inventory.read().trusted());
 

@@ -1191,3 +1191,72 @@ state/noise.
 r12 remains live with `LocalShadow`, `KvEventMode Off`, both probes at one,
 zero inflight/load/tokenizer queue, and zero engine or LB restarts. No engine
 configuration or process changed during this rollout.
+
+## 2026-08-12 — real r34 KV-event replay and exact-index qualification
+
+Production was first single-homed on engine A through a brief r12 LB-only
+recreate; engine A stayed up with zero restarts throughout. Engine B was then
+rolled with r34's native ZMQ publisher enabled on container-only ports
+5557/5558. The accepted r34 CLI keys use underscores
+(`enable_kv_cache_events`, `replay_endpoint`, `buffer_steps`, `max_queue_size`);
+JSON quoting through Compose and hyphenated nested keys were rejected before
+model load. The corrected B process booted with publisher `zmq`, topic `kv`, a
+10,000-step replay buffer, 100,000 HWM/queue bounds, and zero restarts. B was
+never advertised by the production LB during this gate.
+
+The first real 18.6K-token request correctly exposed a decoder incompatibility
+instead of silently accepting incomplete state. A privacy-bounded live probe
+showed that one request produced five KV groups: group 0 `mla_attention` at
+256-token blocks and four `sliding_window_mla` groups at 64/64/4/8 tokens.
+Only group 0 had one hash per token block; the masked non-main groups retained
+the full token slice while omitting hashes. Decoding now accepts that wire
+shape so the existing semantic group filter can discard it, while the exact
+main-attention index still enforces one hash per token chunk.
+
+A bounded replay probe then checked only in-memory hash membership and emitted
+counts, never token or hash values. Replay from zero returned 37 contiguous
+batches and 220 stores with 1,259 hashes. Of 579 main-attention hashes, exactly
+two 4-token partial stores referenced parents absent from the entire event
+stream (sequences 22 and 32); the normal 256-token MLA chain was complete.
+This matches r34's partial-block implementation: it can reference an internal
+fine-grained chain hash that is not itself emitted. The index now filters only
+missing-parent stores whose block size is smaller than the cache group's
+already observed root geometry. A missing canonical-size parent remains a
+generation-fencing error.
+
+Startup recovery was also corrected. Sequence zero directly establishes the
+new process generation; a late subscriber requests a bounded replay from zero
+through its first live sequence. Transport and index errors now expose only a
+fixed reason label (`invalid_messagepack`, `invalid_replay`,
+`index_parent_not_found`, and peers), retaining privacy and bounded metric
+cardinality. These reason codes drove the real-feed fixes without rendering a
+payload.
+
+The final isolated r17 consumer requested and applied sequences 0–37, set
+`trusted=1`, and built 650 exact blocks / 166,400 resident token IDs. Two
+fresh locality turns raised the live applied count to five while preserving a
+49.5% cache hit (18,432 cached on the returning turn). An eight-request direct
+B same-app load completed 8/8 at 327 generated tok/s; afterward the consumer
+had applied 14 live batches, remained trusted, grew to 728 blocks / 186,368
+token IDs, and had exactly one initial connection with no reconnect, decode,
+replay, or index errors. Exact state remained unreachable from route selection.
+
+The canary was stopped, B was recreated with `EXTRA_VLLM_ARGS` explicitly
+empty, and its normal warm boot completed in 545 seconds with zero restarts.
+After model and health probes passed, r12 was restored to both engines with KV
+events off and local tokenization shadow on. The post-restore gates were:
+
+- locality: 8/8 requests, 74.2% aggregate cache hit, exactly two cold prefills
+  for two fresh apps;
+- same-app c12/max128: 12/12, exact 6/6 split, 397 tok/s;
+- aggregate c16/max512: 16/16, 1,230.8 generated tok/s;
+- both upstream readiness gauges one, zero residual inflight/load, and zero
+  unexpected container restart counts after the intentional recreates.
+
+All **71 Rust tests**, Rust formatting, strict all-target/all-feature Clippy,
+the retained Go tests/vet/build, Go formatting, Python probe syntax checks, and
+`git diff --check` pass. The locally built r17 canary is intentionally not the
+production LB; production remains immutable r12. Next qualify the same feed on
+A, add a longer removal/eviction soak and filter-reason counters, then compare
+exact-score shadow choices with the approximate router before exact placement
+is considered.
