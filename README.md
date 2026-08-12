@@ -284,10 +284,33 @@ time, preemptions, cache outcomes, reuse-wave survival, and per-replica exact
 inventory before/after snapshots keyed only by route ordinal. Negative
 resident changes are preserved so a capacity cliff cannot be mistaken for a
 counter reset; changes are `null` unless that inventory was trusted at both
-snapshot boundaries. `--concurrency 2`
+snapshot boundaries. Initial-wave prompt-token total and mean make byte-shape
+drift visible before comparing capacity cells. The same cell reports zero-safe
+shadow deltas for exact agreement and cold-residency `would_balance`,
+delta-gate, load-gate, and
+all-zero decisions, avoiding manual production-wide counter joins.
+`--concurrency 2`
 uses both TP4 engine pairs while retaining a barrier between each cold/reuse
 wave, so a reuse cannot race its unfinished cold request. With both engine
 metric URLs and the LB metric URL supplied, `--require-reconciled` fails unless
 response usage, LB counters, native prompt/cache counters, native prefix
 query/hit counters, and request sample counts all agree within the configured
-tolerance.
+tolerance. Long cells can add `--progress-every 2` to emit content-free
+completion counts and elapsed time to stderr without contaminating final JSONL
+summaries on stdout.
+
+For direct engine A/Bs, generate one identity file per engine before accepting
+benchmark output. The capture includes immutable image/repository digests,
+model/tokenizer revisions and artifact hashes, runtime package versions,
+container lifetime, CPU/NUMA placement, a topology hash, an allow-listed
+effective serving contract, and a secret-independent argv hash. Supplying an
+upstream qualification receipt hard-fails mismatched image, digest,
+model/tokenizer, or observed runtime package identity:
+
+```bash
+bench/node06_engine_metadata.sh /tmp/engine-b.json dspark-0731-b \
+  /tmp/infernal-invocation-r4-receipt.json
+```
+
+The raw serving command, API keys, hostnames, prompts, and token IDs are never
+written to the output.

@@ -8,6 +8,7 @@ token counts, timings, route ordinals, and aggregate Prometheus deltas.
 import argparse
 import collections
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
@@ -38,6 +39,34 @@ LB_COUNTERS = {
         {"source": "live", "action": "removed"},
     ),
     "live_clear_events": ("ds4proxy_kv_event_clears_total", {"source": "live"}),
+    "shadow_exact_agree": (
+        "ds4proxy_exact_route_placement_total",
+        {"mode": "shadow", "endpoint": "chat", "outcome": "kept_agree"},
+    ),
+    "shadow_cold_all_zero": (
+        "ds4proxy_exact_route_placement_total",
+        {"mode": "shadow", "endpoint": "chat", "outcome": "kept_all_zero"},
+    ),
+    "shadow_cold_would_balance": (
+        "ds4proxy_exact_route_placement_total",
+        {"mode": "shadow", "endpoint": "chat", "outcome": "would_balance"},
+    ),
+    "shadow_cold_delta_gate": (
+        "ds4proxy_exact_route_placement_total",
+        {
+            "mode": "shadow",
+            "endpoint": "chat",
+            "outcome": "kept_balance_delta_gate",
+        },
+    ),
+    "shadow_cold_load_gate": (
+        "ds4proxy_exact_route_placement_total",
+        {
+            "mode": "shadow",
+            "endpoint": "chat",
+            "outcome": "kept_balance_load_gate",
+        },
+    ),
 }
 
 
@@ -244,10 +273,13 @@ def reconcile(records, lb, engine, tolerance=0):
 
 def synthetic_prefix(app, prefix_kib, salt):
     target = prefix_kib * 1024
-    unit = f"Synthetic cache app {salt}-{app}; stable shared context. "
-    return (unit * (target // len(unit.encode()) + 1)).encode()[:target].decode(
-        "utf-8", "ignore"
-    )
+    nonce = hashlib.blake2b(f"{salt}:{app}".encode(), digest_size=16).hexdigest()
+    header = f"Synthetic cache nonce {nonce}. "
+    # Keep the repeated portion representative of the original capacity
+    # workload while making it independent from the fresh-salt spelling.
+    unit = "Synthetic cache app 1786561234567890123-07; stable shared context. "
+    prefix = header + unit * (target // len(unit.encode()) + 1)
+    return prefix.encode()[:target].decode("utf-8", "strict")
 
 
 def messages_for(app, session, turn, prefix_kib, salt):
@@ -289,13 +321,32 @@ def workload_coordinates(apps, sessions, turns):
         yield from wave
 
 
-def execute_waves(apps, sessions, turns, concurrency, execute):
+def execute_waves(apps, sessions, turns, concurrency, execute, progress=None):
     """Execute each app wave concurrently, preserving barriers and output order."""
     records = []
+    total_requests = apps * sessions * turns
+    total_waves = sessions * turns
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-        for wave in workload_waves(apps, sessions, turns):
-            for (app, session, turn), result in zip(wave, pool.map(execute, wave)):
-                records.append({"app": app, "session": session, "turn": turn, **result})
+        for wave_index, wave in enumerate(
+            workload_waves(apps, sessions, turns), start=1
+        ):
+            for wave_completed, ((app, session, turn), result) in enumerate(
+                zip(wave, pool.map(execute, wave)), start=1
+            ):
+                record = {"app": app, "session": session, "turn": turn, **result}
+                records.append(record)
+                if progress:
+                    progress(
+                        {
+                            "completed": len(records),
+                            "total": total_requests,
+                            "wave": wave_index,
+                            "waves": total_waves,
+                            "wave_completed": wave_completed,
+                            "wave_size": len(wave),
+                            "ok": bool(record.get("ok")),
+                        }
+                    )
     return records
 
 
@@ -384,13 +435,17 @@ def summarize(
     last_seen = {}
     reuse_distances = []
     reuse_records = []
+    initial_records = []
     for position, record in enumerate(records):
         app = record["app"]
         if app in last_seen:
             reuse_distances.append(position - last_seen[app] - 1)
             if record["ok"]:
                 reuse_records.append(record)
+        elif record["ok"]:
+            initial_records.append(record)
         last_seen[app] = position
+    initial_prompt = sum(record["prompt_tokens"] for record in initial_records)
     reuse_prompt = sum(record["prompt_tokens"] for record in reuse_records)
     reuse_cached = sum(record["cached_tokens"] for record in reuse_records)
     reuse_outcomes = collections.Counter(
@@ -408,6 +463,10 @@ def summarize(
         "outcomes": dict(sorted(outcomes.items())),
         "route_split": dict(sorted(routes.items())),
         "prompt_tokens": prompt,
+        "initial_wave_prompt_tokens": initial_prompt,
+        "initial_prompt_tokens_mean": (
+            round(initial_prompt / len(initial_records), 1) if initial_records else None
+        ),
         "cached_tokens": cached,
         "completion_tokens": completion,
         "cache_hit_pct": round(100 * cached / prompt, 2) if prompt else None,
@@ -452,6 +511,7 @@ def run_cell(args, apps, token):
     inventory_before = fetch_replica_inventory(args.base)
     engine_before = [fetch_engine_metrics(url) for url in args.engine_metrics]
     started = time.perf_counter()
+    progress_successful = 0
 
     def execute(coordinate):
         app, session, turn = coordinate
@@ -464,7 +524,40 @@ def run_cell(args, apps, token):
             args.timeout,
         )
 
-    records = execute_waves(apps, args.sessions, args.turns, args.concurrency, execute)
+    def progress(state):
+        nonlocal progress_successful
+        progress_successful += int(state["ok"])
+        if not args.progress_every or (
+            state["completed"] % args.progress_every
+            and state["wave_completed"] != state["wave_size"]
+        ):
+            return
+        print(
+            json.dumps(
+                {
+                    "type": "cache_progress",
+                    "apps": apps,
+                    "completed": state["completed"],
+                    "total": state["total"],
+                    "successful": progress_successful,
+                    "wave": state["wave"],
+                    "waves": state["waves"],
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+    records = execute_waves(
+        apps,
+        args.sessions,
+        args.turns,
+        args.concurrency,
+        execute,
+        progress if args.progress_every else None,
+    )
     if args.emit_requests:
         for record in records:
             print(json.dumps({"type": "cache_request", **record}, sort_keys=True))
@@ -514,6 +607,12 @@ def parser():
     result.add_argument("--reconcile-tolerance", type=float, default=0)
     result.add_argument("--require-reconciled", action="store_true")
     result.add_argument("--emit-requests", action="store_true")
+    result.add_argument(
+        "--progress-every",
+        type=int,
+        default=0,
+        help="emit a content-free stderr progress record every N completions",
+    )
     return result
 
 
@@ -525,9 +624,11 @@ def main():
         or args.prefix_kib < 1
         or args.max_tokens < 1
         or args.concurrency < 1
+        or args.progress_every < 0
     ):
         raise SystemExit(
-            "sessions, turns, prefix-kib, max-tokens, and concurrency must be positive"
+            "sessions, turns, prefix-kib, max-tokens, and concurrency must be positive; "
+            "progress-every must be nonnegative"
         )
     token = os.environ.get("BENCH_TOKEN") or os.environ.get("VLLM_API_KEY")
     if not token:

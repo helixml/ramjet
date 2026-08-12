@@ -13,12 +13,25 @@ from cachebench import (
     reconcile,
     replica_inventory_change,
     summarize,
+    synthetic_prefix,
     workload_coordinates,
     workload_waves,
 )
 
 
 class CacheBenchTest(unittest.TestCase):
+    def test_synthetic_prefix_has_stable_size_without_repeating_salt(self):
+        first = synthetic_prefix(1, 2, "short")
+        second = synthetic_prefix(1, 2, "a-much-longer-salt")
+        other_app = synthetic_prefix(2, 2, "short")
+        self.assertEqual(len(first.encode()), 2048)
+        self.assertEqual(len(second.encode()), 2048)
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(first, other_app)
+        self.assertNotIn("short", first)
+        self.assertNotIn("a-much-longer-salt", second)
+        self.assertEqual(first[64:], second[64:])
+
     def test_registered_but_unobserved_lb_metric_is_zero(self):
         body = b"""# HELP ds4proxy_prompt_tokens_total prompts
 # TYPE ds4proxy_prompt_tokens_total counter
@@ -32,12 +45,29 @@ class CacheBenchTest(unittest.TestCase):
 # TYPE ds4proxy_kv_event_blocks_total counter
 # HELP ds4proxy_kv_event_clears_total clears
 # TYPE ds4proxy_kv_event_clears_total counter
+# HELP ds4proxy_exact_route_placement_total exact route placement decisions
+# TYPE ds4proxy_exact_route_placement_total counter
 """
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = body
         with mock.patch("urllib.request.urlopen", return_value=response):
             metrics = fetch_lb_metrics("http://metrics")
         self.assertTrue(all(value == 0 for value in metrics.values()))
+
+    def test_shadow_counter_deltas_select_only_bounded_chat_outcomes(self):
+        body = b'''# HELP ds4proxy_exact_route_placement_total decisions
+# TYPE ds4proxy_exact_route_placement_total counter
+ds4proxy_exact_route_placement_total{endpoint="chat",mode="shadow",outcome="would_balance"} 3
+ds4proxy_exact_route_placement_total{endpoint="chat",mode="shadow",outcome="kept_balance_load_gate"} 5
+ds4proxy_exact_route_placement_total{endpoint="chat",mode="placement",outcome="would_balance"} 99
+'''
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = body
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            metrics = fetch_lb_metrics("http://metrics")
+        self.assertEqual(metrics["shadow_cold_would_balance"], 3)
+        self.assertEqual(metrics["shadow_cold_load_gate"], 5)
+        self.assertEqual(metrics["shadow_cold_delta_gate"], 0)
 
     def test_workload_round_robins_apps_before_reuse(self):
         self.assertEqual(
@@ -96,6 +126,7 @@ class CacheBenchTest(unittest.TestCase):
 
     def test_concurrent_waves_keep_cold_to_reuse_barrier(self):
         completed_cold = set()
+        progress = []
 
         def execute(coordinate):
             app, session, _turn = coordinate
@@ -105,7 +136,7 @@ class CacheBenchTest(unittest.TestCase):
                 self.assertEqual(completed_cold, {0, 1, 2})
             return {"ok": True}
 
-        records = execute_waves(3, 2, 1, 2, execute)
+        records = execute_waves(3, 2, 1, 2, execute, progress.append)
         self.assertEqual(
             [(record["app"], record["session"]) for record in records],
             [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)],
@@ -114,6 +145,22 @@ class CacheBenchTest(unittest.TestCase):
             list(workload_waves(2, 2, 1)),
             [[(0, 0, 1), (1, 0, 1)], [(0, 1, 1), (1, 1, 1)]],
         )
+        self.assertEqual(
+            [
+                (item["completed"], item["wave"], item["wave_completed"])
+                for item in progress
+            ],
+            [
+                (1, 1, 1),
+                (2, 1, 2),
+                (3, 1, 3),
+                (4, 2, 1),
+                (5, 2, 2),
+                (6, 2, 3),
+            ],
+        )
+        self.assertTrue(all(item["total"] == 6 for item in progress))
+        self.assertTrue(all(item["waves"] == 2 for item in progress))
 
     def test_app_list_and_cache_outcomes_are_bounded(self):
         self.assertEqual(parse_apps("1,4,8"), [1, 4, 8])
@@ -170,6 +217,11 @@ class CacheBenchTest(unittest.TestCase):
             "live_stored_blocks": 1,
             "live_removed_blocks": 0,
             "live_clear_events": 0,
+            "shadow_exact_agree": 0,
+            "shadow_cold_all_zero": 0,
+            "shadow_cold_would_balance": 0,
+            "shadow_cold_delta_gate": 0,
+            "shadow_cold_load_gate": 0,
         }
         engine = {
             "prompt_tokens": 100,
@@ -222,6 +274,8 @@ class CacheBenchTest(unittest.TestCase):
         summary = summarize(records, 2, 2, 1, 32, 1.0, None, None, 0)
         self.assertEqual(summary["cache_hit_pct"], 40)
         self.assertEqual(summary["completion_tokens"], 8)
+        self.assertEqual(summary["initial_wave_prompt_tokens"], 200)
+        self.assertEqual(summary["initial_prompt_tokens_mean"], 100)
         self.assertEqual(summary["total_tok_s"], 408)
         self.assertEqual(summary["request_reuse_pct"], 50)
         self.assertEqual(summary["reuse_wave_requests"], 2)

@@ -283,6 +283,24 @@ Do not interpret draft acceptance alone when comparing capacity policies: a
 pruned policy can raise the percentage by reducing its denominator. Compare
 effective tokens/step and end-to-end throughput as well.
 
+Before an engine image A/B, capture each engine separately with
+`bench/node06_engine_metadata.sh OUTPUT CONTAINER [RECEIPT]`. A supplied receipt
+must verify before its benchmark cells are admissible. Never combine two
+engines into one provenance string: their image, lifetime, runtime packages,
+effective argv, JIT interval, and metrics must remain independently
+attributable. Run matched direct cells on A and B concurrently only after both
+are warm; keep cache/LB capacity cells serial because cross-traffic
+contaminates their residency result.
+
+Before an engine image A/B, capture each engine separately with
+`bench/node06_engine_metadata.sh OUTPUT CONTAINER [RECEIPT]`. A supplied receipt
+must verify before its benchmark cells are admissible. Never combine two
+engines into one provenance string: their image, lifetime, runtime packages,
+effective argv, JIT interval, and metrics must remain independently
+attributable. Run matched direct cells on A and B concurrently only after both
+are warm; keep cache/LB capacity cells serial because cross-traffic
+contaminates their residency result.
+
 ### A/B protocol
 
 To compare two LB images cleanly: deploy image X, run a bench with a fresh

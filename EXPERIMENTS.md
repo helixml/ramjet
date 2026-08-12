@@ -2270,3 +2270,107 @@ inventory boundaries, and reached 98.07% reuse-wave token hits in 1.56s. This
 qualifies both the bounded failure path and live-event recovery, while also
 leaving replay-drain throughput as a follow-up optimization rather than hiding
 it behind unbounded retries.
+
+## 2026-08-12 — repeated 52/64 residency boundary and faster observability
+
+Before spending another long cell on the cache cliff, a matched four-app
+512 KiB concurrency check tested whether more host parallelism would shorten
+the loop. Concurrency two completed 8/8 in 37.14s with 0.05ms mean native
+queue time and 18.15s cold p95. Concurrency four was 13% slower at 42.06s,
+introduced 4.35s mean queue time, and raised cold p95 to 40.42s. The existing
+c2 wave schedule is therefore the efficient setting: it keeps one long
+prefill on each TP4 pair without queueing a second behind it.
+
+The first fresh r28.1 52-app × 512 KiB attempt completed 104/104 in 594.58s,
+split 50/54, and reconciled response, LB, and native vLLM counters with zero
+spread. All 52 reuse requests remained partial hits with 99.91% reuse-wave
+token hits. There were zero preemptions. Live block removals reached 106.02%
+of stores, again confirming that gross publisher churn is not itself a
+cache-survival measure. Both exact inventories were trusted at both snapshots:
+replica 0 changed by -547,072 resident token IDs and replica 1 by +40,704
+while reuse still survived.
+
+This is a valid stress cell but not a matched repeat: its prompts averaged
+161,818 tokens, 11.0% above the original cell's 145,723. The generator had
+repeated the caller-provided salt throughout the entire 512 KiB prefix, so the
+new `r29-*` spelling changed tokenizer density on every repetition. The runner
+now hashes the salt/app into one fixed-size leading nonce and repeats a fixed
+representative payload. Fresh salts still invalidate cache identity at the
+first block, but salt spelling can no longer change the bulk token density.
+Future boundary runs must first calibrate the corrected generator's reported
+prompt count and must compare actual tokens, not the nominal byte size alone.
+
+The corresponding oversized 64-app stress cell completed 128/128 in
+1,715.73s with exact zero-spread reconciliation, zero preemptions, and a 60/68
+request split. It averaged 161,742 prompt tokens per request, 10.99% above the
+original 145,723-token cell. All 64 reuse requests were cold, reuse-wave token
+hits were zero, and live removals were 100.19% of stores. Both exact
+inventories remained trusted at both snapshots and changed by only -19,456
+and -18,944 resident token IDs after the full churn cycle. This usefully
+confirms complete thrash above the boundary, but it is explicitly excluded
+from the matched 64-app repetition count because of the generator-density
+confounder.
+
+Corrected one-app calibration at 512 KiB produced 140,952 initial prompt
+tokens, 3.27% below the historical target. Scaling only the fixed payload to
+529 KiB produced 145,631 tokens, within 0.063% of the original 145,723-token
+mean. The matched repetition therefore uses 529 KiB and records its actual
+initial-wave mean; the nominal byte change compensates tokenizer density and
+does not enlarge the token working set.
+
+The corrected 52-app cell completed 104/104 in 654.55s with an actual
+145,632-token initial mean, a 50/54 request split, zero-spread reconciliation,
+and zero preemptions. All 52 reuse requests survived as partial hits with a
+99.85% reuse-wave token-hit rate. Both inventories stayed trusted; their
+signed changes were +2,560 and +55,296 resident token IDs. The now-joined cold
+shadow deltas were 26 `kept_all_zero`, 26 `kept_balance_delta_gate`, zero
+`kept_balance_load_gate`, and zero `would_balance`; all 52 reuse decisions
+agreed with exact lookup. At this below-cliff working set there is no admitted
+cold-residency move to evaluate, so the calibrated 64-app cell remains the
+decision point.
+
+Long cells previously emitted nothing until their final JSON record, making
+iteration progress dependent on manual SSH and production-wide metric reads.
+`cachebench.py --progress-every N` now emits only cell size, bounded completion
+and success counts, wave ordinal, and elapsed time to stderr; stdout remains
+clean JSONL. The same snapshot now includes zero-safe deltas for exact shadow
+agreement and cold-residency `would_balance`, delta-gate, load-gate, and
+all-zero outcomes. This directly joins the counterfactual with per-replica
+residency without exposing prompts, fingerprints, token vectors, or upstream
+addresses. All 35 cache/benchmark Python tests pass.
+
+## 2026-08-13 — issue #32 Infernal Invocation r4 preflight boundary
+
+Parallel upstream, node06, and benchmark-tooling reviews found that issue
+#32's r2 target had already been superseded by Infernal Invocation r4. The
+candidate is pinned as
+`voipmonitor/vllm:infernal-invocation-vllm3226eb7-b12x1584743-fi1ac6942-cu133-torch213-20260812-r4`
+at registry digest
+`sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6`.
+It retains the exact node06 model/tokenizer revision but moves to vLLM
+0.26.1rc0, B12X 1.2.3, Torch 2.13, CUDA 13.3, and NCCL 2.31.2. The integration
+trees remain the immutable identity because their constituent upstream PRs are
+not all merged.
+
+No engine or driver was changed. The image is not cached on node06; its
+13.69GB compressed / 30.64GB unpacked footprint fits current disk headroom,
+and the existing 152GB model snapshot is reusable. Driver 595.84 meets CUDA
+13.x minor compatibility but is below CUDA 13.3's corresponding 610.43
+driver. The image carries the forward-compat path, but CUDA/CuTe/FlashInfer/
+B12X PTX/JIT startup remains an empirical hard gate. The first candidate must
+therefore isolate B, keep A on r34, run a disposable GPU compatibility smoke,
+force NCCL, and preserve current A16/K5/standard/MNS16/MBT4096/393K/GMU0.975
+settings. Custom all-reduce is a later maintenance-window experiment because
+node06 lacks the upstream direct-P2P registry configuration.
+
+Benchmark provenance was the first implementation slice. The new one-engine
+capture records configured image, local image ID and repo digests,
+model/tokenizer revisions and artifact hashes, runtime packages, container
+start/restart identity, CPU/NUMA placement, topology hash, an allow-listed
+effective serving contract, and a secret-independent argv hash. An optional
+upstream receipt is compacted to immutable source trees/packages and hard-fails
+bounded image/digest/model/tokenizer/runtime mismatches. It never writes the
+raw argv or credential values. Live r34 B capture succeeded and matched its
+deployed digest/revisions; a synthetic live-r4 fixture verified against the
+immutable upstream receipt. Thirty-eight Python tests pass across the full
+benchmark suite.
