@@ -413,10 +413,43 @@ fn append_field(output: &mut Vec<u8>, key: &str, value: Option<&Value>) {
     };
     output.extend_from_slice(key.as_bytes());
     output.push(0);
-    if let Ok(encoded) = serde_json::to_vec(value) {
-        output.extend_from_slice(&encoded);
-    }
+    append_canonical_json(output, value);
     output.push(0);
+}
+
+/// Serialize JSON with recursively sorted object keys. Fingerprints must not
+/// depend on `serde_json`'s optional `preserve_order` feature, which transitive
+/// tokenizer dependencies can enable for the entire crate graph.
+fn append_canonical_json(output: &mut Vec<u8>, value: &Value) {
+    match value {
+        Value::Array(values) => {
+            output.push(b'[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                append_canonical_json(output, value);
+            }
+            output.push(b']');
+        }
+        Value::Object(object) => {
+            output.push(b'{');
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                serde_json::to_writer(&mut *output, key)
+                    .expect("serializing a JSON object key into Vec cannot fail");
+                output.push(b':');
+                append_canonical_json(output, &object[key]);
+            }
+            output.push(b'}');
+        }
+        _ => serde_json::to_writer(output, value)
+            .expect("serializing a JSON scalar into Vec cannot fail"),
+    }
 }
 
 fn chain_fingerprints(prompt: &[u8], chunk_bytes: usize) -> Vec<u64> {
@@ -564,6 +597,14 @@ mod tests {
         for (body, expected) in cases {
             assert_eq!(router.fingerprints(body), *expected);
         }
+    }
+
+    #[test]
+    fn fingerprints_ignore_nested_object_insertion_order() {
+        let router = Router::new(config());
+        let first = br#"{"messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"z":{"type":"integer"},"a":{"type":"string"}}}}}]}"#;
+        let second = br#"{"tools":[{"function":{"parameters":{"properties":{"a":{"type":"string"},"z":{"type":"integer"}},"type":"object"},"name":"lookup"},"type":"function"}],"messages":[{"content":"hello","role":"user"}]}"#;
+        assert_eq!(router.fingerprints(first), router.fingerprints(second));
     }
 
     #[test]

@@ -34,16 +34,18 @@ func TestSanitizeKeepsReasonableMaxTokens(t *testing.T) {
 	}
 }
 
-func TestSanitizeDropsInvalidReasoningEffort(t *testing.T) {
-	body := []byte(`{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`)
+func TestSanitizeDropsOnlyInvalidReasoningEffort(t *testing.T) {
+	for _, effort := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		body := []byte(`{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"` + effort + `"}`)
+		out := decode(t, SanitizeRequestBody("chat", body, 100000))
+		if out["reasoning_effort"] != effort {
+			t.Fatalf("reasoning_effort=%s must survive", effort)
+		}
+	}
+	body := []byte(`{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"invalid"}`)
 	out := decode(t, SanitizeRequestBody("chat", body, 100000))
 	if _, exists := out["reasoning_effort"]; exists {
-		t.Fatal("reasoning_effort=none should be dropped")
-	}
-	body = []byte(`{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`)
-	out = decode(t, SanitizeRequestBody("chat", body, 100000))
-	if out["reasoning_effort"] != "high" {
-		t.Fatal("valid reasoning_effort must survive")
+		t.Fatal("unsupported reasoning_effort should be dropped")
 	}
 }
 

@@ -83,9 +83,12 @@ pub(crate) fn sanitize_object(
         }
     }
     changed |= flatten_content_parts(object);
-    let valid_effort = object
-        .get("reasoning_effort")
-        .is_none_or(|effort| matches!(effort.as_str(), Some("low" | "medium" | "high" | "max")));
+    let valid_effort = object.get("reasoning_effort").is_none_or(|effort| {
+        matches!(
+            effort.as_str(),
+            Some("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")
+        )
+    });
     if !valid_effort {
         object.remove("reasoning_effort");
         changed = true;
@@ -168,8 +171,24 @@ mod tests {
         let value: Value =
             serde_json::from_slice(&sanitize_request(Endpoint::Chat, body, 100_000)).unwrap();
         assert!(value.get("max_tokens").is_none());
-        assert!(value.get("reasoning_effort").is_none());
+        assert_eq!(value["reasoning_effort"], "none");
         assert_eq!(value["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn drops_only_unsupported_reasoning_effort() {
+        for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let body = format!(r#"{{"messages":[],"reasoning_effort":"{effort}"}}"#);
+            let value: Value =
+                serde_json::from_slice(&sanitize_request(Endpoint::Chat, body.as_bytes(), 100_000))
+                    .unwrap();
+            assert_eq!(value["reasoning_effort"], effort);
+        }
+
+        let body = br#"{"messages":[],"reasoning_effort":"invalid"}"#;
+        let value: Value =
+            serde_json::from_slice(&sanitize_request(Endpoint::Chat, body, 100_000)).unwrap();
+        assert!(value.get("reasoning_effort").is_none());
     }
 
     #[test]

@@ -855,7 +855,10 @@ mod tests {
         let upstream = AxumRouter::new().fallback(any(|request: Request<Body>| async move {
             let body = to_bytes(request.into_body(), MAX_REQUEST_BODY).await.unwrap();
             let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            if request.get("max_tokens").is_some() || request.get("reasoning_effort").is_some() {
+            if request.get("max_tokens").is_some()
+                || request.get("reasoning_effort").and_then(serde_json::Value::as_str)
+                    != Some("none")
+            {
                 return json_error(StatusCode::BAD_REQUEST, "request was not sanitized");
             }
             Response::builder()

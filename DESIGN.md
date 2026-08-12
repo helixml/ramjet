@@ -103,7 +103,7 @@ Emergent behaviors (tested in `router_test.go`):
 |---|---|
 | strip `max_tokens`/`max_completion_tokens` ≥ 100k | Helix/Zed send full-context budgets; strict engines reject prompt+budget > ctx |
 | flatten content-parts arrays (incl. `{"type":"text"}` with no text) | Zed sends assistant history as parts; SGLang-class engines require strings |
-| drop invalid `reasoning_effort` (`"none"`) | Helix agent-switch flow emits it; engines 400 |
+| drop unsupported `reasoning_effort` values | Preserve the current vLLM schema (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); reject client-only values that engines would 400 |
 | `/v1/models` context shrink (`DS4_ADVERTISE_CTX_MARGIN`) | clients undercount rendered prompts; and a thread over the engine limit can't even run compaction — advertised window MUST be below the engine ceiling |
 
 ## Metrics

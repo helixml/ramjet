@@ -76,6 +76,30 @@ fn tokenization_body(endpoint: Endpoint, object: &Map<String, Value>) -> Option<
                 .entry("add_generation_prompt")
                 .or_insert(Value::Bool(!continue_final));
             request.insert("return_token_strs".to_owned(), Value::Bool(false));
+            let mut template_kwargs = request
+                .get("chat_template_kwargs")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            for key in ["documents", "reasoning_effort"] {
+                if let Some(value) = request
+                    .get(key)
+                    .filter(|value| !value.is_null() && value.as_str() != Some("auto"))
+                {
+                    template_kwargs.insert(key.to_owned(), value.clone());
+                }
+            }
+            if let Some(effort) = request.get("reasoning_effort").and_then(Value::as_str)
+                && !template_kwargs.contains_key("enable_thinking")
+            {
+                template_kwargs.insert("enable_thinking".to_owned(), Value::Bool(effort != "none"));
+            }
+            if !template_kwargs.is_empty() {
+                request.insert(
+                    "chat_template_kwargs".to_owned(),
+                    Value::Object(template_kwargs),
+                );
+            }
             serde_json::to_vec(&request).ok()
         }
         Endpoint::Completions if object.get("prompt").is_some_and(Value::is_string) => {
@@ -149,7 +173,7 @@ mod tests {
     #[test]
     fn derives_tokenizer_payload_from_the_sanitized_parse() {
         let router = router();
-        let raw = br#"{"model":"model","messages":[{"role":"user","content":"hello"}],"max_tokens":100000,"continue_final_message":true}"#;
+        let raw = br#"{"model":"model","messages":[{"role":"user","content":"hello"}],"max_tokens":100000,"continue_final_message":true,"reasoning_effort":"none","chat_template_kwargs":{"custom":7}}"#;
         let prepared = PreparedRequest::with_tokenizer(Endpoint::Chat, raw, 100_000, &router, true);
         let body: Value =
             serde_json::from_slice(prepared.tokenizer_body.as_ref().unwrap()).unwrap();
@@ -157,6 +181,9 @@ mod tests {
         assert_eq!(body["add_generation_prompt"], false);
         assert_eq!(body["return_token_strs"], false);
         assert_eq!(body["messages"][0]["content"], "hello");
+        assert_eq!(body["chat_template_kwargs"]["reasoning_effort"], "none");
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(body["chat_template_kwargs"]["custom"], 7);
     }
 
     #[test]

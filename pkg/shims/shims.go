@@ -66,7 +66,7 @@ func SanitizeRequestBody(endpoint string, body []byte, threshold int64) []byte {
 	}
 	if effort, exists := object["reasoning_effort"]; exists {
 		value, validString := effort.(string)
-		valid := validString && (value == "low" || value == "medium" || value == "high" || value == "max")
+		valid := validString && (value == "none" || value == "minimal" || value == "low" || value == "medium" || value == "high" || value == "xhigh" || value == "max")
 		if !valid {
 			delete(object, "reasoning_effort")
 			notes = append(notes, fmt.Sprintf("dropped reasoning_effort=%v", effort))

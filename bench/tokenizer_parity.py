@@ -86,9 +86,17 @@ CASES = {
         "messages": [{"role": "user", "content": "Compare two routing scores."}],
         "reasoning_effort": "high",
     },
+    "reasoning_none": {
+        "messages": [{"role": "user", "content": "Compare two routing scores."}],
+        "reasoning_effort": "none",
+    },
+    "reasoning_max": {
+        "messages": [{"role": "user", "content": "Compare two routing scores."}],
+        "reasoning_effort": "max",
+    },
     "thinking_disabled": {
         "messages": [{"role": "user", "content": "Return one short sentence."}],
-        "think": False,
+        "chat_template_kwargs": {"thinking": False},
     },
     "normalized_content": {
         "messages": [{"role": "user", "content": "first part; second part"}],
@@ -113,6 +121,28 @@ def post(path, payload):
         raise RuntimeError(f"{path} returned HTTP {error.code}: {detail}") from error
 
 
+def tokenization_payload(fields):
+    payload = copy.deepcopy(fields)
+    kwargs = dict(payload.get("chat_template_kwargs") or {})
+    for key in ("documents", "reasoning_effort"):
+        value = payload.get(key)
+        if value is not None and value != "auto":
+            kwargs[key] = value
+    effort = payload.get("reasoning_effort")
+    if effort is not None and "enable_thinking" not in kwargs:
+        kwargs["enable_thinking"] = effort != "none"
+    if kwargs:
+        payload["chat_template_kwargs"] = kwargs
+    payload.update(
+        {
+            "model": MODEL,
+            "add_generation_prompt": True,
+            "return_token_strs": False,
+        }
+    )
+    return payload
+
+
 failures = 0
 for name, fields in CASES.items():
     completion_request = {
@@ -124,14 +154,7 @@ for name, fields in CASES.items():
     completion = post("/v1/chat/completions", completion_request)
     usage_count = int(completion["usage"]["prompt_tokens"])
 
-    tokenize_request = copy.deepcopy(fields)
-    tokenize_request.update(
-        {
-            "model": MODEL,
-            "add_generation_prompt": True,
-            "return_token_strs": False,
-        }
-    )
+    tokenize_request = tokenization_payload(fields)
     first = post("/tokenize", tokenize_request)
     second = post("/tokenize", tokenize_request)
     tokenize_count = int(first["count"])
