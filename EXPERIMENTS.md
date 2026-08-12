@@ -2069,3 +2069,60 @@ thrashed completely. The next router experiment should price persistent KV
 residency or cold-app placement balance, not merely instantaneous inflight
 load. Repeat the 52/64 cells three times after that candidate; do not define a
 95% cache SLO from these single boundary observations.
+
+## 2026-08-12 — issue #13 cold-residency counterfactual
+
+The 64-app cliff motivates a narrow extension to the already fenced exact
+pre-route evaluator. For an all-zero lookup only, it snapshots each healthy,
+trusted inventory's resident token-ID count under the same generation/revision
+checks as exact prefix matching. It reports `would_balance` only when the
+approximate choice holds at least one whole prompt more resident token IDs than
+the least-occupied replica and that replica passes the existing load-delta
+gate. Smaller deltas and excess target load receive explicit bounded outcomes.
+The residency delta is a histogram, never an upstream or request identifier.
+
+This path is telemetry-only even if warm-prefix exact placement mode is active:
+the decision and candidate order are unchanged. Unit tests prove both shadow
+and placement modes cannot move an all-zero request, the one-prompt threshold
+holds, and the load gate fails closed. Strict Clippy and all 111 Rust tests pass;
+the focused edit/compile/test loop took under four seconds after the first
+incremental build.
+
+Before the r26 LB-only roll, the live counters showed 2,075 applied batches on
+A and 3,453 on B. The canonical 2,048 replay cap could no longer reconstruct
+B from generation zero even though the publisher retains 10,000 batches. The
+deployment cap is therefore raised to 8,192, preserving 18% publisher-history
+headroom and the existing 20-second fail-closed deadline. This is an LB memory
+and recovery-window change only; no engine restart or publisher mutation is
+required. After one fresh request triggered each live stream, r26 replayed
+3,546 B batches and 3,617 A batches from generation zero. Both inventories
+became trusted in 2.923s including the 1.122s trigger requests, well inside the
+deadline, while both engines kept their original start times.
+
+Four subsequent fresh 128KiB cold requests remained on the existing
+round-robin path and completed successfully. The new shadow evaluator reported
+two `kept_all_zero` and two `would_balance` outcomes; the latter represented a
+combined 508,672 resident-token delta. Both inventories stayed trusted and the
+final exact-index residency was 4,853,248 token IDs on A versus 4,665,856 on B.
+This proves the counterfactual sees a production-shaped capacity imbalance
+without changing placement. The published r26 image is
+`ghcr.io/helixml/mini-dynamo:rust-r26-cold-residency-b4b3b55` at digest
+`sha256:ae7dc14c2d19579bb721e475c8a0936b61d49309ea0579ec760c287d9780df8f`;
+the registry push reused all but one layer and took 4.21s.
+
+The final public-digest LB-only swap took 1.67s. Both vLLM engine start times
+and restart counts remained unchanged, `/health` reported 2/2 healthy, the
+container resolved the 8,192 replay limit, and node06's Compose SHA matched
+the canonical repository file. A fresh direct request triggered the quiet B
+publisher after the first balanced LB trigger reached only A's live event
+stream; the final public process replayed 3,637 A and 3,568 B batches and made
+both exact inventories trusted. The two-request LB trigger itself succeeded
+and split 1/1, but its native-metric reconciliation sampled only one engine's
+eventual counters, so it is not claimed as a reconciled benchmark cell.
+
+The post-deploy Helix correctness probe could not reach inference: the
+provided internal account authenticated but received HTTP 403 for the
+documented test app, and its visible app list was empty. This is an account/app
+authorization blocker rather than an LB result; synthetic and direct-engine
+gates remain green, but the Helix workflow gate must be repeated with an app
+shared to that account.

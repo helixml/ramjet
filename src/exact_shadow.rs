@@ -57,7 +57,25 @@ impl ExactPlacementMode {
 struct PreRouteResult {
     shadow: ShadowResult,
     overlaps: Vec<Option<usize>>,
+    resident_tokens: Vec<Option<usize>>,
+    prompt_tokens: usize,
     winner: Option<usize>,
+}
+
+impl PreRouteResult {
+    fn failure(outcome: ShadowOutcome) -> Self {
+        Self {
+            shadow: ShadowResult {
+                outcome,
+                selected_tokens: 0,
+                best_tokens: 0,
+            },
+            overlaps: Vec::new(),
+            resident_tokens: Vec::new(),
+            prompt_tokens: 0,
+            winner: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,6 +87,9 @@ enum PlacementOutcome {
     KeptAmbiguous,
     KeptGainGate,
     KeptLoadGate,
+    WouldBalance { delta_tokens: usize },
+    KeptBalanceDeltaGate,
+    KeptBalanceLoadGate,
     Fallback,
 }
 
@@ -83,6 +104,9 @@ impl PlacementOutcome {
             Self::KeptAmbiguous => "kept_ambiguous",
             Self::KeptGainGate => "kept_gain_gate",
             Self::KeptLoadGate => "kept_load_gate",
+            Self::WouldBalance { .. } => "would_balance",
+            Self::KeptBalanceDeltaGate => "kept_balance_delta_gate",
+            Self::KeptBalanceLoadGate => "kept_balance_load_gate",
             Self::Fallback => "fallback",
         }
     }
@@ -228,6 +252,12 @@ impl ExactRouteShadow {
             .inc();
         self.record_result(endpoint, &result.shadow);
         let placement = evaluate_placement(decision, &result, policy);
+        if let PlacementOutcome::WouldBalance { delta_tokens, .. } = placement {
+            self.metrics
+                .exact_route_residency_delta
+                .with_label_values(&[endpoint.label()])
+                .observe(usize_to_f64(delta_tokens));
+        }
         if mode.applies()
             && let PlacementOutcome::Move(winner) = placement
         {
@@ -275,23 +305,14 @@ impl ExactRouteShadow {
     }
 
     fn evaluate_pre_route(&self, token_ids: &[u32], decision: &Decision) -> PreRouteResult {
-        let failure = |outcome| PreRouteResult {
-            shadow: ShadowResult {
-                outcome,
-                selected_tokens: 0,
-                best_tokens: 0,
-            },
-            overlaps: Vec::new(),
-            winner: None,
-        };
         if self.inventories.is_empty() {
-            return failure(ShadowOutcome::NoInventories);
+            return PreRouteResult::failure(ShadowOutcome::NoInventories);
         }
         let Some(&selected) = decision.candidates.first() else {
-            return failure(ShadowOutcome::CandidateMismatch);
+            return PreRouteResult::failure(ShadowOutcome::CandidateMismatch);
         };
         if decision.candidate_state.len() != self.inventories.len() {
-            return failure(ShadowOutcome::CandidateMismatch);
+            return PreRouteResult::failure(ShadowOutcome::CandidateMismatch);
         }
         let markers = self
             .inventories
@@ -306,36 +327,38 @@ impl ExactRouteShadow {
             .collect::<Vec<_>>();
         let mut seen = vec![false; self.inventories.len()];
         let mut overlaps = vec![None; self.inventories.len()];
+        let mut resident_tokens = vec![None; self.inventories.len()];
         for candidate in &decision.candidate_state {
             if candidate.index >= self.inventories.len() || seen[candidate.index] {
-                return failure(ShadowOutcome::CandidateMismatch);
+                return PreRouteResult::failure(ShadowOutcome::CandidateMismatch);
             }
             seen[candidate.index] = true;
             if !candidate.healthy {
                 continue;
             }
             let Some(marker) = markers[candidate.index] else {
-                return failure(ShadowOutcome::InventoryUntrusted);
+                return PreRouteResult::failure(ShadowOutcome::InventoryUntrusted);
             };
             let inventory = self.inventories[candidate.index].read();
             if !inventory.trusted() {
-                return failure(ShadowOutcome::InventoryUntrusted);
+                return PreRouteResult::failure(ShadowOutcome::InventoryUntrusted);
             }
             if inventory.generation() != marker.generation
                 || inventory.revision() != marker.revision
             {
-                return failure(ShadowOutcome::InventoryChanged);
+                return PreRouteResult::failure(ShadowOutcome::InventoryChanged);
             }
             let Ok(exact_match) = inventory.find_longest(token_ids) else {
-                return failure(ShadowOutcome::LookupError);
+                return PreRouteResult::failure(ShadowOutcome::LookupError);
             };
             let Some(exact_match) = exact_match else {
-                return failure(ShadowOutcome::InventoryUntrusted);
+                return PreRouteResult::failure(ShadowOutcome::InventoryUntrusted);
             };
             overlaps[candidate.index] = Some(exact_match.token_ids);
+            resident_tokens[candidate.index] = Some(inventory.stats().token_ids);
         }
         if seen.iter().any(|seen| !seen) {
-            return failure(ShadowOutcome::CandidateMismatch);
+            return PreRouteResult::failure(ShadowOutcome::CandidateMismatch);
         }
         for candidate in decision
             .candidate_state
@@ -343,16 +366,16 @@ impl ExactRouteShadow {
             .filter(|candidate| candidate.healthy)
         {
             let Some(marker) = markers[candidate.index] else {
-                return failure(ShadowOutcome::InventoryUntrusted);
+                return PreRouteResult::failure(ShadowOutcome::InventoryUntrusted);
             };
             let inventory = self.inventories[candidate.index].read();
             if !inventory.trusted() {
-                return failure(ShadowOutcome::InventoryUntrusted);
+                return PreRouteResult::failure(ShadowOutcome::InventoryUntrusted);
             }
             if inventory.generation() != marker.generation
                 || inventory.revision() != marker.revision
             {
-                return failure(ShadowOutcome::InventoryChanged);
+                return PreRouteResult::failure(ShadowOutcome::InventoryChanged);
             }
         }
         let shadow = classify(
@@ -373,6 +396,8 @@ impl ExactRouteShadow {
         PreRouteResult {
             shadow,
             overlaps,
+            resident_tokens,
+            prompt_tokens: token_ids.len(),
             winner,
         }
     }
@@ -629,6 +654,9 @@ fn evaluate_placement(
     exact: &PreRouteResult,
     policy: ExactPlacementPolicy,
 ) -> PlacementOutcome {
+    if exact.shadow.outcome == ShadowOutcome::AllZero {
+        return evaluate_cold_balance(decision, exact, policy);
+    }
     if exact.shadow.outcome != ShadowOutcome::WouldMove {
         return match exact.shadow.outcome {
             ShadowOutcome::Agree => PlacementOutcome::KeptAgree,
@@ -674,6 +702,58 @@ fn evaluate_placement(
     }
 
     PlacementOutcome::Move(winner)
+}
+
+fn evaluate_cold_balance(
+    decision: &Decision,
+    exact: &PreRouteResult,
+    policy: ExactPlacementPolicy,
+) -> PlacementOutcome {
+    let Some(selected) = decision.candidates.first().copied() else {
+        return PlacementOutcome::Fallback;
+    };
+    let Some(selected_resident) = exact.resident_tokens.get(selected).copied().flatten() else {
+        return PlacementOutcome::Fallback;
+    };
+    let mut eligible = decision
+        .candidate_state
+        .iter()
+        .filter(|candidate| candidate.healthy)
+        .filter_map(|candidate| {
+            exact
+                .resident_tokens
+                .get(candidate.index)
+                .copied()
+                .flatten()
+                .map(|resident| (candidate, resident))
+        })
+        .collect::<Vec<_>>();
+    eligible.sort_by_key(|(candidate, resident)| (*resident, candidate.index));
+    let Some((winner_state, winner_resident)) = eligible.first().copied() else {
+        return PlacementOutcome::Fallback;
+    };
+    if winner_state.index == selected {
+        return PlacementOutcome::KeptAllZero;
+    }
+    let delta_tokens = selected_resident.saturating_sub(winner_resident);
+    if delta_tokens < exact.prompt_tokens.max(1) {
+        return PlacementOutcome::KeptBalanceDeltaGate;
+    }
+    let Some(selected_state) = decision
+        .candidate_state
+        .iter()
+        .find(|candidate| candidate.index == selected)
+    else {
+        return PlacementOutcome::Fallback;
+    };
+    if winner_state.load_units
+        > selected_state
+            .load_units
+            .saturating_add(policy.max_load_delta)
+    {
+        return PlacementOutcome::KeptBalanceLoadGate;
+    }
+    PlacementOutcome::WouldBalance { delta_tokens }
 }
 
 fn apply_placement(
@@ -770,8 +850,12 @@ mod tests {
     }
 
     fn store(tokens: &[u32]) -> KvEvent {
+        store_hash(7, tokens)
+    }
+
+    fn store_hash(hash: u64, tokens: &[u32]) -> KvEvent {
         KvEvent::BlockStored(BlockStored {
-            block_hashes: vec![ExternalBlockHash::Unsigned(7)],
+            block_hashes: vec![ExternalBlockHash::Unsigned(hash)],
             parent_block_hash: None,
             token_ids: tokens.to_vec(),
             block_size: tokens.len(),
@@ -790,6 +874,13 @@ mod tests {
         let mut inventory = FencedExactKvInventory::new(8, ExactIndexLimits::default());
         inventory.ingest_live(0, &batch(events)).unwrap();
         Arc::new(parking_lot::RwLock::new(inventory))
+    }
+
+    fn assert_one(value: f64) {
+        assert!(
+            (value - 1.0).abs() < f64::EPSILON,
+            "expected one, got {value}"
+        );
     }
 
     #[test]
@@ -913,6 +1004,106 @@ mod tests {
                 - 1.0)
                 .abs()
                 < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn cold_residency_balance_is_shadow_only_and_requires_one_prompt_delta() {
+        let fuller = trusted_inventory(vec![store_hash(7, &[1, 2, 3, 4, 5, 6, 7, 8])]);
+        let emptier = trusted_inventory(Vec::new());
+        let registry = Registry::new();
+        let metrics = Arc::new(Metrics::new(&registry).unwrap());
+        let shadow =
+            ExactRouteShadow::new(Arc::from([fuller, emptier]), Arc::clone(&metrics), 1.0, 8);
+        let original = decision();
+        for mode in [ExactPlacementMode::Shadow, ExactPlacementMode::Placement] {
+            let mut route = original.clone();
+            shadow.route_pre_route(
+                Endpoint::Chat,
+                &[9, 10, 11, 12],
+                &mut route,
+                ExactPlacementPolicy {
+                    min_gain_tokens: 4,
+                    max_load_delta: 0,
+                },
+                mode,
+            );
+            assert_eq!(route, original, "cold balance must remain shadow-only");
+        }
+        assert_one(
+            metrics
+                .exact_route_placement
+                .with_label_values(&["shadow", "chat", "would_balance"])
+                .get(),
+        );
+        assert_one(
+            metrics
+                .exact_route_placement
+                .with_label_values(&["placement", "chat", "would_balance"])
+                .get(),
+        );
+        assert_eq!(
+            metrics
+                .exact_route_residency_delta
+                .with_label_values(&["chat"])
+                .get_sample_count(),
+            2
+        );
+
+        let slightly_fuller = trusted_inventory(vec![store_hash(8, &[1, 2])]);
+        let empty = trusted_inventory(Vec::new());
+        let registry = Registry::new();
+        let metrics = Arc::new(Metrics::new(&registry).unwrap());
+        let shadow = ExactRouteShadow::new(
+            Arc::from([slightly_fuller, empty]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+        );
+        let mut route = decision();
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[9, 10, 11, 12],
+            &mut route,
+            ExactPlacementPolicy {
+                min_gain_tokens: 4,
+                max_load_delta: 0,
+            },
+            ExactPlacementMode::Shadow,
+        );
+        assert_one(
+            metrics
+                .exact_route_placement
+                .with_label_values(&["shadow", "chat", "kept_balance_delta_gate"])
+                .get(),
+        );
+    }
+
+    #[test]
+    fn cold_residency_balance_respects_the_existing_load_gate() {
+        let fuller = trusted_inventory(vec![store_hash(7, &[1, 2, 3, 4, 5, 6, 7, 8])]);
+        let emptier = trusted_inventory(Vec::new());
+        let registry = Registry::new();
+        let metrics = Arc::new(Metrics::new(&registry).unwrap());
+        let shadow =
+            ExactRouteShadow::new(Arc::from([fuller, emptier]), Arc::clone(&metrics), 1.0, 8);
+        let mut route = decision();
+        route.candidate_state[1].load_units = 1;
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[9, 10, 11, 12],
+            &mut route,
+            ExactPlacementPolicy {
+                min_gain_tokens: 4,
+                max_load_delta: 0,
+            },
+            ExactPlacementMode::Shadow,
+        );
+        assert_one(
+            metrics
+                .exact_route_placement
+                .with_label_values(&["shadow", "chat", "kept_balance_load_gate"])
+                .get(),
         );
     }
 

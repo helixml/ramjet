@@ -139,6 +139,16 @@ evaluates the same gain/load policy without changing placement, while
 fallbacks. Production remains in `shadow` until a representative
 counterfactual distribution and isolated node06 canary justify promotion.
 
+Exact all-zero lookups also evaluate a separate cold-capacity counterfactual.
+When every healthy inventory is trusted and revision-stable, the policy asks
+whether the approximate choice holds at least one full prompt more resident
+exact-index token IDs than the least-occupied replica, while retaining the
+existing load gate. It emits only `would_balance`, `kept_balance_delta_gate`,
+or `kept_balance_load_gate` outcomes plus a residency-delta histogram. This
+path is shadow-only even when exact warm-prefix placement is enabled; it cannot
+change candidate order until repeated capacity-boundary experiments qualify
+the signal.
+
 Set `DS4_ROUTE_JOURNAL=true` to emit privacy-bounded versioned `start`/`finish`
 records to the process log. Records contain only process-local sequence IDs,
 opaque upstream ordinals, sizes, route-state snapshots, latency, status, and
