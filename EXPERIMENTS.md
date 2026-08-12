@@ -1837,3 +1837,28 @@ The full 0/256KiB cold/warm c1/c8/c16 matrix and three-run variance requirement
 remain intentionally deferred until the corpus/runner PR is green. This keeps
 the shared production box available and avoids spending GPU time before the
 correctness oracle and its CI gate are reviewed.
+
+## 2026-08-12 — issue #11 targeted partial-prefill instrumentation
+
+Before any rolling engine restart, the exact pinned r34 binary was queried for
+its scheduler contract. It implements `--max-num-partial-prefills` (default 1),
+`--max-long-partial-prefills` (default 1), and
+`--long-prefill-token-threshold` (default 0, which disables the long-request
+cap). The live argv confirms the global 4,096 batched-token budget, 16 sequence
+limit, chunked prefill, and async scheduling remain the production baseline.
+
+`mixed_bench.py` now optionally snapshots the direct engine's Prometheus
+counters around a cell: request queue/prefill histogram sum+count, prompt
+tokens, and preemptions. A 20ms background sampler captures peak running,
+waiting, and KV usage. This makes the planned 2/1 partial-prefill experiment
+mechanistically testable without relying only on end-to-end TTFT. A tiny
+2,245-token prefill plus one 32-token decoder direct-engine smoke completed
+2/2 requests, saw two requests running, zero waiting/preemptions, 0.01ms mean
+engine queue time, 361.39ms mean prefill time, and 690.7ms decoder TTFT. The
+collector's 21 GPU-free tests pass in about 0.2s locally.
+
+No engine was restarted or reconfigured for this slice. The next controlled
+step is a rolling A/B at fixed global 4,096: production single-homed away from
+the candidate, thresholds 1,024/2,048/4,096 with total/long partial-prefill
+limits 2/1, both arrival orders, and three matched runs. Engine-global deltas
+must not be interpreted while unrelated production traffic can hit that engine.
