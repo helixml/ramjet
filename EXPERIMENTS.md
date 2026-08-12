@@ -2164,3 +2164,13 @@ The public `rust-r27-residency-health-48ff0bd` image has digest
 `sha256:eceb463dd63954b826076d3eda7b7e4cd2695597c037e2a495fe91d05247a90f`.
 Its registry promotion reused all but the changed binary layer and took 4.08s;
 the canonical node06 Compose now pins that digest.
+
+The public-digest LB-only swap took 1.55s; both engines again retained their
+start times and zero restart counts. A became authoritative after a 3,647-batch
+replay. B's first 3,500-plus-batch attempt failed closed as `invalid_replay`,
+reconnected, and—because this publisher is quiet until another allocation—
+required one more direct cold request before replaying 3,577 batches and
+becoming trusted. Serving health remained 2/2 throughout because exact state
+is shadow-only. This is a recovery-latency opportunity: a failed replay should
+be able to retry its known range after reconnect without waiting for a second
+live event, while preserving the current publisher-backpressure protections.
