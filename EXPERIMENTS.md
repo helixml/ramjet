@@ -1472,8 +1472,11 @@ returned 12/12, split 6/6, at 578 tok/s; c16/max512 returned 16/16 at
 1,370.3 tok/s. Across the startup trigger and gates, pre-route shadow admitted
 17 requests, reported six `agree` and 11 `all_zero`, and fell back three times
 under CPU-permit pressure. All containers remained at zero restarts and the LB
-logged no error, panic, or fatal. The exact placement mode remains absent;
-rollback is the stateless r19 LB image or `DS4_EXACT_ROUTE_MODE=off`.
+logged no error, panic, or fatal. A real internal-account Helix
+`POST /api/v1/sessions/chat` through provider `ds4-flash-node06` also returned
+HTTP 200 with the requested exact sentinel. The exact placement mode remains
+absent; rollback is the stateless r19 LB image or
+`DS4_EXACT_ROUTE_MODE=off`.
 
 Verdict: r20 proves exact IDs and exact KV overlap can be joined before cache
 mutation with bounded single-digit-millisecond frontend cost and independent
