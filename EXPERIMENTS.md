@@ -1766,3 +1766,61 @@ issue #10's production-shaped DSML benchmark/correctness corpus, which becomes
 the reusable oracle for the remaining P1 engine, routing, and effort-policy
 experiments. The existing Helix credential blocker remains; no claim is made
 for a new real-session E2E in this run.
+
+## 2026-08-12 — issue #10 agent protocol corpus and fast CI loop
+
+The first issue #10 slice adds a synthetic, versioned five-case JSONL corpus
+and a standard-library-only runner. It covers deterministic non-stream text,
+required streamed typed arguments, two parallel calls assembled by index,
+automatic streamed tool selection with DSML-leak rejection, and a second pass
+over preserved assistant reasoning plus tool history. The assembler accepts
+both `arguments` and `input`, reconstructs arbitrary SSE and JSON delta
+boundaries, parses typed values without printing them, and resets all state per
+request. Eighteen GPU-free tests include deliberately broken split-marker,
+typed-argument, and reasoning-history fixtures. Corpus validation plus the
+complete Python test suite take about 0.2 seconds wall locally (the test body
+itself reports 1-2ms).
+
+Every live record carries the serving image, model revision/config digest,
+tokenizer digest, router image, GPU count, official/deterministic sampling,
+and controlled case identity. Per-request output is limited to structural
+validity, route ordinal, finish/tool counts, usage, first response, streaming
+TTFT, mean token interval, and wall time. Summaries add protocol-valid rate,
+output/total token rate, cache hit ratio, and successful tasks per GPU-hour.
+No completion, reasoning, tool argument, credential, fingerprint, or customer
+content enters the artifact.
+
+The first production-LB node06 gate used c1 and zero synthetic prefix. All 5/5
+deterministic cases passed, including two parallel calls, null/boolean/number/
+array/object arguments, preserved reasoning history, and automatic streaming
+with no DSML fragments. After a corpus warmup, the measured five cases finished
+in 2.522s at 163.8 output tok/s and 737.9 total tok/s, with 53.0% aggregate
+cache usage, 360.8ms streaming TTFT p95, 2.00ms median mean-ITL, and 892.1
+successful tasks/GPU-hour across the eight-GPU box. A separate official
+agentic (`temperature=1.0`, `top_p=0.95`) auto+stream regression passed 5/5 in
+2.452s: no DSML leak, structured tool calls every time, 366.4ms TTFT p95,
+2.00ms median mean-ITL, and 122.0 output tok/s. These are correctness-runner
+qualification numbers, not a headline capacity comparison.
+
+A warm c8 development cell then passed 10/10 protocol checks in 1.494s with a
+balanced 5/5 upstream split, 841.4ms streaming TTFT p95, 3.73ms median
+mean-ITL, 560.4 output tok/s, 2,499.3 total tok/s, 26.5% cache usage, and
+3,012.8 successful tasks/GPU-hour. This validates concurrent stream/tool-call
+assembly and the runner's aggregate accounting; it is still a one-run smoke,
+not the three-run variance-qualified matrix.
+
+Iteration timing was treated as a deliverable. The warm local image path is
+already 2-3s plus about 4s to node06; this slice makes protocol failures local
+and sub-second. Drone now fans Rust, Go, and Python protocol gates out in
+parallel. A cold GitHub-hosted run took 6m08s, compiled test dependencies for
+3m11s, then exposed a fixture race: the in-process async ROUTER could be
+dropped after enqueueing its end marker but before the blocking libzmq client
+drained it. Retaining the fixture until explicit client acknowledgement passed
+100/100 focused and 10/10 full local suites. GitHub now uses a dependency-aware
+Rust cache, including failed runs, so later no-lockfile iterations do not repay
+that cold compile.
+
+The full 0/256KiB cold/warm c1/c8/c16 matrix and three-run variance requirement
+remain intentionally deferred until the corpus/runner PR is green. This keeps
+the shared production box available and avoids spending GPU time before the
+correctness oracle and its CI gate are reviewed.

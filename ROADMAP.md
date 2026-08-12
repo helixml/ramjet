@@ -176,6 +176,17 @@ node06). The design rationale for each lives in DESIGN.md.
 
 ## Near term
 
+- 🔨 **Production-shaped DeepSeek-V4 agent/DSML gate (#10).** The versioned
+  synthetic v1 JSONL corpus and privacy-safe runner now cover stream/non-stream,
+  automatic/required/parallel tool calls, split deltas and DSML leaks, every
+  JSON argument class plus `arguments`/`input`, and retained reasoning/tool
+  history. Eighteen GPU-free parser/schema tests run in Drone. The first
+  node06 gates passed 5/5 deterministic c1 and 10/10 deterministic c8 cases; a
+  five-run official-agentic auto+stream probe also passed 5/5 with no DSML leak. The matrix records image,
+  model/config/tokenizer/router provenance, TTFT, mean ITL, throughput, cache,
+  protocol validity, and successful tasks/GPU-hour. Complete the 0/256KiB,
+  cold/warm, c1/c8/c16 matrix with three qualified runs and add sovereign
+  redacted trace-shape ingestion before closing the issue.
 - 🔨 **Reproducible experiment journal + workload matrix.** Keep
   `EXPERIMENTS.md`; measure deterministic code, prose, shared-app, cold/warm
   prefill, and mixed prefill+decode separately. Never report speculative decode
@@ -231,8 +242,10 @@ node06). The design rationale for each lives in DESIGN.md.
   Retain automatic sizing and do not jump to the profiler's full-memory value.
 
 - 🔨 **CI + package publishing.** GitHub Actions and Drone now both run Rust
-  fmt, strict Clippy, 97 unit tests, and the release build; Drone additionally
-  runs the retained Go tests/vet/gofmt parity oracle. Both Drone push/PR builds
+  fmt, strict Clippy, 104 unit tests, and the release build; Drone additionally
+  runs the retained Go tests/vet/gofmt parity oracle plus 18 GPU-free protocol
+  tests. Rust, Go, and protocol steps fan out in parallel, and GitHub caches
+  dependency artifacts even after a failed run. Both Drone push/PR builds
   and GitHub Actions passed on r21. The post-merge image also compiled, but GHCR
   denied its final push: because `mini-dynamo` was created by a manual push,
   repository linkage did not grant Actions access. Add `helixml/mini-dynamo`

@@ -23,6 +23,8 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
 cargo build --release --locked
 go test ./... && go vet ./... && test -z "$(gofmt -l .)"
+python3 bench/agentbench.py validate
+python3 -m unittest discover -s bench -p 'test_*.py'
 ```
 
 On the 2026-08-12 development checkout, a focused/warm test took about 2-3s,
@@ -57,8 +59,10 @@ bench/build_transfer.sh rust-rNN-description-$(git rev-parse --short HEAD) --nod
 
 The cold first build still downloads the Rust base and compiles dependencies;
 judge the workflow by its warm edit/rebuild time. A dependency change is a
-legitimate one-time cold build. `sccache` is a useful follow-up for cross-branch
-and CI reuse, but it does not replace Cargo incremental/BuildKit caches.
+legitimate one-time cold build. GitHub Actions uses `Swatinem/rust-cache` for
+dependency artifacts (including failed runs), and Drone fans Rust, Go, and the
+GPU-free protocol suite out in parallel. If a no-dependency CI change still
+does a cold compile, inspect the cache action before accepting the delay.
 
 The router is the interesting surface — `src/router.rs` contains the active
 Rust tests and Go-generated fingerprint goldens; `pkg/router/router_test.go`
@@ -147,6 +151,34 @@ Standard N-way mixed sweep. Run after any change to confirm no throughput
 regression. The current rc7 box code gate is in the 1,820–1,844 tok/s class at
 c24/max256; the box is shared with live traffic, so expect run-to-run noise.
 
+### Agent protocol regression — `agentbench.py` / `agent_matrix.sh`
+
+Run the committed synthetic corpus locally before using GPUs. It catches split
+DSML marker leakage, malformed or wrongly typed tool arguments, parallel-call
+assembly, and missing reasoning/tool history:
+
+```bash
+python3 bench/agentbench.py validate
+python3 -m unittest discover -s bench -p 'test_*.py'
+```
+
+On node06, generate provenance and run a focused smoke first. The runner never
+prints completion content, reasoning, or arguments:
+
+```bash
+bench/node06_agent_metadata.sh /tmp/agent-metadata.json
+python3 bench/agentbench.py run http://127.0.0.1:8006 deepseek-v4-flash \
+  --metadata-json /tmp/agent-metadata.json --profile deterministic \
+  --concurrency 1 --repetitions 1
+```
+
+Use `agent_matrix.sh BASE MODEL LABEL` for the qualification matrix. Defaults
+cover deterministic and official agentic sampling, 0/256KiB shared prefixes,
+c1/c8/c16, and cold/warm passes. Narrow `AGENT_PROFILES`,
+`AGENT_PREFIX_KIBS`, or `AGENT_CONCURRENCIES` in the development loop; set
+`AGENT_RUNS=3` only for a final variance-qualified candidate. Run direct-engine
+A/B cells with the two-round crossover below to use both TP4 pairs at once.
+
 ### Direct engine matrix — `engine_matrix.sh BASE MODEL LABEL`
 
 For a rolling engine/image A/B, keep production single-homed on the other
@@ -228,14 +260,18 @@ caveats: EXPERIMENTS.md "rc5 privacy-bounded decision journal and replay".
 The repeatable end-to-end loop (each past run is written up in
 EXPERIMENTS.md — add yours there too):
 
-1. **Local**: `go test ./... && go vet ./...`; add/extend a router test for
-   any routing change.
+1. **Local**: run the Rust/Go gate plus `python3 bench/agentbench.py validate`
+   and `python3 -m unittest discover -s bench -p 'test_*.py'`; add/extend a
+   router test for any routing change.
 2. **Build + deploy candidate** on node06 (section above) with a fresh
    `<tag>`; confirm `ds4proxy_upstream_up` shows both engines and the boot
    log line has the config you meant to ship.
 3. **Bench matrix** (fresh SALT per run, per the A/B protocol):
    locality (`locality_bench.sh`), concurrent same-app
-   (`concurrent_sameapp.sh`), aggregate regression (`bench_serving.sh 16 512`).
+   (`concurrent_sameapp.sh`), aggregate regression (`bench_serving.sh 16 512`),
+   and the focused agent protocol smoke. Run the full agent matrix only for
+   engine/parser/router candidates that can affect the protocol or headline
+   performance.
 4. **Route telemetry**: `curl -s :8007/metrics | grep -E
    "route_decisions|route_overlap|upstream_inflight|upstream_load_units"` —
    confirm the decision mix moved the way the change predicts.
