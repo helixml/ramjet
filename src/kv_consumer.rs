@@ -11,7 +11,10 @@ use tokio::{sync::broadcast, task::JoinHandle, time::sleep};
 
 use crate::{
     config::{Config, KvEventMode},
-    exact_index::{ExactIndexLimits, FencedExactKvInventory, LiveBatchOutcome, ReplayBatchOutcome},
+    exact_index::{
+        ExactIndexLimits, FencedExactKvInventory, FullReplayStage, LiveBatchOutcome,
+        ReplayBatchOutcome,
+    },
     kv_transport::{KvTransportConfig, LiveActivity, SequencedBatch, ZmqKvEventSource},
     kv_wire::KvWireLimits,
     metrics::Metrics,
@@ -331,6 +334,9 @@ async fn replay_range(
     from: u64,
     through: u64,
 ) -> ReplayAttempt {
+    if from == 0 {
+        return replay_full_range(source, inventory, metrics, upstream, shutdown, through).await;
+    }
     let replayed = tokio::select! {
         _ = shutdown.recv() => {
             metrics.kv_event_up.with_label_values(&[upstream]).set(0.0);
@@ -348,6 +354,37 @@ async fn replay_range(
         .observe(metric_usize(replayed.len()));
     ReplayAttempt::Applied {
         authoritative: ingest_replay(inventory, metrics, upstream, replayed),
+    }
+}
+
+async fn replay_full_range(
+    source: &mut ZmqKvEventSource,
+    inventory: &SharedFencedInventory,
+    metrics: &Metrics,
+    upstream: &str,
+    shutdown: &mut broadcast::Receiver<()>,
+    through: u64,
+) -> ReplayAttempt {
+    let stage = inventory.read().begin_full_replay();
+    let replayed = tokio::select! {
+        _ = shutdown.recv() => {
+            metrics.kv_event_up.with_label_values(&[upstream]).set(0.0);
+            return ReplayAttempt::Shutdown;
+        }
+        result = source.replay_fold(0, through, stage, |stage, batch| {
+            stage.ingest(batch.sequence, &batch.batch);
+        }) => result,
+    };
+    let stage = match replayed {
+        Ok(stage) => stage,
+        Err(error) => return ReplayAttempt::Failed(error.reason()),
+    };
+    metrics
+        .kv_event_replay_batches
+        .with_label_values(&[upstream])
+        .observe(metric_usize(stage.batch_count()));
+    ReplayAttempt::Applied {
+        authoritative: ingest_full_replay(inventory, metrics, upstream, stage),
     }
 }
 
@@ -424,6 +461,30 @@ fn ingest_replay(
         .map(|batch| (batch.sequence, batch.batch))
         .collect::<Vec<_>>();
     let outcome = inventory.write().ingest_replay(&batches);
+    let (label, summary) = match outcome {
+        Ok(ReplayBatchOutcome::Applied(summary)) => ("applied", Some(summary)),
+        Ok(ReplayBatchOutcome::ObserveOnly) => ("observe_only", None),
+        Ok(ReplayBatchOutcome::Invalid) => ("invalid", None),
+        Err(error) => (error.reason(), None),
+    };
+    metrics
+        .kv_event_batches
+        .with_label_values(&[upstream, "replay", label])
+        .inc();
+    if let Some(summary) = summary {
+        record_apply_summary(metrics, upstream, "replay", summary);
+    }
+    update_state_metrics(inventory, metrics, upstream);
+    inventory.read().trusted()
+}
+
+fn ingest_full_replay(
+    inventory: &SharedFencedInventory,
+    metrics: &Metrics,
+    upstream: &str,
+    stage: FullReplayStage,
+) -> bool {
+    let outcome = inventory.write().commit_full_replay(stage);
     let (label, summary) = match outcome {
         Ok(ReplayBatchOutcome::Applied(summary)) => ("applied", Some(summary)),
         Ok(ReplayBatchOutcome::ObserveOnly) => ("observe_only", None),

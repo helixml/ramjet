@@ -408,7 +408,13 @@ node06). The design rationale for each lives in DESIGN.md.
   hard stop was correctness: r4 leaked a DSML marker in the deterministic
   parallel-tool case (4/5), while adjacent r34 passed 5/5 cold and warm. B was
   rolled back. Do not test MBT8192, MTP0, offload, or custom all-reduce on this
-  image; retest a fixed successor from the retained JIT cache and immutable
+  image. No successor is packaged yet. A fixed candidate must first pass the
+  retained malformed-wrapper/orphan-invoke fixtures (upstream vLLM #49117 and
+  #51914 remain open). It should also carry or disprove vLLM #51318's C128A
+  FULL-graph row-stride fix: r4 composes a runtime-width change that is
+  plausibly exposed to the separately reported concurrent decode corruption,
+  although that does not explain node06's sequential parser failure. Run these
+  GPU-free gates before retesting from the retained JIT cache and immutable
   one-engine overlay.
 
 - 🔨 **KV-event ground truth.** Subscribe to vLLM `kv_events` (block
@@ -426,15 +432,17 @@ node06). The design rationale for each lives in DESIGN.md.
   long-lived A was beyond replay history and correctly remained fenced. Do not
   restart a healthy engine only to recover shadow telemetry. A read-only
   follow-up found that A still retained a complete sparse sequence 0–9,392
-  replay, but its 8,380 event-bearing messages occupy 408.6MB serialized and
-  exceed the current 8,192 fence. Do not merely raise the limit: stream a full
-  replay into a scratch inventory, validate its end/cursor, and atomically swap
-  it so decoded overlapping token vectors are never accumulated in one giant
-  `Vec`. This can recover within vLLM's 10,000-step window; add Dynamo-style
-  snapshot/tree-dump recovery for histories older than that. Compare exact
-  versus approximate decisions in
-  telemetry before the router may consume this state; Dynamo's additional
-  tree-dump recovery remains the scale-out reference.
+  replay: 8,380 event-bearing messages and 408.6MB serialized. r31 now folds a
+  full replay batch-by-batch into a scratch index and atomically swaps it only
+  after end/cursor validation. The live A generation recovered in about six
+  seconds with 407MiB peak LB RSS and more than 8.2GiB host memory available;
+  both exact inventories became trusted without restarting either engine. The
+  node06 replay limit is therefore aligned with the publisher's 10,000-step
+  window while the 20-second fail-closed timeout remains unchanged. Add
+  Dynamo-style snapshot/tree-dump recovery for histories older than that.
+  Compare exact versus approximate decisions in telemetry before the router
+  may consume this state; Dynamo's additional tree-dump recovery remains the
+  scale-out reference.
 - ✅ **True TTFT instrumentation.** rc6's journal and Prometheus histogram
   time the first SSE response byte, which may be a role-only chunk. Journal v3
   code now records both first byte and first generated token/tool-call delta;

@@ -98,6 +98,16 @@ separate `placement` mode is explicitly enabled.
 contain counts only. Raw token IDs and hashes never enter logs, journals, or
 metrics.
 
+Full replay is folded batch-by-batch into a private scratch inventory. The live
+inventory remains fenced and unchanged until the requested end/cursor is
+validated, then the completed generation is swapped in atomically. Invalid,
+incomplete, or capacity-exceeded replay discards the scratch state. This keeps
+memory bounded by the resulting index plus the transport's current batch
+instead of retaining every decoded token vector until replay completes. Group
+metadata shares the index's node-count capacity, and cancellation wakes the
+blocking replay worker within 50ms so shutdown promptly releases scratch and
+native receive buffers.
+
 Replay sequence numbers are monotonic scheduler-step positions, not a promise
 that every number has a published KV event. A replay is valid when its retained
 events are strictly increasing, stay inside the requested range, and include

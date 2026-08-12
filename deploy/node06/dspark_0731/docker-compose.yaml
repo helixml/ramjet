@@ -71,10 +71,10 @@ services:
       DS4_KV_EVENT_LIVE_ENDPOINTS: ${DS4_KV_EVENT_LIVE_ENDPOINTS:-tcp://dspark-0731:5557,tcp://dspark-0731-b:5557}
       DS4_KV_EVENT_REPLAY_ENDPOINTS: ${DS4_KV_EVENT_REPLAY_ENDPOINTS:-tcp://dspark-0731:5558,tcp://dspark-0731-b:5558}
       DS4_KV_EVENT_TOPIC: "${DS4_KV_EVENT_TOPIC:-}"
-      # Capacity sweeps pushed one retained generation beyond 3.4K batches.
-      # Keep the consumer below the publisher's 10K history while preserving
-      # enough headroom for LB-only rolls; timeout remains fail-closed.
-      DS4_KV_EVENT_REPLAY_LIMIT: ${DS4_KV_EVENT_REPLAY_LIMIT:-8192}
+      # The publisher retains 10K scheduler steps. Full recovery streams into
+      # a scratch inventory and swaps only after end/cursor validation, so an
+      # LB-only roll can safely consume the complete retained generation.
+      DS4_KV_EVENT_REPLAY_LIMIT: ${DS4_KV_EVENT_REPLAY_LIMIT:-10000}
       DS4_KV_EVENT_REPLAY_TAIL_LIMIT: ${DS4_KV_EVENT_REPLAY_TAIL_LIMIT:-64}
       DS4_KV_EVENT_TIMEOUT_MS: ${DS4_KV_EVENT_TIMEOUT_MS:-20000}
 

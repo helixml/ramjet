@@ -542,7 +542,7 @@ impl ExactKvInventory {
     ) -> Result<ApplyOutcome, ExactIndexError> {
         match event {
             KvEvent::BlockStored(stored) => {
-                self.learn_group(data_parallel_rank, stored);
+                self.learn_group(data_parallel_rank, stored)?;
                 if let Some(reason) = filter_store(stored, data_parallel_rank, &self.group_kinds) {
                     return Ok(ApplyOutcome::Filtered(reason));
                 }
@@ -601,19 +601,25 @@ impl ExactKvInventory {
         Ok(summary)
     }
 
-    fn learn_group(&mut self, rank: u32, stored: &BlockStored) {
+    fn learn_group(&mut self, rank: u32, stored: &BlockStored) -> Result<(), ExactIndexError> {
         let (Some(group), Some(kind)) = (stored.group_idx, stored.kv_cache_spec_kind.as_deref())
         else {
-            return;
+            return Ok(());
         };
-        self.group_kinds
-            .insert((rank, group), AttentionKind::from_wire(kind));
+        let key = (rank, group);
+        if !self.group_kinds.contains_key(&key)
+            && self.group_kinds.len() >= self.index.limits.max_nodes
+        {
+            return Err(ExactIndexError::CapacityExceeded);
+        }
+        self.group_kinds.insert(key, AttentionKind::from_wire(kind));
         if stored.parent_block_hash.is_none() {
             self.group_block_sizes
-                .entry((rank, group))
+                .entry(key)
                 .and_modify(|size| *size = (*size).max(stored.block_size))
                 .or_insert(stored.block_size);
         }
+        Ok(())
     }
 
     fn is_unsupported_partial(&self, rank: u32, stored: &BlockStored) -> bool {
@@ -673,6 +679,50 @@ impl SharedExactKvInventory {
     }
 }
 
+/// Transactional accumulator for a full replay beginning at sequence zero.
+///
+/// Decoded event batches are applied directly to this private scratch index and
+/// then dropped. Only the bounded sequence vector and final exact inventory
+/// survive until commit, so a large retained publisher history never becomes a
+/// `Vec<KvEventBatch>` alongside the index it constructs.
+#[derive(Debug)]
+pub(crate) struct FullReplayStage {
+    inventory: ExactKvInventory,
+    sequences: Vec<u64>,
+    summary: BatchApplySummary,
+    establishes_boundary: bool,
+    error: Option<ExactIndexError>,
+}
+
+impl FullReplayStage {
+    fn new(limits: ExactIndexLimits) -> Self {
+        Self {
+            inventory: ExactKvInventory::new(limits),
+            sequences: Vec::new(),
+            summary: BatchApplySummary::default(),
+            establishes_boundary: false,
+            error: None,
+        }
+    }
+
+    pub(crate) fn ingest(&mut self, sequence: u64, batch: &KvEventBatch) {
+        self.sequences.push(sequence);
+        self.establishes_boundary |= batch.clears_all();
+        if self.error.is_some() {
+            return;
+        }
+        match self.inventory.apply_batch(batch) {
+            Ok(applied) => merge_summary(&mut self.summary, applied),
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn batch_count(&self) -> usize {
+        self.sequences.len()
+    }
+}
+
 #[derive(Debug)]
 pub struct FencedExactKvInventory {
     fence: KvEventFence,
@@ -711,6 +761,12 @@ impl FencedExactKvInventory {
     #[must_use]
     pub fn stats(&self) -> ExactIndexStats {
         self.inventory.stats()
+    }
+
+    /// Allocate an isolated accumulator for a full generation replay.
+    #[must_use]
+    pub(crate) fn begin_full_replay(&self) -> FullReplayStage {
+        FullReplayStage::new(self.inventory.index.limits)
     }
 
     /// Process one live sequence without ever exposing partial exact state.
@@ -796,6 +852,49 @@ impl FencedExactKvInventory {
             self.revision = self.revision.wrapping_add(1);
         }
         outcome
+    }
+
+    /// Atomically replace exact state after a streamed full replay validates.
+    ///
+    /// The live inventory is never mutated during staging. An index error or
+    /// invalid sequence boundary discards the scratch state, clears the old
+    /// generation, and leaves exact routing fenced.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first staged index error after fencing and clearing the
+    /// current generation.
+    pub(crate) fn commit_full_replay(
+        &mut self,
+        mut stage: FullReplayStage,
+    ) -> Result<ReplayBatchOutcome, ExactIndexError> {
+        if let Some(error) = stage.error.take() {
+            self.fence.generation_changed();
+            self.inventory.reset_generation();
+            self.revision = self.revision.wrapping_add(1);
+            return Err(error);
+        }
+        let outcome = match self
+            .fence
+            .accept_replay(&stage.sequences, stage.establishes_boundary)
+        {
+            ReplayAction::Invalid => {
+                self.inventory.reset_generation();
+                ReplayBatchOutcome::Invalid
+            }
+            ReplayAction::RecoveredObserveOnly => ReplayBatchOutcome::ObserveOnly,
+            ReplayAction::Recovered => {
+                self.inventory = stage.inventory;
+                ReplayBatchOutcome::Applied(stage.summary)
+            }
+        };
+        if matches!(
+            outcome,
+            ReplayBatchOutcome::Applied(_) | ReplayBatchOutcome::Invalid
+        ) {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Ok(outcome)
     }
 
     /// Fence and clear state when the engine process/cache generation changes.
@@ -1343,6 +1442,126 @@ mod tests {
         assert_eq!(state.stats().token_ids, 2);
 
         assert!(!state.prepare_full_replay_retry(4));
+        assert!(!state.trusted());
+        assert_eq!(state.stats(), ExactIndexStats::default());
+    }
+
+    #[test]
+    fn streamed_full_replay_is_invisible_until_atomic_commit() {
+        let mut state = FencedExactKvInventory::new(8, ExactIndexLimits::default());
+        assert_eq!(
+            state.ingest_live(3, &batch(Vec::new())).unwrap(),
+            LiveBatchOutcome::Replay {
+                from: 0,
+                through: 3
+            }
+        );
+        let mut scratch = state.begin_full_replay();
+        scratch.ingest(
+            0,
+            &batch(vec![KvEvent::BlockStored(store_event(
+                &[1],
+                None,
+                &[1, 2],
+                2,
+            ))]),
+        );
+        scratch.ingest(
+            3,
+            &batch(vec![KvEvent::BlockStored(store_event(
+                &[2],
+                Some(1),
+                &[3, 4],
+                2,
+            ))]),
+        );
+        assert_eq!(scratch.batch_count(), 2);
+        assert_eq!(state.stats(), ExactIndexStats::default());
+        assert!(!state.trusted());
+
+        assert!(matches!(
+            state.commit_full_replay(scratch).unwrap(),
+            ReplayBatchOutcome::Applied(_)
+        ));
+        assert!(state.trusted());
+        assert_eq!(state.stats().token_ids, 4);
+        assert_eq!(
+            state.find_longest(&[1, 2, 3, 4]).unwrap(),
+            Some(ExactMatch {
+                blocks: 2,
+                token_ids: 4
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_or_failed_streamed_full_replay_discards_every_staged_block() {
+        let mut state = FencedExactKvInventory::new(8, ExactIndexLimits::default());
+        state.ingest_live(3, &batch(Vec::new())).unwrap();
+        let mut incomplete = state.begin_full_replay();
+        incomplete.ingest(
+            0,
+            &batch(vec![KvEvent::BlockStored(store_event(
+                &[1],
+                None,
+                &[1, 2],
+                2,
+            ))]),
+        );
+        assert_eq!(
+            state.commit_full_replay(incomplete).unwrap(),
+            ReplayBatchOutcome::Invalid
+        );
+        assert!(!state.trusted());
+        assert_eq!(state.stats(), ExactIndexStats::default());
+
+        assert!(state.prepare_full_replay_retry(1));
+        let mut malformed = state.begin_full_replay();
+        malformed.ingest(
+            0,
+            &batch(vec![KvEvent::BlockStored(store_event(
+                &[9, 10],
+                None,
+                &[1],
+                2,
+            ))]),
+        );
+        malformed.ingest(1, &batch(Vec::new()));
+        assert_eq!(
+            state.commit_full_replay(malformed),
+            Err(ExactIndexError::InconsistentBlockShape)
+        );
+        assert!(!state.trusted());
+        assert_eq!(state.stats(), ExactIndexStats::default());
+    }
+
+    #[test]
+    fn streamed_full_replay_bounds_filtered_group_metadata() {
+        let limits = ExactIndexLimits {
+            max_nodes: 2,
+            max_token_ids: 16,
+            max_lookup_steps: 16,
+        };
+        let mut state = FencedExactKvInventory::new(8, limits);
+        assert!(matches!(
+            state.ingest_live(2, &batch(Vec::new())).unwrap(),
+            LiveBatchOutcome::Replay {
+                from: 0,
+                through: 2
+            }
+        ));
+        let mut scratch = state.begin_full_replay();
+        for sequence in 0..=2 {
+            let mut filtered = store_event(&[sequence + 1], None, &[1, 2], 2);
+            filtered.group_idx = Some(u32::try_from(sequence + 1).unwrap());
+            filtered.kv_cache_spec_kind = Some("mamba".to_owned());
+            scratch.ingest(sequence, &batch(vec![KvEvent::BlockStored(filtered)]));
+        }
+
+        assert_eq!(
+            state.commit_full_replay(scratch),
+            Err(ExactIndexError::CapacityExceeded)
+        );
         assert!(!state.trusted());
         assert_eq!(state.stats(), ExactIndexStats::default());
     }
