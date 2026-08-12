@@ -835,9 +835,10 @@ cutover oracle; Go-generated fingerprint vectors are Rust golden tests.
 Local gates passed strict fmt/clippy, 19 Rust unit/integration tests, release
 build, the complete Go suite/vet/format checks, and a distroless container
 smoke test. The optimized binary is 7.3MiB. Immutable public images were
-published to GHCR; the current candidate is
-`ghcr.io/helixml/ds4-loadbalancer:rust-r2-341a2c9` (digest
-`sha256:ef722ece8149dcb95c792b406b437d09ef6e5e089f59ac03837ba1e799f5d932`).
+published to GHCR. r2 fixed the journal protocol; r3 removes a duplicated
+parse/fingerprint pass before cache observation. The current candidate is
+`ghcr.io/helixml/ds4-loadbalancer:rust-r3-59a8f08` (digest
+`sha256:134548ce0b06617347a56e0d87461a310c79527b969533630a57a301307bb51f`).
 
 The Go→Rust deployment replaced only the stateless LB. Both TP4 engines and
 their KV caches stayed online and both authenticated probes remained healthy.
@@ -862,9 +863,13 @@ After the LB-only r2 roll, a 4/4 request smoke paired all starts/finishes and
 `route_replay.py` parsed and reproduced 4/4 decisions across the requested
 alpha/cap sweep. This validates the experiment loop itself, not just serving.
 
+The r3 post-roll repeat retained the 74.5% locality result and completed
+c16/max256 at 1,086.0 tok/s, within 2.5% of r1 and still 25% above the adjacent
+Go sample; every request succeeded and both probes stayed up.
+
 An actual Helix control-plane request used the test account's authorized org,
 explicit `ds4-flash-node06` provider, and `deepseek-v4-flash`; it returned HTTP
 200, finish reason `stop`, and the requested exact response. The separately
 documented unmanned-org test app correctly returned 403 for this account, so no
-cross-org access was assumed. The current state is Rust r2 live on node06 with
+cross-org access was assumed. The current state is Rust r3 live on node06 with
 both engines healthy; Go rc7 remains a one-command LB-only rollback.
