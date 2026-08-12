@@ -110,6 +110,10 @@ generation clears. A live removal is observable cache churn, but is not labeled
 an eviction because the publisher event does not state why the block left.
 Together with the resident-index gauges and native preemption counter, these
 make capacity sweeps explainable without logging hashes or token IDs.
+`GET /health` exposes the same content-free exact inventory as
+`exact_inventory.{trusted,resident_blocks,resident_tokens}` under each opaque
+replica index. It never returns an upstream address or cache key and does not
+change the endpoint's serving-readiness status semantics.
 
 `DS4_EXACT_ROUTE_MODE=shadow` moves admitted local tokenization before the
 approximate decision, then immediately scores the same load snapshot against
@@ -258,7 +262,10 @@ Point it at the same direct engine and keep unrelated production traffic off
 that engine while interpreting the deltas.
 `bench/cachebench.py` generates fresh-salt synthetic app working sets and
 reports request/token reuse, TTFT, route split, reuse distance, prefill/queue
-time, preemptions, cache outcomes, and reuse-wave survival. `--concurrency 2`
+time, preemptions, cache outcomes, reuse-wave survival, and per-replica exact
+inventory before/after snapshots keyed only by route ordinal. Negative
+resident changes are preserved so a capacity cliff cannot be mistaken for a
+counter reset. `--concurrency 2`
 uses both TP4 engine pairs while retaining a barrier between each cold/reuse
 wave, so a reuse cannot race its unfinished cold request. With both engine
 metric URLs and the LB metric URL supplied, `--require-reconciled` fails unless

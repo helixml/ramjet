@@ -2126,3 +2126,19 @@ documented test app, and its visible app list was empty. This is an account/app
 authorization blocker rather than an LB result; synthetic and direct-engine
 gates remain green, but the Helix workflow gate must be repeated with an app
 shared to that account.
+
+## 2026-08-12 — issue #16 replica-residency scorecard
+
+The 64-app result required a manual join between route ordinals and raw
+upstream-labeled exact-index gauges. The next benchmark slice makes that join
+native and content-free: `/health` now nests trust, resident block count, and
+resident token count under each existing opaque replica index. It still bases
+HTTP readiness only on serving health and never emits upstream addresses,
+hashes, or token vectors. `cachebench.py` snapshots these values before and
+after each cell, retains signed residency changes, and fails closed to `null`
+for old/non-LB endpoints or malformed/missing inventory state.
+
+The implementation adds one O(1) inventory-stats read per replica per health
+call and no request-path work. Focused Rust health tests took 3.21s including
+the incremental compile; all 33 Python tests took 0.07s. This should remove the
+manual telemetry reconstruction from the three-run 52/64 boundary matrix.

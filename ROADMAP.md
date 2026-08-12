@@ -215,8 +215,11 @@ node06). The design rationale for each lives in DESIGN.md.
   capacity-aware so a small balance error cannot strand reusable capacity.
   The first implementation is deliberately telemetry-only: exact all-zero
   requests compare fenced resident token counts, require at least one prompt's
-  delta, and retain the load gate. Qualify that shadow signal, then repeat the
-  52/64 boundary three times before defining any 95%+ SLO.
+  delta, and retain the load gate. `/health` and `cachebench` now expose
+  content-free before/after exact residency per opaque replica index, making
+  the next boundary runs directly attributable without parsing upstream URL
+  labels. Qualify that shadow signal, then repeat the 52/64 boundary three
+  times before defining any 95%+ SLO.
 - 🔨 **Production-shaped DeepSeek-V4 agent/DSML gate (#10).** The versioned
   synthetic v1 JSONL corpus and privacy-safe runner now cover stream/non-stream,
   automatic/required/parallel tool calls, split deltas and DSML leaks, every
