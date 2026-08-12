@@ -1026,3 +1026,12 @@ A standalone startup and LB-only roll passed; a fresh 18,762-token request
 again matched local IDs, remote IDs, and completion usage, with both probes up
 and no restart. The live local image is
 `ghcr.io/helixml/ds4-loadbalancer:rust-r11-8e38ec7`.
+
+The legacy `ghcr.io/helixml/ds4-loadbalancer` package also denied the
+repository Actions token despite job-level `packages: write`; its package ACL
+is not inherited from mini-dynamo. The exact r11 image was retagged and
+published publicly as `ghcr.io/helixml/mini-dynamo:rust-r11-8e38ec7`
+(`sha256:e01f57188b87b80426bcf5a2e0b29964d27e4e78a272903705a4c303cdeda86b`).
+An anonymous manifest read succeeded, node06 pulled that public tag, and the
+post-swap 18,762-token observation matched local/remote/usage with both probes
+up. CI now targets the repository-owned package.
