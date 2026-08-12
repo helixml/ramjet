@@ -1,12 +1,9 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use axum::body::Bytes;
 use dynamo_protocols::types::CreateChatCompletionRequest;
-use dynamo_renderer::{
-    OAIChatLikeRequest, PromptFormatter, TextInput, deepseek_formatter_for,
-    dynamo_tokenizers::{FastTokenizer, traits::Encoder},
-};
+use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, TextInput, deepseek_formatter_for};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
@@ -57,7 +54,7 @@ struct RemoteTokenizer {
 }
 
 struct LocalTokenizer {
-    tokenizer: FastTokenizer,
+    tokenizer: fastokens::Tokenizer,
     formatter: Arc<dyn dynamo_renderer::OAIPromptFormatter>,
 }
 
@@ -145,7 +142,8 @@ impl TokenizerObserver {
                     .tokenizer_path
                     .as_deref()
                     .context("DS4_TOKENIZER_PATH is required in local-shadow mode")?;
-                let tokenizer = FastTokenizer::from_file(path)
+                let tokenizer = fastokens::Tokenizer::from_file(Path::new(path))
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
                     .with_context(|| format!("load fastokens tokenizer from {path}"))?;
                 let PromptFormatter::OAI(formatter) =
                     deepseek_formatter_for(&Some("deepseek_v4".to_owned()), "deepseek-v4-flash")
@@ -427,13 +425,11 @@ impl LocalTokenizer {
     }
 
     fn encode(&self, prompt: &str) -> Result<ExactTokens, LocalFailure> {
-        let encoding = self
+        let token_ids = self
             .tokenizer
             .encode(prompt)
             .map_err(|_| LocalFailure::Encode)?;
-        Ok(ExactTokens {
-            token_ids: encoding.token_ids().to_vec(),
-        })
+        Ok(ExactTokens { token_ids })
     }
 }
 

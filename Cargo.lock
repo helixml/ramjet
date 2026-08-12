@@ -1414,6 +1414,7 @@ dependencies = [
  "bytes",
  "dynamo-protocols",
  "dynamo-renderer",
+ "fastokens",
  "futures-util",
  "lru",
  "minijinja",
