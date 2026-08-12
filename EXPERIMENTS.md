@@ -1887,3 +1887,28 @@ backend. Retain 1/1/disabled. Revisit only after an engine upgrade advertises
 concurrent-partial-prefill support; add a fail-fast capability probe before any
 future rolling restart so an unsupported flag combination never enters a
 restart loop again.
+
+## 2026-08-12 — issue #17 prefix-match-unit capability audit
+
+The exact pinned r34 source and one privacy-bounded 15-second live-event probe
+were inspected without restarting either engine. `CacheConfig` exposes
+`prefix_match_unit`; for a multi-group cache, the runtime defaults its logical
+hash/match unit to the GCD of all effective group block sizes when the flag is
+unset. The live B probe observed hybrid group block sizes 256 (main MLA), 64,
+64, 4, and 8 tokens. Their GCD is four, so production already matches at a
+four-token logical boundary even though its main physical KV blocks are 256
+tokens. The probe retained no token IDs or hashes and emitted aggregates only.
+
+An explicit unit must divide every group size. Values 1 or 2 are therefore
+syntactically possible, but can recover at most three extra boundary tokens
+over the current default while increasing hash/index work by 4x or 2x. Values
+above four make matching coarser. No plausible end-to-end benefit clears the
+cost of a rolling trial, especially after the adjacent #11 work measured a
+9m28s engine recovery cycle.
+
+Verdict: retain the unset/default four-token logical unit and close #17. Reopen
+only if an engine release changes the hybrid group layout/default resolution,
+or profiling identifies hash matching—not physical KV storage—as a material
+bottleneck. Any future audit should repeat the aggregate event probe first;
+the unit and group layout are runtime compatibility identity, not an assumed
+constant.

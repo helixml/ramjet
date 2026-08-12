@@ -189,6 +189,13 @@ node06). The design rationale for each lives in DESIGN.md.
   partial prefill. Retain 1/1/disabled and reopen the matrix only after an
   engine version exposes the capability. Future trials must probe candidate
   argv in a disposable container before rolling a resident engine.
+- ✅ **Finer prefix-match-unit audit (#17).** The pinned engine already uses a
+  four-token logical match unit by default: a privacy-bounded live probe found
+  hybrid group sizes 256/64/64/4/8, and r34 resolves an unset unit to their
+  GCD. Explicit 1- or 2-token matching offers at most three additional boundary
+  tokens while multiplying hash work; larger values are strictly coarser.
+  Retain the default and treat the group layout/unit as compatibility identity
+  to re-audit after engine upgrades.
 - 🔨 **Production-shaped DeepSeek-V4 agent/DSML gate (#10).** The versioned
   synthetic v1 JSONL corpus and privacy-safe runner now cover stream/non-stream,
   automatic/required/parallel tool calls, split deltas and DSML leaks, every
