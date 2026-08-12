@@ -36,9 +36,10 @@ Packages: `pkg/router` (selection), `pkg/shims` (request/metadata rewrites),
 
 ## The router
 
-Chain fingerprints over the canonicalized prompt prefix (role+content per
-message, `DS4_ROUTE_CHUNK_BYTES`=2048-byte blocks ≈ 512 tokens, up to
-`DS4_ROUTE_MAX_PREFIX_BYTES`=256KB). Block *i*'s fingerprint hashes block
+Chain fingerprints over the canonicalized prompt prefix (prompt-affecting
+system, tool, message, reasoning, name, and tool-call fields;
+`DS4_ROUTE_CHUNK_BYTES`=2048-byte blocks ≈ 512 tokens, up to
+`DS4_ROUTE_MAX_PREFIX_BYTES`=2MB). Block *i*'s fingerprint hashes block
 *i−1*'s fingerprint too, so depth-d match ⇒ whole d-block prefix matches —
 the same prefix-tree property engine radix caches key on, approximated
 without engine cooperation.
@@ -47,21 +48,38 @@ Per upstream: LRU fingerprint index (`DS4_ROUTE_INDEX_CAPACITY`=100k ≈
 covers ~200MB of distinct prompt text) populated on every 2xx response.
 
 ```
-score(u) = overlapBlocks(u) − alpha × inflight(u)      alpha = DS4_ROUTE_ALPHA (4)
-order    = healthy first, score desc, rotating tiebreak
+affinity(u) = min(overlapBlocks(u), DS4_ROUTE_MAX_OVERLAP_BLOCKS)  # default 32
+score(u)    = affinity(u) − alpha × loadUnits(u)                    # alpha 4
+order    = healthy first, score desc, raw overlap desc, rotating tiebreak
 ```
+
+Every request costs at least one load unit. The estimate uses request-body
+bytes remaining after the chosen upstream's overlap, at one unit per
+`DS4_ROUTE_LOAD_UNIT_BYTES` (32KB), capped at
+`DS4_ROUTE_MAX_LOAD_UNITS` (8). A fully cached large prompt is therefore cheap;
+a cold one still reserves the engine. Raw overlap is retained for observability
+and breaks exact score ties, while capped affinity ensures a multi-megabyte
+trunk can still yield whenever load has a strictly better score. This avoids
+making the warm/cold choice at the precise decision boundary depend on round-
+robin rotation. The request-count metric
+remains a literal count; only placement uses weighted load.
 
 Emergent behaviors (tested in `router_test.go`):
 - conversation stickiness (deep overlap on every follow-up turn);
 - **template co-location** — sessions of one Helix app share the system
-  prompt and now share an engine's cache (static hashing split them 50/50);
-- cold big prefills → least-loaded engine (poor-man's prefill/decode
-  disaggregation);
-- load spikes override affinity once `alpha×Δinflight` exceeds overlap;
+  prompt and share an engine's cache. The previous 4KB hash happened to do
+  this too for large system prompts, but could not override affinity under
+  concurrent load;
+- cold big prefills → least-loaded engine, then temporarily reserve several
+  load units so small decoders stay on the other engine (poor-man's
+  prefill/decode disaggregation);
+- load spikes override affinity once `alpha×ΔloadUnits` exceeds bounded
+  affinity;
 - unhealthy engines sort last but remain failover candidates;
-- `DS4_AFFINITY=load` zeroes the overlap term — for **K3/KDA-class models**
-  whose recurrent-state attention can't snapshot arbitrary prefixes, prefix
-  affinity buys nothing and pure load balancing is correct.
+- `DS4_AFFINITY=load` zeroes the overlap term for an explicit least-loaded
+  baseline or engines without reusable prefix state. Do not infer this from
+  linear attention alone: current vLLM implements fine-grained, copy-on-write
+  recurrent-state prefix caching for Kimi K3's hybrid KDA/MLA stack.
 
 ## Shims (accumulated harness-compat fixes, all battle-earned)
 
@@ -77,35 +95,80 @@ Emergent behaviors (tested in `router_test.go`):
 `ds4proxy_*` (compat with existing dashboards): requests/duration/TTFT/TPOT,
 prompt/cached/completion tokens, context & output size histograms, finish
 reasons, upstream up/probes/errors/requests, client disconnects — plus new:
-`route_decisions_total{outcome}`, `route_overlap_blocks`,
-`upstream_inflight{upstream}`. Native engine metrics pass through at
+`route_decisions_total{outcome}`, `route_overlap_blocks`, `route_affinity_blocks`,
+`upstream_inflight{upstream}`, `upstream_load_units{upstream}`. Native engine metrics pass through at
 `/metrics/upstream/{i}`.
+
+Successful proxy responses and chat logs include an opaque upstream ordinal,
+allowing benchmark traffic to correlate exact route choices without exposing
+internal service names or subtracting production-wide counters.
+
+With `DS4_ROUTE_JOURNAL=true`, the proxy also emits versioned start/finish
+JSONL for static counterfactual replay. It records request/response sizes,
+opaque upstream ordinals, route-state snapshots, status, timing, and aggregate
+usage. It deliberately excludes prompt text, request IDs, fingerprints,
+generated text, and hostnames. Because no prefix identity is retained, replay
+holds every observed cache/load snapshot fixed and does not claim to simulate
+the cache state caused by earlier counterfactual choices.
+
+## Engine KV-event boundary (under qualification)
+
+r34's vLLM exposes a ZMQ `KVEventBatch` feed with monotonically increasing
+sequence numbers, `BlockStored`/`BlockRemoved`/clear events, and a bounded
+replay socket. A one-engine probe received 49 consecutive batches without a
+gap. This can correct the request-derived index after cache replication and
+eviction, but it is not a drop-in replacement. NVIDIA Dynamo's
+[replay/recovery comparison](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/kv-event-replay-comparison.md)
+is the reference for the failure semantics below:
+
+- `BlockStored` carries exact token IDs. The feed must stay on the trusted
+  compose network, raw events must never enter logs/journals, and the in-memory
+  retention/privacy boundary needs explicit review.
+- The observed DSpark feed contains several cache-group block geometries, not
+  only the configured 256-token physical block. A consumer must honor group and
+  cache-spec metadata rather than merging every emitted hash into one index.
+- vLLM replay covers only its retained event window and has no full current-
+  state snapshot. Sequence gaps must trigger bounded replay; an unrecoverable
+  gap clears/fences that engine's exact index and falls back to the current
+  approximate router. Dynamo's worker-side radix-tree dump is the stronger
+  recovery model to copy if this limitation matters operationally.
+- Exact request lookup requires the rendered token sequence. Calling r34's
+  `/tokenize` for every request costs 3.7ms at 299 tokens, 8.4ms at 4.3K,
+  41ms at 21K, and 203ms at 83.7K, while returning up to 419KB of token IDs.
+  The viable design is shadow mode first, then selective exact lookup for
+  high-value ambiguous decisions and/or a session-cached incremental path;
+  unconditional hot-path tokenization would tax returning long sessions.
 
 ## Learnings adopted (and their sources)
 
 | Source | Idea | Status |
 |---|---|---|
 | NVIDIA Dynamo | KV-aware routing (overlap + load) | **v1.1 (this repo)** |
-| NVIDIA Dynamo | conditional disaggregation (cold prefill placement) | **v1.1** (emergent from scoring) |
-| Kimi K3 / KDA | model-aware affinity (linear-attn ⇒ affinity off) | **v1.1** (`DS4_AFFINITY`) |
+| NVIDIA Dynamo | conditional disaggregation (cold prefill placement) | **v1.1** (size-weighted load reservation) |
+| NVIDIA Dynamo | event gaps, replay, and snapshot recovery | native feed qualification / shadow-mode design |
+| [Kimi K3 / KDA](https://github.com/MoonshotAI/Kimi-K3/blob/main/k3_tech_report.pdf) | model-aware cache geometry; recurrent state remains reusable | research / benchmark |
+| Kimi K3 | primary/secondary affinity and request-class budgets | planned, scaled down to two engines |
 | DwarfStar/ds4 | per-request timings surfaced to ops | v1.0 (chat log line + histograms) |
+| DwarfStar/ds4 | decision traces and policy replay | **v1.1 rc5** (privacy-bounded static replay) |
 | SGLang router | radix-tree-approximate LB | v1.1 (chain fingerprints) |
 
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for the tracked list. Summary below.
 
-1. **KV-event ground truth**: vLLM exposes `kv_events` (block stored/removed).
-   Subscribe → replace the approximate index with the engine's actual block
-   inventory (Dynamo does exactly this). Removes drift from evictions we
-   can't see today.
-2. **Decision journal + offline replay** (DwarfStar's
-   `dspark_trace_replay.py` idea): log (fingerprints, inflight, choice) per
-   request; replay against alternative alphas/policies offline before
-   changing production. Cheap and high-leverage for tuning.
+1. **KV-event ground truth**: qualify vLLM `kv_events` in privacy-safe shadow
+   mode, add gap/replay/fallback semantics, then use exact inventory only where
+   tokenization cost is justified. Dynamo's event index and snapshot recovery
+   are the reference; never persist raw event token IDs.
+2. **Decision journal + offline replay** (shipped in rc5, inspired by
+   DwarfStar's `dspark_trace_replay.py`): privacy-bounded route snapshots and
+   outcomes can be replayed against alternative alphas/caps before production
+   A/B changes. Next, add a controlled affinity-versus-load conflict workload
+   because routine traces do not exercise every policy boundary.
 3. **Pinned sessions** (DwarfStar's pinned deep-trunk KV banks): mark
    long-lived orchestrator conversations so neither the router (migration)
-   nor alpha pressure moves them off their warm engine.
+   nor alpha pressure moves them off their warm engine. Use Kimi K3's bounded
+   primary/secondary assignment so failure recovery spreads cold re-prefill.
 4. **True disaggregated prefill** once engines expose KV transfer (vLLM P/D
    + NIXL): route prefill to a prefill pool, stream KV to a decode engine.
    Single-box value is modest; multi-node value is large.
@@ -114,8 +177,9 @@ See [ROADMAP.md](ROADMAP.md) for the tracked list. Summary below.
 6. **KVBM-lite**: engine-side CPU-RAM KV offload (LMCache connector) so
    evicted agent sessions warm-restore; ds4's disk KV banks proved the
    pattern on this exact workload.
-7. Anthropic `/v1/messages` fingerprint canonicalization (currently raw-body
-   fallback — works, but misses cross-format overlap).
+7. Anthropic `/v1/messages` fingerprint canonicalization (shipped in rc3),
+   including top-level system prompts and prompt-affecting tool/reasoning
+   fields shared with OpenAI requests.
 
 ## Benchmarks
 

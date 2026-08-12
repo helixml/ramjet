@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strconv"
@@ -19,11 +20,15 @@ type Config struct {
 	AdvertiseCtxMargin int64
 
 	// Router tuning — see internal/router.
-	RouteAlpha          float64
-	RouteChunkBytes     int
-	RouteMaxPrefixBytes int
-	RouteIndexCapacity  int
-	Affinity            string // "prefix" (default) | "load"
+	RouteAlpha            float64
+	RouteChunkBytes       int
+	RouteMaxPrefixBytes   int
+	RouteMaxOverlapBlocks int
+	RouteIndexCapacity    int
+	RouteLoadUnitBytes    int
+	RouteMaxLoadUnits     int
+	Affinity              string // "prefix" (default) | "load"
+	RouteJournal          bool
 }
 
 func Load() (Config, error) {
@@ -60,7 +65,11 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	maxPrefix, err := envInt64("DS4_ROUTE_MAX_PREFIX_BYTES", 256<<10)
+	maxPrefix, err := envInt64("DS4_ROUTE_MAX_PREFIX_BYTES", 2<<20)
+	if err != nil {
+		return Config{}, err
+	}
+	maxOverlap, err := envInt64("DS4_ROUTE_MAX_OVERLAP_BLOCKS", 32)
 	if err != nil {
 		return Config{}, err
 	}
@@ -68,22 +77,56 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	loadUnitBytes, err := envInt64("DS4_ROUTE_LOAD_UNIT_BYTES", 32<<10)
+	if err != nil {
+		return Config{}, err
+	}
+	maxLoadUnits, err := envInt64("DS4_ROUTE_MAX_LOAD_UNITS", 8)
+	if err != nil {
+		return Config{}, err
+	}
+	if alpha < 0 || math.IsNaN(alpha) || math.IsInf(alpha, 0) {
+		return Config{}, errors.New("DS4_ROUTE_ALPHA must be finite and non-negative")
+	}
+	if chunk <= 0 || maxPrefix <= 0 || maxOverlap <= 0 || capacity <= 0 || loadUnitBytes <= 0 || maxLoadUnits <= 0 {
+		return Config{}, errors.New("DS4 route byte, block, capacity, and load settings must be positive")
+	}
 	affinity := envOr("DS4_AFFINITY", "prefix")
 	if affinity != "prefix" && affinity != "load" {
 		return Config{}, fmt.Errorf("invalid DS4_AFFINITY %q (want prefix|load)", affinity)
 	}
+	journal, err := envBool("DS4_ROUTE_JOURNAL", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
-		Upstreams:           upstreams,
-		UpstreamToken:       os.Getenv("DS4_UPSTREAM_TOKEN"),
-		MaxTokensStrip:      strip,
-		AdvertiseCtxMargin:  margin,
-		RouteAlpha:          alpha,
-		RouteChunkBytes:     int(chunk),
-		RouteMaxPrefixBytes: int(maxPrefix),
-		RouteIndexCapacity:  int(capacity),
-		Affinity:            affinity,
+		Upstreams:             upstreams,
+		UpstreamToken:         os.Getenv("DS4_UPSTREAM_TOKEN"),
+		MaxTokensStrip:        strip,
+		AdvertiseCtxMargin:    margin,
+		RouteAlpha:            alpha,
+		RouteChunkBytes:       int(chunk),
+		RouteMaxPrefixBytes:   int(maxPrefix),
+		RouteMaxOverlapBlocks: int(maxOverlap),
+		RouteIndexCapacity:    int(capacity),
+		RouteLoadUnitBytes:    int(loadUnitBytes),
+		RouteMaxLoadUnits:     int(maxLoadUnits),
+		Affinity:              affinity,
+		RouteJournal:          journal,
 	}, nil
+}
+
+func envBool(key string, fallback bool) (bool, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s=%q: %w", key, raw, err)
+	}
+	return value, nil
 }
 
 func envOr(key, fallback string) string {

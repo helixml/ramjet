@@ -14,6 +14,7 @@ type Accumulator struct {
 	ContentChars               int
 	ReasoningChars             int
 	ToolCallDeltas             int
+	Generated                  bool
 }
 
 func (a *Accumulator) FeedJSON(data []byte) {
@@ -52,12 +53,19 @@ func (a *Accumulator) FeedObject(object map[string]any) {
 				}
 				if content, ok := node["content"].(string); ok {
 					a.ContentChars += len([]rune(content))
+					a.Generated = a.Generated || content != ""
 				}
 				if reasoning, ok := node["reasoning_content"].(string); ok {
 					a.ReasoningChars += len([]rune(reasoning))
+					a.Generated = a.Generated || reasoning != ""
+				}
+				if reasoning, ok := node["reasoning"].(string); ok {
+					a.ReasoningChars += len([]rune(reasoning))
+					a.Generated = a.Generated || reasoning != ""
 				}
 				if truthy(node["tool_calls"]) {
 					a.ToolCallDeltas++
+					a.Generated = true
 				}
 			}
 		}
@@ -67,6 +75,17 @@ func (a *Accumulator) FeedObject(object map[string]any) {
 	}
 	if status, ok := object["status"].(string); ok && (status == "completed" || status == "incomplete" || status == "cancelled") {
 		a.FinishReason = status
+	}
+	// Anthropic streams generated text/reasoning in a top-level delta object;
+	// the Responses API uses a top-level delta string for output-text events.
+	if delta, ok := object["delta"].(map[string]any); ok {
+		for _, key := range []string{"text", "thinking", "reasoning", "partial_json"} {
+			if value, ok := delta[key].(string); ok && value != "" {
+				a.Generated = true
+			}
+		}
+	} else if delta, ok := object["delta"].(string); ok && delta != "" {
+		a.Generated = true
 	}
 
 	usage, _ := object["usage"].(map[string]any)

@@ -107,6 +107,52 @@ capture; compare. Never reuse a salt across the two — warm state leaks.
 Read the router's own decisions with
 `curl -s :8007/metrics | grep ds4proxy_route_decisions_total`.
 
+
+### Decision journal + offline replay (rc5+)
+
+Answer "would a different alpha/cap have routed better?" without touching
+production: enable the journal, capture real traffic, replay counterfactuals.
+
+```bash
+# enable (LB env; stdout JSONL, privacy-bounded: no prompts/fingerprints/hosts)
+ssh node06 'cd /home/luke/inference/dspark_0731 &&   DS4_ROUTE_JOURNAL=true LB_IMAGE=<current tag> docker compose up -d ds4-loadbalancer'
+
+# capture + replay a policy sweep locally
+ssh node06 'docker logs ds4-loadbalancer 2>&1' > /tmp/trace.log
+python3 bench/route_replay.py /tmp/trace.log --alphas 1,2,4,8 --caps 8,16,32,64
+```
+
+Replay holds each observed cache/load snapshot fixed (the journal keeps no
+prefix identity), so it compares single-decision policies — it cannot
+simulate cache drift caused by earlier counterfactual choices. Findings and
+caveats: EXPERIMENTS.md "rc5 privacy-bounded decision journal and replay".
+
+## Full experiment checklist
+
+The repeatable end-to-end loop (each past run is written up in
+EXPERIMENTS.md — add yours there too):
+
+1. **Local**: `go test ./... && go vet ./...`; add/extend a router test for
+   any routing change.
+2. **Build + deploy candidate** on node06 (section above) with a fresh
+   `<tag>`; confirm `ds4proxy_upstream_up` shows both engines and the boot
+   log line has the config you meant to ship.
+3. **Bench matrix** (fresh SALT per run, per the A/B protocol):
+   locality (`locality_bench.sh`), concurrent same-app
+   (`concurrent_sameapp.sh`), aggregate regression (`bench_serving.sh 16 512`).
+4. **Route telemetry**: `curl -s :8007/metrics | grep -E
+   "route_decisions|route_overlap|upstream_inflight|upstream_load_units"` —
+   confirm the decision mix moved the way the change predicts.
+5. **Helix end-to-end**: one real session via `POST $HELIX_URL/api/v1/
+   sessions/chat` against the org test app (ids + creds: infra repo,
+   `node06/inference/dspark_0731/README.md`). This catches harness-shim
+   regressions that synthetic benches miss.
+6. **Record**: append the run to EXPERIMENTS.md (config, numbers, verdict),
+   update RESULTS.md if it changes a headline, and either promote the tag in
+   the infra compose (`LB_IMAGE` default) or note why not.
+7. **Watch after promote**: Grafana `ds4-flash-serving` for 10-15 min
+   (5xx, TTFT p95, upstream split) — rollback is one `LB_IMAGE` flip.
+
 ## Guardrails
 
 - The LB sits in the **production inference path** (Helix agent fleet). Bench

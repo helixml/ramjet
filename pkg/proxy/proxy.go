@@ -30,6 +30,7 @@ var hopHeaders = map[string]struct{}{
 	"connection": {}, "keep-alive": {}, "proxy-authenticate": {},
 	"proxy-authorization": {}, "te": {}, "trailers": {},
 	"transfer-encoding": {}, "upgrade": {}, "content-length": {}, "host": {},
+	"x-mini-dynamo-upstream": {},
 }
 
 type Proxy struct {
@@ -37,10 +38,11 @@ type Proxy struct {
 	client  *http.Client
 	metrics *metrics.Metrics
 	router  *router.Router
+	journal *routeJournal
 }
 
 func New(cfg config.Config, client *http.Client, m *metrics.Metrics, r *router.Router) *Proxy {
-	return &Proxy{cfg: cfg, client: client, metrics: m, router: r}
+	return &Proxy{cfg: cfg, client: client, metrics: m, router: r, journal: &routeJournal{enabled: cfg.RouteJournal}}
 }
 
 func (p *Proxy) Router() *router.Router { return p.router }
@@ -66,6 +68,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	p.metrics.RouteDecisions.WithLabelValues(decision.Outcome).Inc()
 	if decision.TotalBlocks > 0 {
 		p.metrics.RouteOverlap.Observe(float64(decision.OverlapBlocks))
+		p.metrics.RouteAffinity.Observe(float64(decision.AffinityBlocks))
 	}
 	var fingerprints []uint64
 	if endpoint != "other" {
@@ -73,6 +76,16 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	target := decision.Candidates[0]
+	accumulator := &usage.Accumulator{}
+	var firstByteAt, firstTokenAt time.Time
+	var bytesOut int64
+	journalResult := "incomplete"
+	journalStatus := 0
+	journalUpstream := p.upstreamIndex(target)
+	journalID := p.journal.start(endpoint, len(body), decision, p.cfg)
+	defer func() {
+		p.journal.finish(journalID, started, firstByteAt, firstTokenAt, journalResult, journalUpstream, journalStatus, bytesOut, accumulator)
+	}()
 	var response *http.Response
 	var release func()
 	var lastError error
@@ -83,11 +96,16 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			p.router.SetHealthy(candidate, false)
 			continue
 		}
-		candidateRelease := p.acquire(candidate)
+		requestLoadUnits := decision.LoadUnits
+		if idx < len(decision.CandidateState) {
+			requestLoadUnits = decision.CandidateState[idx].RequestLoadUnits
+		}
+		candidateRelease := p.acquire(candidate, requestLoadUnits)
 		response, err = p.client.Do(outbound)
 		if err != nil {
 			candidateRelease()
 			if request.Context().Err() != nil {
+				journalResult = "client_disconnect"
 				p.recordClientDisconnect(endpoint, "", 0)
 				return
 			}
@@ -104,6 +122,8 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			continue
 		}
 		target = candidate
+		journalUpstream = p.upstreamIndex(target)
+		journalStatus = response.StatusCode
 		release = candidateRelease
 		if idx > 0 {
 			log.Printf("[failover] %s unavailable, using %s", decision.Candidates[0], candidate)
@@ -111,19 +131,29 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		break
 	}
 	if response == nil {
+		journalResult = "upstream_error"
+		journalStatus = http.StatusBadGateway
+		if upstreamErrorReason(lastError) == "timeout" {
+			journalStatus = http.StatusGatewayTimeout
+		}
 		p.writeUpstreamError(writer, endpoint, target, started, lastError, false)
 		return
 	}
 	defer response.Body.Close()
 	defer release()
+	// An opaque ordinal lets benchmarks correlate their own requests with route
+	// decisions without scraping global metrics or exposing internal hostnames.
+	writer.Header().Set("X-Mini-Dynamo-Upstream", strconv.Itoa(p.upstreamIndex(target)))
 
 	if request.Method == http.MethodGet && strings.HasSuffix(strings.TrimRight(request.URL.Path, "/"), "/v1/models") && response.StatusCode == http.StatusOK {
 		raw, err := io.ReadAll(response.Body)
 		if err != nil {
 			if request.Context().Err() != nil {
+				journalResult = "client_disconnect"
 				p.recordClientDisconnect(endpoint, target, response.StatusCode)
 				return
 			}
+			journalResult = "upstream_read_error"
 			p.writeUpstreamError(writer, endpoint, target, started, err, false)
 			return
 		}
@@ -131,6 +161,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write(result)
+		journalResult = "complete"
 		p.recordRequest(endpoint, http.StatusOK, "false", started)
 		p.metrics.UpstreamRequests.WithLabelValues(target, "200").Inc()
 		return
@@ -140,31 +171,34 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	writer.WriteHeader(response.StatusCode)
 	stream := strings.Contains(response.Header.Get("Content-Type"), "text/event-stream")
 	streamLabel := strconv.FormatBool(stream)
-	accumulator := &usage.Accumulator{}
-	var firstByteAt time.Time
-	var bytesOut int64
 	var parseBuffer []byte
 	buffer := make([]byte, 32<<10)
 	for {
 		count, readError := response.Body.Read(buffer)
 		if count > 0 {
+			receivedAt := time.Now()
 			if firstByteAt.IsZero() {
-				firstByteAt = time.Now()
+				firstByteAt = receivedAt
 			}
 			chunk := buffer[:count]
 			written, writeError := writer.Write(chunk)
 			bytesOut += int64(written)
 			if stream {
 				parseBuffer = usage.FeedSSEChunk(accumulator, parseBuffer, chunk)
+				if firstTokenAt.IsZero() && accumulator.Generated {
+					firstTokenAt = receivedAt
+				}
 			} else {
 				parseBuffer = append(parseBuffer, chunk...)
 			}
 			if writeError != nil {
+				journalResult = "client_disconnect"
 				p.recordClientDisconnect(endpoint, target, response.StatusCode)
 				return
 			}
 			if stream {
 				if flushError := http.NewResponseController(writer).Flush(); flushError != nil {
+					journalResult = "client_disconnect"
 					p.recordClientDisconnect(endpoint, target, response.StatusCode)
 					return
 				}
@@ -175,9 +209,11 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		}
 		if readError != nil {
 			if request.Context().Err() != nil {
+				journalResult = "client_disconnect"
 				p.recordClientDisconnect(endpoint, target, response.StatusCode)
 				return
 			}
+			journalResult = "upstream_read_error"
 			p.writeUpstreamError(writer, endpoint, target, started, readError, true)
 			return
 		}
@@ -192,30 +228,42 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if response.StatusCode >= 400 {
 		log.Printf("[upstream %d] %s %s\n  request body: %.2000q\n  response body: %.2000q", response.StatusCode, request.Method, request.URL.RequestURI(), body, parseBuffer)
 	} else if endpoint == "chat" {
-		log.Printf("[chat %d] stream=%t %.1fs finish=%s overlap=%d/%d outcome=%s content_chars=%d reasoning_chars=%d tool_call_deltas=%d prompt_toks=%s completion_toks=%s req_bytes=%d",
-			response.StatusCode, stream, elapsed.Seconds(), accumulator.FinishReason,
-			decision.OverlapBlocks, decision.TotalBlocks, decision.Outcome,
+		log.Printf("[chat %d] stream=%t %.1fs upstream=%d finish=%s overlap=%d/%d affinity=%d load_units=%d outcome=%s content_chars=%d reasoning_chars=%d tool_call_deltas=%d prompt_toks=%s completion_toks=%s req_bytes=%d",
+			response.StatusCode, stream, elapsed.Seconds(), p.upstreamIndex(target), accumulator.FinishReason,
+			decision.OverlapBlocks, decision.TotalBlocks, decision.AffinityBlocks, decision.LoadUnits, decision.Outcome,
 			accumulator.ContentChars, accumulator.ReasoningChars, accumulator.ToolCallDeltas,
 			formatOptionalNumber(accumulator.Prompt), formatOptionalNumber(accumulator.Completion), len(body))
 	}
 	p.recordRequest(endpoint, response.StatusCode, streamLabel, started)
 	p.metrics.ResponseBytes.WithLabelValues(endpoint).Observe(float64(bytesOut))
-	if stream && !firstByteAt.IsZero() {
-		p.metrics.TTFT.WithLabelValues(endpoint).Observe(firstByteAt.Sub(started).Seconds())
+	if stream && !firstTokenAt.IsZero() {
+		p.metrics.TTFT.WithLabelValues(endpoint).Observe(firstTokenAt.Sub(started).Seconds())
 	}
 	if response.StatusCode == http.StatusOK && endpoint != "other" {
-		p.recordUsage(endpoint, accumulator, elapsed, started, firstByteAt)
+		p.recordUsage(endpoint, accumulator, elapsed, started, firstTokenAt)
 		p.router.Observe(target, fingerprints)
 	}
 	p.metrics.UpstreamRequests.WithLabelValues(target, strconv.Itoa(response.StatusCode)).Inc()
+	journalResult = "complete"
 }
 
-func (p *Proxy) acquire(upstream string) func() {
-	release := p.router.Acquire(upstream)
+func (p *Proxy) upstreamIndex(target string) int {
+	for index, upstream := range p.cfg.Upstreams {
+		if upstream == target {
+			return index
+		}
+	}
+	return -1
+}
+
+func (p *Proxy) acquire(upstream string, loadUnits int) func() {
+	release := p.router.AcquireWeighted(upstream, loadUnits)
 	p.metrics.UpstreamInflight.WithLabelValues(upstream).Set(float64(p.router.Inflight(upstream)))
+	p.metrics.UpstreamLoadUnits.WithLabelValues(upstream).Set(float64(p.router.LoadUnits(upstream)))
 	return func() {
 		release()
 		p.metrics.UpstreamInflight.WithLabelValues(upstream).Set(float64(p.router.Inflight(upstream)))
+		p.metrics.UpstreamLoadUnits.WithLabelValues(upstream).Set(float64(p.router.LoadUnits(upstream)))
 	}
 }
 
@@ -262,7 +310,7 @@ func (p *Proxy) recordRequest(endpoint string, code int, stream string, started 
 	p.metrics.Duration.WithLabelValues(endpoint).Observe(time.Since(started).Seconds())
 }
 
-func (p *Proxy) recordUsage(endpoint string, accumulator *usage.Accumulator, elapsed time.Duration, started, firstByteAt time.Time) {
+func (p *Proxy) recordUsage(endpoint string, accumulator *usage.Accumulator, elapsed time.Duration, started, firstTokenAt time.Time) {
 	if accumulator.Prompt == nil && accumulator.Completion == nil {
 		p.metrics.ParseFailures.WithLabelValues(endpoint).Inc()
 	}
@@ -277,8 +325,8 @@ func (p *Proxy) recordUsage(endpoint string, accumulator *usage.Accumulator, ela
 		p.metrics.CompletionTokens.WithLabelValues(endpoint).Add(*accumulator.Completion)
 		p.metrics.OutputSize.WithLabelValues(endpoint).Observe(*accumulator.Completion)
 		decodeTime := elapsed
-		if !firstByteAt.IsZero() {
-			decodeTime -= firstByteAt.Sub(started)
+		if !firstTokenAt.IsZero() {
+			decodeTime -= firstTokenAt.Sub(started)
 		}
 		if decodeTime > 500*time.Millisecond && *accumulator.Completion > 8 {
 			p.metrics.DecodeTPS.WithLabelValues(endpoint).Observe(*accumulator.Completion / decodeTime.Seconds())

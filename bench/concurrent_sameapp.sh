@@ -5,29 +5,59 @@
 # instance (idle sibling). Overlap+load router: spreads by inflight.
 set -uo pipefail
 BASE=$1 N=$2 SALT=$3 TOK=$4
-KEY=$(grep -o "Bearer [A-Za-z0-9_-]*" /etc/caddy/Caddyfile | head -1 | cut -d" " -f2)
+KEY=${BENCH_TOKEN:-${VLLM_API_KEY:-}}
+if [ -z "$KEY" ]; then
+  KEY=$(grep -o "Bearer [A-Za-z0-9_-]*" /etc/caddy/Caddyfile | head -1 | cut -d" " -f2)
+fi
 SYS=$(python3 -c "print('You are coding agent for CONC-$SALT. ' + 'Follow the runbook carefully and cite file paths. ' * 1800)")
-before_a=$(curl -s http://127.0.0.1:8007/metrics | awk -F'[ ]' '/upstream_requests_total.*code="200".*dspark-0731:8000/{print $2}')
-before_b=$(curl -s http://127.0.0.1:8007/metrics | awk -F'[ ]' '/upstream_requests_total.*code="200".*dspark-0731-b:8000/{print $2}')
+WORK=$(mktemp -d /tmp/mini-dynamo-sameapp.XXXXXX)
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT
 start=$(date +%s.%N)
+pids=()
 for i in $(seq 1 $N); do
-  curl -s -m 300 -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$BASE/v1/chat/completions" -d "$(python3 -c "
+  curl -sS -m 300 -D "$WORK/$i.headers" -o "$WORK/$i.json" \
+    -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$BASE/v1/chat/completions" -d "$(python3 -c "
 import json,sys
 print(json.dumps({'model':'deepseek-v4-flash','messages':[{'role':'system','content':sys.argv[1]},{'role':'user','content':f'session $i: solve subtask $i briefly'}],'max_tokens':$TOK,'temperature':0}))
-" "$SYS")" > /tmp/ca_$i.json &
+" "$SYS")" &
+  pids+=("$!")
 done
-wait
+curl_failures=0
+for pid in "${pids[@]}"; do
+  wait "$pid" || curl_failures=$((curl_failures + 1))
+done
 end=$(date +%s.%N)
-after_a=$(curl -s http://127.0.0.1:8007/metrics | awk -F'[ ]' '/upstream_requests_total.*code="200".*dspark-0731:8000/{print $2}')
-after_b=$(curl -s http://127.0.0.1:8007/metrics | awk -F'[ ]' '/upstream_requests_total.*code="200".*dspark-0731-b:8000/{print $2}')
-python3 -c "
-import json,glob,os
-tot=0
-for f in glob.glob('/tmp/ca_*.json'):
-    try: tot+=json.load(open(f)).get('usage',{}).get('completion_tokens',0)
-    except: pass
-    os.remove(f)
-w=$end-$start
-da=${after_a:-0}-${before_a:-0}; db=${after_b:-0}-${before_b:-0}
-print(f'  split A/B = {da}/{db}  wall={w:.1f}s  aggregate={tot/w:.0f} tok/s')
-"
+WORK="$WORK" START="$start" END="$end" N="$N" CURL_FAILURES="$curl_failures" python3 - <<'PY'
+import glob
+import json
+import os
+
+work = os.environ["WORK"]
+tokens = 0
+errors = int(os.environ["CURL_FAILURES"])
+routes = {"0": 0, "1": 0}
+for path in glob.glob(work + "/*.json"):
+    try:
+        with open(path) as source:
+            response = json.load(source)
+        tokens += response.get("usage", {}).get("completion_tokens", 0)
+        if response.get("error"):
+            errors += 1
+    except Exception:
+        errors += 1
+for path in glob.glob(work + "/*.headers"):
+    with open(path, errors="replace") as source:
+        for line in source:
+            if line.lower().startswith("x-mini-dynamo-upstream:"):
+                route = line.split(":", 1)[1].strip()
+                routes[route] = routes.get(route, 0) + 1
+wall = float(os.environ["END"]) - float(os.environ["START"])
+routed = sum(routes.values())
+print(
+    f"  split A/B = {routes.get('0', 0)}/{routes.get('1', 0)} "
+    f"routed={routed}/{os.environ['N']} failures={errors} "
+    f"wall={wall:.1f}s aggregate={tokens / wall:.0f} tok/s"
+)
+raise SystemExit(0 if routed == int(os.environ["N"]) and errors == 0 else 1)
+PY

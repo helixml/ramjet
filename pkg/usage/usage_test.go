@@ -11,6 +11,17 @@ func TestOpenAIUsage(t *testing.T) {
 	if a.FinishReason != "stop" || a.ContentChars != 2 || a.ReasoningChars != 8 {
 		t.Fatalf("stream shape wrong: %+v", a)
 	}
+	if !a.Generated {
+		t.Fatal("content should mark generated output")
+	}
+}
+
+func TestReasoningAlias(t *testing.T) {
+	a := &Accumulator{}
+	a.FeedJSON([]byte(`{"choices":[{"delta":{"reasoning":"think"}}]}`))
+	if a.ReasoningChars != 5 {
+		t.Fatalf("reasoning alias not counted: %+v", a)
+	}
 }
 
 func TestAnthropicUsage(t *testing.T) {
@@ -45,5 +56,25 @@ func TestDoneAndGarbageIgnored(t *testing.T) {
 	a.FeedSSELine([]byte(": comment"))
 	if a.Prompt != nil || a.Completion != nil {
 		t.Fatalf("garbage should not populate usage: %+v", a)
+	}
+}
+
+func TestGeneratedOutputDetectionIgnoresRoleOnlyChunk(t *testing.T) {
+	a := &Accumulator{}
+	a.FeedJSON([]byte(`{"choices":[{"delta":{"role":"assistant","content":""}}]}`))
+	if a.Generated {
+		t.Fatal("role-only chunk was treated as the first generated token")
+	}
+	a.FeedJSON([]byte(`{"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}`))
+	if !a.Generated {
+		t.Fatal("tool-call delta should mark generated output")
+	}
+}
+
+func TestAnthropicGeneratedOutputDetection(t *testing.T) {
+	a := &Accumulator{}
+	a.FeedJSON([]byte(`{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}`))
+	if !a.Generated {
+		t.Fatal("Anthropic text delta should mark generated output")
 	}
 }
