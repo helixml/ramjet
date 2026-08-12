@@ -8,10 +8,16 @@ class EngineMetricsTest(unittest.TestCase):
         body = """
 # HELP vllm:num_requests_waiting waiting
 vllm:num_requests_waiting{engine="0"} 2
-vllm:num_requests_waiting{engine="1"} 3
+vllm:num_requests_waiting{engine="1",source="local"} 3
 vllm:num_requests_running 7
 """
         self.assertEqual(metric_value(body, "vllm:num_requests_waiting"), 5)
+        self.assertEqual(
+            metric_value(body, "vllm:num_requests_waiting", {"source": "local"}), 3
+        )
+        self.assertIsNone(
+            metric_value(body, "vllm:num_requests_waiting", {"source": "external"})
+        )
         self.assertEqual(metric_value(body, "vllm:num_requests_running"), 7)
         self.assertIsNone(metric_value(body, "vllm:missing"))
 

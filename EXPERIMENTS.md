@@ -1999,3 +1999,34 @@ the Cargo manifests, with the implicit README disabled. `cargo package
 the warm release check after the manifest change took 0.16s. After changing
 these experiment/agent documents again, the release check remained warm at
 0.15s instead of relinking, proving the intended inner-loop effect.
+
+## 2026-08-12 — issue #16 content-free KV churn telemetry
+
+The fenced consumer already computes how many semantically accepted exact-
+index blocks each batch stores and removes, plus accepted generation clears.
+The LB now exports those totals by upstream and live/replay source. This adds
+no decoding, retention, content-derived label, or routing work. “Removed” is
+the metric action rather than “evicted”: vLLM's event proves that a block left
+the index but does not encode whether capacity pressure, explicit release, or
+another lifecycle event caused it. `cachebench.py` snapshots the live counters
+and reports removed/stored block churn alongside native preemptions.
+
+Rust tests cover store, remove, clear, metric registration, and bounded action
+labels. The Python parser now supports exact label filtering, and its 29 tests
+cover live-churn reporting without upgrading a removal into an eviction claim.
+All expected live/replay/action series are initialized to zero at consumer
+startup, so a quiet interval is distinguishable from an old or missing metric
+family. The final warm gate passed strict Clippy, 109 Rust tests, and the
+release build in 1.19s; 30 Python/corpus tests passed in 0.06s and the Go
+parity oracle in 0.35s. Building the final r25 image still paid the expected
+18.34s Rust relink inside BuildKit; build plus transfer to node06 took 27.71s.
+
+The final `rust-r25-cache-churn-873a201` stateless LB swap took 1.586s and
+returned 2/2 healthy replicas with zero restarts. A fresh 32KiB, four-request
+smoke then reconciled exactly across response usage, LB counters, and both
+native engines: 38,544 prompt tokens, 28,416 cached tokens (73.72%), four
+request samples, and zero spread. It observed six accepted live stores, zero
+removals, zero clears, zero preemptions, and 0.04ms mean native queue time.
+The cold request took 1,049ms TTFT; the three partial hits had 392ms median
+TTFT. This validates the counter plumbing and quiet-interval zero series; it
+does not yet exercise capacity-driven removal.

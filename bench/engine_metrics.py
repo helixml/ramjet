@@ -24,15 +24,21 @@ GAUGES = {
 }
 
 
-def metric_value(body, name):
+def metric_value(body, name, required_labels=None):
     matches = re.findall(
-        r"^" + re.escape(name) + r"(?:\{[^\n]*\})?\s+([0-9.eE+-]+)$",
+        r"^" + re.escape(name) + r"(?:\{([^\n}]*)\})?\s+([0-9.eE+-]+)$",
         body,
         re.MULTILINE,
     )
-    if not matches:
+    selected = []
+    for raw_labels, value in matches:
+        labels = dict(re.findall(r'(\w+)="((?:\\.|[^"\\])*)"', raw_labels))
+        if required_labels and any(labels.get(key) != wanted for key, wanted in required_labels.items()):
+            continue
+        selected.append(float(value))
+    if not selected:
         return None
-    return sum(float(value) for value in matches)
+    return sum(selected)
 
 
 def fetch(url, timeout=10):

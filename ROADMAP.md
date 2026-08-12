@@ -204,8 +204,11 @@ node06). The design rationale for each lives in DESIGN.md.
   runner reconciles response usage, LB counters, and summed native
   prompt/cache/query/hit and request-sample counters with a fail-closed
   zero-spread gate; its first 1/4/8-app sweep passed 52/52 and balanced larger
-  cells exactly across both engines. Next add eviction-event/churn reporting
-  and sweep working sets toward the measured 3.84M-token per-engine frontier
+  cells exactly across both engines. Accepted live/replay store, removal, and
+  clear counters now expose content-free churn; removals are deliberately not
+  called evictions because publisher events do not state the cause. Next sweep
+  working sets toward the measured 3.84M-token per-engine frontier and alert on
+  removal rate, index contraction, preemptions, and warm-TTFT degradation
   before defining any 95%+ SLO.
 - 🔨 **Production-shaped DeepSeek-V4 agent/DSML gate (#10).** The versioned
   synthetic v1 JSONL corpus and privacy-safe runner now cover stream/non-stream,

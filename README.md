@@ -98,6 +98,14 @@ their ratio in PromQL rather than averaging per-request percentages. These are
 observed response outcomes, not claims that every prompt token was cache
 eligible.
 
+`ds4proxy_kv_event_blocks_total{upstream,source,action}` counts accepted
+`stored` and `removed` exact-index block mutations; replay and live traffic are
+separate. `ds4proxy_kv_event_clears_total{upstream,source}` counts accepted
+generation clears. A live removal is observable cache churn, but is not labeled
+an eviction because the publisher event does not state why the block left.
+Together with the resident-index gauges and native preemption counter, these
+make capacity sweeps explainable without logging hashes or token IDs.
+
 `DS4_EXACT_ROUTE_MODE=shadow` moves admitted local tokenization before the
 approximate decision, then immediately scores the same load snapshot against
 all trusted exact inventories without changing candidate order. It requires

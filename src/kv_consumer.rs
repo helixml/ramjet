@@ -119,6 +119,7 @@ async fn run_consumer(
     metrics: Arc<Metrics>,
     mut shutdown: broadcast::Receiver<()>,
 ) {
+    initialize_event_metrics(&metrics, &upstream);
     let mut backoff = config.reconnect_min;
     let mut first_attempt = true;
     loop {
@@ -187,6 +188,19 @@ async fn run_consumer(
         if wait_or_shutdown(delay, &mut shutdown).await {
             return;
         }
+    }
+}
+
+fn initialize_event_metrics(metrics: &Metrics, upstream: &str) {
+    for source in ["live", "replay"] {
+        for action in ["stored", "removed"] {
+            metrics
+                .kv_event_blocks
+                .with_label_values(&[upstream, source, action]);
+        }
+        metrics
+            .kv_event_clears
+            .with_label_values(&[upstream, source]);
     }
 }
 
@@ -308,7 +322,7 @@ fn ingest_live(
         .with_label_values(&[upstream, "live", label])
         .inc();
     if let Some(summary) = summary {
-        record_filtered(metrics, upstream, "live", summary);
+        record_apply_summary(metrics, upstream, "live", summary);
     }
     update_state_metrics(inventory, metrics, upstream);
     if failed { Err(()) } else { Ok(replay) }
@@ -336,18 +350,35 @@ fn ingest_replay(
         .with_label_values(&[upstream, "replay", label])
         .inc();
     if let Some(summary) = summary {
-        record_filtered(metrics, upstream, "replay", summary);
+        record_apply_summary(metrics, upstream, "replay", summary);
     }
     update_state_metrics(inventory, metrics, upstream);
     inventory.read().trusted()
 }
 
-fn record_filtered(
+fn record_apply_summary(
     metrics: &Metrics,
     upstream: &str,
     source: &'static str,
     summary: crate::exact_index::BatchApplySummary,
 ) {
+    for (action, count) in [
+        ("stored", summary.stored_blocks),
+        ("removed", summary.removed_blocks),
+    ] {
+        if count > 0 {
+            metrics
+                .kv_event_blocks
+                .with_label_values(&[upstream, source, action])
+                .inc_by(metric_usize(count));
+        }
+    }
+    if summary.clear_events > 0 {
+        metrics
+            .kv_event_clears
+            .with_label_values(&[upstream, source])
+            .inc_by(metric_usize(summary.clear_events));
+    }
     for (reason, count) in summary.filtered_by_reason().filter(|(_, count)| *count > 0) {
         metrics
             .kv_event_filtered
@@ -418,7 +449,7 @@ mod tests {
     use prometheus::Registry;
 
     use super::*;
-    use crate::kv_wire::{BlockStored, KvEvent, KvEventBatch};
+    use crate::kv_wire::{BlockRemoved, BlockStored, ExternalBlockHash, KvEvent, KvEventBatch};
 
     #[test]
     fn live_shadow_requests_startup_replay_and_clear_establishes_generation() {
@@ -464,6 +495,91 @@ mod tests {
                 .abs()
                 < f64::EPSILON
         );
+        assert!(
+            (metrics
+                .kv_event_clears
+                .with_label_values(&["engine", "live"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn accepted_store_and_remove_record_content_free_block_churn() {
+        let metrics = Metrics::new(&Registry::new()).unwrap();
+        let inventory = Arc::new(RwLock::new(FencedExactKvInventory::new(
+            8,
+            ExactIndexLimits::default(),
+        )));
+        let stored = SequencedBatch {
+            sequence: 0,
+            batch: KvEventBatch {
+                timestamp: 1.0,
+                events: vec![KvEvent::BlockStored(BlockStored {
+                    block_hashes: vec![ExternalBlockHash::Unsigned(7)],
+                    parent_block_hash: None,
+                    token_ids: vec![1, 2],
+                    block_size: 2,
+                    group_idx: Some(0),
+                    kv_cache_spec_kind: Some("mla_attention".to_owned()),
+                    kv_cache_spec_sliding_window: None,
+                    medium: Some("GPU".to_owned()),
+                    locality: Some("LOCAL".to_owned()),
+                    lora_name: None,
+                    cache_namespace: None,
+                    has_extra_keys: false,
+                })],
+                data_parallel_rank: Some(0),
+            },
+        };
+        let removed = SequencedBatch {
+            sequence: 1,
+            batch: KvEventBatch {
+                timestamp: 2.0,
+                events: vec![KvEvent::BlockRemoved(BlockRemoved {
+                    block_hashes: vec![ExternalBlockHash::Unsigned(7)],
+                    group_idx: Some(0),
+                    medium: Some("GPU".to_owned()),
+                    locality: Some("LOCAL".to_owned()),
+                })],
+                data_parallel_rank: Some(0),
+            },
+        };
+
+        assert_eq!(
+            ingest_live(&inventory, &metrics, "engine", &stored),
+            Ok(None)
+        );
+        assert_eq!(
+            ingest_live(&inventory, &metrics, "engine", &removed),
+            Ok(None)
+        );
+        for action in ["stored", "removed"] {
+            let blocks = metrics
+                .kv_event_blocks
+                .with_label_values(&["engine", "live", action])
+                .get();
+            assert!((blocks - 1.0).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn block_churn_series_exist_before_the_first_event() {
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry).unwrap();
+        initialize_event_metrics(&metrics, "engine");
+        let text = prometheus::TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        for labels in [
+            r#"action="stored",source="live""#,
+            r#"action="removed",source="replay""#,
+        ] {
+            assert!(text.contains(labels));
+        }
+        assert!(text.contains("ds4proxy_kv_event_clears_total"));
     }
 
     #[test]

@@ -49,6 +49,8 @@ pub struct Metrics {
     pub kv_event_generation: GaugeVec,
     pub kv_event_index_entries: GaugeVec,
     pub kv_event_batches: CounterVec,
+    pub kv_event_blocks: CounterVec,
+    pub kv_event_clears: CounterVec,
     pub kv_event_filtered: CounterVec,
     pub kv_event_reconnects: CounterVec,
     pub kv_event_replay_batches: HistogramVec,
@@ -362,6 +364,16 @@ impl Metrics {
                 "KV-event batches by source and bounded processing outcome",
                 &["upstream", "source", "outcome"],
             )?,
+            kv_event_blocks: counter(
+                "ds4proxy_kv_event_blocks_total",
+                "Accepted exact-index block mutations by event source and action",
+                &["upstream", "source", "action"],
+            )?,
+            kv_event_clears: counter(
+                "ds4proxy_kv_event_clears_total",
+                "Accepted exact-index clear events by event source",
+                &["upstream", "source"],
+            )?,
             kv_event_filtered: counter(
                 "ds4proxy_kv_event_filtered_total",
                 "KV events conservatively excluded from the exact index by bounded reason",
@@ -381,6 +393,16 @@ impl Metrics {
                 &["upstream"],
             )?,
         };
+        for endpoint in ["chat", "messages", "responses", "completions", "other"] {
+            metrics.prompt_tokens.with_label_values(&[endpoint]);
+            metrics.cached_tokens.with_label_values(&[endpoint]);
+            for outcome in ["cold", "partial", "full", "unknown"] {
+                metrics
+                    .cache_requests
+                    .with_label_values(&[endpoint, outcome]);
+                metrics.cache_ttft.with_label_values(&[endpoint, outcome]);
+            }
+        }
         for collector in metrics.collectors() {
             registry.register(collector)?;
         }
@@ -435,6 +457,8 @@ impl Metrics {
             Box::new(self.kv_event_generation.clone()),
             Box::new(self.kv_event_index_entries.clone()),
             Box::new(self.kv_event_batches.clone()),
+            Box::new(self.kv_event_blocks.clone()),
+            Box::new(self.kv_event_clears.clone()),
             Box::new(self.kv_event_filtered.clone()),
             Box::new(self.kv_event_reconnects.clone()),
             Box::new(self.kv_event_replay_batches.clone()),
@@ -489,6 +513,14 @@ mod tests {
             .kv_event_trusted
             .with_label_values(&["upstream-0"])
             .set(1.0);
+        metrics
+            .kv_event_blocks
+            .with_label_values(&["upstream-0", "live", "removed"])
+            .inc();
+        metrics
+            .kv_event_clears
+            .with_label_values(&["upstream-0", "live"])
+            .inc();
         let names = registry
             .gather()
             .into_iter()
@@ -507,8 +539,27 @@ mod tests {
             "ds4proxy_exact_route_placement_total",
             "ds4proxy_compat_attested",
             "ds4proxy_kv_event_trusted",
+            "ds4proxy_kv_event_blocks_total",
+            "ds4proxy_kv_event_clears_total",
         ] {
             assert!(names.contains(expected), "missing metric family {expected}");
+        }
+    }
+
+    #[test]
+    fn cache_scorecard_series_exist_before_the_first_request() {
+        let registry = Registry::new();
+        Metrics::new(&registry).unwrap();
+        let text = prometheus::TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        for expected in [
+            r#"ds4proxy_prompt_tokens_total{endpoint="chat"} 0"#,
+            r#"ds4proxy_cached_prompt_tokens_total{endpoint="chat"} 0"#,
+            r#"ds4proxy_cache_requests_total{endpoint="chat",outcome="cold"} 0"#,
+            r#"ds4proxy_cache_ttft_seconds_count{endpoint="chat",outcome="partial"} 0"#,
+        ] {
+            assert!(text.contains(expected), "missing zero series: {expected}");
         }
     }
 }
