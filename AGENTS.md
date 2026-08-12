@@ -96,8 +96,26 @@ sends all N to one instance; a good one spreads them.
 ### Aggregate throughput regression — `bench_serving.sh N TOK`
 
 Standard N-way mixed sweep. Run after any change to confirm no throughput
-regression (target: the ~840 tok/s class at 16-way; the box is shared with
-live traffic, so expect run-to-run noise).
+regression. The current rc7 box code gate is in the 1,820–1,844 tok/s class at
+c24/max256; the box is shared with live traffic, so expect run-to-run noise.
+
+### Direct engine matrix — `engine_matrix.sh BASE MODEL LABEL`
+
+For a rolling engine/image A/B, keep production single-homed on the other
+engine and run the matched code+prose c1/c8/c16 matrix directly. The output is
+six JSONL records with usage-token throughput, TTFT, and DSpark acceptance.
+Point `METRICS_URL` at the same engine so production-wide counters do not
+contaminate the speculative deltas:
+
+```bash
+METRICS_URL=http://127.0.0.1:8013/metrics \
+  ./engine_matrix.sh http://127.0.0.1:8013 deepseek-v4-flash candidate \
+  | tee /tmp/candidate-matrix.jsonl
+```
+
+Do not interpret draft acceptance alone when comparing capacity policies: a
+pruned policy can raise the percentage by reducing its denominator. Compare
+effective tokens/step and end-to-end throughput as well.
 
 ### A/B protocol
 

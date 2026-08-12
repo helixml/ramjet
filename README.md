@@ -67,6 +67,23 @@ For reproducible node06 work, `bench/context_frontier.py` measures cold
 prefill, warm TTFT, decode throughput, and DSpark acceptance from 2K through
 the advertised context boundary. `bash bench/capture_node06.sh` records the
 effective runtime configuration and topology without emitting credentials.
+`bench/codebench.py` runs deterministic code or prose decode gates with true
+usage-token accounting. Point `METRICS_URL` at a direct engine metrics endpoint
+(or provide comma-separated `METRICS_URLS`) to record draft steps, draft-token
+acceptance, mean accepted tokens, and effective tokens per speculative step in
+the same result. Compare acceptance together with effective tokens/step and
+throughput: capacity pruning can raise the percentage simply by shrinking the
+draft-token denominator.
+
+    METRICS_URL=http://127.0.0.1:8013/metrics \
+      python3 bench/codebench.py http://127.0.0.1:8013 deepseek-v4-flash 256 16 3
+
+For a matched engine/image A/B, run the standard code+prose c1/c8/c16 matrix
+against a direct engine endpoint and capture its JSONL output:
+
+    bench/engine_matrix.sh http://127.0.0.1:8013 deepseek-v4-flash fixed \
+      | tee fixed.jsonl
+
 `bench/route_replay.py` sweeps router policies over privacy-bounded live
 decision records and splits observed warm/cold outcome latency. For native
 KV-event feasibility, `bench/tokenize_bench.py` measures the exact-tokenization

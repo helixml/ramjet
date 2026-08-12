@@ -755,3 +755,69 @@ the pre-P2P A16 range and has balanced placement, no failures, and normal TTFT.
 Given the instrumentation-only data-plane change and known live-traffic noise,
 no material regression is observed. rc7 is the production/default LB image;
 both upstream health probes are up.
+
+## 2026-08-12 — explicit KV-cache memory trial (rejected)
+
+Production stayed single-homed on engine A while engine B was rolled with the
+r34 profiler's conservative `--kv-cache-memory-bytes=53105596109` suggestion.
+The candidate reserved 49.46GiB per GPU and raised reported KV capacity from
+**3,838,897 to 3,883,559 tokens**: +44,662 tokens / **+1.16%**. It completed a
+first-use 209K-token prompt plus three cold and three warm measured requests
+without OOM, restart, or API failure. All warm samples reused 208,896 tokens.
+
+| Direct engine B gate | Automatic control | Explicit bytes |
+|---|---:|---:|
+| 209K cold prefill | 7,728.2 tok/s | 8,097.9 tok/s |
+| 209K cold TTFT median | 27,070.6ms | 25,834.5ms |
+| 209K warm TTFT median | 1,527.4ms | 1,541.4ms |
+| code c16 aggregate | 1,130.2 tok/s | 1,058.8 / 1,120.5 tok/s |
+| code c16 requests | 48/48 | 96/96 |
+
+The c16 repeat recovered to within 0.9% of control, so the first low result is
+treated as shared-box noise rather than a reproducible regression. The repeat
+also measured 50.0% draft-token acceptance and 3.50 effective tokens per
+speculative step. Despite passing the safety and performance gates, explicit
+bytes bypass vLLM memory profiling and couple available headroom to future
+image, graph, and runtime changes. A 1.16% capacity gain does not justify that
+operational fragility. Decision: retain automatic KV sizing; engine B was
+rolled back before returning it to the production upstream set.
+
+## 2026-08-12 — DSpark dynamic depth/capacity (rejected)
+
+Production remained single-homed on fixed-K5 engine A. On engine B, the fixed
+control and r34's supported `DSPARK_DEPTH_MODE=dynamic` default used the same
+image, A16 backend, NCCL/P2P path, max-seqs 16, and 4,096 scheduler ceiling.
+The candidate enabled compact varlen capacity verification, online sequential
+temperature scaling, auto SPS profiling, and dynamic physical draft depth. It
+auto-profiled a 40-draft-token budget and the following TP4 curve: 106.44
+steps/s at one token, 84.71 at four, 54.30 at 12, 34.32 at 48, and 25.20 at
+96. The six-point matrix completed 308/308 fixed+dynamic requests.
+
+| Workload | Concurrency | Fixed K5 | Dynamic default | Delta |
+|---|---:|---:|---:|---:|
+| code | 1 | 227.5 tok/s | 175.7 tok/s | **-22.8%** |
+| code | 8 | 742.2 tok/s | 671.7 tok/s | **-9.5%** |
+| code | 16 | 1,130.4 tok/s | 1,029.7 tok/s | **-8.9%** |
+| prose | 1 | 173.9 tok/s | 130.9 tok/s | **-24.7%** |
+| prose | 8 | 564.1 tok/s | 519.6 tok/s | **-7.9%** |
+| prose | 16 | 824.5 tok/s | 845.1 tok/s | +2.5% |
+
+Dynamic mode's higher reported draft-token acceptance is not a throughput win:
+it verifies a pruned denominator. Effective accepted tokens per engine step
+fell from 3.22/3.48/3.53 to 2.87/3.16/2.86 on code and from
+2.20/2.34/2.37 to 1.98/2.12/1.96 on prose. Reported KV capacity also fell
+**1.1%**, from 3,838,897 to 3,796,598 tokens. Startup was about 670 seconds,
+roughly two minutes longer than the fixed roll, including auto SPS profiling.
+
+The 33.6K-prefill + 12-decoder gate completed 36/36 decoders and 3/3 prefills
+at 501.0 aggregate tok/s, 3.48s median decoder TTFT, and 5.48s p95. Against the
+same-profile fixed reference (510.1 tok/s, 3.66s median, 4.91s p95), that is a
+1.8% throughput loss and 11.7% tail regression for a small median gain.
+
+Aggregate diagnostics exposed two actionable r34 issues. First, the launcher
+forces capacity activation at batch one even though hardware profiling chose a
+threshold of eight and logged a mismatch warning. Second, the physical draft
+controller repeatedly oscillated among depths three, four, and five; at one
+c16 snapshot it retained only 21/80 possible draft tokens. Decision: retain
+fixed K5. Revisit dynamic capacity only after profiled-threshold activation and
+controller hysteresis are fixed or explicitly exposed for a matched retest.

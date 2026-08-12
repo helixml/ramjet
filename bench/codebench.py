@@ -11,6 +11,7 @@ decoding. The prompt intentionally matches the upstream RTX PRO 6000 recipe.
 import json
 import math
 import os
+import re
 import statistics
 import sys
 import threading
@@ -45,6 +46,16 @@ if WORKLOAD not in ("code", "prose"):
     raise SystemExit("BENCH_WORKLOAD must be code or prose")
 PROMPT = os.environ.get("BENCH_PROMPT") or (CODE_PROMPT if WORKLOAD == "code" else PROSE_PROMPT)
 TEMPERATURE = float(os.environ.get("BENCH_TEMPERATURE", "0" if WORKLOAD == "code" else "0.6"))
+METRICS_URLS = [
+    value.strip()
+    for value in os.environ.get("METRICS_URLS", os.environ.get("METRICS_URL", "")).split(",")
+    if value.strip()
+]
+METRIC_NAMES = {
+    "drafts": "vllm:spec_decode_num_drafts_total",
+    "draft_tokens": "vllm:spec_decode_num_draft_tokens_total",
+    "accepted_tokens": "vllm:spec_decode_num_accepted_tokens_total",
+}
 
 
 def percentile(values, fraction):
@@ -127,10 +138,49 @@ def run_batch():
     return output, time.perf_counter() - started
 
 
+def metric_snapshot():
+    if not METRICS_URLS:
+        return None
+    try:
+        snapshot = {key: 0.0 for key in METRIC_NAMES}
+        for metrics_url in METRICS_URLS:
+            with urllib.request.urlopen(metrics_url, timeout=30) as response:
+                body = response.read().decode("utf-8", "replace")
+            for key, name in METRIC_NAMES.items():
+                matches = re.findall(
+                    r"^" + re.escape(name) + r"(?:\{[^\n]*\})?\s+([0-9.eE+-]+)$",
+                    body,
+                    re.MULTILINE,
+                )
+                if not matches:
+                    return None
+                snapshot[key] += sum(float(value) for value in matches)
+        return snapshot
+    except Exception:
+        return None
+
+
+def acceptance(before, after):
+    if before is None or after is None:
+        return None
+    delta = {key: after[key] - before[key] for key in before}
+    if min(delta.values()) < 0 or delta["draft_tokens"] <= 0 or delta["drafts"] <= 0:
+        return None
+    return {
+        "draft_steps": int(delta["drafts"]),
+        "draft_tokens": int(delta["draft_tokens"]),
+        "accepted_tokens": int(delta["accepted_tokens"]),
+        "draft_acceptance_pct": round(100 * delta["accepted_tokens"] / delta["draft_tokens"], 1),
+        "mean_accepted_per_draft": round(delta["accepted_tokens"] / delta["drafts"], 2),
+        "effective_tokens_per_step": round(1 + delta["accepted_tokens"] / delta["drafts"], 2),
+    }
+
+
 warmup, _ = run_batch()
 if not warmup or not all(item.get("ok") for item in warmup.values()):
     raise SystemExit("warmup failed: " + json.dumps(warmup, sort_keys=True))
 
+metrics_before = metric_snapshot()
 batches = []
 requests = []
 for _ in range(RUNS):
@@ -167,6 +217,7 @@ result = {
         route: sum(1 for item in good if item.get("route") == route)
         for route in sorted({item.get("route") for item in good if item.get("route") is not None})
     },
+    "dspark": acceptance(metrics_before, metric_snapshot()),
 }
 errors = [item["error"] for item in requests if not item.get("ok")]
 if errors:
