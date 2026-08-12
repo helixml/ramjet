@@ -40,7 +40,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/helixml/ds4-loadbalancer
+          images: ghcr.io/helixml/mini-dynamo
           tags: |
             type=sha,prefix=rust-
             type=ref,event=tag

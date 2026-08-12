@@ -144,8 +144,10 @@ node06). The design rationale for each lives in DESIGN.md.
 
 - 🔨 **CI + package publishing.** Rust fmt/clippy/test/release checks and an
   amd64 distroless image publisher are present on the rewrite branch. Validate
-  the first workflow and public GHCR pull, then mark complete. Manual publishing
-  is now possible with the current package scope.
+  the first `ghcr.io/helixml/mini-dynamo` workflow and public GHCR pull, then
+  mark complete. The legacy `ds4-loadbalancer` package rejects this repository's
+  Actions token, so Rust uses the repository-owned package rather than sharing
+  that package permission boundary.
 - ⬜ **Secure post-deploy Helix acceptance.** The retired plaintext key now
   returns 401 and has been removed from both node06 guides. Confirm revocation,
   clean Git history if policy requires it, and inject a current smoke-test key
