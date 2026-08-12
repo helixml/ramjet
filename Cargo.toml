@@ -6,6 +6,9 @@ rust-version = "1.95"
 description = "Token- and KV-cache-aware inference router"
 license = "Apache-2.0"
 repository = "https://github.com/helixml/mini-dynamo"
+publish = false
+readme = false
+include = ["src/**", "examples/**", "compat/**", "Cargo.toml", "Cargo.lock"]
 
 [dependencies]
 anyhow = "1.0.104"

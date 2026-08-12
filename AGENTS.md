@@ -80,6 +80,13 @@ dependency artifacts (including failed runs), and Drone fans Rust, Go, and the
 GPU-free protocol suite out in parallel. If a no-dependency CI change still
 does a cold compile, inspect the cache action before accepting the delay.
 
+`Cargo.toml` deliberately limits the crate package to Rust sources, examples,
+compatibility fixtures, and Cargo manifests. This keeps edits under `bench/`
+and the operational Markdown files from invalidating the thin-LTO release
+artifact. If a non-Rust edit unexpectedly triggers an 18–20s relink, run
+`cargo package --allow-dirty --list` and remove the accidental package input;
+do not paper over it with another target directory.
+
 The router is the interesting surface — `src/router.rs` contains the active
 Rust tests and Go-generated fingerprint goldens; `pkg/router/router_test.go`
 is the cutover oracle. Add a Rust test for every routing change and retain a
@@ -169,6 +176,29 @@ SALT=$(date +%s) ./locality_bench.sh http://127.0.0.1:8006 3 4 2
 # cold prefills = rows with cached==0; count them:
 #   awk 'NF==6 && $5==0' <output>
 ```
+
+### Cache scorecard — `cachebench.py BASE MODEL`
+
+Prefer the Python scorecard when changing cache metrics or measuring a working
+set. It streams synthetic requests, round-robins apps before reuse, and
+requires response usage, LB counters, and summed native engine counters to
+reconcile. A zero-spread run is evidence that unrelated production traffic did
+not contaminate the cell:
+
+```bash
+python3 cachebench.py http://127.0.0.1:8006 deepseek-v4-flash \
+  --apps 1,4,8 --sessions 2 --turns 2 --prefix-kib 32 \
+  --metrics-url http://127.0.0.1:8007/metrics \
+  --engine-metrics http://127.0.0.1:8012/metrics \
+  --engine-metrics http://127.0.0.1:8013/metrics \
+  --salt "$(date +%s%N)" --require-reconciled
+```
+
+Always use a fresh salt. With one app and one session, 2/4/10/20/100 turns
+produce controlled request-reuse targets of 50/75/90/95/99%; do not call that
+the token hit ratio—the runner reports both separately. Increase app count and
+prefix size to grow the working set. Keep these cells sequential because
+reuse distance, cache residency, and counter deltas are the experiment.
 
 ### Concurrent same-app load — `concurrent_sameapp.sh BASE N SALT TOK`
 

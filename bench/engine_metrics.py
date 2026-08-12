@@ -9,6 +9,9 @@ import urllib.request
 COUNTERS = {
     "preemptions": "vllm:num_preemptions_total",
     "prompt_tokens": "vllm:prompt_tokens_total",
+    "cached_prompt_tokens": "vllm:prompt_tokens_cached_total",
+    "prefix_queries": "vllm:prefix_cache_queries_total",
+    "prefix_hits": "vllm:prefix_cache_hits_total",
     "queue_seconds_sum": "vllm:request_queue_time_seconds_sum",
     "queue_samples": "vllm:request_queue_time_seconds_count",
     "prefill_seconds_sum": "vllm:request_prefill_time_seconds_sum",
@@ -62,6 +65,13 @@ def delta(before, after):
     result["prefill_ms_mean"] = (
         round(1000 * result["prefill_seconds_sum"] / prefill_samples, 2)
         if prefill_samples and result["prefill_seconds_sum"] is not None
+        else None
+    )
+    prefix_queries = result["prefix_queries"]
+    prefix_hits = result["prefix_hits"]
+    result["prefix_hit_pct"] = (
+        round(100 * prefix_hits / prefix_queries, 2)
+        if prefix_queries and prefix_hits is not None
         else None
     )
     return result

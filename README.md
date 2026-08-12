@@ -233,3 +233,9 @@ and records engine-native queue/prefill histogram deltas, preemptions, and peak
 running/waiting/KV gauges alongside per-request TTFT and decode throughput.
 Point it at the same direct engine and keep unrelated production traffic off
 that engine while interpreting the deltas.
+`bench/cachebench.py` generates fresh-salt synthetic app working sets and
+reports request/token reuse, TTFT, route split, reuse distance, prefill/queue
+time, preemptions, and cache outcomes. With both engine metric URLs and the LB
+metric URL supplied, `--require-reconciled` fails unless response usage, LB
+counters, native prompt/cache counters, native prefix query/hit counters, and
+request sample counts all agree within the configured tolerance.
