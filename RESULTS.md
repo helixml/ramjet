@@ -25,7 +25,8 @@ placement. Current measured landmarks:
 | r34 KV shadow qualification | **both engines; replay + 2,442-removal eviction soak; trusted** |
 | r19 exact-score shadow | **15 agree / 3 cold / 1 forced move; 14,336-token miss detected** |
 | r20 attested pre-route shadow | **15 agree / 3 cold; forced miss found 36,096 warm tokens before mutation** |
-| r21 isolated exact placement canary | **2 moves / 2 agrees; 32,768 cached tokens on all 4 forced-warm requests** |
+| r21 exact placement canary | **2 moves / 2 agrees; 32,768 cached tokens on all 4 forced-warm requests** |
+| r21 production shadow policy | **71.6% locality; c12 566 tok/s; c16/max512 1,343 tok/s; 28/28 requests** |
 
 Two r34 candidates were explicitly rejected after rolling B-only trials:
 manual KV bytes gained just 1.16% capacity while bypassing runtime profiling;
@@ -57,13 +58,14 @@ matched c16/max512 runs had a 1,343.4 tok/s r19 median versus 1,362.1 for r12
 (-1.4%, within box noise); the matched long-prompt pair had identical 112,128
 cached tokens and overlapping warm latency.
 
-Public r20 is now the production LB with event publishers enabled on
-container-only ports and manifest-attested exact routing in shadow mode. The
-LB-only promotion left both engine processes and KV caches intact. Both runtime
-identities attested and late-subscriber replay restored both authoritative
-inventories. The post-deploy gates passed at 71.6% locality, 578 tok/s for a
-6/6 c12 same-app split, and 1,370.3 tok/s for c16/max512, with every request
-HTTP 200. Exact state remains telemetry-only and cannot change placement.
+Public r21 is now the production LB with event publishers enabled on
+container-only ports, manifest-attested exact routing, and the gated placement
+policy evaluated in non-mutating shadow mode. The LB-only promotion left both
+engine processes and KV caches intact. Both runtime identities attested and
+late-subscriber replay restored both authoritative inventories. The
+post-deploy gates passed at 71.6% locality, 566 tok/s for a 6/6 c12 same-app
+split, and 1,343.2 tok/s for c16/max512, with all 28 requests successful.
+Exact state remains telemetry-only and cannot change placement.
 
 r20 removes the concurrency ambiguity without enabling exact placement. A
 SHA-pinned manifest replays ten local token-vector goldens at startup and
@@ -79,8 +81,8 @@ served normally through the approximate fallback. Two matched short-prompt
 c16/max512 samples averaged 1,342 tok/s through r20 versus 1,350 through r19
 (-0.6%, inside shared-box noise). Exact placement remains disabled.
 
-r21 is currently an isolated, default-off placement canary; production remains
-on r20 shadow. A constructed four-request run warmed each fresh 228,791-byte
+r21's placement mode remains default-off; only its non-mutating policy shadow
+is in production. A constructed four-request run warmed each fresh 228,791-byte
 prompt only on engine A. Exact placement retained two approximate agreements
 and corrected two approximate misses, sending all four requests to A where
 usage reported 32,768 cached tokens. Its matched 2-app locality gate was
@@ -99,7 +101,14 @@ The follow-up `718012c` shadow-policy canary then observed a constructed
 cached tokens, proving the counterfactual metric cannot affect placement. Two
 reverse-order c16/max256 pairs averaged 1,192 tok/s through the canary versus
 1,221 through r20 (-2.3%, within the shared-box noise band); all 64 requests
-succeeded.
+succeeded. The public r21 promotion then recorded two agreements and 12
+all-zero decisions in its initial qualification gates; production has not yet
+produced an organic `would_move` sample.
+The 2,048-batch/20-second replay setting recovered authoritative inventories
+of 1.53M and 1.27M token IDs. The initial simultaneous full replays exposed
+publisher-side stale identity/backpressure behavior after aborted requests;
+serving stayed healthy and exact routing remained fenced until later contiguous
+replays restored trust.
 
 ## Cache locality — TIE (no regression, no win at this scale)
 

@@ -30,9 +30,9 @@ node06). The design rationale for each lives in DESIGN.md.
   `rust-*` images, then run locality, concurrent same-app, c24 aggregate, route
   telemetry, and occasional Helix workflow acceptance before promotion. Go
   remains an LB-only rollback; neither engine is restarted for proxy trials.
-  Public r20 is live with both r34 publishers and manifest-attested pre-route
-  exact scoring in observation-only shadow mode. Exact state is not exposed to
-  placement.
+  Public r21 is live with both r34 publishers, manifest-attested pre-route
+  exact scoring, and the placement policy in observation-only shadow mode.
+  Exact state is not exposed to placement.
 - ✅ **Bounded remote tokenizer shadow.** The one-pass boundary selectively
   derives chat/completion `/tokenize` payloads, then submits them only after the
   user request completes. Authenticated calls use a bounded non-blocking queue,
@@ -116,17 +116,27 @@ node06). The design rationale for each lives in DESIGN.md.
   retaining the attestation, health, event-trust, inventory-revision, CPU, and
   timeout fences. An isolated node06 trial corrected 2/2 constructed
   approximate misses and kept 2/2 existing exact agreements; all four requests
-  reused 32,768 tokens on the deliberately warmed engine. Production remains
-  r20 shadow-only. An intentional canary-only restart then proved recovery:
+  reused 32,768 tokens on the deliberately warmed engine. An intentional
+  canary-only restart then proved recovery:
   the first long request fell back as `inventory_untrusted`, B replayed 943
   batches, A stayed fenced until its own event and replayed 885 batches, and
   the recovered gate again corrected 2/2 forced misses. r21 now also exports
   the identical gated decision as `mode="shadow"` without mutating the route;
   a real forced miss stayed cold on B while telemetry reported `would_move`.
-  Next promote only this observation mode and collect representative organic
-  move/gain/load distributions before considering a narrowly admitted
-  placement rollout. Raw token IDs, block hashes, and prompts remain out of
-  logs.
+  Public r21 now runs only this observation mode. Its initial qualification
+  gates recorded two agreements and 12 cold/all-zero decisions; production has
+  not yet produced an organic move. Collect representative organic
+  move/gain/load distributions before
+  considering a narrowly admitted placement rollout. Raw token IDs, block
+  hashes, and prompts remain out of logs.
+- ⬜ **Replay cancellation and publisher-backpressure resilience.** Production
+  inventories crossed the old 1,024-batch replay cap, so the qualified defaults
+  are now 2,048 batches and a 20-second fail-closed deadline. After simultaneous
+  aborted full replays, stale ROUTER/DEALER identities temporarily delayed new
+  full requests even though a direct contiguous 0..1083 replay completed in
+  about one second. Add deterministic cancellation/identity tests, recovery
+  telemetry, and either unique consumer identities or chunked/snapshot replay;
+  keep exact placement fenced throughout recovery.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
   vectors rather than restarting; benchmark memory, p99 preparation latency,
@@ -219,10 +229,12 @@ node06). The design rationale for each lives in DESIGN.md.
   under the package's **Manage Actions access**, rerun the failed job, and
   verify an anonymous pull before marking complete. Do not replace this
   one-time ACL with a long-lived PAT secret.
-- ⬜ **Secure post-deploy Helix acceptance.** The retired plaintext key now
-  returns 401 and has been removed from both node06 guides. Confirm revocation,
-  clean Git history if policy requires it, and inject a current smoke-test key
-  from the secret store so every rolling promotion can close the required
+- ⬜ **Secure post-deploy Helix acceptance.** The retired plaintext key was
+  removed from both node06 guides. The separately supplied internal-account
+  credential is also unusable for the test app (HTTP 403; `/users/me` returns
+  500), so r21's real Helix workflow gate remains open even though direct LB
+  gates pass. Confirm revocation/history policy and inject a current scoped
+  smoke-test key from the secret store so every rolling promotion can close the
   control-plane-to-node06 acceptance gate automatically.
 - ✅ **Alpha/affinity auto-tuning gate.** rc5's first 114-request live replay
   reproduced the deployed `(alpha=4, cap=32)` policy exactly. All positive

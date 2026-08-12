@@ -1597,3 +1597,54 @@ The post-merge public image workflow is a separate infrastructure blocker: the
 image compiled successfully, then GHCR rejected the push with
 `permission_denied: write_package`. Grant the repository package Actions
 access and rerun; no source/build repair is indicated by that failure.
+
+## 2026-08-12 — r21 production shadow promotion and replay-window recovery
+
+The public multi-architecture image
+`ghcr.io/helixml/ds4-loadbalancer:rust-r21-shadow-policy-718012c` (digest
+`sha256:12bb463ad554099e856b3b5a8beb6a23002cdf2d3da96efea57b59f2834d49f3`)
+replaced r20 in production with `DS4_EXACT_ROUTE_MODE=shadow`. This was an
+LB-only swap: A and B retained their 12:11Z/12:21Z start times and zero restart
+counts, so neither engine nor its KV cache was disturbed. `/health` returned
+`ok` with 2/2 replicas, both runtime compatibility gauges attested, and the LB
+had no error/panic/fatal logs.
+
+The retained publisher histories had grown beyond the old 1,024-batch replay
+limit. A 2,048-batch request with the old five-second deadline timed out on B;
+raising the fail-closed deadline to 20 seconds recovered 1,051 batches in four
+seconds in the isolated canary. During the production roll, overlapping full
+replays from the old canary and the new LB initially timed out, and immediate
+retries could remain queued behind stale ROUTER/DEALER identities. A direct
+privacy-bounded protocol probe established that A's retained 0..1083 history
+was intact and contiguous: 1,084 batches, 5,516 `BlockStored` events, and 5,946
+indexable main hashes replayed in about one second with no gaps or removals.
+After that drain, Rust recovered A's 1,076 retained batches in five seconds;
+B independently recovered 1,084 batches in four seconds. Both inventories are
+now generation-zero trusted at 5,985/4,963 nodes and
+1,532,160/1,270,528 token IDs. The working diagnosis is stale replay-client
+backpressure after aborted full requests, not corrupt publisher history. The
+entire interval failed closed to approximate routing while `/health` remained
+available.
+
+Post-promotion qualification used fresh prompts:
+
+- locality, 2 apps × 2 sessions × 2 turns: 8/8 successful, 71.6% cache hit;
+- same-app c12/max128: 12/12, exact 6/6 split, 566 aggregate tok/s;
+- aggregate c16/max512: 16/16, 1,343.2 aggregate tok/s;
+- exact pre-route: 14 tokenizations, all remote parity matches; policy shadow
+  recorded two `kept_agree` and 12 `kept_all_zero`, with no organic
+  `would_move` in this small initial sample.
+
+The populated LB used about 301MiB RSS. It retained zero restarts, both engine
+health gauges stayed one, and both engine containers remained untouched. The
+infra compose update pins r21 plus the qualified 2,048-batch/20-second replay
+defaults; r20 is the LB-only rollback. Exact placement remains off until the
+organic shadow distribution is large enough and replay cancellation/backpressure
+has a deterministic recovery test.
+
+The required real Helix workflow check did not reach inference. The supplied
+internal-account credential received HTTP 403 for both the named test app and
+`POST /api/v1/sessions/chat`; `/api/v1/users/me` returned 500. This is recorded
+as an authentication/control-plane blocker rather than an r21 inference
+failure. A current scoped smoke-test credential is still required to close the
+end-to-end acceptance gate.
