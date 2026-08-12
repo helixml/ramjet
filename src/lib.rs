@@ -1,3 +1,4 @@
+pub mod compat;
 pub mod config;
 pub mod exact_index;
 pub mod exact_shadow;

@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use serde_json::{Map, Value};
 
 use crate::{
@@ -13,7 +14,7 @@ use crate::{
 pub struct PreparedRequest {
     pub body: Vec<u8>,
     pub fingerprints: Vec<u64>,
-    pub tokenizer_body: Option<Vec<u8>>,
+    pub tokenizer_body: Option<Bytes>,
 }
 
 impl PreparedRequest {
@@ -50,7 +51,8 @@ impl PreparedRequest {
                     .as_ref()
                     .and_then(|object| tokenization_body(endpoint, object))
             })
-            .flatten();
+            .flatten()
+            .map(Bytes::from);
         Self {
             body,
             fingerprints,

@@ -24,6 +24,7 @@ placement. Current measured landmarks:
 | 209K warm cached tokens | **208,896** |
 | r34 KV shadow qualification | **both engines; replay + 2,442-removal eviction soak; trusted** |
 | r19 exact-score shadow | **15 agree / 3 cold / 1 forced move; 14,336-token miss detected** |
+| r20 attested pre-route shadow | **15 agree / 3 cold; forced miss found 36,096 warm tokens before mutation** |
 
 Two r34 candidates were explicitly rejected after rolling B-only trials:
 manual KV bytes gained just 1.16% capacity while bypassing runtime profiling;
@@ -61,6 +62,20 @@ caches intact. Late-subscriber replay restored both authoritative inventories;
 the post-deploy gates passed at 64.8% locality, 568 tok/s for a 6/6 c12
 same-app split, and 1,351.9 tok/s for c16/max512, with every request HTTP 200.
 Exact state remains telemetry-only.
+
+r20 removes the concurrency ambiguity without enabling exact placement. A
+SHA-pinned manifest replays ten local token-vector goldens at startup and
+continuously attests both engines' model identity and r34 `/version`. With the
+production 32KiB admission threshold and eight non-blocking CPU permits, the
+final 3-app × 3-session × 2-turn gate passed 18/18 at 78.9% cache hit; the
+pre-route scorer recorded 15 agreements and three cold decisions. c12 passed
+12/12 with a 6/6 split at 564 tok/s. A prompt warmed directly only on A was
+approximately routed cold to B, while the pre-route exact lookup found 36,096
+tokens on A and emitted `would_move` before either inventory could be mutated.
+A wrong-version negative control kept both attestation gauges at zero and
+served normally through the approximate fallback. Two matched short-prompt
+c16/max512 samples averaged 1,342 tok/s through r20 versus 1,350 through r19
+(-0.6%, inside shared-box noise). Exact placement remains disabled.
 
 ## Cache locality — TIE (no regression, no win at this scale)
 

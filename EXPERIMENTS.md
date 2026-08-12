@@ -1386,3 +1386,83 @@ event mode off is the LB-only rollback. The next architectural gate is
 selective pre-route tokenization plus a versioned renderer/engine attestation;
 pre-route lookup is required to observe useful counterfactuals under concurrent
 cache mutation.
+
+## 2026-08-12 — r20 manifest-attested pre-route exact shadow
+
+r20 moves selective local tokenization ahead of the approximate decision, but
+still does not allow exact state to change candidate order. The new
+`off|shadow` exact-route mode requires local-shadow tokenization, KV-event
+shadow, and a SHA-pinned compatibility manifest. The node06 r34 manifest binds:
+
+- model `deepseek-v4-flash`, root
+  `deepseek-ai/DeepSeek-V4-Flash-0731`, and context 393,216;
+- runtime `/version`
+  `0.11.2.dev280+gilded.gnosis.v20.vllm4d006a4.b12xcd3ce19.fi1ac6942.cu132.20260810.r34`;
+- engine-image provenance
+  `sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b`;
+- tokenizer SHA-256
+  `8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf`,
+  renderer profile `deepseek-v4-r34`, nine admitted request classes, and ten
+  synthetic token-vector count/digest goldens.
+
+The local tokenizer re-renders every golden at startup. Each 15-second health
+probe also matches `/v1/models` and `/version` for every engine. Attestation is
+cleared before the asynchronous version check; a monotonic attestation revision
+rejects tokenization that overlaps an identity transition. Request admission
+also rejects known template gaps and ungoldened combinations, including tool
+history, `max`/`xhigh`, tools plus reasoning, custom templates/kwargs,
+truncation, and non-generation-prompt rendering. Eight non-blocking CPU permits
+are independent from the single post-response remote-parity worker. Permit
+pressure, timeout, unsupported input, attestation change, untrusted KV state,
+or an inventory revision change drops only the observation.
+
+The committed manifest was generated twice from direct authenticated r34
+`/tokenize` calls per case; all IDs were stable and only vector digests were
+persisted. Loading the real node06 tokenizer artifact then passed all ten local
+goldens before the test binary bound a port. The full local gate passed **83
+Rust tests**, formatting, strict all-target/all-feature Clippy, release build,
+the retained Go tests/vet/build and formatting, Python syntax, and
+`git diff --check`.
+
+Three isolated canary concurrency settings established the admission budget:
+
+- one permit: c12/max128 passed 12/12, split 6/6, at 545 tok/s; 3 tokenized and
+  9 immediately fell back as busy;
+- four permits: matched c12 runs passed at 552–556 tok/s; 4–5 tokenized before
+  the remainder fell back;
+- eight permits: c12 passed at 561 tok/s with all 12 tokenized in one
+  authoritative run. The final production-threshold build passed at 564 tok/s;
+  eight tokenized, three were busy, and one deliberately conservative fallback
+  overlapped the periodic identity recheck.
+
+Sequential local tokenization averaged about 4.1ms across short and 18.8K-token
+requests; revision-stable exact lookup averaged about 44µs. The final 32KiB-
+threshold 3 apps × 3 sessions × 2 turns gate returned 18/18, reused 266,496 of
+337,923 prompt tokens (78.9%), maintained 0.58–0.70s warm walls, and added 15
+pre-route `agree` plus three cold `all_zero` decisions. All admitted jobs later
+matched the remote r34 authority; short c16 aggregate inputs were correctly
+outside the production admission window.
+
+The decisive forced-miss control warmed a fresh 228,791-byte prompt directly
+only on A, then sent the identical request through a cold approximate router.
+The proxy chose B and B reported zero cached tokens, while the pre-route exact
+inventory found **36,096** tokens on A and emitted one `would_move` before the
+request could mutate either cache. A separate manifest with an intentionally
+wrong runtime version kept both `ds4proxy_compat_attested` gauges at zero;
+its request still returned HTTP 200 through approximate routing and recorded
+only `unattested`.
+
+Two reverse-order short c16/max512 pairs averaged 1,342.4 tok/s through r20 and
+1,350.2 through production r19, a -0.6% difference inside shared-box noise.
+All canaries had zero restarts and no proxy error/panic/fatal logs. A fresh
+late subscriber stays connected but untrusted until a publisher emits its first
+full-block event; a fresh long prefill then triggered bounded replay of roughly
+436–523 retained batches per engine and restored trust. This is a safe readiness
+property and should remain visible in rollout checks.
+
+Verdict: r20 proves exact IDs and exact KV overlap can be joined before cache
+mutation with bounded single-digit-millisecond frontend cost and independent
+fail-closed fences. It is safe to promote only in `shadow` mode at the 32KiB
+threshold with eight pre-route permits. Exact placement remains disabled until
+production shadow distributions cover move gain, load conflict, attestation
+transitions, and event recovery long enough to set a conservative route gate.

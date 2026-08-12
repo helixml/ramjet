@@ -27,6 +27,11 @@ pub struct Config {
     pub tokenizer_workers: usize,
     pub tokenizer_queue_capacity: usize,
     pub tokenizer_timeout_ms: usize,
+    pub exact_route_mode: ExactRouteMode,
+    pub exact_route_manifest_path: Option<String>,
+    pub exact_route_manifest_sha256: Option<String>,
+    pub exact_route_workers: usize,
+    pub exact_route_timeout_ms: usize,
     pub kv_event_mode: KvEventMode,
     pub kv_event_sources: Vec<KvEventSourceConfig>,
     pub kv_event_replay_limit: usize,
@@ -52,6 +57,12 @@ pub enum TokenizerMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenizerProfile {
     DeepSeekV4R34,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExactRouteMode {
+    Off,
+    Shadow,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,6 +95,14 @@ struct KvEventSettings {
     timeout_ms: usize,
     reconnect_min_ms: usize,
     reconnect_max_ms: usize,
+}
+
+struct ExactRouteSettings {
+    mode: ExactRouteMode,
+    manifest_path: Option<String>,
+    manifest_sha256: Option<String>,
+    workers: usize,
+    timeout_ms: usize,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -161,6 +180,7 @@ impl Config {
         };
         let tokenizer = tokenizer_settings(&mut get)?;
         let kv_events = kv_event_settings(&mut get, upstreams.len())?;
+        let exact_route = exact_route_settings(&mut get, &tokenizer, &kv_events)?;
 
         Ok(Self {
             upstreams,
@@ -190,6 +210,11 @@ impl Config {
             tokenizer_workers: positive(&mut get, "DS4_TOKENIZER_WORKERS", 1)?,
             tokenizer_queue_capacity: positive(&mut get, "DS4_TOKENIZER_QUEUE_CAPACITY", 8)?,
             tokenizer_timeout_ms: positive(&mut get, "DS4_TOKENIZER_TIMEOUT_MS", 2_000)?,
+            exact_route_mode: exact_route.mode,
+            exact_route_manifest_path: exact_route.manifest_path,
+            exact_route_manifest_sha256: exact_route.manifest_sha256,
+            exact_route_workers: exact_route.workers,
+            exact_route_timeout_ms: exact_route.timeout_ms,
             kv_event_mode: kv_events.mode,
             kv_event_sources: kv_events.sources,
             kv_event_replay_limit: kv_events.replay_limit,
@@ -199,6 +224,74 @@ impl Config {
             kv_event_reconnect_max_ms: kv_events.reconnect_max_ms,
         })
     }
+}
+
+fn exact_route_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    tokenizer: &TokenizerSettings,
+    kv_events: &KvEventSettings,
+) -> Result<ExactRouteSettings, ConfigError> {
+    let mode = match get("DS4_EXACT_ROUTE_MODE").as_deref().unwrap_or("off") {
+        "off" => ExactRouteMode::Off,
+        "shadow" => ExactRouteMode::Shadow,
+        value => {
+            return Err(invalid(
+                "DS4_EXACT_ROUTE_MODE",
+                value.to_owned(),
+                "off or shadow",
+            ));
+        }
+    };
+    let manifest_path = get("DS4_EXACT_ROUTE_MANIFEST_PATH").filter(|value| !value.is_empty());
+    let manifest_sha256 = get("DS4_EXACT_ROUTE_MANIFEST_SHA256")
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    if let Some(value) = &manifest_sha256
+        && !valid_sha256(value)
+    {
+        return Err(invalid(
+            "DS4_EXACT_ROUTE_MANIFEST_SHA256",
+            value.clone(),
+            "a 64-character hexadecimal SHA-256",
+        ));
+    }
+    if mode == ExactRouteMode::Shadow {
+        if tokenizer.mode != TokenizerMode::LocalShadow {
+            return Err(invalid(
+                "DS4_EXACT_ROUTE_MODE",
+                "shadow".to_owned(),
+                "shadow requires DS4_TOKENIZER_MODE=local-shadow",
+            ));
+        }
+        if kv_events.mode != KvEventMode::Shadow {
+            return Err(invalid(
+                "DS4_EXACT_ROUTE_MODE",
+                "shadow".to_owned(),
+                "shadow requires DS4_KV_EVENT_MODE=shadow",
+            ));
+        }
+        if manifest_path.is_none() {
+            return Err(invalid(
+                "DS4_EXACT_ROUTE_MANIFEST_PATH",
+                String::new(),
+                "a compatibility manifest path in exact-route shadow mode",
+            ));
+        }
+        if manifest_sha256.is_none() {
+            return Err(invalid(
+                "DS4_EXACT_ROUTE_MANIFEST_SHA256",
+                String::new(),
+                "the expected manifest SHA-256 in exact-route shadow mode",
+            ));
+        }
+    }
+    Ok(ExactRouteSettings {
+        mode,
+        manifest_path,
+        manifest_sha256,
+        workers: positive(get, "DS4_EXACT_ROUTE_WORKERS", 4)?,
+        timeout_ms: positive(get, "DS4_EXACT_ROUTE_TIMEOUT_MS", 250)?,
+    })
 }
 
 fn kv_event_settings(
@@ -361,7 +454,7 @@ fn tokenizer_settings(
         }
     }
     if let Some(value) = &sha256
-        && (value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        && !valid_sha256(value)
     {
         return Err(invalid(
             "DS4_TOKENIZER_SHA256",
@@ -391,6 +484,10 @@ fn tokenizer_settings(
         min_bytes,
         max_bytes,
     })
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn parse<T: std::str::FromStr>(
@@ -448,6 +545,11 @@ mod tests {
         assert_eq!(config.tokenizer_workers, 1);
         assert_eq!(config.tokenizer_queue_capacity, 8);
         assert_eq!(config.tokenizer_timeout_ms, 2_000);
+        assert_eq!(config.exact_route_mode, ExactRouteMode::Off);
+        assert!(config.exact_route_manifest_path.is_none());
+        assert!(config.exact_route_manifest_sha256.is_none());
+        assert_eq!(config.exact_route_workers, 4);
+        assert_eq!(config.exact_route_timeout_ms, 250);
         assert_eq!(config.kv_event_mode, KvEventMode::Off);
         assert!(config.kv_event_sources.is_empty());
         assert_eq!(config.kv_event_replay_limit, 1_024);
@@ -522,6 +624,54 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn exact_route_shadow_requires_local_tokens_events_and_manifest() {
+        let base = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1"),
+            ("DS4_TOKENIZER_MODE", "local-shadow"),
+            ("DS4_TOKENIZER_PATH", "/models/tokenizer.json"),
+            (
+                "DS4_TOKENIZER_SHA256",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            ("DS4_EXACT_ROUTE_MODE", "shadow"),
+        ]);
+        let error = Config::from_lookup(|key| base.get(key).map(ToString::to_string)).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "DS4_EXACT_ROUTE_MODE",
+                ..
+            }
+        ));
+
+        let mut values = base;
+        values.insert("DS4_KV_EVENT_MODE", "shadow");
+        values.insert("DS4_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557");
+        values.insert("DS4_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558");
+        let error =
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "DS4_EXACT_ROUTE_MANIFEST_PATH",
+                ..
+            }
+        ));
+
+        values.insert("DS4_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json");
+        values.insert(
+            "DS4_EXACT_ROUTE_MANIFEST_SHA256",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+        assert_eq!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string))
+                .unwrap()
+                .exact_route_mode,
+            ExactRouteMode::Shadow
+        );
     }
 
     #[test]

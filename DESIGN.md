@@ -48,8 +48,12 @@ change placement. Local-shadow mode feeds Dynamo's native DeepSeek-V4 renderer
 and NVIDIA `fastokens` through bounded blocking CPU workers while the remote
 engine remains the exact-ID authority. Local tokenization work never runs on
 Tokio I/O workers. Admitted request classes must match remote IDs; known
-template-version gaps fail closed to remote-only observation. Next, this
-boundary feeds exact per-engine KV indexes.
+template-version gaps fail closed to remote-only observation. In exact-route
+shadow mode, a SHA-pinned compatibility manifest and continuous engine
+identity attestation admit selected long requests to a non-blocking pre-route
+CPU pool. Exact IDs then query every revision-stable per-engine inventory
+before the request can mutate cache state. This records a live counterfactual
+without changing the approximate candidate order.
 Exact state is fenced on event gaps and routing falls back automatically to
 the approximate chain-fingerprint index.
 
@@ -191,8 +195,8 @@ is the reference for the failure semantics below:
   return. The task exposes controlled connection, generation, trust,
   batch-outcome, bounded filter-reason, replay, and resident-size metrics and
   shuts down with the proxy.
-- `src/exact_shadow.rs` connects those inventories only to post-response
-  telemetry. At approximate decision time it snapshots each trusted
+- `src/exact_shadow.rs` connects those inventories only to telemetry. The r19
+  post-response path snapshots each trusted
   generation plus a monotonic inventory revision and retains the router's load
   snapshot. At completion, engine-reported `cached_tokens` supplies the
   selected engine's pre-request overlap so blocks created by that request
@@ -201,7 +205,13 @@ is the reference for the failure semantics below:
   missing usage, or lookup errors produce bounded fail-closed outcomes. Exact
   token overlap is mapped onto the existing approximate overlap-unit scale so
   the counterfactual changes only the cache term while holding alpha and load
-  fixed. No result is returned to route selection.
+  fixed. The r20 pre-route path instead obtains admitted local IDs under a
+  bounded CPU permit, takes the approximate load snapshot, queries all exact
+  inventories, and verifies their revisions again before recording the result.
+  `compat/deepseek-v4-r34.json` binds synthetic golden digests and local
+  artifacts to `/v1/models` plus `/version`; an attestation revision fences a
+  tokenization already in flight when identity changes. No result from either
+  path is returned to route selection.
 - Exact request lookup requires the rendered token sequence. Calling r34's
   `/tokenize` for every request costs 3.7ms at 299 tokens, 8.4ms at 4.3K,
   41ms at 21K, and 203ms at 83.7K, while returning up to 419KB of token IDs.
@@ -215,7 +225,7 @@ is the reference for the failure semantics below:
 |---|---|---|
 | NVIDIA Dynamo | KV-aware routing (overlap + load) | **v1.1 (this repo)** |
 | NVIDIA Dynamo | conditional disaggregation (cold prefill placement) | **v1.1** (size-weighted load reservation) |
-| NVIDIA Dynamo | event gaps, replay, and snapshot recovery | native feed qualification / shadow-mode design |
+| NVIDIA Dynamo | event gaps, replay, exact token-ID lookup, and `best_worker_id`-style counterfactuals | **r20 pre-route shadow**, placement still disabled |
 | [Kimi K3 / KDA](https://github.com/MoonshotAI/Kimi-K3/blob/main/k3_tech_report.pdf) | model-aware cache geometry; recurrent state remains reusable | research / benchmark |
 | Kimi K3 | primary/secondary affinity and request-class budgets | planned, scaled down to two engines |
 | DwarfStar/ds4 | per-request timings surfaced to ops | v1.0 (chat log line + histograms) |

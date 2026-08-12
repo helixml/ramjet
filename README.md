@@ -33,6 +33,9 @@ DS4_TOKENIZER_PATH, DS4_TOKENIZER_SHA256 (both required by local-shadow),
 DS4_TOKENIZER_PROFILE (deepseek-v4-r34), DS4_TOKENIZER_MIN_BYTES (32768),
 DS4_TOKENIZER_MAX_BYTES (2097152), DS4_TOKENIZER_WORKERS (1),
 DS4_TOKENIZER_QUEUE_CAPACITY (8), DS4_TOKENIZER_TIMEOUT_MS (2000),
+DS4_EXACT_ROUTE_MODE (off|shadow), DS4_EXACT_ROUTE_MANIFEST_PATH,
+DS4_EXACT_ROUTE_MANIFEST_SHA256, DS4_EXACT_ROUTE_WORKERS (4),
+DS4_EXACT_ROUTE_TIMEOUT_MS (250),
 DS4_KV_EVENT_MODE (off|shadow), DS4_KV_EVENT_LIVE_ENDPOINTS,
 DS4_KV_EVENT_REPLAY_ENDPOINTS, DS4_KV_EVENT_TOPIC (empty),
 DS4_KV_EVENT_REPLAY_LIMIT (1024), DS4_KV_EVENT_REPLAY_TAIL_LIMIT (64), and
@@ -75,6 +78,22 @@ change placement. `ds4proxy_exact_route_shadow_total` reports bounded
 `agree`, `would_move`, `tie`, `all_zero`, and fail-closed outcomes, while the
 overlap/gain histograms contain counts only. Raw token IDs and hashes never
 enter logs, journals, or metrics.
+
+`DS4_EXACT_ROUTE_MODE=shadow` moves admitted local tokenization before the
+approximate decision, then immediately scores the same load snapshot against
+all trusted exact inventories without changing candidate order. It requires
+local-shadow tokenization, KV-event shadow, and a SHA-pinned compatibility
+manifest. The manifest binds the tokenizer hash, renderer profile, model
+ID/root/context, runtime `/version`, engine-image provenance, admitted request
+classes, and synthetic token-vector goldens. Goldens are re-rendered at
+startup; `/v1/models` and `/version` are continuously re-attested for every
+engine. An identity change during tokenization, an ungoldened request shape,
+an unavailable CPU permit, timeout, event gap, or inventory revision change
+drops only the observation. The live approximate route remains authoritative.
+`ds4proxy_exact_route_preroute_total`, duration histograms, and
+`ds4proxy_compat_attested` expose controlled results. Generate a fresh manifest
+after an engine/template update with `bench/tokenizer_manifest.py`; it never
+prints or persists raw token IDs.
 
 Set `DS4_ROUTE_JOURNAL=true` to emit privacy-bounded versioned `start`/`finish`
 records to the process log. Records contain only process-local sequence IDs,
@@ -157,3 +176,6 @@ and summarizes event continuity/volume without logging the token IDs or hashes
 carried by raw events. `bench/kv_event_replay_probe.py` requests retained replay
 and reports only bounded sequence, geometry, parent-order, and per-group
 removal counts while keeping all identifiers process-local.
+`bench/forced_exact_miss.py` warms a synthetic long prompt directly on one
+engine and sends it through the proxy, creating a reproducible exact-versus-
+approximate disagreement without printing the prompt or token IDs.

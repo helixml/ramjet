@@ -11,5 +11,6 @@ LABEL org.opencontainers.image.source="https://github.com/helixml/mini-dynamo"
 # dynamo-tokenizers' PCRE2 regex backend is dynamically linked on Debian.
 COPY --from=build /lib/x86_64-linux-gnu/libpcre2-8.so.0.11.2 /lib/x86_64-linux-gnu/libpcre2-8.so.0
 COPY --from=build /mini-dynamo /mini-dynamo
+COPY compat /compat
 EXPOSE 8000 9090
 ENTRYPOINT ["/mini-dynamo"]

@@ -23,13 +23,10 @@ node06). The design rationale for each lives in DESIGN.md.
 - ✅ **Rolling Go/Rust node06 qualification.** Build and publish immutable
   `rust-*` images, then run locality, concurrent same-app, c24 aggregate, route
   telemetry, and occasional Helix workflow acceptance before promotion. Go
-  remains the instant LB-only rollback; neither engine is restarted. r4 matched
-  Go at c16/c24, preserved locality, replayed 36/36 decisions, and established
-  the rollback baseline. Locally built r12 is live in exact-token local-shadow
-  mode with KV events default-off; public r11 remains the immediate LB-only
-  rollback while GHCR Actions access is pending. A rolling r34 B-only publisher
-  trial has now qualified the Rust consumer against the real feed without
-  exposing exact state to routing.
+  remains an LB-only rollback; neither engine is restarted for proxy trials.
+  Public r19 is live with both r34 publishers and exact state observation-only.
+  r20 has now qualified manifest-attested pre-route exact scoring on an
+  isolated canary without exposing exact state to placement.
 - ✅ **Bounded remote tokenizer shadow.** The one-pass boundary selectively
   derives chat/completion `/tokenize` payloads, then submits them only after the
   user request completes. Authenticated calls use a bounded non-blocking queue,
@@ -49,12 +46,14 @@ node06). The design rationale for each lives in DESIGN.md.
   remote or approximate mode on any model/template mismatch. The node06 OpenAI
   matrix admits 10/10 exact classes; tool history and `max`/`xhigh` are fenced
   remote-only because Dynamo 5.0.1 and vLLM r34 render them differently.
-- ⬜ **Versioned renderer compatibility manifest.** Bind model/tokenizer hashes,
+- ✅ **Versioned renderer compatibility manifest.** Bind model/tokenizer hashes,
   renderer profile, engine image digest, admitted request classes, and golden
   results so an engine or template update cannot silently widen local routing.
-  Startup now enforces the exact tokenizer SHA-256 and the
-  `deepseek-v4-r34` profile; add engine-digest discovery and a machine-readable
-  golden attestation before exact IDs can influence routing.
+  The SHA-pinned r34 manifest re-renders ten synthetic token-vector goldens at
+  startup and continuously matches each engine's model ID/root/context and
+  `/version`. Image digest is recorded as provenance because Docker does not
+  expose it inside the proxy container. Any mismatch or identity change fences
+  in-flight tokenization and falls back to approximate routing.
 - 🔨 **Exact KV-event shadow index.** The transport-independent sequence fence
   now starts untrusted, requests bounded contiguous replay on gaps, increments
   generations on restart/unrecoverable recovery, and admits exact state after
@@ -101,10 +100,16 @@ node06). The design rationale for each lives in DESIGN.md.
   original load snapshot. The node06 gate recorded 15 agreements, three cold
   decisions, and one deliberately constructed 14,336-token `would_move`; all
   28 concurrent comparisons failed closed on changing alternative revisions.
-  Next move selective exact IDs into the pre-route preparation boundary so
-  live concurrent choices can be observed before mutation, gated by a
-  versioned renderer/engine attestation, before enabling placement. Raw token
-  IDs, block hashes, and prompts remain out of logs.
+  r20 now moves admitted exact IDs into the pre-route preparation boundary:
+  eight non-blocking CPU permits observed all 12 requests at c12, exact lookup
+  averaged tens of microseconds, and the 3×3×2 locality gate produced 15
+  agreements plus three cold decisions without post-response revision
+  ambiguity. A forced approximate miss found 36,096 warm tokens on the other
+  engine before mutation. Placement is still disabled. Next accumulate a
+  production shadow distribution of move/gain/load outcomes, then add an
+  explicit opt-in exact placement mode with the same attestation, event, and
+  revision fences plus instant approximate fallback. Raw token IDs, block
+  hashes, and prompts remain out of logs.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
   vectors rather than restarting; benchmark memory, p99 preparation latency,

@@ -5,7 +5,7 @@
 //! changed since the approximate decision. This prevents the completed request
 //! from teaching the shadow scorer the answer after the fact.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use crate::{
     kv_consumer::SharedFencedInventory,
@@ -94,6 +94,16 @@ impl ExactRouteShadow {
         }
     }
 
+    /// Whether every configured inventory is currently authoritative.
+    #[must_use]
+    pub fn ready(&self) -> bool {
+        !self.inventories.is_empty()
+            && self
+                .inventories
+                .iter()
+                .all(|inventory| inventory.read().trusted())
+    }
+
     /// Captures the exact inventory generation visible at approximate routing
     /// time without retaining any locks across request I/O.
     #[must_use]
@@ -131,6 +141,27 @@ impl ExactRouteShadow {
             .exact_route_shadow
             .with_label_values(&[backend, endpoint.label(), result.outcome.label()])
             .inc();
+        self.record_result(endpoint, &result);
+    }
+
+    /// Compare the approximate decision with one revision-stable exact lookup
+    /// before the selected engine can mutate its cache. The result is telemetry
+    /// only and never changes `decision.candidates`.
+    pub fn observe_pre_route(&self, endpoint: Endpoint, token_ids: &[u32], decision: &Decision) {
+        let started = Instant::now();
+        let result = self.evaluate_pre_route(token_ids, decision);
+        self.metrics
+            .exact_route_preroute_duration
+            .with_label_values(&[endpoint.label(), "lookup"])
+            .observe(started.elapsed().as_secs_f64());
+        self.metrics
+            .exact_route_preroute
+            .with_label_values(&[endpoint.label(), result.outcome.label()])
+            .inc();
+        self.record_result(endpoint, &result);
+    }
+
+    fn record_result(&self, endpoint: Endpoint, result: &ShadowResult) {
         if matches!(
             result.outcome,
             ShadowOutcome::Agree
@@ -153,6 +184,93 @@ impl ExactRouteShadow {
                     result.best_tokens.saturating_sub(result.selected_tokens),
                 ));
         }
+    }
+
+    fn evaluate_pre_route(&self, token_ids: &[u32], decision: &Decision) -> ShadowResult {
+        let failure = |outcome| ShadowResult {
+            outcome,
+            selected_tokens: 0,
+            best_tokens: 0,
+        };
+        if self.inventories.is_empty() {
+            return failure(ShadowOutcome::NoInventories);
+        }
+        let Some(&selected) = decision.candidates.first() else {
+            return failure(ShadowOutcome::CandidateMismatch);
+        };
+        if decision.candidate_state.len() != self.inventories.len() {
+            return failure(ShadowOutcome::CandidateMismatch);
+        }
+        let markers = self
+            .inventories
+            .iter()
+            .map(|inventory| {
+                let inventory = inventory.read();
+                inventory.trusted().then(|| InventoryMarker {
+                    generation: inventory.generation(),
+                    revision: inventory.revision(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut seen = vec![false; self.inventories.len()];
+        let mut overlaps = vec![None; self.inventories.len()];
+        for candidate in &decision.candidate_state {
+            if candidate.index >= self.inventories.len() || seen[candidate.index] {
+                return failure(ShadowOutcome::CandidateMismatch);
+            }
+            seen[candidate.index] = true;
+            if !candidate.healthy {
+                continue;
+            }
+            let Some(marker) = markers[candidate.index] else {
+                return failure(ShadowOutcome::InventoryUntrusted);
+            };
+            let inventory = self.inventories[candidate.index].read();
+            if !inventory.trusted() {
+                return failure(ShadowOutcome::InventoryUntrusted);
+            }
+            if inventory.generation() != marker.generation
+                || inventory.revision() != marker.revision
+            {
+                return failure(ShadowOutcome::InventoryChanged);
+            }
+            let Ok(exact_match) = inventory.find_longest(token_ids) else {
+                return failure(ShadowOutcome::LookupError);
+            };
+            let Some(exact_match) = exact_match else {
+                return failure(ShadowOutcome::InventoryUntrusted);
+            };
+            overlaps[candidate.index] = Some(exact_match.token_ids);
+        }
+        if seen.iter().any(|seen| !seen) {
+            return failure(ShadowOutcome::CandidateMismatch);
+        }
+        for candidate in decision
+            .candidate_state
+            .iter()
+            .filter(|candidate| candidate.healthy)
+        {
+            let Some(marker) = markers[candidate.index] else {
+                return failure(ShadowOutcome::InventoryUntrusted);
+            };
+            let inventory = self.inventories[candidate.index].read();
+            if !inventory.trusted() {
+                return failure(ShadowOutcome::InventoryUntrusted);
+            }
+            if inventory.generation() != marker.generation
+                || inventory.revision() != marker.revision
+            {
+                return failure(ShadowOutcome::InventoryChanged);
+            }
+        }
+        classify(
+            selected,
+            token_ids.len(),
+            &overlaps,
+            decision,
+            self.alpha,
+            self.max_overlap_units,
+        )
     }
 
     fn evaluate(
@@ -477,6 +595,53 @@ mod tests {
                 - 1.0)
                 .abs()
                 < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn pre_route_shadow_observes_both_inventories_before_mutation() {
+        let selected = trusted_inventory(Vec::new());
+        let alternative = trusted_inventory(vec![store(&[1, 2, 3, 4])]);
+        let registry = Registry::new();
+        let metrics = Arc::new(Metrics::new(&registry).unwrap());
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+        );
+        shadow.observe_pre_route(Endpoint::Chat, &[1, 2, 3, 4], &decision());
+        assert!(
+            (metrics
+                .exact_route_preroute
+                .with_label_values(&["chat", "would_move"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn readiness_requires_every_inventory_to_be_authoritative() {
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        let trusted = trusted_inventory(Vec::new());
+        let untrusted = Arc::new(parking_lot::RwLock::new(FencedExactKvInventory::new(
+            8,
+            ExactIndexLimits::default(),
+        )));
+        assert!(
+            ExactRouteShadow::new(Arc::from([trusted.clone()]), Arc::clone(&metrics), 1.0, 8)
+                .ready()
+        );
+        assert!(
+            !ExactRouteShadow::new(
+                Arc::from([trusted, untrusted]),
+                Arc::clone(&metrics),
+                1.0,
+                8
+            )
+            .ready()
         );
     }
 }

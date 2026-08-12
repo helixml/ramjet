@@ -23,11 +23,12 @@ use crate::{
     prepare::PreparedRequest,
     router::{Decision, LoadGuard, Router},
     shims::{self, Endpoint},
-    tokenizer::TokenizerObserver,
+    tokenizer::{ExactTokens, TokenizerObserver},
     usage::{Accumulator, feed_sse_chunk},
 };
 
 const MAX_REQUEST_BODY: usize = 64 << 20;
+const MAX_PROBE_BODY: usize = 64 << 10;
 const STREAM_BUFFER_CHUNKS: usize = 8;
 
 #[derive(Clone)]
@@ -136,7 +137,21 @@ impl Proxy {
             &self.inner.router,
             prepare_tokenizer_body,
         );
+        let tokenizer_body = prepared.tokenizer_body.clone();
+        let pre_route_tokens = if prepare_tokenizer_body {
+            self.inner
+                .tokenizer
+                .prepare_pre_route(endpoint, tokenizer_body.as_ref())
+                .await
+        } else {
+            None
+        };
         let decision = prepared.route(&self.inner.router);
+        if let Some(tokens) = &pre_route_tokens {
+            self.inner
+                .tokenizer
+                .observe_pre_route(endpoint, tokens, &decision);
+        }
         let exact_route_snapshot =
             prepare_tokenizer_body.then(|| self.inner.tokenizer.capture_route(&decision));
         let fingerprints = if endpoint == Endpoint::Other {
@@ -144,7 +159,6 @@ impl Proxy {
         } else {
             prepared.fingerprints
         };
-        let tokenizer_body = prepared.tokenizer_body;
         let body = Bytes::from(prepared.body);
         self.inner
             .metrics
@@ -278,6 +292,7 @@ impl Proxy {
                     streaming,
                     fingerprints,
                     tokenizer_body,
+                    pre_route_tokens,
                     prepare_tokenizer_body,
                     exact_route_snapshot,
                     decision,
@@ -303,7 +318,8 @@ impl Proxy {
         status: StatusCode,
         streaming: bool,
         fingerprints: Vec<u64>,
-        tokenizer_body: Option<Vec<u8>>,
+        tokenizer_body: Option<Bytes>,
+        pre_route_tokens: Option<ExactTokens>,
         tokenizer_selected: bool,
         exact_route_snapshot: Option<ExactRouteSnapshot>,
         decision: Decision,
@@ -388,6 +404,7 @@ impl Proxy {
                         tokenizer_body,
                         usage.cached.and_then(f64_to_usize),
                         route_snapshot,
+                        pre_route_tokens,
                     );
                 }
             }
@@ -644,14 +661,32 @@ impl Proxy {
             request = request.bearer_auth(token);
         }
         let result = request.send().await;
-        let (healthy, reason) = match result {
-            Ok(response) if response.status() == StatusCode::OK => match response.bytes().await {
-                Ok(_) => (true, ""),
-                Err(error) => (false, upstream_error_reason(&error)),
-            },
-            Ok(_) => (false, "http"),
-            Err(error) => (false, upstream_error_reason(&error)),
+        let (healthy, reason, models_body) = match result {
+            Ok(response) if response.status() == StatusCode::OK => {
+                if response
+                    .content_length()
+                    .is_some_and(|size| size > MAX_PROBE_BODY as u64)
+                {
+                    (false, "response_too_large", None)
+                } else {
+                    match response.bytes().await {
+                        Ok(body) if body.len() <= MAX_PROBE_BODY => (true, "", Some(body)),
+                        Ok(_) => (false, "response_too_large", None),
+                        Err(error) => (false, upstream_error_reason(&error), None),
+                    }
+                }
+            }
+            Ok(_) => (false, "http", None),
+            Err(error) => (false, upstream_error_reason(&error), None),
         };
+        if let Some(models_body) = models_body {
+            self.inner
+                .tokenizer
+                .attest_upstream(upstream, &models_body)
+                .await;
+        } else {
+            self.inner.tokenizer.invalidate_attestation(upstream);
+        }
         self.mark_probe(upstream, healthy, reason);
         self.inner
             .metrics
