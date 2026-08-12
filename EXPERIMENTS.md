@@ -1857,8 +1857,33 @@ mechanistically testable without relying only on end-to-end TTFT. A tiny
 engine queue time, 361.39ms mean prefill time, and 690.7ms decoder TTFT. The
 collector's 21 GPU-free tests pass in about 0.2s locally.
 
-No engine was restarted or reconfigured for this slice. The next controlled
-step is a rolling A/B at fixed global 4,096: production single-homed away from
-the candidate, thresholds 1,024/2,048/4,096 with total/long partial-prefill
-limits 2/1, both arrival orders, and three matched runs. Engine-global deltas
-must not be interpreted while unrelated production traffic can hit that engine.
+The subsequent rolling B-only trial first single-homed production on healthy A
+and held the global budget at 4,096. The 1/1/disabled baseline used a fresh
+roughly 52K-token prefill beside eight 128-token decoders for three runs in
+each arrival order. Prefill-first completed 24/24 decoders at 173.8 aggregate
+output tok/s, with 5,083ms median decoder TTFT, 5,135ms median prefill TTFT,
+eight requests waiting at peak, 3,573.68ms mean engine queue time, and zero
+preemptions. Decode-first completed 24/24 at 146.0 aggregate output tok/s,
+833.9ms median decoder TTFT, 5,740ms median prefill TTFT, no waiting, 0.01ms
+mean queue time, and zero preemptions. This confirms arrival order creates a
+large, directly observable queueing effect under the current scheduler.
+
+The candidate `2/1/2048` cell could not start: the pinned vLLM/DSpark binary
+raises `NotImplementedError: Concurrent Partial Prefill is not supported`
+during argument validation. It restarted four times before the readiness check
+surfaced the failure; no candidate request was served. A remained healthy and
+served production throughout. B was immediately recreated from the unmodified
+compose recipe, its argv was checked to contain none of the candidate flags,
+and the normal two-engine LB configuration was restored after readiness. The
+baseline B recreation took 9m28s from container start to `/health`, dominated
+by weight load, compilation, KV profiling, and CUDA-graph capture; the LB swap
+back to two healthy replicas took under 7s. The equivalent read-only
+`EngineArgs._check_feature_supported()` preflight rejected the candidate in
+16.5s.
+
+Verdict: do not sweep 1,024/2,048/4,096 on r34—the threshold is inert unless
+`max_num_partial_prefills > 1`, and that mode is explicitly unsupported by this
+backend. Retain 1/1/disabled. Revisit only after an engine upgrade advertises
+concurrent-partial-prefill support; add a fail-fast capability probe before any
+future rolling restart so an unsupported flag combination never enters a
+restart loop again.
