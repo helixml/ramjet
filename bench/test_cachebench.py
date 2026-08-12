@@ -4,6 +4,7 @@ from unittest import mock
 from cachebench import (
     aggregate_engine_delta,
     cache_outcome,
+    execute_waves,
     fetch_lb_metrics,
     latency_by_outcome,
     nonnegative_delta,
@@ -11,6 +12,7 @@ from cachebench import (
     reconcile,
     summarize,
     workload_coordinates,
+    workload_waves,
 )
 
 
@@ -39,6 +41,27 @@ class CacheBenchTest(unittest.TestCase):
         self.assertEqual(
             list(workload_coordinates(2, 2, 1)),
             [(0, 0, 1), (1, 0, 1), (0, 1, 1), (1, 1, 1)],
+        )
+
+    def test_concurrent_waves_keep_cold_to_reuse_barrier(self):
+        completed_cold = set()
+
+        def execute(coordinate):
+            app, session, _turn = coordinate
+            if session == 0:
+                completed_cold.add(app)
+            else:
+                self.assertEqual(completed_cold, {0, 1, 2})
+            return {"ok": True}
+
+        records = execute_waves(3, 2, 1, 2, execute)
+        self.assertEqual(
+            [(record["app"], record["session"]) for record in records],
+            [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)],
+        )
+        self.assertEqual(
+            list(workload_waves(2, 2, 1)),
+            [[(0, 0, 1), (1, 0, 1)], [(0, 1, 1), (1, 1, 1)]],
         )
 
     def test_app_list_and_cache_outcomes_are_bounded(self):
@@ -150,6 +173,9 @@ class CacheBenchTest(unittest.TestCase):
         self.assertEqual(summary["completion_tokens"], 8)
         self.assertEqual(summary["total_tok_s"], 408)
         self.assertEqual(summary["request_reuse_pct"], 50)
+        self.assertEqual(summary["reuse_wave_requests"], 2)
+        self.assertEqual(summary["reuse_wave_outcomes"], {"partial": 2})
+        self.assertEqual(summary["reuse_wave_cache_hit_pct"], 80)
         self.assertEqual(summary["reuse_distance_requests_max"], 0)
         self.assertEqual(summary["route_split"], {"0": 2, "1": 2})
         encoded = str(summary).lower()
