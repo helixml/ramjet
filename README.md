@@ -69,6 +69,11 @@ During the rewrite, keep both suites green:
 
     go test ./... && go vet ./... && test -z "$(gofmt -l .)"
 
+Measure the request-preparation hot path before and after tokenizer work:
+
+    cargo run --release --locked --example preparation_bench
+    go test ./pkg/proxy -run '^$' -bench BenchmarkPrepareLongPrompt -benchmem
+
 See [ROADMAP.md](ROADMAP.md), [EXPERIMENTS.md](EXPERIMENTS.md), and
 [AGENTS.md](AGENTS.md) (node06 test/bench workflow).
 

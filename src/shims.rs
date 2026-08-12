@@ -48,6 +48,7 @@ pub fn finish_reason(reason: &str) -> &'static str {
     }
 }
 
+#[must_use]
 pub fn sanitize_request(endpoint: Endpoint, body: &[u8], threshold: i64) -> Vec<u8> {
     if !matches!(endpoint, Endpoint::Chat | Endpoint::Completions) || body.is_empty() {
         return body.to_vec();
@@ -55,6 +56,21 @@ pub fn sanitize_request(endpoint: Endpoint, body: &[u8], threshold: i64) -> Vec<
     let Ok(Value::Object(mut object)) = serde_json::from_slice(body) else {
         return body.to_vec();
     };
+    let changed = sanitize_object(endpoint, &mut object, threshold);
+    if !changed {
+        return body.to_vec();
+    }
+    serde_json::to_vec(&object).unwrap_or_else(|_| body.to_vec())
+}
+
+pub(crate) fn sanitize_object(
+    endpoint: Endpoint,
+    object: &mut Map<String, Value>,
+    threshold: i64,
+) -> bool {
+    if !matches!(endpoint, Endpoint::Chat | Endpoint::Completions) {
+        return false;
+    }
     let mut changed = false;
     for field in ["max_tokens", "max_completion_tokens"] {
         let oversized = object
@@ -66,7 +82,7 @@ pub fn sanitize_request(endpoint: Endpoint, body: &[u8], threshold: i64) -> Vec<
             changed = true;
         }
     }
-    changed |= flatten_content_parts(&mut object);
+    changed |= flatten_content_parts(object);
     let valid_effort = object
         .get("reasoning_effort")
         .is_none_or(|effort| matches!(effort.as_str(), Some("low" | "medium" | "high" | "max")));
@@ -74,10 +90,7 @@ pub fn sanitize_request(endpoint: Endpoint, body: &[u8], threshold: i64) -> Vec<
         object.remove("reasoning_effort");
         changed = true;
     }
-    if !changed {
-        return body.to_vec();
-    }
-    serde_json::to_vec(&object).unwrap_or_else(|_| body.to_vec())
+    changed
 }
 
 fn flatten_content_parts(object: &mut Map<String, Value>) -> bool {

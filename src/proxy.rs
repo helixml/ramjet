@@ -18,6 +18,7 @@ use crate::{
     config::Config,
     journal::RouteJournal,
     metrics::Metrics,
+    prepare::PreparedRequest,
     router::{Decision, LoadGuard, Router},
     shims::{self, Endpoint},
     usage::{Accumulator, feed_sse_chunk},
@@ -115,11 +116,19 @@ impl Proxy {
                 "request body too large or unreadable",
             );
         };
-        let body = Bytes::from(shims::sanitize_request(
+        let prepared = PreparedRequest::new(
             endpoint,
             &raw_body,
             self.inner.config.max_tokens_strip,
-        ));
+            &self.inner.router,
+        );
+        let decision = prepared.route(&self.inner.router);
+        let fingerprints = if endpoint == Endpoint::Other {
+            Vec::new()
+        } else {
+            prepared.fingerprints
+        };
+        let body = Bytes::from(prepared.body);
         self.inner
             .metrics
             .request_bytes
@@ -128,13 +137,7 @@ impl Proxy {
         self.inner.metrics.inflight.inc();
         let inflight_guard = InflightGuard(GaugeHandle(self.inner.metrics.inflight.clone()));
 
-        let (decision, fingerprints) = self.inner.router.route_with_fingerprints(&body);
         self.record_decision(&decision);
-        let fingerprints = if endpoint == Endpoint::Other {
-            Vec::new()
-        } else {
-            fingerprints
-        };
         let journal_sequence =
             self.inner
                 .journal

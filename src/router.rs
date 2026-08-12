@@ -125,10 +125,13 @@ impl Router {
     }
 
     pub fn fingerprints(&self, body: &[u8]) -> Vec<u64> {
-        chain_fingerprints(
-            &canonical_prompt(body, self.config.max_prefix_bytes),
-            self.config.chunk_bytes,
-        )
+        let object = serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|value| match value {
+                Value::Object(object) => Some(object),
+                _ => None,
+            });
+        self.fingerprints_preparsed(body, object.as_ref())
     }
 
     pub fn route(&self, body: &[u8]) -> Decision {
@@ -144,6 +147,21 @@ impl Router {
         let fingerprints = self.fingerprints(body);
         let decision = self.route_fingerprints(body.len(), &fingerprints);
         (decision, fingerprints)
+    }
+
+    pub(crate) fn fingerprints_preparsed(
+        &self,
+        body: &[u8],
+        object: Option<&Map<String, Value>>,
+    ) -> Vec<u64> {
+        chain_fingerprints(
+            &canonical_prompt(body, object, self.config.max_prefix_bytes),
+            self.config.chunk_bytes,
+        )
+    }
+
+    pub(crate) fn route_prepared(&self, body_bytes: usize, fingerprints: &[u64]) -> Decision {
+        self.route_fingerprints(body_bytes, fingerprints)
     }
 
     fn route_fingerprints(&self, body_bytes: usize, fingerprints: &[u64]) -> Decision {
@@ -319,9 +337,9 @@ impl Drop for LoadGuard {
     }
 }
 
-fn canonical_prompt(body: &[u8], max_bytes: usize) -> Vec<u8> {
+fn canonical_prompt(body: &[u8], object: Option<&Map<String, Value>>, max_bytes: usize) -> Vec<u8> {
     let fallback = || body[..body.len().min(max_bytes)].to_vec();
-    let Ok(Value::Object(object)) = serde_json::from_slice(body) else {
+    let Some(object) = object else {
         return fallback();
     };
     let messages = match object.get("messages") {

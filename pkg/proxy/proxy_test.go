@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -9,8 +10,33 @@ import (
 
 	"github.com/helixml/mini-dynamo/pkg/config"
 	"github.com/helixml/mini-dynamo/pkg/router"
+	"github.com/helixml/mini-dynamo/pkg/shims"
 	"github.com/helixml/mini-dynamo/pkg/usage"
 )
+
+var benchmarkDecision router.Decision
+var benchmarkFingerprints []uint64
+
+func BenchmarkPrepareLongPrompt(b *testing.B) {
+	for _, targetBytes := range []int{256 << 10, 2 << 20} {
+		b.Run(fmt.Sprintf("bytes-%d", targetBytes), func(b *testing.B) {
+			body := []byte(fmt.Sprintf(
+				`{"messages":[{"role":"system","content":%q},{"role":"user","content":"summarize"}],"max_tokens":256}`,
+				strings.Repeat("long-context-ledger-", targetBytes/20),
+			))
+			cfg := router.DefaultConfig([]string{"http://engine:8000"})
+			r := router.New(cfg)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(body)))
+			b.ResetTimer()
+			for range b.N {
+				sanitized := shims.SanitizeRequestBody("chat", body, 100_000)
+				benchmarkDecision = r.Route(sanitized)
+				benchmarkFingerprints = r.Fingerprints(sanitized)
+			}
+		})
+	}
+}
 
 func TestUpstreamIndexIsOpaqueAndStable(t *testing.T) {
 	p := &Proxy{cfg: config.Config{Upstreams: []string{"http://engine-a:8000", "http://engine-b:8000"}}}

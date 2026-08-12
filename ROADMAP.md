@@ -14,6 +14,12 @@ node06). The design rationale for each lives in DESIGN.md.
   bounded request bodies, request shims, model metadata rewrite, health probes,
   retryable-status failover, opaque route headers, true generated-token TTFT,
   privacy-bounded journal v3, and the existing `ds4proxy_*` metric names.
+- ✅ **Single-parse approximate preparation.** One JSON parse now feeds both
+  compatibility mutations and canonical route fingerprints; cache observation
+  reuses the prepared vector. Release-mode preparation is 0.49ms at 256KiB and
+  4.53ms at 2MiB on the development host, about 10× faster than the retained Go
+  data path and 15% faster than the initial two-parse Rust implementation at
+  2MiB. Keep `examples/preparation_bench.rs` as the pre-tokenizer baseline.
 - 🔨 **Rolling Go/Rust node06 qualification.** Build and publish immutable
   `rust-*` images, then run locality, concurrent same-app, c24 aggregate, route
   telemetry, and occasional Helix workflow acceptance before promotion. Go
