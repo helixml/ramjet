@@ -113,6 +113,8 @@ against a direct engine endpoint and capture its JSONL output:
 `bench/route_replay.py` sweeps router policies over privacy-bounded live
 decision records and splits observed warm/cold outcome latency. For native
 KV-event feasibility, `bench/tokenize_bench.py` measures the exact-tokenization
-hot-path cost; `bench/kv_event_probe.py` runs only inside a trusted vLLM
-environment and summarizes event continuity/volume without logging the token
-IDs or hashes carried by raw events.
+hot-path cost; `bench/tokenizer_parity.py` checks `/tokenize` counts and
+in-memory ID stability against real chat prompt usage without printing prompts
+or IDs; `bench/kv_event_probe.py` runs only inside a trusted vLLM environment
+and summarizes event continuity/volume without logging the token IDs or hashes
+carried by raw events.

@@ -30,6 +30,11 @@ node06). The design rationale for each lives in DESIGN.md.
   user request completes. Authenticated calls use a bounded non-blocking queue,
   fixed workers/timeouts/response caps, controlled metrics, and unconditional
   approximate-routing fallback; raw token IDs and prompts never enter logs.
+- ✅ **Remote chat-template parity matrix.** Active vLLM completion usage and
+  `/tokenize` agreed exactly in 7/7 plain, multi-turn, tools, tool-history,
+  reasoning, thinking-disabled, and normalized-content cases; repeated token
+  IDs were stable in memory and never printed. Keep this as the remote
+  authority while local rendering is introduced.
 - ⬜ **Bounded local Rust tokenizer pool.** Load a validated model/template
   bundle, run CPU-heavy Hugging Face or fastokens encoding outside Tokio I/O
   workers, retain authenticated `/tokenize` as the parity/fallback authority,

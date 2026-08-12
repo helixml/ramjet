@@ -898,5 +898,60 @@ An actual Helix control-plane request used the test account's authorized org,
 explicit `ds4-flash-node06` provider, and `deepseek-v4-flash`; it returned HTTP
 200, finish reason `stop`, and the requested exact response. The separately
 documented unmanned-org test app correctly returned 403 for this account, so no
-cross-org access was assumed. The current state is Rust r4 live on node06 with
-both engines healthy; Go rc7 remains a one-command LB-only rollback.
+cross-org access was assumed. At the end of the r4 gate, both engines were
+healthy and Go rc7 remained a one-command LB-only rollback.
+
+## 2026-08-12 — Rust r5/r6 bounded tokenizer shadow
+
+r5 added a selective remote exact-token adapter without putting tokenization on
+the routing critical path. The one-pass preparation boundary derives a vLLM
+`/tokenize` payload only for supported chat/completion requests in a configured
+32KiB–2MiB window. After the client request completes, it uses a one-worker,
+eight-slot non-blocking queue, a two-second deadline, authenticated direct
+engine calls, and a 16MiB response cap. Any skip, queue pressure, timeout, HTTP
+failure, or decoding failure leaves the approximate router unchanged. Token IDs
+exist only for the lifetime of the background observation and are never logged,
+journaled, or exported.
+
+The first r5 shadow run found an observability-only bug: 48 short requests were
+correctly labeled outside the size window but were also labeled
+`invalid_payload` at completion. r6 made selection explicit across the relay
+boundary so outcomes are exclusive. A post-roll short request then emitted only
+`outside_size_window`. No client request or routing decision was affected by
+the r5 accounting issue.
+
+The live candidate is
+`ghcr.io/helixml/ds4-loadbalancer:rust-r6-ed8e595` (digest
+`sha256:49a04896fe22d1c29a962de1adb1d78f8df39fc84ea68ff871eac38d6ac8c1b4`).
+The infra compose exposes all shadow controls with mode `off` by default; the
+node06 experiment explicitly enables `remote-shadow`. Both TP4 engines remained
+running through each LB-only roll.
+
+Exactness and boundedness gates:
+
+- The first eight long-prompt shadow requests succeeded 8/8. Their exact-token
+  sum was **150,188**, exactly equal to the completion-usage prompt-token sum;
+  aggregate background tokenization time was 373ms (46.6ms/request).
+- `bench/tokenizer_parity.py` passed 7/7 direct-engine cases: plain chat,
+  system/multi-turn, declared tools, tool-call history, reasoning effort,
+  `think:false`, and normalized content. `/tokenize` count equaled real
+  completion `prompt_tokens` in every case, and a repeated in-memory token-ID
+  vector was identical. The harness prints neither prompts nor IDs.
+- A 12-request eligible same-app burst completed 12/12 client requests, split
+  6/6 at 646 tok/s, and completed all 12 shadow jobs. Queue depth returned to
+  zero with no queue-full, timeout, HTTP, size, or decode failures.
+- At capture, the r6 process had 73 intentional short-request skips and 13/13
+  exact-token successes. Idle LB RSS was 10.6MiB versus 8.8MiB for r4.
+
+Three r6 c24/max256 samples were 1,480.6, 1,672.8, and **1,637.4 tok/s median**.
+The median matches r4 Rust (1,638.0) and the adjacent Go rc7 control (1,636.7)
+to within 0.1%; the low first sample again shows cold/live-load variance. The
+decision journal paired 86/86 requests, reproduced the deployed alpha-4/cap-32
+policy exactly, and showed a balanced 43/43 split. Both readiness probes were
+up and all inflight/load/queue gauges were zero after the run.
+
+Verdict: leave r6 shadow mode live to accumulate cost and request-class data.
+It validates the remote authority and backpressure seam, but exact IDs do not
+influence routing until the KV-event index has sequence-gap replay, generation
+fencing, and an automatic approximate fallback. Go rc7 remains the compose-
+default rollback.
