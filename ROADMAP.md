@@ -241,11 +241,11 @@ node06). The design rationale for each lives in DESIGN.md.
   transients. The 44.7K-token gain is not worth that operational fragility.
   Retain automatic sizing and do not jump to the profiler's full-memory value.
 
-- 🔨 **CI + package publishing.** GitHub Actions and Drone now both run Rust
-  fmt, strict Clippy, 104 unit tests, and the release build; Drone additionally
-  runs the retained Go tests/vet/gofmt parity oracle plus 18 GPU-free protocol
-  tests. Rust, Go, and protocol steps fan out in parallel, and GitHub caches
-  dependency artifacts even after a failed run. Both Drone push/PR builds
+- 🔨 **CI + package publishing.** GitHub Actions runs Rust fmt, strict Clippy,
+  and 104 unit tests with a pruned dependency cache. Drone independently adds
+  the release build plus retained Go tests/vet/gofmt and 18 GPU-free protocol
+  tests; its Rust, Go, and protocol steps fan out in parallel. Main's Docker
+  build is the second release-mode proof, avoiding a duplicate PR link. Both Drone push/PR builds
   and GitHub Actions passed on r21. The post-merge image also compiled, but GHCR
   denied its final push: because `mini-dynamo` was created by a manual push,
   repository linkage did not grant Actions access. Add `helixml/mini-dynamo`

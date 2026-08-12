@@ -155,11 +155,12 @@ During the rewrite, keep both suites green:
 
     go test ./... && go vet ./... && test -z "$(gofmt -l .)"
 
-GitHub Actions and Drone both run the Rust format, strict Clippy, test, and
-release-build gates on pull requests; Drone also keeps the Go parity oracle and
-GPU-free agent protocol suite green. Those three Drone lanes run in parallel,
-and GitHub restores pruned Cargo dependency artifacts between runs. The image
-publisher runs only after the post-merge Rust gate succeeds
+GitHub Actions runs Rust format, strict Clippy, and tests with a pruned
+dependency cache. Drone independently adds the release build and keeps the Go
+parity oracle and GPU-free agent protocol suite green; its three language lanes
+run in parallel. The post-merge Docker build is the second release-mode proof,
+so GitHub does not duplicate a release link in the PR check. The image publisher
+runs only after the post-merge Rust gate succeeds
 and requires GHCR package write permission for this repository.
 
 Measure the request-preparation hot path before and after tokenizer work:

@@ -1790,7 +1790,10 @@ output/total token rate, cache hit ratio, and successful tasks per GPU-hour.
 No completion, reasoning, tool argument, credential, fingerprint, or customer
 content enters the artifact.
 
-The first production-LB node06 gate used c1 and zero synthetic prefix. All 5/5
+The first production-LB node06 gate used c1, zero synthetic prefix, and model
+revision `9e165c30e2704aec5d9d593cce3eebd58bbef1cb`. The metadata helper now
+extracts that exact `--revision` plus the local Docker content IDs for engines
+and router, rather than relying on mutable image tags. All 5/5
 deterministic cases passed, including two parallel calls, null/boolean/number/
 array/object arguments, preserved reasoning history, and automatic streaming
 with no DSML fragments. After a corpus warmup, the measured five cases finished
