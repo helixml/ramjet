@@ -1648,3 +1648,51 @@ internal-account credential received HTTP 403 for both the named test app and
 as an authentication/control-plane blocker rather than an r21 inference
 failure. A current scoped smoke-test credential is still required to close the
 end-to-end acceptance gate.
+
+## 2026-08-12 — r22 immediate client-disconnect cancellation
+
+r22 fixes a resource-lifetime gap in the Rust relay. Previously, the detached
+upstream relay noticed a closed downstream only when its next chunk reached the
+bounded channel. If an engine was silent during prefill or between chunks, its
+request and the router's weighted load reservation could survive until that
+next read. The relay now selects on `sender.closed()` and the reqwest byte
+stream concurrently; downstream closure immediately drops the upstream stream,
+which propagates transport cancellation to vLLM. Existing completion, usage,
+journal, and error accounting remain unchanged, while
+`ds4proxy_client_disconnects_total` increments exactly once.
+
+The local gate passed formatting, strict all-target/all-feature Clippy, release
+build, retained Go tests/vet/gofmt, and all **98 Rust tests**. The new loopback
+test keeps an upstream response body permanently silent, drops the downstream
+body, and proves within one second that the networked upstream body is dropped,
+the disconnect metric increments once, and both inflight and weighted load
+return to zero.
+
+The isolated node06 image `rust-r22-client-cancel-16704db` then ran against
+engine A only. A 4,096-token streaming request became active at 328ms; curl
+closed at 2.000s, and the first 2.012s sample showed proxy inflight zero, route
+load zero, vLLM running requests zero, and one disconnect. A normal
+c8/max128 gate completed 8/8 at 338 tok/s. No production component changed
+during the canary.
+
+The public amd64 image (digest
+`sha256:df6ff508caf54e09519a0106b6da7c131c76d4609500042644c55c41311e1fb2`)
+was then promoted LB-only. Both engines retained their original start times,
+container IDs, and zero restart counts. One fresh full-block event per engine
+triggered clean 1,186/1,137-batch replays; both inventories became trusted at
+6,529/5,071 nodes and 1,671,424/1,298,176 token IDs. The production
+cancellation gate again activated engine A, closed the client at 2.000s, and
+showed LB inflight/load plus both vLLM running gauges at zero by the first
+2.019s sample, with exactly one new disconnect. Normal regressions passed:
+c12/max128 completed 12/12 with a 6/6 split at 565 tok/s, and c16/max512
+completed 16/16 at 1,354.0 tok/s. The LB and engines retained zero restarts and
+`/health` remained `ok` with 2/2 replicas.
+
+A separate, unpromoted replay-retry experiment changed reconnect progress to
+mean "authoritative inventory restored" instead of merely "one live event
+received," preventing a 250ms full-replay request storm after timeouts. Unit
+tests passed, including fresh reconnect identities and bounded exponential
+backoff, but live canaries encountered the known publisher-side backlog after
+aborted full replays. That work remains isolated from r22 production until the
+publisher supports cancellation/chunking or the recovery behavior is proven
+deterministically.
