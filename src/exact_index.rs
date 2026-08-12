@@ -1290,7 +1290,7 @@ mod tests {
             LiveBatchOutcome::Replay { .. }
         ));
         assert_eq!(
-            state.ingest_replay(&[(2, batch(Vec::new()))]).unwrap(),
+            state.ingest_replay(&[(3, batch(Vec::new()))]).unwrap(),
             ReplayBatchOutcome::Invalid
         );
         assert!(!state.trusted());

@@ -268,7 +268,8 @@ fn blocking_replay_exchange(
         .map_err(|_| KvTransportError::Socket)?;
 
     let deadline = Instant::now() + replay_timeout;
-    let mut expected = Some(from);
+    let mut last_requested = None;
+    let mut completed_requested_range = false;
     let mut batches = Vec::with_capacity(expected_count);
     let mut messages = 0_usize;
     let mut validation_error = None;
@@ -302,7 +303,7 @@ fn blocking_replay_exchange(
             None => {
                 return match validation_error {
                     Some(error) => Err(error),
-                    None if batches.len() == expected_count => Ok(batches),
+                    None if completed_requested_range => Ok(batches),
                     None => Err(KvTransportError::InvalidReplay),
                 };
             }
@@ -314,22 +315,18 @@ fn blocking_replay_exchange(
                 if validation_error.is_some() {
                     continue;
                 }
-                if batch.sequence > through && expected.is_none() {
+                if batch.sequence > through && completed_requested_range {
                     continue;
                 }
-                if Some(batch.sequence) != expected {
+                if batch.sequence < from
+                    || batch.sequence > through
+                    || last_requested.is_some_and(|last| batch.sequence <= last)
+                {
                     validation_error.get_or_insert(KvTransportError::InvalidReplay);
                     continue;
                 }
-                expected = if batch.sequence == through {
-                    None
-                } else {
-                    batch.sequence.checked_add(1)
-                };
-                if expected.is_none() && batch.sequence != through {
-                    validation_error.get_or_insert(KvTransportError::InvalidReplay);
-                    continue;
-                }
+                last_requested = Some(batch.sequence);
+                completed_requested_range = batch.sequence == through;
                 batches.push(batch);
             }
         }
@@ -522,7 +519,9 @@ mod tests {
             assert!(request.get(1).unwrap().is_empty());
             assert_eq!(request.get(2).unwrap().as_ref(), 5_u64.to_be_bytes());
             let identity = request.get(0).unwrap().clone();
-            for sequence in [5_u64, 6, 7] {
+            // Sequence 5 emitted no KV event and is legitimately absent from
+            // the retained publisher stream; sequence 7 is a live tail.
+            for sequence in [6_u64, 7] {
                 replay_server
                     .send(message(vec![
                         identity.clone(),
@@ -555,7 +554,7 @@ mod tests {
                 .iter()
                 .map(|batch| batch.sequence)
                 .collect::<Vec<_>>(),
-            vec![5, 6]
+            vec![6]
         );
         server.await.unwrap();
         drop(publisher);

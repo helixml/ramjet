@@ -80,9 +80,10 @@ controlled connection, trust, generation, batch/filter-outcome, and
 resident-size metrics. Startup and every disconnect are untrusted; publisher
 sequence zero or a complete bounded replay from zero establishes the initially
 empty engine generation. If a requested replay fails after its range is known,
-the consumer clears the old generation and retries a bounded full range from
+the consumer clears the old generation and retries one bounded full range from
 zero after reconnecting; it does not wait for another live allocation merely
-to rediscover the same boundary. Every retry still uses a fresh DEALER identity,
+to rediscover the same boundary. A failed retry falls back to the live-event
+gate instead of looping. Every retry still uses a fresh DEALER identity,
 deadline, drain-through-validation, and exponential backoff. When selective
 tokenization succeeds, the inventories
 also feed an observation-only counterfactual: the selected engine's pre-request
@@ -96,6 +97,13 @@ separate `placement` mode is explicitly enabled.
 `tie`, `all_zero`, and fail-closed outcomes, while the overlap/gain histograms
 contain counts only. Raw token IDs and hashes never enter logs, journals, or
 metrics.
+
+Replay sequence numbers are monotonic scheduler-step positions, not a promise
+that every number has a published KV event. A replay is valid when its retained
+events are strictly increasing, stay inside the requested range, and include
+the requested upper boundary; absent intermediate numbers are authoritative
+no-op steps. Duplicate, decreasing, out-of-range, or incomplete-tail responses
+remain invalid and fail closed.
 
 The cache scorecard uses upstream response usage as its authority.
 `ds4proxy_cache_requests_total{endpoint,outcome}` classifies each completed

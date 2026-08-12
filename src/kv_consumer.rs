@@ -248,7 +248,7 @@ async fn consume_connection(
                     return Some(ConnectionEnd {
                         reason: "replay_not_authoritative",
                         restored_authority,
-                        full_replay_through: Some(through),
+                        full_replay_through: None,
                     });
                 }
             }
@@ -256,7 +256,7 @@ async fn consume_connection(
                 return Some(ConnectionEnd {
                     reason,
                     restored_authority,
-                    full_replay_through: Some(through),
+                    full_replay_through: None,
                 });
             }
             ReplayAttempt::Shutdown => return None,
@@ -559,7 +559,7 @@ mod tests {
             }
             assert_eq!(request.get(2).unwrap().as_ref(), 0_u64.to_be_bytes());
             let identity = request.get(0).unwrap().clone();
-            let sequences: &[u64] = if attempt == 0 { &[1] } else { &[0, 1] };
+            let sequences: &[u64] = if attempt == 0 { &[2] } else { &[0, 1] };
             for sequence in sequences {
                 replay_server
                     .send(message(vec![

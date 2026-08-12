@@ -169,15 +169,15 @@ impl KvEventFence {
         let Some(pending) = self.pending else {
             return ReplayAction::Invalid;
         };
-        let expected_len = pending
-            .through
-            .saturating_sub(pending.from)
-            .saturating_add(1);
-        let valid_len = usize::try_from(expected_len)
-            .ok()
-            .is_some_and(|expected| expected == sequences.len());
-        let valid_order = sequences.iter().copied().eq(pending.from..=pending.through);
-        if !valid_len || !valid_order {
+        // vLLM's sequence tracks scheduler steps while the publisher retains
+        // only steps that emitted a KV event. Missing sequence numbers are
+        // therefore authoritative no-ops, not missing replay messages.
+        let valid_bounds = sequences
+            .first()
+            .is_some_and(|first| *first >= pending.from)
+            && sequences.last() == Some(&pending.through);
+        let strictly_increasing = sequences.windows(2).all(|pair| pair[0] < pair[1]);
+        if !valid_bounds || !strictly_increasing {
             self.pending = None;
             self.generation = self.generation.saturating_add(1);
             self.trusted = false;
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_contiguous_replay_restores_trust() {
+    fn bounded_sparse_replay_restores_trust() {
         let mut fence = KvEventFence::new(8);
         assert_eq!(fence.ingest(0, true), IngestAction::ResetAndApply);
         assert_eq!(
@@ -293,10 +293,7 @@ mod tests {
             }
         );
         assert!(!fence.trusted());
-        assert_eq!(
-            fence.accept_replay(&[1, 2, 3], false),
-            ReplayAction::Recovered
-        );
+        assert_eq!(fence.accept_replay(&[1, 3], false), ReplayAction::Recovered);
         assert!(fence.trusted());
         assert_eq!(fence.ingest(4, false), IngestAction::Apply);
     }
@@ -312,7 +309,7 @@ mod tests {
                 through: 2
             }
         );
-        assert_eq!(fence.accept_replay(&[2], false), ReplayAction::Invalid);
+        assert_eq!(fence.accept_replay(&[1], false), ReplayAction::Invalid);
         assert!(!fence.trusted());
         let generation = fence.generation();
         assert_eq!(fence.ingest(10, false), IngestAction::UnrecoverableGap);

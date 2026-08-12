@@ -2179,10 +2179,11 @@ live event, while preserving the current publisher-backpressure protections.
 
 The r27 recovery observation is addressed narrowly. When a replay fails after
 the consumer has learned its upper sequence, reconnect now discards the prior
-generation and re-arms only a bounded complete `0..through` replay. It never
+generation and re-arms only one bounded complete `0..through` replay. It never
 continues a partial nonzero range against cleared state. A range outside the
 configured replay limit remains fenced and falls back to waiting for an
-authoritative boundary. Retries retain r23's fresh libzmq DEALER identity,
+authoritative boundary; a failed retry does the same instead of looping.
+Retries retain r23's fresh libzmq DEALER identity,
 drain-through-validation, timeout floor, and exponential backoff; serving and
 approximate routing remain independent.
 
@@ -2194,3 +2195,17 @@ second live message. The focused test plus incremental compile completed in
 force one malformed/invalid replay in an isolated mock only, never mutate the
 production publisher, then confirm ordinary retained replay still restores
 both real inventories.
+
+The first node06 r28 attempt was rolled back in 0.97s after B repeated
+`invalid_replay` five times and then hit the 20-second drain deadline. Serving
+remained 2/2 and both engines retained their start times and zero restart
+counts, but automatic retries were amplifying a persistent validation error.
+A read-only replay probe found the root cause: B returned 2,040 event-bearing
+batches across sequence 0..3,581 with 1,542 legitimate holes. vLLM increments
+the sequence per scheduler step but retains/publishes only steps with KV
+events. The old transport incorrectly required every integer in the interval.
+It now accepts a sparse replay only when events are strictly increasing,
+in-range, and end exactly at `through`; this preserves authoritative no-op
+steps while rejecting duplicates, regressions, early tails, and out-of-range
+messages. The retry path is also single-shot: another failure returns to the
+live-event gate rather than forming a replay storm.
