@@ -2030,3 +2030,42 @@ removals, zero clears, zero preemptions, and 0.04ms mean native queue time.
 The cold request took 1,049ms TTFT; the three partial hits had 392ms median
 TTFT. This validates the counter plumbing and quiet-interval zero series; it
 does not yet exercise capacity-driven removal.
+
+## 2026-08-12 — issue #16 cache-capacity boundary and parallel iteration
+
+A 512KiB canary established the experiment cost and scale: each request
+rendered to roughly 145–154K prompt tokens, with 15.4s cold TTFT, 1.1s warm
+TTFT, 571 accepted live stores, and exact cross-layer reconciliation. Running
+the boundary sequentially would leave one TP4 pair idle and take roughly twice
+as long, so `cachebench.py` gained a wave-barrier `--concurrency` option. It
+runs apps within each session/turn wave concurrently but never starts a reuse
+wave before every cold app has completed. A two-app smoke used both engines,
+split 2/2, reconciled with zero spread, and completed in 1.50s. The Python
+suite is now 31 tests and the release build remained warm at 0.20s after the
+benchmark/docs-only edit.
+
+The first fresh 52-app × 512KiB cell used concurrency two and finished in
+8m23s. All 104 requests succeeded; usage, LB, and both native engines agreed
+exactly at 15,155,148 prompt and 7,565,824 cached tokens, with zero preemptions
+and 0.05ms mean queue time. It observed 29,554 stores and 6,077 removals
+(20.56% churn), but every second-wave request was still a partial hit. Aggregate
+token hit was 49.92%, as expected for one cold and one almost-fully-cached
+request per app. This proves removals alone are not an eviction or survival
+signal and validates the deliberately conservative metric name.
+
+The next fresh 64-app × 512KiB cell crossed the actual residency cliff. It
+completed 128/128 in 20m33s with exact zero-spread reconciliation at 18,644,316
+prompt and 4,363,520 cached tokens. The cold wave placed 30 apps on A and 34 on
+B (60/68 requests after reuse). All 30 A-side repeats survived as partial hits;
+all 34 B-side repeats were cold. Reuse-wave token hit fell to 46.81%; overall
+outcomes were 98 cold and 30 partial. Cold TTFT p50/p95 were
+20,462/35,038ms versus 836/868ms for partial hits. The cell observed 55,671
+stores, 51,429 removals (92.38% churn), zero preemptions, and 3.75s mean queue
+time as the overloaded side serialized cold prefills.
+
+Verdict: the cache cliff is sharp and placement-sensitive. A modest 30/34 app
+imbalance preserved every reusable prefix on one TP4 pair while the other
+thrashed completely. The next router experiment should price persistent KV
+residency or cold-app placement balance, not merely instantaneous inflight
+load. Repeat the 52/64 cells three times after that candidate; do not define a
+95% cache SLO from these single boundary observations.

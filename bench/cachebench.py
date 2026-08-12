@@ -7,6 +7,7 @@ token counts, timings, route ordinals, and aggregate Prometheus deltas.
 
 import argparse
 import collections
+import concurrent.futures
 import json
 import os
 import re
@@ -200,12 +201,27 @@ def messages_for(app, session, turn, prefix_kib, salt):
     return messages
 
 
-def workload_coordinates(apps, sessions, turns):
-    """Round-robin apps so cold placement and reuse distance are not phase-biased."""
+def workload_waves(apps, sessions, turns):
+    """Yield phase-barrier waves so reuse never races an unfinished cold app."""
     for turn in range(1, turns + 1):
         for session in range(sessions):
-            for app in range(apps):
-                yield app, session, turn
+            yield [(app, session, turn) for app in range(apps)]
+
+
+def workload_coordinates(apps, sessions, turns):
+    """Round-robin apps so cold placement and reuse distance are not phase-biased."""
+    for wave in workload_waves(apps, sessions, turns):
+        yield from wave
+
+
+def execute_waves(apps, sessions, turns, concurrency, execute):
+    """Execute each app wave concurrently, preserving barriers and output order."""
+    records = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+        for wave in workload_waves(apps, sessions, turns):
+            for (app, session, turn), result in zip(wave, pool.map(execute, wave)):
+                records.append({"app": app, "session": session, "turn": turn, **result})
+    return records
 
 
 def execute_request(base, model, token, messages, max_tokens, timeout):
@@ -281,11 +297,19 @@ def summarize(records, apps, sessions, turns, prefix_kib, elapsed, lb, engine, t
     walls = [record["wall_ms"] for record in good]
     last_seen = {}
     reuse_distances = []
+    reuse_records = []
     for position, record in enumerate(records):
         app = record["app"]
         if app in last_seen:
             reuse_distances.append(position - last_seen[app] - 1)
+            if record["ok"]:
+                reuse_records.append(record)
         last_seen[app] = position
+    reuse_prompt = sum(record["prompt_tokens"] for record in reuse_records)
+    reuse_cached = sum(record["cached_tokens"] for record in reuse_records)
+    reuse_outcomes = collections.Counter(
+        record["cache_outcome"] for record in reuse_records
+    )
     return {
         "type": "cache_working_set",
         "apps": apps,
@@ -304,6 +328,11 @@ def summarize(records, apps, sessions, turns, prefix_kib, elapsed, lb, engine, t
         "request_reuse_pct": round(100 * (len(good) - outcomes["cold"]) / len(good), 2)
         if good
         else None,
+        "reuse_wave_requests": len(reuse_records),
+        "reuse_wave_outcomes": dict(sorted(reuse_outcomes.items())),
+        "reuse_wave_cache_hit_pct": (
+            round(100 * reuse_cached / reuse_prompt, 2) if reuse_prompt else None
+        ),
         "ttft_ms_p50": round(statistics.median(ttfts), 1) if ttfts else None,
         "ttft_ms_p95": percentile(ttfts, 0.95),
         "ttft_ms_by_outcome": latency_by_outcome(good, "ttft_ms"),
@@ -334,10 +363,11 @@ def run_cell(args, apps, token):
     salt = f"{args.salt}-a{apps}"
     lb_before = fetch_lb_metrics(args.metrics_url)
     engine_before = [fetch_engine_metrics(url) for url in args.engine_metrics]
-    records = []
     started = time.perf_counter()
-    for app, session, turn in workload_coordinates(apps, args.sessions, args.turns):
-        result = execute_request(
+
+    def execute(coordinate):
+        app, session, turn = coordinate
+        return execute_request(
             args.base,
             args.model,
             token,
@@ -345,9 +375,10 @@ def run_cell(args, apps, token):
             args.max_tokens,
             args.timeout,
         )
-        record = {"app": app, "session": session, "turn": turn, **result}
-        records.append(record)
-        if args.emit_requests:
+
+    records = execute_waves(apps, args.sessions, args.turns, args.concurrency, execute)
+    if args.emit_requests:
+        for record in records:
             print(json.dumps({"type": "cache_request", **record}, sort_keys=True))
     elapsed = time.perf_counter() - started
     time.sleep(args.settle_seconds)
@@ -355,7 +386,7 @@ def run_cell(args, apps, token):
     engine_after = [fetch_engine_metrics(url) for url in args.engine_metrics]
     lb = nonnegative_delta(lb_before, lb_after, LB_COUNTERS)
     engine = aggregate_engine_delta(engine_before, engine_after)
-    return summarize(
+    summary = summarize(
         records,
         apps,
         args.sessions,
@@ -366,6 +397,8 @@ def run_cell(args, apps, token):
         engine,
         args.reconcile_tolerance,
     )
+    summary["concurrency"] = args.concurrency
+    return summary
 
 
 def parser():
@@ -377,6 +410,12 @@ def parser():
     result.add_argument("--turns", type=int, default=2)
     result.add_argument("--prefix-kib", type=int, default=32)
     result.add_argument("--max-tokens", type=int, default=8)
+    result.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="requests per app wave; each session/turn remains a phase barrier",
+    )
     result.add_argument("--salt", default=str(time.time_ns()))
     result.add_argument("--metrics-url")
     result.add_argument("--engine-metrics", action="append", default=[])
@@ -390,8 +429,16 @@ def parser():
 
 def main():
     args = parser().parse_args()
-    if args.sessions < 1 or args.turns < 1 or args.prefix_kib < 1 or args.max_tokens < 1:
-        raise SystemExit("sessions, turns, prefix-kib, and max-tokens must be positive")
+    if (
+        args.sessions < 1
+        or args.turns < 1
+        or args.prefix_kib < 1
+        or args.max_tokens < 1
+        or args.concurrency < 1
+    ):
+        raise SystemExit(
+            "sessions, turns, prefix-kib, max-tokens, and concurrency must be positive"
+        )
     token = os.environ.get("BENCH_TOKEN") or os.environ.get("VLLM_API_KEY")
     if not token:
         raise SystemExit("set BENCH_TOKEN or VLLM_API_KEY")
