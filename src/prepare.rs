@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::{
     router::{Decision, Router},
@@ -13,11 +13,23 @@ use crate::{
 pub struct PreparedRequest {
     pub body: Vec<u8>,
     pub fingerprints: Vec<u64>,
+    pub tokenizer_body: Option<Vec<u8>>,
 }
 
 impl PreparedRequest {
     #[must_use]
     pub fn new(endpoint: Endpoint, raw: &[u8], threshold: i64, router: &Router) -> Self {
+        Self::with_tokenizer(endpoint, raw, threshold, router, false)
+    }
+
+    #[must_use]
+    pub fn with_tokenizer(
+        endpoint: Endpoint,
+        raw: &[u8],
+        threshold: i64,
+        router: &Router,
+        prepare_tokenizer_body: bool,
+    ) -> Self {
         let parsed = serde_json::from_slice::<Value>(raw).ok();
         let (body, object) = match parsed {
             Some(Value::Object(mut object)) => {
@@ -32,12 +44,46 @@ impl PreparedRequest {
             _ => (raw.to_vec(), None),
         };
         let fingerprints = router.fingerprints_preparsed(&body, object.as_ref());
-        Self { body, fingerprints }
+        let tokenizer_body = prepare_tokenizer_body
+            .then(|| {
+                object
+                    .as_ref()
+                    .and_then(|object| tokenization_body(endpoint, object))
+            })
+            .flatten();
+        Self {
+            body,
+            fingerprints,
+            tokenizer_body,
+        }
     }
 
     #[must_use]
     pub fn route(&self, router: &Router) -> Decision {
         router.route_prepared(self.body.len(), &self.fingerprints)
+    }
+}
+
+fn tokenization_body(endpoint: Endpoint, object: &Map<String, Value>) -> Option<Vec<u8>> {
+    match endpoint {
+        Endpoint::Chat if object.get("messages").is_some_and(Value::is_array) => {
+            let mut request = object.clone();
+            let continue_final = request
+                .get("continue_final_message")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            request
+                .entry("add_generation_prompt")
+                .or_insert(Value::Bool(!continue_final));
+            request.insert("return_token_strs".to_owned(), Value::Bool(false));
+            serde_json::to_vec(&request).ok()
+        }
+        Endpoint::Completions if object.get("prompt").is_some_and(Value::is_string) => {
+            let mut request = object.clone();
+            request.insert("return_token_strs".to_owned(), Value::Bool(false));
+            serde_json::to_vec(&request).ok()
+        }
+        _ => None,
     }
 }
 
@@ -97,6 +143,35 @@ mod tests {
         assert_eq!(
             PreparedRequest::new(Endpoint::Chat, raw, 100_000, &router).body,
             raw
+        );
+    }
+
+    #[test]
+    fn derives_tokenizer_payload_from_the_sanitized_parse() {
+        let router = router();
+        let raw = br#"{"model":"model","messages":[{"role":"user","content":"hello"}],"max_tokens":100000,"continue_final_message":true}"#;
+        let prepared = PreparedRequest::with_tokenizer(Endpoint::Chat, raw, 100_000, &router, true);
+        let body: Value =
+            serde_json::from_slice(prepared.tokenizer_body.as_ref().unwrap()).unwrap();
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["add_generation_prompt"], false);
+        assert_eq!(body["return_token_strs"], false);
+        assert_eq!(body["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn tokenizer_payload_is_selective_by_endpoint_and_flag() {
+        let router = router();
+        let chat = br#"{"messages":[{"role":"user","content":"hello"}]}"#;
+        assert!(
+            PreparedRequest::new(Endpoint::Chat, chat, 100_000, &router)
+                .tokenizer_body
+                .is_none()
+        );
+        assert!(
+            PreparedRequest::with_tokenizer(Endpoint::Messages, chat, 100_000, &router, true)
+                .tokenizer_body
+                .is_none()
         );
     }
 }

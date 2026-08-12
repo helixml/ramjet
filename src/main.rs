@@ -73,6 +73,11 @@ async fn main() -> anyhow::Result<()> {
         load_unit_bytes = config.route_load_unit_bytes,
         max_load_units = config.route_max_load_units,
         journal = config.route_journal,
+        tokenizer_mode = ?config.tokenizer_mode,
+        tokenizer_min_bytes = config.tokenizer_min_bytes,
+        tokenizer_max_bytes = config.tokenizer_max_bytes,
+        tokenizer_workers = config.tokenizer_workers,
+        tokenizer_queue_capacity = config.tokenizer_queue_capacity,
         "mini-dynamo up: API :8000, metrics :9090"
     );
 

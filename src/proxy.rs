@@ -21,6 +21,7 @@ use crate::{
     prepare::PreparedRequest,
     router::{Decision, LoadGuard, Router},
     shims::{self, Endpoint},
+    tokenizer::TokenizerObserver,
     usage::{Accumulator, feed_sse_chunk},
 };
 
@@ -38,6 +39,7 @@ struct Inner {
     metrics: Arc<Metrics>,
     router: Arc<Router>,
     journal: RouteJournal,
+    tokenizer: TokenizerObserver,
 }
 
 struct InflightGuard(GaugeHandle);
@@ -84,6 +86,7 @@ impl Proxy {
         router: Arc<Router>,
     ) -> Self {
         let journal = RouteJournal::new(config.route_journal);
+        let tokenizer = TokenizerObserver::new(&config, client.clone(), Arc::clone(&metrics));
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -91,6 +94,7 @@ impl Proxy {
                 metrics,
                 router,
                 journal,
+                tokenizer,
             }),
         }
     }
@@ -116,11 +120,13 @@ impl Proxy {
                 "request body too large or unreadable",
             );
         };
-        let prepared = PreparedRequest::new(
+        let prepare_tokenizer_body = self.inner.tokenizer.wants_payload(endpoint, raw_body.len());
+        let prepared = PreparedRequest::with_tokenizer(
             endpoint,
             &raw_body,
             self.inner.config.max_tokens_strip,
             &self.inner.router,
+            prepare_tokenizer_body,
         );
         let decision = prepared.route(&self.inner.router);
         let fingerprints = if endpoint == Endpoint::Other {
@@ -128,6 +134,7 @@ impl Proxy {
         } else {
             prepared.fingerprints
         };
+        let tokenizer_body = prepared.tokenizer_body;
         let body = Bytes::from(prepared.body);
         self.inner
             .metrics
@@ -260,6 +267,7 @@ impl Proxy {
                     status,
                     streaming,
                     fingerprints,
+                    tokenizer_body,
                     decision,
                     load_guard,
                     inflight_guard,
@@ -273,7 +281,7 @@ impl Proxy {
             .expect("valid upstream response")
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn relay(
         &self,
         sender: mpsc::Sender<Result<Bytes, io::Error>>,
@@ -283,6 +291,7 @@ impl Proxy {
         status: StatusCode,
         streaming: bool,
         fingerprints: Vec<u64>,
+        tokenizer_body: Option<Vec<u8>>,
         decision: Decision,
         _load_guard: RoutedLoad,
         _inflight_guard: InflightGuard,
@@ -358,6 +367,9 @@ impl Proxy {
             if status == StatusCode::OK && endpoint != Endpoint::Other {
                 self.record_usage(endpoint_label, &usage, started.elapsed(), first_token);
                 self.inner.router.observe(upstream, &fingerprints);
+                self.inner
+                    .tokenizer
+                    .submit(endpoint, upstream, tokenizer_body);
             }
         }
         self.record_upstream_request(upstream, status);

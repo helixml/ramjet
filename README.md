@@ -27,9 +27,21 @@ DS4_MAX_TOKENS_STRIP (100000), DS4_ROUTE_ALPHA (4), DS4_ROUTE_CHUNK_BYTES
 (2048), DS4_ROUTE_MAX_PREFIX_BYTES (2097152), DS4_ROUTE_MAX_OVERLAP_BLOCKS
 (32), DS4_ROUTE_INDEX_CAPACITY (100000), DS4_ROUTE_LOAD_UNIT_BYTES (32768),
 DS4_ROUTE_MAX_LOAD_UNITS (8),
-DS4_AFFINITY (prefix|load), DS4_ROUTE_JOURNAL (false). `load` is an explicit baseline or an
+DS4_AFFINITY (prefix|load), DS4_ROUTE_JOURNAL (false),
+DS4_TOKENIZER_MODE (off|remote-shadow), DS4_TOKENIZER_MIN_BYTES (32768),
+DS4_TOKENIZER_MAX_BYTES (2097152), DS4_TOKENIZER_WORKERS (1),
+DS4_TOKENIZER_QUEUE_CAPACITY (8), DS4_TOKENIZER_TIMEOUT_MS (2000). `load` is an explicit baseline or an
 escape hatch for engines without reusable prefix state; hybrid KDA models such
 as Kimi K3 still benefit from their engine's recurrent-state prefix cache.
+
+`remote-shadow` derives a vLLM-compatible `/tokenize` payload from the same
+parsed and sanitized request, but does not use its token IDs for routing. After
+the client request completes, the payload enters a bounded, non-blocking queue
+and is sent to the selected engine with `DS4_UPSTREAM_TOKEN`. Unsupported
+endpoints, requests outside the configured byte window, a full queue, timeouts,
+and malformed responses all fall back to the existing approximate router.
+Shadow results expose only controlled outcome labels, duration, and token-count
+histograms; prompt text and token IDs are neither logged nor retained.
 
 Set `DS4_ROUTE_JOURNAL=true` to emit privacy-bounded versioned `start`/`finish`
 records to the process log. Records contain only process-local sequence IDs,

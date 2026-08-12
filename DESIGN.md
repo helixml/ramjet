@@ -33,15 +33,20 @@ client ──▶ :8000 proxy ──▶ router.Route(body) ──▶ engine[i] (s
 The active implementation is Rust: `src/router.rs` (selection),
 `src/shims.rs` (request/metadata rewrites), `src/usage.rs` (response parsing),
 `src/metrics.rs` (Prometheus), `src/proxy.rs` (async data plane + probes), and
-`src/journal.rs`. The original Go packages remain temporarily as a parity
-oracle during the rolling cutover.
+`src/journal.rs`, and `src/tokenizer.rs` (bounded exact-token shadow adapter).
+The original Go packages remain temporarily as a parity oracle during the
+rolling cutover.
 
 The Rust boundary is deliberate: one parsed request-preparation pass applies
 compatibility mutations and derives route fingerprints before feeding the async
 streaming proxy. The prepared fingerprint vector is reused after a successful
-response instead of reparsing the prompt for cache observation. Next, this
-boundary feeds local tokenizer workers and exact per-engine KV indexes.
-Tokenization work never runs on Tokio I/O workers.
+response instead of reparsing the prompt for cache observation. In selective
+remote-shadow mode the same parsed object also derives a vLLM `/tokenize`
+payload. It enters a bounded non-blocking worker queue only after the client
+request completes, so queue pressure or tokenizer failure cannot delay or
+change placement. Next, this boundary feeds bounded local tokenizer CPU workers
+and exact per-engine KV indexes. Local tokenization work never runs on Tokio I/O
+workers.
 Exact state is fenced on event gaps and routing falls back automatically to
 the approximate chain-fingerprint index.
 
@@ -107,7 +112,9 @@ Emergent behaviors (tested in `router_test.go`):
 prompt/cached/completion tokens, context & output size histograms, finish
 reasons, upstream up/probes/errors/requests, client disconnects — plus new:
 `route_decisions_total{outcome}`, `route_overlap_blocks`, `route_affinity_blocks`,
-`upstream_inflight{upstream}`, `upstream_load_units{upstream}`. Native engine metrics pass through at
+`upstream_inflight{upstream}`, `upstream_load_units{upstream}`,
+`tokenizer_shadow_total{backend,endpoint,outcome}`, tokenizer duration/token
+histograms, and bounded queue depth. Native engine metrics pass through at
 `/metrics/upstream/{i}`.
 
 Successful proxy responses and chat logs include an opaque upstream ordinal,

@@ -30,6 +30,10 @@ pub struct Metrics {
     pub route_affinity: Histogram,
     pub upstream_inflight: GaugeVec,
     pub upstream_load_units: GaugeVec,
+    pub tokenizer_shadow: CounterVec,
+    pub tokenizer_duration: HistogramVec,
+    pub tokenizer_tokens: HistogramVec,
+    pub tokenizer_queue_depth: Gauge,
 }
 
 impl Metrics {
@@ -226,6 +230,32 @@ impl Metrics {
                 "Size-weighted in-flight work used by the router",
                 &["upstream"],
             )?,
+            tokenizer_shadow: counter(
+                "ds4proxy_tokenizer_shadow_total",
+                "Selective tokenizer observations by backend, endpoint, and outcome",
+                &["backend", "endpoint", "outcome"],
+            )?,
+            tokenizer_duration: histogram(
+                "ds4proxy_tokenizer_duration_seconds",
+                "Background tokenizer request duration",
+                vec![
+                    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0,
+                ],
+                &["backend", "endpoint"],
+            )?,
+            tokenizer_tokens: histogram(
+                "ds4proxy_tokenizer_tokens",
+                "Exact tokens returned by a background tokenizer observation",
+                vec![
+                    256.0, 1_024.0, 4_096.0, 8_192.0, 16_384.0, 32_768.0, 65_536.0, 98_304.0,
+                    131_072.0, 262_144.0, 393_216.0,
+                ],
+                &["backend", "endpoint"],
+            )?,
+            tokenizer_queue_depth: Gauge::with_opts(Opts::new(
+                "ds4proxy_tokenizer_queue_depth",
+                "Background tokenizer jobs waiting for a bounded worker",
+            ))?,
         };
         for collector in metrics.collectors() {
             registry.register(collector)?;
@@ -262,6 +292,10 @@ impl Metrics {
             Box::new(self.route_affinity.clone()),
             Box::new(self.upstream_inflight.clone()),
             Box::new(self.upstream_load_units.clone()),
+            Box::new(self.tokenizer_shadow.clone()),
+            Box::new(self.tokenizer_duration.clone()),
+            Box::new(self.tokenizer_tokens.clone()),
+            Box::new(self.tokenizer_queue_depth.clone()),
         ]
     }
 }

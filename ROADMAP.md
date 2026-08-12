@@ -25,10 +25,16 @@ node06). The design rationale for each lives in DESIGN.md.
   telemetry, and occasional Helix workflow acceptance before promotion. Go
   remains the instant LB-only rollback; neither engine is restarted. r4 matched
   Go at c16/c24, preserved locality, replayed 36/36 decisions, and is live.
-- 🔨 **Tokenizer abstraction and bounded CPU pool.** Local Rust tokenizer,
-  authenticated `/tokenize` fallback, approximate fingerprint fallback, queue
-  limits, request-class telemetry, and selective exact lookup. Never tokenize
-  long prompts on async I/O workers.
+- ✅ **Bounded remote tokenizer shadow.** The one-pass boundary selectively
+  derives chat/completion `/tokenize` payloads, then submits them only after the
+  user request completes. Authenticated calls use a bounded non-blocking queue,
+  fixed workers/timeouts/response caps, controlled metrics, and unconditional
+  approximate-routing fallback; raw token IDs and prompts never enter logs.
+- ⬜ **Bounded local Rust tokenizer pool.** Load a validated model/template
+  bundle, run CPU-heavy Hugging Face or fastokens encoding outside Tokio I/O
+  workers, retain authenticated `/tokenize` as the parity/fallback authority,
+  and use exact lookup only for request classes whose measured value exceeds
+  tokenization cost.
 - ⬜ **Chat-template/token-ID golden matrix.** Compare local token IDs with the
   active vLLM `/tokenize` across OpenAI/Anthropic messages, tools, reasoning,
   content parts, special tokens, and `add_generation_prompt`; fail closed to
