@@ -2109,3 +2109,20 @@ without changing placement. The published r26 image is
 `ghcr.io/helixml/mini-dynamo:rust-r26-cold-residency-b4b3b55` at digest
 `sha256:ae7dc14c2d19579bb721e475c8a0936b61d49309ea0579ec760c287d9780df8f`;
 the registry push reused all but one layer and took 4.21s.
+
+The final public-digest LB-only swap took 1.67s. Both vLLM engine start times
+and restart counts remained unchanged, `/health` reported 2/2 healthy, the
+container resolved the 8,192 replay limit, and node06's Compose SHA matched
+the canonical repository file. A fresh direct request triggered the quiet B
+publisher after the first balanced LB trigger reached only A's live event
+stream; the final public process replayed 3,637 A and 3,568 B batches and made
+both exact inventories trusted. The two-request LB trigger itself succeeded
+and split 1/1, but its native-metric reconciliation sampled only one engine's
+eventual counters, so it is not claimed as a reconciled benchmark cell.
+
+The post-deploy Helix correctness probe could not reach inference: the
+provided internal account authenticated but received HTTP 403 for the
+documented test app, and its visible app list was empty. This is an account/app
+authorization blocker rather than an LB result; synthetic and direct-engine
+gates remain green, but the Helix workflow gate must be repeated with an app
+shared to that account.
