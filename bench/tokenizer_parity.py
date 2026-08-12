@@ -161,6 +161,9 @@ def tokenization_payload(fields):
 
 failures = 0
 for name, fields in CASES.items():
+    selected_case = os.environ.get("TOKENIZER_CASE")
+    if selected_case and name != selected_case:
+        continue
     completion_request = {
         "model": MODEL,
         "max_tokens": 1,

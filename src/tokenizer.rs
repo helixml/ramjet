@@ -390,6 +390,7 @@ impl LocalTokenizer {
         if object
             .get("documents")
             .is_some_and(|value| !value.is_null())
+            || has_tool_history(object)
         {
             return Err(LocalFailure::Unsupported);
         }
@@ -434,6 +435,23 @@ impl LocalTokenizer {
             token_ids: encoding.token_ids().to_vec(),
         })
     }
+}
+
+fn has_tool_history(object: &serde_json::Map<String, Value>) -> bool {
+    object
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message.get("role").and_then(Value::as_str) == Some("tool")
+                    || message
+                        .get("tool_calls")
+                        .is_some_and(|value| !value.is_null())
+                    || message
+                        .get("function_call")
+                        .is_some_and(|value| !value.is_null())
+            })
+        })
 }
 
 /// Translate the active node06 vLLM r34 DeepSeek-V4 template profile into
@@ -699,5 +717,22 @@ mod tests {
             )]);
             assert!(apply_node06_vllm_profile(&mut args).is_err());
         }
+    }
+
+    #[test]
+    fn tool_history_stays_on_remote_authority() {
+        let declared = serde_json::json!({
+            "messages": [{"role": "user", "content": "use a tool"}],
+            "tools": [{"type": "function", "function": {"name": "lookup"}}]
+        });
+        assert!(!has_tool_history(declared.as_object().unwrap()));
+
+        let history = serde_json::json!({
+            "messages": [
+                {"role": "assistant", "tool_calls": [{"id": "call-1"}]},
+                {"role": "tool", "tool_call_id": "call-1", "content": "ok"}
+            ]
+        });
+        assert!(has_tool_history(history.as_object().unwrap()));
     }
 }
