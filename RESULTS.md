@@ -28,6 +28,7 @@ placement. Current measured landmarks:
 | r21 exact placement canary | **2 moves / 2 agrees; 32,768 cached tokens on all 4 forced-warm requests** |
 | r21 production shadow policy | **71.6% locality; c12 566 tok/s; c16/max512 1,343 tok/s; 28/28 requests** |
 | r22 production client cancellation | **2.000s disconnect; LB load + vLLM running zero by 2.019s** |
+| r23 publisher-safe KV replay | **1,332/1,724 batches trusted first attempt; c16/max512 1,462.9 tok/s** |
 
 Two r34 candidates were explicitly rejected after rolling B-only trials:
 manual KV bytes gained just 1.16% capacity while bypassing runtime profiling;
@@ -74,6 +75,19 @@ A before the client timed out at 2.000s; by the first 2.019s sample, proxy
 inflight/load and both engines' running-request gauges were zero, and the
 disconnect counter had incremented exactly once. This closes the prior gap
 where a silent engine could retain work until its next response chunk.
+
+r23 removes the replay-recovery blocker without changing request placement.
+The node06 vLLM publisher streams retained replay synchronously from one
+ROUTER thread. A framing-only pure-Rust ZMTP client handled small tails but
+could stall before the end marker on a large response; the same full 1,292-
+batch, 29.9MB response drained through libzmq in 77ms. mini-dynamo therefore
+keeps async Rust for live SUB events and confines libzmq replay to a deadline-
+bounded blocking worker with fresh identities and drain-through-validation.
+An isolated start restored 1,293/1,684 batches on the two engines concurrently;
+production then restored 1,332/1,724 on its first attempt. The post-promotion
+c12 gate split 6/6 at 556 tok/s and c16/max512 reached 1,462.9 tok/s. Both
+engine processes and caches were retained. Exact placement remains telemetry-
+only.
 
 r20 removes the concurrency ambiguity without enabling exact placement. A
 SHA-pinned manifest replays ten local token-vector goldens at startup and

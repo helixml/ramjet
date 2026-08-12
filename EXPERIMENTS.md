@@ -1696,3 +1696,73 @@ backoff, but live canaries encountered the known publisher-side backlog after
 aborted full replays. That work remains isolated from r22 production until the
 publisher supports cancellation/chunking or the recovery behavior is proven
 deterministically.
+
+## 2026-08-12 — r23 publisher-safe replay recovery and faster build loop
+
+r23 resolves the replay-recovery blocker encountered after r21/r22 inventories
+grew beyond 1,024 retained batches. vLLM r34 services replay synchronously on
+its publisher thread: one DEALER request receives all retained batches followed
+by an explicit end marker. Privacy-bounded framing probes showed that the
+pure-Rust `zeromq` 0.6 client handled a 92-batch / 2.7MB tail in 11ms and a
+102-batch / 3.0MB tail in 39ms, but a large replay could stop making progress
+before the end marker. The same endpoint and request through the mature libzmq
+implementation drained all 1,292 batches / 29.9MB in 77ms. This isolated the
+failure below MessagePack decoding and exact-index construction.
+
+Commit `c0c2874` retains the async pure-Rust SUB path for live events but moves
+the exceptional replay burst to `spawn_blocking` with statically vendored
+libzmq. Every attempt uses a fresh DEALER identity, a receive HWM sized for the
+bounded response, one monotonic deadline, and zero linger. Framing, topic,
+sequence, payload, and size errors are remembered while the worker continues
+draining to the end marker, preventing a malformed response from stranding the
+single vLLM publisher thread. A receive deadline or socket failure drops the
+identity and fails closed. Reconnect backoff resets only after exact inventory
+authority is restored, and an undrained timeout receives at least one full
+replay-window delay before retry. The local gate passed formatting, strict
+all-target/all-feature Clippy, release build, retained Go tests/vet/gofmt, and
+all **104 Rust tests**.
+
+The image
+`ghcr.io/helixml/ds4-loadbalancer:rust-r23-replay-libzmq-c0c2874` has digest
+`sha256:716dec709ffecc78b8b6ebf21ca984ab09dfa316d33bbd8996943cc9d13e53ee`
+and a 14,245,839-byte runtime footprint. An isolated node06 canary connected to
+both production engines. One 12.7K-token, one-output-token request per engine
+was launched concurrently to generate the startup boundary. Both full replays
+completed on the first attempt at 1,293 and 1,684 batches; both inventories
+became generation-zero trusted at 7,384/6,063 blocks and
+1,890,304/1,552,128 token IDs. Populated RSS was 270.3MiB versus 270.4MiB for
+r22.
+
+Canary serving gates then passed:
+
+- downstream cancellation: curl closed at 2.013s, and 71ms later proxy
+  inflight plus both vLLM running gauges were zero with exactly one new client
+  disconnect;
+- c12 same-app/max128: 12/12, exact 6/6 split, 562 aggregate tok/s;
+- c16/max512: 16/16, 1,397.7 aggregate tok/s.
+
+The public image replaced only the production LB. Engines A/B retained IDs
+`2bc90280...` / `c8fd901e...`, their 12:11Z/12:21Z starts, and zero restarts.
+One modest concurrent full-block trigger per engine restored 1,332/1,724
+batches on the first poll, with both event and trust gauges one. Production
+regressions completed 12/12 at a 6/6 split and 556 tok/s, then 16/16 at
+1,462.9 tok/s for max512. `/health` remained `ok` with 2/2 replicas and all
+three serving containers retained zero restarts. Exact placement remains
+non-mutating shadow mode.
+
+The development loop was measured as part of this run. The first local
+Bookworm BuildKit image was cold—83.09s including base images, registry
+downloads, and every dependency. The unchanged warm build took 2.31s, and the
+14.2MB zstd-compressed Docker stream loaded on node06 in 3.80s. This replaces
+source upload plus compilation on the live GPU host. `bench/build_transfer.sh`
+prints build, transfer, and total wall time; `AGENTS.md` now separates the
+2-5s focused Rust loop, the once-per-push full gate, and valid two-engine
+crossover work from cache/routing tests that must remain serial.
+
+Verdict: promote r23. It deterministically restores large retained inventories
+without changing the serving policy or engine state and closes the replay-
+backpressure prerequisite in issue #13. The next implementation priority is
+issue #10's production-shaped DSML benchmark/correctness corpus, which becomes
+the reusable oracle for the remaining P1 engine, routing, and effort-policy
+experiments. The existing Helix credential blocker remains; no claim is made
+for a new real-session E2E in this run.
