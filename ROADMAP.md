@@ -14,6 +14,12 @@ node06). The design rationale for each lives in DESIGN.md.
   bounded request bodies, request shims, model metadata rewrite, health probes,
   retryable-status failover, opaque route headers, true generated-token TTFT,
   privacy-bounded journal v3, and the existing `ds4proxy_*` metric names.
+- ✅ **Immediate downstream-cancellation propagation.** The relay now selects
+  on downstream closure and upstream reads concurrently, so dropping a client
+  immediately drops the reqwest response stream even while the engine is
+  silent. A loopback test proves upstream-body destruction plus inflight/load
+  release; the production gate drained LB load and vLLM running state by the
+  first 2.019s sample after a forced 2.000s timeout.
 - ✅ **Health-gated serving contract.** `/health` reports opaque per-replica
   health plus aggregate `ok|degraded|unhealthy` readiness, returning 503 only
   when no replica can serve. Known-unhealthy replicas are removed from every
@@ -30,7 +36,7 @@ node06). The design rationale for each lives in DESIGN.md.
   `rust-*` images, then run locality, concurrent same-app, c24 aggregate, route
   telemetry, and occasional Helix workflow acceptance before promotion. Go
   remains an LB-only rollback; neither engine is restarted for proxy trials.
-  Public r21 is live with both r34 publishers, manifest-attested pre-route
+  Public r22 is live with both r34 publishers, manifest-attested pre-route
   exact scoring, and the placement policy in observation-only shadow mode.
   Exact state is not exposed to placement.
 - ✅ **Bounded remote tokenizer shadow.** The one-pass boundary selectively
@@ -123,9 +129,10 @@ node06). The design rationale for each lives in DESIGN.md.
   the recovered gate again corrected 2/2 forced misses. r21 now also exports
   the identical gated decision as `mode="shadow"` without mutating the route;
   a real forced miss stayed cold on B while telemetry reported `would_move`.
-  Public r21 now runs only this observation mode. Its initial qualification
-  gates recorded two agreements and 12 cold/all-zero decisions; production has
-  not yet produced an organic move. Collect representative organic
+  r21 introduced this observation mode and production r22 retains it. Its
+  initial qualification gates recorded two agreements and 12 cold/all-zero
+  decisions; production has not yet produced an organic move. Collect
+  representative organic
   move/gain/load distributions before
   considering a narrowly admitted placement rollout. Raw token IDs, block
   hashes, and prompts remain out of logs.
@@ -134,9 +141,12 @@ node06). The design rationale for each lives in DESIGN.md.
   are now 2,048 batches and a 20-second fail-closed deadline. After simultaneous
   aborted full replays, stale ROUTER/DEALER identities temporarily delayed new
   full requests even though a direct contiguous 0..1083 replay completed in
-  about one second. Add deterministic cancellation/identity tests, recovery
-  telemetry, and either unique consumer identities or chunked/snapshot replay;
-  keep exact placement fenced throughout recovery.
+  about one second. A first Rust retry-pacing experiment now proves fresh
+  identities and refuses to reset exponential backoff until an inventory is
+  authoritative, but its live canary was intentionally not promoted after an
+  aborted replay left the publisher busy. Add recovery telemetry and upstream
+  cancellation or chunked/snapshot replay; keep exact placement fenced
+  throughout recovery.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
   vectors rather than restarting; benchmark memory, p99 preparation latency,

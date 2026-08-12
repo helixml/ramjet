@@ -27,6 +27,7 @@ placement. Current measured landmarks:
 | r20 attested pre-route shadow | **15 agree / 3 cold; forced miss found 36,096 warm tokens before mutation** |
 | r21 exact placement canary | **2 moves / 2 agrees; 32,768 cached tokens on all 4 forced-warm requests** |
 | r21 production shadow policy | **71.6% locality; c12 566 tok/s; c16/max512 1,343 tok/s; 28/28 requests** |
+| r22 production client cancellation | **2.000s disconnect; LB load + vLLM running zero by 2.019s** |
 
 Two r34 candidates were explicitly rejected after rolling B-only trials:
 manual KV bytes gained just 1.16% capacity while bypassing runtime profiling;
@@ -58,14 +59,21 @@ matched c16/max512 runs had a 1,343.4 tok/s r19 median versus 1,362.1 for r12
 (-1.4%, within box noise); the matched long-prompt pair had identical 112,128
 cached tokens and overlapping warm latency.
 
-Public r21 is now the production LB with event publishers enabled on
+Public r22 is now the production LB with event publishers enabled on
 container-only ports, manifest-attested exact routing, and the gated placement
 policy evaluated in non-mutating shadow mode. The LB-only promotion left both
 engine processes and KV caches intact. Both runtime identities attested and
 late-subscriber replay restored both authoritative inventories. The
-post-deploy gates passed at 71.6% locality, 566 tok/s for a 6/6 c12 same-app
-split, and 1,343.2 tok/s for c16/max512, with all 28 requests successful.
+post-deploy gates passed at 565 tok/s for a 6/6 c12 same-app split and
+1,354.0 tok/s for c16/max512, with all 28 requests successful.
 Exact state remains telemetry-only and cannot change placement.
+
+r22 watches downstream closure concurrently with upstream reads. In a
+production forced-cancellation gate, a 4,096-token stream was active on engine
+A before the client timed out at 2.000s; by the first 2.019s sample, proxy
+inflight/load and both engines' running-request gauges were zero, and the
+disconnect counter had incremented exactly once. This closes the prior gap
+where a silent engine could retain work until its next response chunk.
 
 r20 removes the concurrency ambiguity without enabling exact placement. A
 SHA-pinned manifest replays ten local token-vector goldens at startup and
