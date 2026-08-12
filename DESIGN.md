@@ -30,9 +30,17 @@ client ──▶ :8000 proxy ──▶ router.Route(body) ──▶ engine[i] (s
                                                 :9090 /metrics/upstream/{i}
 ```
 
-Packages: `pkg/router` (selection), `pkg/shims` (request/metadata rewrites),
-`pkg/usage` (response parsing), `pkg/metrics` (Prometheus), `pkg/proxy`
-(data plane + probes), `pkg/config`, `cmd/mini-dynamo`.
+The active implementation is Rust: `src/router.rs` (selection),
+`src/shims.rs` (request/metadata rewrites), `src/usage.rs` (response parsing),
+`src/metrics.rs` (Prometheus), `src/proxy.rs` (async data plane + probes), and
+`src/journal.rs`. The original Go packages remain temporarily as a parity
+oracle during the rolling cutover.
+
+The Rust boundary is deliberate: one bounded request-preparation pass feeds
+an async streaming proxy today and, next, local tokenizer workers and exact
+per-engine KV indexes. Tokenization work never runs on Tokio I/O workers.
+Exact state is fenced on event gaps and routing falls back automatically to
+the approximate chain-fingerprint index.
 
 ## The router
 

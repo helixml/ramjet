@@ -4,6 +4,40 @@ Status legend: ✅ done · 🔨 in progress · ⬜ planned. Ordered by
 value-per-effort given the current deployment (2 vLLM+DSpark TP4 instances on
 node06). The design rationale for each lives in DESIGN.md.
 
+## Rust rewrite (v1.2)
+
+- ✅ **Parity routing kernel.** Rust 2024 implementation of typed config,
+  canonical prompt preparation, chained fingerprints, bounded LRU indexes,
+  overlap/load scoring, health ordering, exact-score tie policy, and RAII
+  weighted-load accounting. Go-generated fingerprints are golden-tested.
+- ✅ **Async compatibility data plane.** Axum/Tokio/Reqwest streaming proxy,
+  bounded request bodies, request shims, model metadata rewrite, health probes,
+  retryable-status failover, opaque route headers, true generated-token TTFT,
+  privacy-bounded journal v3, and the existing `ds4proxy_*` metric names.
+- 🔨 **Rolling Go/Rust node06 qualification.** Build and publish immutable
+  `rust-*` images, then run locality, concurrent same-app, c24 aggregate, route
+  telemetry, and occasional Helix workflow acceptance before promotion. Go
+  remains the instant LB-only rollback; neither engine is restarted.
+- ⬜ **Tokenizer abstraction and bounded CPU pool.** Local Rust tokenizer,
+  authenticated `/tokenize` fallback, approximate fingerprint fallback, queue
+  limits, request-class telemetry, and selective exact lookup. Never tokenize
+  long prompts on async I/O workers.
+- ⬜ **Chat-template/token-ID golden matrix.** Compare local token IDs with the
+  active vLLM `/tokenize` across OpenAI/Anthropic messages, tools, reasoning,
+  content parts, special tokens, and `add_generation_prompt`; fail closed to
+  remote or approximate mode on any model/template mismatch.
+- ⬜ **Exact KV-event shadow index.** Per-engine token-prefix/radix indexes,
+  cache-group-aware block metadata, sequence-gap detection, bounded replay,
+  generation fencing, reconnect backoff, and an automatic approximate-routing
+  fallback. Raw token IDs, block hashes, and prompts remain out of logs.
+- ⬜ **Session-cached incremental preparation.** Bounded session state with
+  deterministic invalidation so returning 80K conversations extend prior token
+  vectors rather than restarting; benchmark memory, p99 preparation latency,
+  and mismatch recovery before routing with it.
+- ⬜ **P/D and KV-transfer seams.** Keep request preparation, cache inventory,
+  placement policy, and transport independent so a future Dynamo/NIXL prefill
+  pool does not require another proxy rewrite.
+
 ## Shipped (v1.1)
 
 - ✅ Overlap+load router (`score = prefixOverlapBlocks − alpha·loadUnits`),
@@ -79,10 +113,10 @@ node06). The design rationale for each lives in DESIGN.md.
   transients. The 44.7K-token gain is not worth that operational fragility.
   Retain automatic sizing and do not jump to the profiler's full-memory value.
 
-- ⬜ **CI + package publishing.** GitHub Actions: `go test ./...`, `go vet`,
-  build, and push `ghcr.io/helixml/ds4-loadbalancer:<tag>` on tag/main.
-  Removes the current manual "build on node06, no ghcr push" gap (the
-  interactive `gh` token lacks `write:packages`).
+- 🔨 **CI + package publishing.** Rust fmt/clippy/test/release checks and an
+  amd64 distroless image publisher are present on the rewrite branch. Validate
+  the first workflow and public GHCR pull, then mark complete. Manual publishing
+  is now possible with the current package scope.
 - ⬜ **Secure post-deploy Helix acceptance.** The retired plaintext key now
   returns 401 and has been removed from both node06 guides. Confirm revocation,
   clean Git history if policy requires it, and inject a current smoke-test key

@@ -1,7 +1,7 @@
 # mini-dynamo
 
 KV-cache-locality-aware load balancer for OpenAI-compatible inference
-engines. Single static binary; drop-in replacement for `ds4-loadbalancer`
+engines. Compact Rust binary; drop-in replacement for `ds4-loadbalancer`
 (same env vars, same `ds4proxy_*` metrics), plus an overlap-scored router:
 
     score(upstream) = min(prefixOverlapBlocks, maxAffinityBlocks) − alpha × loadUnits
@@ -57,8 +57,17 @@ to compare this rule with the legacy load-neutral equality behavior.
 
 ## Develop
 
-    go test ./...
-    go build ./cmd/mini-dynamo
+    cargo fmt --check
+    cargo clippy --locked --all-targets --all-features -- -D warnings
+    cargo test --locked
+    cargo build --release --locked
+
+The Go implementation remains in-tree as the cutover reference. Rust tests
+include Go-generated fingerprint goldens and live HTTP tests for sanitization,
+failover, route correlation, usage streaming, and model metadata rewriting.
+During the rewrite, keep both suites green:
+
+    go test ./... && go vet ./... && test -z "$(gofmt -l .)"
 
 See [ROADMAP.md](ROADMAP.md), [EXPERIMENTS.md](EXPERIMENTS.md), and
 [AGENTS.md](AGENTS.md) (node06 test/bench workflow).
