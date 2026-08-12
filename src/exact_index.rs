@@ -542,7 +542,7 @@ impl ExactKvInventory {
     ) -> Result<ApplyOutcome, ExactIndexError> {
         match event {
             KvEvent::BlockStored(stored) => {
-                self.learn_group(data_parallel_rank, stored);
+                self.learn_group(data_parallel_rank, stored)?;
                 if let Some(reason) = filter_store(stored, data_parallel_rank, &self.group_kinds) {
                     return Ok(ApplyOutcome::Filtered(reason));
                 }
@@ -601,19 +601,25 @@ impl ExactKvInventory {
         Ok(summary)
     }
 
-    fn learn_group(&mut self, rank: u32, stored: &BlockStored) {
+    fn learn_group(&mut self, rank: u32, stored: &BlockStored) -> Result<(), ExactIndexError> {
         let (Some(group), Some(kind)) = (stored.group_idx, stored.kv_cache_spec_kind.as_deref())
         else {
-            return;
+            return Ok(());
         };
-        self.group_kinds
-            .insert((rank, group), AttentionKind::from_wire(kind));
+        let key = (rank, group);
+        if !self.group_kinds.contains_key(&key)
+            && self.group_kinds.len() >= self.index.limits.max_nodes
+        {
+            return Err(ExactIndexError::CapacityExceeded);
+        }
+        self.group_kinds.insert(key, AttentionKind::from_wire(kind));
         if stored.parent_block_hash.is_none() {
             self.group_block_sizes
-                .entry((rank, group))
+                .entry(key)
                 .and_modify(|size| *size = (*size).max(stored.block_size))
                 .or_insert(stored.block_size);
         }
+        Ok(())
     }
 
     fn is_unsupported_partial(&self, rank: u32, stored: &BlockStored) -> bool {
@@ -1524,6 +1530,37 @@ mod tests {
         assert_eq!(
             state.commit_full_replay(malformed),
             Err(ExactIndexError::InconsistentBlockShape)
+        );
+        assert!(!state.trusted());
+        assert_eq!(state.stats(), ExactIndexStats::default());
+    }
+
+    #[test]
+    fn streamed_full_replay_bounds_filtered_group_metadata() {
+        let limits = ExactIndexLimits {
+            max_nodes: 2,
+            max_token_ids: 16,
+            max_lookup_steps: 16,
+        };
+        let mut state = FencedExactKvInventory::new(8, limits);
+        assert!(matches!(
+            state.ingest_live(2, &batch(Vec::new())).unwrap(),
+            LiveBatchOutcome::Replay {
+                from: 0,
+                through: 2
+            }
+        ));
+        let mut scratch = state.begin_full_replay();
+        for sequence in 0..=2 {
+            let mut filtered = store_event(&[sequence + 1], None, &[1, 2], 2);
+            filtered.group_idx = Some(u32::try_from(sequence + 1).unwrap());
+            filtered.kv_cache_spec_kind = Some("mamba".to_owned());
+            scratch.ingest(sequence, &batch(vec![KvEvent::BlockStored(filtered)]));
+        }
+
+        assert_eq!(
+            state.commit_full_replay(scratch),
+            Err(ExactIndexError::CapacityExceeded)
         );
         assert!(!state.trusted());
         assert_eq!(state.stats(), ExactIndexStats::default());

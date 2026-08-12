@@ -7,7 +7,10 @@
 //! reliably. DEALER is required because one request has multiple streamed
 //! replies before the explicit end marker.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Weak},
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use futures::{StreamExt, channel::mpsc};
@@ -17,6 +20,7 @@ use zeromq::{Socket, SocketEvent, SocketOptions, SocketRecv, SubSocket, ZmqMessa
 use crate::kv_wire::{DecodeError, KvEventBatch, KvWireLimits, decode_batch};
 
 const END_SEQUENCE: [u8; 8] = [u8::MAX; 8];
+const REPLAY_CANCEL_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug)]
 pub struct KvTransportConfig {
@@ -63,6 +67,8 @@ pub enum KvTransportError {
     ReplayTimeoutUndrained,
     #[error("KV-event replay response is incomplete or out of order")]
     InvalidReplay,
+    #[error("KV-event replay was cancelled")]
+    ReplayCancelled,
 }
 
 impl From<DecodeError> for KvTransportError {
@@ -84,6 +90,7 @@ impl KvTransportError {
             Self::ReplayTooLarge => "replay_too_large",
             Self::ReplayTimeoutUndrained => "replay_timeout_undrained",
             Self::InvalidReplay => "invalid_replay",
+            Self::ReplayCancelled => "replay_cancelled",
         }
     }
 }
@@ -242,7 +249,12 @@ impl ZmqKvEventSource {
         let limits = self.wire_limits;
         let connect_timeout = self.connect_timeout;
         let replay_timeout = self.replay_timeout;
-        tokio::task::spawn_blocking(move || {
+        // The blocking worker cannot be aborted by dropping its Tokio join
+        // handle. Keep the sole strong witness in this async future so a
+        // shutdown/client cancellation becomes visible to libzmq promptly.
+        let replay_alive = Arc::new(());
+        let worker_alive = Arc::downgrade(&replay_alive);
+        let result = tokio::task::spawn_blocking(move || {
             blocking_replay_exchange(
                 &endpoint,
                 from,
@@ -254,10 +266,13 @@ impl ZmqKvEventSource {
                 limits,
                 accumulator,
                 fold,
+                &worker_alive,
             )
         })
         .await
-        .map_err(|_| KvTransportError::Socket)?
+        .map_err(|_| KvTransportError::Socket)?;
+        drop(replay_alive);
+        result
     }
 }
 
@@ -273,6 +288,7 @@ fn blocking_replay_exchange<T, F>(
     limits: KvWireLimits,
     mut accumulator: T,
     mut fold: F,
+    replay_alive: &Weak<()>,
 ) -> Result<T, KvTransportError>
 where
     F: FnMut(&mut T, SequencedBatch),
@@ -307,16 +323,28 @@ where
     let mut messages = 0_usize;
     let mut validation_error = None;
     loop {
+        if replay_alive.strong_count() == 0 {
+            return Err(KvTransportError::ReplayCancelled);
+        }
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
             .ok_or(KvTransportError::ReplayTimeoutUndrained)?;
+        let poll_timeout = remaining.min(REPLAY_CANCEL_POLL);
         replay
-            .set_rcvtimeo(timeout_millis(remaining))
+            .set_rcvtimeo(timeout_millis(poll_timeout))
             .map_err(|_| KvTransportError::Socket)?;
         let frames = match replay.recv_multipart(0) {
             Ok(frames) => frames,
-            Err(zmq::Error::EAGAIN) => return Err(KvTransportError::ReplayTimeoutUndrained),
+            Err(zmq::Error::EAGAIN) => {
+                if replay_alive.strong_count() == 0 {
+                    return Err(KvTransportError::ReplayCancelled);
+                }
+                if Instant::now() >= deadline {
+                    return Err(KvTransportError::ReplayTimeoutUndrained);
+                }
+                continue;
+            }
             Err(_) => return Err(KvTransportError::Socket),
         };
         let Ok(message) =
@@ -428,6 +456,11 @@ fn decode_frames(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
     use zeromq::{PubSocket, RouterSocket, SocketSend};
 
     use super::*;
@@ -715,6 +748,59 @@ mod tests {
         assert_eq!(replay, Err(KvTransportError::ReplayTimeoutUndrained));
         assert!(started.elapsed() >= Duration::from_millis(15));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_replay_promptly_stops_blocking_worker() {
+        #[derive(Debug)]
+        struct DropSignal(Arc<AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let mut publisher = PubSocket::new();
+        let live_endpoint = publisher.bind("tcp://127.0.0.1:0").await.unwrap();
+        let mut replay_server = RouterSocket::new();
+        let replay_endpoint = replay_server.bind("tcp://127.0.0.1:0").await.unwrap();
+        let mut source = ZmqKvEventSource::connect(KvTransportConfig {
+            live_endpoint: live_endpoint.to_string(),
+            replay_endpoint: Some(replay_endpoint.to_string()),
+            topic: "kv".to_owned(),
+            connect_timeout: Duration::from_secs(2),
+            replay_timeout: Duration::from_secs(5),
+            max_replay_batches: 8,
+            max_replay_tail_batches: 2,
+            wire_limits: KvWireLimits::default(),
+        })
+        .await
+        .unwrap();
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let accumulator = DropSignal(dropped.clone());
+        let replay = tokio::spawn(async move {
+            source
+                .replay_fold(0, 0, accumulator, |_accumulator, _batch| {})
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), replay_server.recv())
+            .await
+            .expect("blocking worker must send its request")
+            .unwrap();
+
+        let started = Instant::now();
+        replay.abort();
+        let _ = replay.await;
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while !dropped.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cancellation must release the blocking replay accumulator");
+        assert!(started.elapsed() < Duration::from_millis(250));
     }
 
     #[tokio::test]
