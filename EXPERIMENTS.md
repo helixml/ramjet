@@ -821,3 +821,50 @@ controller repeatedly oscillated among depths three, four, and five; at one
 c16 snapshot it retained only 21/80 possible draft tokens. Decision: retain
 fixed K5. Revisit dynamic capacity only after profiled-threshold activation and
 controller hysteresis are fixed or explicitly exposed for a matched retest.
+
+## 2026-08-12 — Rust rewrite r1/r2 first rolling qualification
+
+The v1.1 Go work was merged before branching `agent/rust-rewrite`. The first
+Rust checkpoint reproduces typed configuration, prompt canonicalization and
+chain fingerprints, overlap/load routing, bounded per-engine LRU indexes,
+request shims, health/failover, response streaming and usage parsing, true
+generated-output TTFT, journal v3, native metric passthrough, and the existing
+`ds4proxy_*` Prometheus surface. The Go implementation remains in-tree as the
+cutover oracle; Go-generated fingerprint vectors are Rust golden tests.
+
+Local gates passed strict fmt/clippy, 19 Rust unit/integration tests, release
+build, the complete Go suite/vet/format checks, and a distroless container
+smoke test. The optimized binary is 7.3MiB. Immutable public images were
+published to GHCR; the current candidate is
+`ghcr.io/helixml/ds4-loadbalancer:rust-r2-341a2c9` (digest
+`sha256:ef722ece8149dcb95c792b406b437d09ef6e5e089f59ac03837ba1e799f5d932`).
+
+The Go→Rust deployment replaced only the stateless LB. Both TP4 engines and
+their KV caches stayed online and both authenticated probes remained healthy.
+Fresh-salt matched gates:
+
+| Gate | Go rc7 control | Rust r1 |
+|---|---:|---:|
+| locality cache hit (2 apps × 2 sessions × 2 turns) | 74.1% | 74.5% |
+| concurrent same-app split / failures | 6/6, 0 | 6/6, 0 |
+| concurrent same-app aggregate | 626 tok/s | 676 tok/s |
+| c16/max256 aggregate | 866.2 tok/s | 1,114.1 tok/s |
+| idle LB RSS | 11.3MiB | 8.9MiB |
+
+The throughput difference is treated as a non-regression rather than a Rust
+speedup because GPU serving and live traffic dominate this small sample. Rust
+completed every measured request and preserved exact route correlation.
+
+The first live r1 review found one observability regression: JSON tracing had
+escaped each journal record inside an outer JSON message, breaking the existing
+replay parser. r2 emits the original literal `[route_journal] {json}` protocol.
+After the LB-only r2 roll, a 4/4 request smoke paired all starts/finishes and
+`route_replay.py` parsed and reproduced 4/4 decisions across the requested
+alpha/cap sweep. This validates the experiment loop itself, not just serving.
+
+An actual Helix control-plane request used the test account's authorized org,
+explicit `ds4-flash-node06` provider, and `deepseek-v4-flash`; it returned HTTP
+200, finish reason `stop`, and the requested exact response. The separately
+documented unmanned-org test app correctly returned 403 for this account, so no
+cross-org access was assumed. The current state is Rust r2 live on node06 with
+both engines healthy; Go rc7 remains a one-command LB-only rollback.
