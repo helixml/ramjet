@@ -4,6 +4,120 @@ Status legend: ✅ done · 🔨 in progress · ⬜ planned. Ordered by
 value-per-effort given the current deployment (2 vLLM+DSpark TP4 instances on
 node06). The design rationale for each lives in DESIGN.md.
 
+## Rust rewrite (v1.2)
+
+- ✅ **Parity routing kernel.** Rust 2024 implementation of typed config,
+  canonical prompt preparation, chained fingerprints, bounded LRU indexes,
+  overlap/load scoring, health ordering, exact-score tie policy, and RAII
+  weighted-load accounting. Go-generated fingerprints are golden-tested.
+- ✅ **Async compatibility data plane.** Axum/Tokio/Reqwest streaming proxy,
+  bounded request bodies, request shims, model metadata rewrite, health probes,
+  retryable-status failover, opaque route headers, true generated-token TTFT,
+  privacy-bounded journal v3, and the existing `ds4proxy_*` metric names.
+- ✅ **Single-parse approximate preparation.** One JSON parse now feeds both
+  compatibility mutations and canonical route fingerprints; cache observation
+  reuses the prepared vector. Release-mode preparation is 0.49ms at 256KiB and
+  4.53ms at 2MiB on the development host, about 10× faster than the retained Go
+  data path and 15% faster than the initial two-parse Rust implementation at
+  2MiB. Keep `examples/preparation_bench.rs` as the pre-tokenizer baseline.
+- ✅ **Rolling Go/Rust node06 qualification.** Build and publish immutable
+  `rust-*` images, then run locality, concurrent same-app, c24 aggregate, route
+  telemetry, and occasional Helix workflow acceptance before promotion. Go
+  remains an LB-only rollback; neither engine is restarted for proxy trials.
+  Public r20 is live with both r34 publishers and manifest-attested pre-route
+  exact scoring in observation-only shadow mode. Exact state is not exposed to
+  placement.
+- ✅ **Bounded remote tokenizer shadow.** The one-pass boundary selectively
+  derives chat/completion `/tokenize` payloads, then submits them only after the
+  user request completes. Authenticated calls use a bounded non-blocking queue,
+  fixed workers/timeouts/response caps, controlled metrics, and unconditional
+  approximate-routing fallback; raw token IDs and prompts never enter logs.
+- ✅ **Remote chat-template parity matrix.** Active vLLM completion usage and
+  `/tokenize` agreed exactly in 13/13 plain, multi-turn, tools, tool-history,
+  all seven reasoning levels, thinking-disabled, and normalized-content cases;
+  repeated token IDs were stable in memory and never printed.
+- ✅ **Bounded local Rust tokenizer pool.** The read-only model artifact feeds
+  Dynamo's native DeepSeek-V4 renderer and NVIDIA `fastokens` outside Tokio I/O
+  workers. Authenticated `/tokenize` runs concurrently as parity authority;
+  only controlled match/fallback metrics survive. Local IDs remain shadow-only.
+- 🔨 **Chat-template/token-ID golden matrix.** Compare local token IDs with the
+  active vLLM `/tokenize` across OpenAI/Anthropic messages, tools, reasoning,
+  content parts, special tokens, and `add_generation_prompt`; fail closed to
+  remote or approximate mode on any model/template mismatch. The node06 OpenAI
+  matrix admits 10/10 exact classes; tool history and `max`/`xhigh` are fenced
+  remote-only because Dynamo 5.0.1 and vLLM r34 render them differently.
+- ✅ **Versioned renderer compatibility manifest.** Bind model/tokenizer hashes,
+  renderer profile, engine image digest, admitted request classes, and golden
+  results so an engine or template update cannot silently widen local routing.
+  The SHA-pinned r34 manifest re-renders ten synthetic token-vector goldens at
+  startup and continuously matches each engine's model ID/root/context and
+  `/version`. Image digest is recorded as provenance because Docker does not
+  expose it inside the proxy container. Any mismatch or identity change fences
+  in-flight tokenization and falls back to approximate routing.
+- 🔨 **Exact KV-event shadow index.** The transport-independent sequence fence
+  now starts untrusted, requests bounded contiguous replay on gaps, increments
+  generations on restart/unrecoverable recovery, and admits exact state after
+  either publisher sequence zero or a complete bounded replay from zero. A
+  bounded, privacy-safe
+  MessagePack decoder now matches an exact synthetic fixture emitted by the
+  node06 vLLM r34 classes and validates event, hash, token, group, and block
+  shape limits. Release-mode decode on the development host sustains about
+  54–58M token IDs/s (4.8µs at 256 IDs, 324µs at 18.9K, and 1.41ms at
+  82.2K). The bounded per-engine exact block trie is also complete: it keeps
+  opaque engine hashes for O(1) removals, exact token-slice keys for collision-
+  free prefix lookup, atomic capacity failure, tombstone pruning, conservative
+  main-attention/tier/namespace filtering, and generation-safe replay
+  integration. A 3.883M-token synthetic inventory used 21.4MiB and served
+  80.9K-token lookups in 50.3µs; eight readers reached 102K lookups/s. The
+  pure-Rust ZMTP transport now validates exact SUB/DEALER frame shapes, applies
+  one total replay deadline and bounded requested/tail batches, and rejects
+  missing, duplicate, or out-of-order sequences. A CPU-only node06 probe passed
+  against Python `pyzmq` using the r34 live/replay protocol without touching
+  either engine. One default-off supervised consumer per engine is now wired
+  into the binary with typed endpoint cardinality, reconnect monitoring,
+  generation fencing, bounded replay, graceful shutdown, and controlled
+  connection/trust/index metrics. A second CPU-only node06 lifecycle test
+  proved reconnect, authoritative-clear trust, and immediate disconnect
+  fencing. The first real r34 B-only feed then exposed two undocumented hybrid
+  details and drove fail-closed fixes: non-main sliding-window groups may omit
+  masked hashes, and 4-token partial MLA events can reference internal parent
+  hashes that the publisher never emits. The decoder now defers geometry to
+  semantic group filtering; the index conservatively filters only orphaned
+  blocks smaller than that group's observed canonical root geometry. A fresh
+  r17 consumer replayed sequences 0–37, became trusted, indexed 650 blocks /
+  166,400 token IDs, and then applied 14 live batches under c8 load with no
+  reconnect or index error. Exact inventories remain disconnected from the
+  router. A matching A-only trial has now passed from sequence zero, and bounded
+  per-filter metrics directly count non-main and unsupported-partial exclusions.
+  A temporary 785K-token A cache then forced 2,442 real removals over 192
+  contiguous batches: 882 group-0 removals reduced the exact MLA index from
+  3,456 stored blocks to 2,574 resident blocks exactly, while trust remained
+  one and no reconnect/index error occurred. Both engines and eviction are now
+  qualified. r19 now compares approximate choices with exact state without
+  changing placement: it snapshots per-engine inventory revisions at decision
+  time, uses engine-reported pre-request cached tokens for the selected engine,
+  rejects an alternative that changes during the request, and preserves the
+  original load snapshot. The node06 gate recorded 15 agreements, three cold
+  decisions, and one deliberately constructed 14,336-token `would_move`; all
+  28 concurrent comparisons failed closed on changing alternative revisions.
+  r20 now moves admitted exact IDs into the pre-route preparation boundary:
+  eight non-blocking CPU permits observed all 12 requests at c12, exact lookup
+  averaged tens of microseconds, and the 3×3×2 locality gate produced 15
+  agreements plus three cold decisions without post-response revision
+  ambiguity. A forced approximate miss found 36,096 warm tokens on the other
+  engine before mutation. Placement is still disabled. Next accumulate a
+  production shadow distribution of move/gain/load outcomes, then add an
+  explicit opt-in exact placement mode with the same attestation, event, and
+  revision fences plus instant approximate fallback. Raw token IDs, block
+  hashes, and prompts remain out of logs.
+- ⬜ **Session-cached incremental preparation.** Bounded session state with
+  deterministic invalidation so returning 80K conversations extend prior token
+  vectors rather than restarting; benchmark memory, p99 preparation latency,
+  and mismatch recovery before routing with it.
+- ⬜ **P/D and KV-transfer seams.** Keep request preparation, cache inventory,
+  placement policy, and transport independent so a future Dynamo/NIXL prefill
+  pool does not require another proxy rewrite.
+
 ## Shipped (v1.1)
 
 - ✅ Overlap+load router (`score = prefixOverlapBlocks − alpha·loadUnits`),
@@ -79,10 +193,13 @@ node06). The design rationale for each lives in DESIGN.md.
   transients. The 44.7K-token gain is not worth that operational fragility.
   Retain automatic sizing and do not jump to the profiler's full-memory value.
 
-- ⬜ **CI + package publishing.** GitHub Actions: `go test ./...`, `go vet`,
-  build, and push `ghcr.io/helixml/ds4-loadbalancer:<tag>` on tag/main.
-  Removes the current manual "build on node06, no ghcr push" gap (the
-  interactive `gh` token lacks `write:packages`).
+- 🔨 **CI + package publishing.** Rust fmt/clippy/test/release checks and an
+  amd64 distroless image publisher are present on the rewrite branch. The first
+  workflow passed all code/build gates but GHCR denied the final push: because
+  `mini-dynamo` was created by a manual push, repository linkage did not grant
+  Actions access. Add `helixml/mini-dynamo` under the package's **Manage Actions
+  access**, rerun the failed job, and verify an anonymous pull before marking
+  complete. Do not replace this one-time ACL with a long-lived PAT secret.
 - ⬜ **Secure post-deploy Helix acceptance.** The retired plaintext key now
   returns 401 and has been removed from both node06 guides. Confirm revocation,
   clean Git history if policy requires it, and inject a current smoke-test key
@@ -164,8 +281,12 @@ node06). The design rationale for each lives in DESIGN.md.
   degrade safely when replay is too old, and avoid persisting the exact token
   IDs carried by `BlockStored`. The isolated publisher gate is complete: 49
   consecutive batches had zero gaps, and same-engine publisher-on/off results
-  were within -1.4% to +2.0%. Next build the privacy-bounded shadow consumer;
-  Dynamo's additional tree-dump recovery is the reference for reconnects.
+  were within -1.4% to +2.0%. The Rust shadow consumer has now passed a complete
+  real replay plus live-update qualification on B. A then passed live startup
+  and a forced-eviction soak whose exact group-0 store/removal arithmetic
+  matched the resident index. Compare exact versus approximate decisions in
+  telemetry before the router may consume this state; Dynamo's additional
+  tree-dump recovery remains the scale-out reference.
 - ✅ **True TTFT instrumentation.** rc6's journal and Prometheus histogram
   time the first SSE response byte, which may be a role-only chunk. Journal v3
   code now records both first byte and first generated token/tool-call delta;

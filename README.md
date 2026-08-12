@@ -1,7 +1,7 @@
 # mini-dynamo
 
 KV-cache-locality-aware load balancer for OpenAI-compatible inference
-engines. Single static binary; drop-in replacement for `ds4-loadbalancer`
+engines. Compact Rust binary; drop-in replacement for `ds4-loadbalancer`
 (same env vars, same `ds4proxy_*` metrics), plus an overlap-scored router:
 
     score(upstream) = min(prefixOverlapBlocks, maxAffinityBlocks) − alpha × loadUnits
@@ -27,9 +27,73 @@ DS4_MAX_TOKENS_STRIP (100000), DS4_ROUTE_ALPHA (4), DS4_ROUTE_CHUNK_BYTES
 (2048), DS4_ROUTE_MAX_PREFIX_BYTES (2097152), DS4_ROUTE_MAX_OVERLAP_BLOCKS
 (32), DS4_ROUTE_INDEX_CAPACITY (100000), DS4_ROUTE_LOAD_UNIT_BYTES (32768),
 DS4_ROUTE_MAX_LOAD_UNITS (8),
-DS4_AFFINITY (prefix|load), DS4_ROUTE_JOURNAL (false). `load` is an explicit baseline or an
-escape hatch for engines without reusable prefix state; hybrid KDA models such
-as Kimi K3 still benefit from their engine's recurrent-state prefix cache.
+DS4_AFFINITY (prefix|load), DS4_ROUTE_JOURNAL (false),
+DS4_TOKENIZER_MODE (off|remote-shadow|local-shadow),
+DS4_TOKENIZER_PATH, DS4_TOKENIZER_SHA256 (both required by local-shadow),
+DS4_TOKENIZER_PROFILE (deepseek-v4-r34), DS4_TOKENIZER_MIN_BYTES (32768),
+DS4_TOKENIZER_MAX_BYTES (2097152), DS4_TOKENIZER_WORKERS (1),
+DS4_TOKENIZER_QUEUE_CAPACITY (8), DS4_TOKENIZER_TIMEOUT_MS (2000),
+DS4_EXACT_ROUTE_MODE (off|shadow), DS4_EXACT_ROUTE_MANIFEST_PATH,
+DS4_EXACT_ROUTE_MANIFEST_SHA256, DS4_EXACT_ROUTE_WORKERS (4),
+DS4_EXACT_ROUTE_TIMEOUT_MS (250),
+DS4_KV_EVENT_MODE (off|shadow), DS4_KV_EVENT_LIVE_ENDPOINTS,
+DS4_KV_EVENT_REPLAY_ENDPOINTS, DS4_KV_EVENT_TOPIC (empty),
+DS4_KV_EVENT_REPLAY_LIMIT (1024), DS4_KV_EVENT_REPLAY_TAIL_LIMIT (64), and
+DS4_KV_EVENT_TIMEOUT_MS (5000). Shadow mode requires one internal TCP live and
+replay endpoint per upstream. `load` is an explicit baseline or an escape hatch
+for engines without reusable prefix state; hybrid KDA models such as Kimi K3
+still benefit from their engine's recurrent-state prefix cache.
+
+`remote-shadow` derives a vLLM-compatible `/tokenize` payload from the same
+parsed and sanitized request, but does not use its token IDs for routing. After
+the client request completes, the payload enters a bounded, non-blocking queue
+and is sent to the selected engine with `DS4_UPSTREAM_TOKEN`. Unsupported
+endpoints, requests outside the configured byte window, a full queue, timeouts,
+and malformed responses all fall back to the existing approximate router.
+Shadow results expose only controlled outcome labels, duration, and token-count
+histograms; prompt text and token IDs are neither logged nor retained.
+
+`local-shadow` additionally renders DeepSeek-V4 prompts with Dynamo's native
+Rust formatter and encodes them with NVIDIA `fastokens` on bounded blocking CPU
+workers. The selected engine's authenticated `/tokenize` runs concurrently as
+the authority. Exact IDs are compared in memory and discarded; a template
+mismatch, unsupported tool-history or reasoning variant, worker failure, or
+missing remote authority cannot affect the approximate routing decision. The
+configured profile and expected SHA-256 must match the mounted tokenizer at
+startup, preventing silent artifact drift from inheriting old golden results.
+
+`DS4_KV_EVENT_MODE=shadow` constructs one supervised, fenced exact inventory
+per upstream. It observes bounded vLLM live/replay events and exports only
+controlled connection, trust, generation, batch/filter-outcome, and
+resident-size metrics. Startup and every disconnect are untrusted; publisher
+sequence zero or a complete bounded replay from zero establishes the initially
+empty engine generation. When selective tokenization succeeds, the inventories
+also feed an observation-only counterfactual: the selected engine's pre-request
+cache hit comes from response usage, while every alternative lookup requires
+the same trusted generation and inventory revision captured at approximate
+decision time. This avoids counting KV blocks created by the request itself and
+rejects a moving alternative under concurrent traffic. The existing
+approximate decision and load snapshot remain authoritative; exact state cannot
+change placement. `ds4proxy_exact_route_shadow_total` reports bounded
+`agree`, `would_move`, `tie`, `all_zero`, and fail-closed outcomes, while the
+overlap/gain histograms contain counts only. Raw token IDs and hashes never
+enter logs, journals, or metrics.
+
+`DS4_EXACT_ROUTE_MODE=shadow` moves admitted local tokenization before the
+approximate decision, then immediately scores the same load snapshot against
+all trusted exact inventories without changing candidate order. It requires
+local-shadow tokenization, KV-event shadow, and a SHA-pinned compatibility
+manifest. The manifest binds the tokenizer hash, renderer profile, model
+ID/root/context, runtime `/version`, engine-image provenance, admitted request
+classes, and synthetic token-vector goldens. Goldens are re-rendered at
+startup; `/v1/models` and `/version` are continuously re-attested for every
+engine. An identity change during tokenization, an ungoldened request shape,
+an unavailable CPU permit, timeout, event gap, or inventory revision change
+drops only the observation. The live approximate route remains authoritative.
+`ds4proxy_exact_route_preroute_total`, duration histograms, and
+`ds4proxy_compat_attested` expose controlled results. Generate a fresh manifest
+after an engine/template update with `bench/tokenizer_manifest.py`; it never
+prints or persists raw token IDs.
 
 Set `DS4_ROUTE_JOURNAL=true` to emit privacy-bounded versioned `start`/`finish`
 records to the process log. Records contain only process-local sequence IDs,
@@ -57,8 +121,26 @@ to compare this rule with the legacy load-neutral equality behavior.
 
 ## Develop
 
-    go test ./...
-    go build ./cmd/mini-dynamo
+    cargo fmt --check
+    cargo clippy --locked --all-targets --all-features -- -D warnings
+    cargo test --locked
+    cargo build --release --locked
+
+The Go implementation remains in-tree as the cutover reference. Rust tests
+include Go-generated fingerprint goldens and live HTTP tests for sanitization,
+failover, route correlation, usage streaming, and model metadata rewriting.
+During the rewrite, keep both suites green:
+
+    go test ./... && go vet ./... && test -z "$(gofmt -l .)"
+
+Measure the request-preparation hot path before and after tokenizer work:
+
+    cargo run --release --locked --example preparation_bench
+    cargo run --release --locked --example kv_wire_bench
+    cargo run --release --locked --example exact_index_bench
+    cargo run --release --locked --example kv_zmq_probe -- LIVE_ENDPOINT REPLAY_ENDPOINT [TOPIC]
+    cargo run --release --locked --example local_tokenizer_probe -- /path/to/tokenizer.json
+    go test ./pkg/proxy -run '^$' -bench BenchmarkPrepareLongPrompt -benchmem
 
 See [ROADMAP.md](ROADMAP.md), [EXPERIMENTS.md](EXPERIMENTS.md), and
 [AGENTS.md](AGENTS.md) (node06 test/bench workflow).
@@ -87,6 +169,13 @@ against a direct engine endpoint and capture its JSONL output:
 `bench/route_replay.py` sweeps router policies over privacy-bounded live
 decision records and splits observed warm/cold outcome latency. For native
 KV-event feasibility, `bench/tokenize_bench.py` measures the exact-tokenization
-hot-path cost; `bench/kv_event_probe.py` runs only inside a trusted vLLM
-environment and summarizes event continuity/volume without logging the token
-IDs or hashes carried by raw events.
+hot-path cost; `bench/tokenizer_parity.py` checks `/tokenize` counts and
+in-memory ID stability against real chat prompt usage without printing prompts
+or IDs; `bench/kv_event_probe.py` runs only inside a trusted vLLM environment
+and summarizes event continuity/volume without logging the token IDs or hashes
+carried by raw events. `bench/kv_event_replay_probe.py` requests retained replay
+and reports only bounded sequence, geometry, parent-order, and per-group
+removal counts while keeping all identifiers process-local.
+`bench/forced_exact_miss.py` warms a synthetic long prompt directly on one
+engine and sends it through the proxy, creating a reproducible exact-versus-
+approximate disagreement without printing the prompt or token IDs.

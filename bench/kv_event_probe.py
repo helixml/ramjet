@@ -38,8 +38,13 @@ poller.register(socket, zmq.POLLIN)
 deadline = time.monotonic() + SECONDS
 sequences = []
 counts = collections.Counter()
+event_keys = collections.Counter()
+event_value_types = collections.Counter()
 stored_blocks = stored_tokens = removed_blocks = 0
 block_sizes = collections.Counter()
+stored_shape_mismatches = 0
+stored_shapes = collections.Counter()
+stored_extra_key_shapes = collections.Counter()
 data_parallel_ranks = collections.Counter()
 
 while time.monotonic() < deadline:
@@ -61,13 +66,34 @@ while time.monotonic() < deadline:
     for event in batch[1]:
         kind = event_type(event)
         counts[kind] += 1
+        if isinstance(event, dict):
+            event_keys[f"{kind}:{','.join(sorted(event))}"] += 1
+            for key, value in event.items():
+                event_value_types[f"{kind}.{key}:{type(value).__name__}"] += 1
         if kind == "BlockStored":
             hashes = event.get("block_hashes") or []
             token_ids = event.get("token_ids") or []
             stored_blocks += len(hashes)
             stored_tokens += len(token_ids)
             if event.get("block_size") is not None:
-                block_sizes[str(event["block_size"])] += len(hashes)
+                block_size = event["block_size"]
+                block_sizes[str(block_size)] += len(hashes)
+                expected_blocks = (len(token_ids) + block_size - 1) // block_size
+                mismatch = expected_blocks != len(hashes)
+                stored_shape_mismatches += mismatch
+                stored_shapes[
+                    f"{event.get('kv_cache_spec_kind', 'unknown')}:"
+                    f"group={event.get('group_idx', 'unknown')}:"
+                    f"block={block_size}:"
+                    f"{'mismatch' if mismatch else 'exact'}"
+                ] += 1
+            for extra_keys in event.get("extra_keys") or []:
+                if extra_keys is None:
+                    stored_extra_key_shapes["none"] += 1
+                elif isinstance(extra_keys, list):
+                    stored_extra_key_shapes[f"list:{len(extra_keys)}"] += 1
+                else:
+                    stored_extra_key_shapes[type(extra_keys).__name__] += 1
         elif kind == "BlockRemoved":
             removed_blocks += len(event.get("block_hashes") or [])
 
@@ -85,8 +111,13 @@ print(
             "last_sequence": sequences[-1] if sequences else None,
             "sequence_gaps": gaps,
             "events": dict(sorted(counts.items())),
+            "event_keys": dict(sorted(event_keys.items())),
+            "event_value_types": dict(sorted(event_value_types.items())),
             "stored_blocks": stored_blocks,
             "stored_token_ids": stored_tokens,
+            "stored_shape_mismatches": stored_shape_mismatches,
+            "stored_shapes": dict(sorted(stored_shapes.items())),
+            "stored_extra_key_shapes": dict(sorted(stored_extra_key_shapes.items())),
             "removed_blocks": removed_blocks,
             "block_sizes": dict(sorted(block_sizes.items())),
             "data_parallel_ranks": dict(sorted(data_parallel_ranks.items())),

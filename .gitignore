@@ -1,2 +1,3 @@
 mini-dynamo
 *.test
+/target/

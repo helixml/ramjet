@@ -30,9 +30,32 @@ client ──▶ :8000 proxy ──▶ router.Route(body) ──▶ engine[i] (s
                                                 :9090 /metrics/upstream/{i}
 ```
 
-Packages: `pkg/router` (selection), `pkg/shims` (request/metadata rewrites),
-`pkg/usage` (response parsing), `pkg/metrics` (Prometheus), `pkg/proxy`
-(data plane + probes), `pkg/config`, `cmd/mini-dynamo`.
+The active implementation is Rust: `src/router.rs` (selection),
+`src/shims.rs` (request/metadata rewrites), `src/usage.rs` (response parsing),
+`src/metrics.rs` (Prometheus), `src/proxy.rs` (async data plane + probes), and
+`src/journal.rs`, and `src/tokenizer.rs` (bounded exact-token shadow adapter).
+The original Go packages remain temporarily as a parity oracle during the
+rolling cutover.
+
+The Rust boundary is deliberate: one parsed request-preparation pass applies
+compatibility mutations and derives route fingerprints before feeding the async
+streaming proxy. The prepared fingerprint vector is reused after a successful
+response instead of reparsing the prompt for cache observation. In selective
+remote-shadow mode the same parsed object also derives a vLLM `/tokenize`
+payload. It enters a bounded non-blocking worker queue only after the client
+request completes, so queue pressure or tokenizer failure cannot delay or
+change placement. Local-shadow mode feeds Dynamo's native DeepSeek-V4 renderer
+and NVIDIA `fastokens` through bounded blocking CPU workers while the remote
+engine remains the exact-ID authority. Local tokenization work never runs on
+Tokio I/O workers. Admitted request classes must match remote IDs; known
+template-version gaps fail closed to remote-only observation. In exact-route
+shadow mode, a SHA-pinned compatibility manifest and continuous engine
+identity attestation admit selected long requests to a non-blocking pre-route
+CPU pool. Exact IDs then query every revision-stable per-engine inventory
+before the request can mutate cache state. This records a live counterfactual
+without changing the approximate candidate order.
+Exact state is fenced on event gaps and routing falls back automatically to
+the approximate chain-fingerprint index.
 
 ## The router
 
@@ -87,7 +110,7 @@ Emergent behaviors (tested in `router_test.go`):
 |---|---|
 | strip `max_tokens`/`max_completion_tokens` ≥ 100k | Helix/Zed send full-context budgets; strict engines reject prompt+budget > ctx |
 | flatten content-parts arrays (incl. `{"type":"text"}` with no text) | Zed sends assistant history as parts; SGLang-class engines require strings |
-| drop invalid `reasoning_effort` (`"none"`) | Helix agent-switch flow emits it; engines 400 |
+| drop unsupported `reasoning_effort` values | Preserve the current vLLM schema (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); reject client-only values that engines would 400 |
 | `/v1/models` context shrink (`DS4_ADVERTISE_CTX_MARGIN`) | clients undercount rendered prompts; and a thread over the engine limit can't even run compaction — advertised window MUST be below the engine ceiling |
 
 ## Metrics
@@ -96,7 +119,9 @@ Emergent behaviors (tested in `router_test.go`):
 prompt/cached/completion tokens, context & output size histograms, finish
 reasons, upstream up/probes/errors/requests, client disconnects — plus new:
 `route_decisions_total{outcome}`, `route_overlap_blocks`, `route_affinity_blocks`,
-`upstream_inflight{upstream}`, `upstream_load_units{upstream}`. Native engine metrics pass through at
+`upstream_inflight{upstream}`, `upstream_load_units{upstream}`,
+`tokenizer_shadow_total{backend,endpoint,outcome}`, tokenizer duration/token
+histograms, and bounded queue depth. Native engine metrics pass through at
 `/metrics/upstream/{i}`.
 
 Successful proxy responses and chat logs include an opaque upstream ordinal,
@@ -115,9 +140,10 @@ the cache state caused by earlier counterfactual choices.
 
 r34's vLLM exposes a ZMQ `KVEventBatch` feed with monotonically increasing
 sequence numbers, `BlockStored`/`BlockRemoved`/clear events, and a bounded
-replay socket. A one-engine probe received 49 consecutive batches without a
-gap. This can correct the request-derived index after cache replication and
-eviction, but it is not a drop-in replacement. NVIDIA Dynamo's
+replay socket. Both node06 engines have passed live shadow qualification; a
+constrained-cache A trial consumed 192 contiguous batches and 2,442 real
+removals without losing trust. This can correct the request-derived index after
+cache replication and eviction, but it is not a drop-in replacement. NVIDIA Dynamo's
 [replay/recovery comparison](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/kv-event-replay-comparison.md)
 is the reference for the failure semantics below:
 
@@ -125,13 +151,67 @@ is the reference for the failure semantics below:
   compose network, raw events must never enter logs/journals, and the in-memory
   retention/privacy boundary needs explicit review.
 - The observed DSpark feed contains several cache-group block geometries, not
-  only the configured 256-token physical block. A consumer must honor group and
-  cache-spec metadata rather than merging every emitted hash into one index.
+  only the configured 256-token physical block. Sliding-window groups can omit
+  masked hashes while retaining their token slice, and fine-grained partial MLA
+  entries can reference internal parent hashes that vLLM never emits. A
+  consumer must honor group/cache-spec metadata, and conservatively exclude
+  unreconstructable partials, rather than merging every hash into one index.
 - vLLM replay covers only its retained event window and has no full current-
   state snapshot. Sequence gaps must trigger bounded replay; an unrecoverable
   gap clears/fences that engine's exact index and falls back to the current
   approximate router. Dynamo's worker-side radix-tree dump is the stronger
   recovery model to copy if this limitation matters operationally.
+- `src/kv_fence.rs` encodes this independently of ZMQ and the index: sequence
+  zero begins the initially empty publisher generation, a late subscriber
+  requests replay from zero when it fits the bound, later gaps request an
+  inclusive bounded replay, and invalid or oversized recovery increments the
+  generation and disables exact placement.
+- `src/kv_wire.rs` decodes only the MessagePack payload frame behind explicit
+  byte/event/hash/token/block bounds. Its fixture was emitted by the exact r34
+  `msgspec` classes on node06 and covers bytes/integer hashes, cache-group/spec
+  metadata, removals, and a full clear. Unknown event types and malformed
+  shapes fail closed; errors never render token IDs, hashes, or payload bytes.
+- `src/exact_index.rs` holds one bounded inventory per engine. Engine block
+  hashes remain opaque reverse-removal keys; trie edges own exact token slices,
+  so lookup does not depend on reproducing vLLM's rolling hash and verifies
+  equality rather than trusting a fingerprint. A coarse per-engine `RwLock`
+  keeps reads concurrent and writes serialized, which the node06 capacity-scale
+  benchmark shows is ample for two engines. Capacity, parent/path, replay, or
+  lookup-budget failure clears and fences the generation. Non-local, non-GPU,
+  non-main-attention, LoRA, cache-salted, and extra-key events stay out of the
+  exact inventory until request-side namespace parity exists.
+- `src/kv_transport.rs` implements the vLLM PUB/ROUTER boundary with pure-Rust
+  ZMTP, so the distroless proxy does not acquire a native `libzmq` dependency.
+  Live messages use SUB and replay uses DEALER because vLLM streams multiple
+  responses to one request. Exact frame/topic/sequence validation, a single
+  replay deadline, requested-range and newer-tail bounds, and privacy-safe
+  errors make malformed or partial recovery fail closed. The wire shape has
+  been cross-checked on node06 against Python `pyzmq`.
+- `src/kv_consumer.rs` constructs one default-off shadow task and fenced
+  inventory per upstream. Typed configuration requires exact live/replay
+  endpoint cardinality and TCP endpoints. Socket monitor events immediately
+  clear trust on disconnect despite the ZMQ library's transparent reconnect;
+  the next live sequence requests a bounded replay from zero before trust can
+  return. The task exposes controlled connection, generation, trust,
+  batch-outcome, bounded filter-reason, replay, and resident-size metrics and
+  shuts down with the proxy.
+- `src/exact_shadow.rs` connects those inventories only to telemetry. The r19
+  post-response path snapshots each trusted
+  generation plus a monotonic inventory revision and retains the router's load
+  snapshot. At completion, engine-reported `cached_tokens` supplies the
+  selected engine's pre-request overlap so blocks created by that request
+  cannot bias the result. Alternative exact lookups proceed only if their
+  generation and revision are unchanged; concurrent mutations, gaps, failover,
+  missing usage, or lookup errors produce bounded fail-closed outcomes. Exact
+  token overlap is mapped onto the existing approximate overlap-unit scale so
+  the counterfactual changes only the cache term while holding alpha and load
+  fixed. The r20 pre-route path instead obtains admitted local IDs under a
+  bounded CPU permit, takes the approximate load snapshot, queries all exact
+  inventories, and verifies their revisions again before recording the result.
+  `compat/deepseek-v4-r34.json` binds synthetic golden digests and local
+  artifacts to `/v1/models` plus `/version`; an attestation revision fences a
+  tokenization already in flight when identity changes. No result from either
+  path is returned to route selection.
 - Exact request lookup requires the rendered token sequence. Calling r34's
   `/tokenize` for every request costs 3.7ms at 299 tokens, 8.4ms at 4.3K,
   41ms at 21K, and 203ms at 83.7K, while returning up to 419KB of token IDs.
@@ -145,7 +225,7 @@ is the reference for the failure semantics below:
 |---|---|---|
 | NVIDIA Dynamo | KV-aware routing (overlap + load) | **v1.1 (this repo)** |
 | NVIDIA Dynamo | conditional disaggregation (cold prefill placement) | **v1.1** (size-weighted load reservation) |
-| NVIDIA Dynamo | event gaps, replay, and snapshot recovery | native feed qualification / shadow-mode design |
+| NVIDIA Dynamo | event gaps, replay, exact token-ID lookup, and `best_worker_id`-style counterfactuals | **r20 pre-route shadow**, placement still disabled |
 | [Kimi K3 / KDA](https://github.com/MoonshotAI/Kimi-K3/blob/main/k3_tech_report.pdf) | model-aware cache geometry; recurrent state remains reusable | research / benchmark |
 | Kimi K3 | primary/secondary affinity and request-class budgets | planned, scaled down to two engines |
 | DwarfStar/ds4 | per-request timings surfaced to ops | v1.0 (chat log line + histograms) |

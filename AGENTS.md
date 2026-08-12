@@ -7,16 +7,20 @@ full experiments require GPUs, so they run there, not locally.
 ## Local (no GPUs needed)
 
 ```bash
-go test ./...          # router, shims, usage unit tests
-go vet ./...
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked
+cargo build --release --locked
+
+# Keep the Go parity oracle healthy until the Rust cutover is promoted.
+go test ./... && go vet ./...
 gofmt -l .             # must be empty
-go build ./cmd/mini-dynamo
 ```
 
-The router is the interesting surface — `pkg/router/router_test.go` covers
-stickiness, template co-location, load-override, cold-prefill placement,
-health failover, affinity-off, index eviction. Add a test there for any
-routing change.
+The router is the interesting surface — `src/router.rs` contains the active
+Rust tests and Go-generated fingerprint goldens; `pkg/router/router_test.go`
+is the cutover oracle. Add a Rust test for every routing change and retain a
+cross-language golden wherever Go/Rust parity matters.
 
 ## node06 — the test/production box
 
@@ -44,7 +48,7 @@ box until CI exists (ROADMAP). From your dev checkout:
 
 ```bash
 # ship source, build the image tag on node06
-tar czf /tmp/md.tgz --exclude=.git . && scp /tmp/md.tgz node06:/tmp/
+tar czf /tmp/md.tgz --exclude=.git --exclude=target . && scp /tmp/md.tgz node06:/tmp/
 ssh node06 'rm -rf /tmp/md && mkdir /tmp/md && tar xzf /tmp/md.tgz -C /tmp/md \
   && cd /tmp/md && docker build -t ghcr.io/helixml/ds4-loadbalancer:<tag> .'
 

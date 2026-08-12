@@ -22,12 +22,61 @@ placement. Current measured landmarks:
 | KV capacity | **3,838,897 tokens/engine** |
 | 209K cold prefill | **~7.7–8.1K effective tok/s** |
 | 209K warm cached tokens | **208,896** |
+| r34 KV shadow qualification | **both engines; replay + 2,442-removal eviction soak; trusted** |
+| r19 exact-score shadow | **15 agree / 3 cold / 1 forced move; 14,336-token miss detected** |
+| r20 attested pre-route shadow | **15 agree / 3 cold; forced miss found 36,096 warm tokens before mutation** |
 
 Two r34 candidates were explicitly rejected after rolling B-only trials:
 manual KV bytes gained just 1.16% capacity while bypassing runtime profiling;
 dynamic DSpark depth regressed five of six code/prose concurrency points by
 8–25%, lost 1.1% KV, and worsened the mixed tail. `EXPERIMENTS.md` is the
 append-only source for configurations, comparisons, and rollback decisions.
+
+The Rust KV-event path is still shadow-only, but its first real r34 feed is now
+qualified end to end. A B-only rolling canary replayed the publisher from
+sequence zero, filtered the engine's non-main masked geometries and two
+unreconstructable 4-token partial entries conservatively, then applied 14 live
+batches under c8 load without reconnecting or losing trust. No exact state was
+used for placement, and B was returned to the event-off production recipe. A
+then passed the symmetric live gate. With its KV allocation temporarily reduced
+to 785,171 tokens, a 893K-token cold sweep produced 882 main-group removals;
+the exact inventory contracted from 3,456 stored blocks to exactly 2,574
+resident blocks while remaining trusted.
+
+r19 then joined exact request IDs to those inventories without changing
+placement. A sequential 3-app locality gate produced 18/18 local/remote token
+parity matches, 15 exact/approximate agreements, three correctly cold
+`all_zero` decisions, and zero missed tokens. A prompt warmed directly on A
+but hidden from the approximate router was then sent to B; engine usage
+reported zero cached tokens while exact A state found 14,336, producing the
+expected single `would_move`. Under c12 same-app and c16 aggregate concurrency,
+all 28 comparisons rejected changing alternative revisions rather than using a
+post-decision cache state. At the production 32KiB tokenizer threshold, five
+matched c16/max512 runs had a 1,343.4 tok/s r19 median versus 1,362.1 for r12
+(-1.4%, within box noise); the matched long-prompt pair had identical 112,128
+cached tokens and overlapping warm latency.
+
+Public r20 is now the production LB with event publishers enabled on
+container-only ports and manifest-attested exact routing in shadow mode. The
+LB-only promotion left both engine processes and KV caches intact. Both runtime
+identities attested and late-subscriber replay restored both authoritative
+inventories. The post-deploy gates passed at 71.6% locality, 578 tok/s for a
+6/6 c12 same-app split, and 1,370.3 tok/s for c16/max512, with every request
+HTTP 200. Exact state remains telemetry-only and cannot change placement.
+
+r20 removes the concurrency ambiguity without enabling exact placement. A
+SHA-pinned manifest replays ten local token-vector goldens at startup and
+continuously attests both engines' model identity and r34 `/version`. With the
+production 32KiB admission threshold and eight non-blocking CPU permits, the
+final 3-app × 3-session × 2-turn gate passed 18/18 at 78.9% cache hit; the
+pre-route scorer recorded 15 agreements and three cold decisions. c12 passed
+12/12 with a 6/6 split at 564 tok/s. A prompt warmed directly only on A was
+approximately routed cold to B, while the pre-route exact lookup found 36,096
+tokens on A and emitted `would_move` before either inventory could be mutated.
+A wrong-version negative control kept both attestation gauges at zero and
+served normally through the approximate fallback. Two matched short-prompt
+c16/max512 samples averaged 1,342 tok/s through r20 versus 1,350 through r19
+(-0.6%, inside shared-box noise). Exact placement remains disabled.
 
 ## Cache locality — TIE (no regression, no win at this scale)
 

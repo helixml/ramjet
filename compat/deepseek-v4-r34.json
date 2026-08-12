@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "model": {
+    "id": "deepseek-v4-flash",
+    "root": "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "max_model_len": 393216
+  },
+  "engine": {
+    "version": "0.11.2.dev280+gilded.gnosis.v20.vllm4d006a4.b12xcd3ce19.fi1ac6942.cu132.20260810.r34",
+    "image_digest": "sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b"
+  },
+  "tokenizer": {
+    "sha256": "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf"
+  },
+  "renderer": {
+    "profile": "deepseek-v4-r34"
+  },
+  "admitted_request_classes": [
+    "plain",
+    "system_multiturn",
+    "tools_declared",
+    "reasoning_high",
+    "reasoning_none",
+    "reasoning_minimal",
+    "reasoning_low",
+    "reasoning_medium",
+    "thinking_disabled"
+  ],
+  "goldens": [
+    {
+      "name": "plain",
+      "endpoint": "chat",
+      "request": {"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Explain prefix caching briefly."}],"add_generation_prompt":true,"return_token_strs":false},
+      "token_count": 88,
+      "token_ids_sha256": "b43f15dfd1cdeefb1c1a5f9f26c8da1eb2f5285fd19307b2453919f25af7381a"
+    },
+    {
+      "name": "system_multiturn",
+      "endpoint": "chat",
+      "request": {"model":"deepseek-v4-flash","messages":[{"role":"system","content":"Answer as a concise systems engineer."},{"role":"user","content":"Name one cache invariant."},{"role":"assistant","content":"A cached block must match its token prefix."},{"role":"user","content":"Now name one recovery invariant."}],"add_generation_prompt":true,"return_token_strs":false},
+      "token_count": 114,
+      "token_ids_sha256": "c7110b7cc4db68b863b3075c9717374690b02542f3c3499b0ebe120bf73b13d5"
+    },
+    {
+      "name": "tools_declared",
+      "endpoint": "chat",
+      "request": {"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Read the deployment status."}],"tools":[{"type":"function","function":{"name":"deployment_status","description":"Return deployment health.","parameters":{"type":"object","properties":{"node":{"type":"string"}},"required":["node"]}}}],"add_generation_prompt":true,"return_token_strs":false},
+      "token_count": 354,
+      "token_ids_sha256": "9aef70e4296d102fca250dee670be23f6c84c2c49e48d6a838f866d097ca1eb6"
+    },
+    {
+      "name": "reasoning_high",
+      "endpoint": "chat",
+      "request": {"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Compare two routing scores."}],"reasoning_effort":"high","chat_template_kwargs":{"reasoning_effort":"high","enable_thinking":true},"add_generation_prompt":true,"return_token_strs":false},
+      "token_count": 88,
+      "token_ids_sha256": "6a9016303d2b47c2b7788da90c93c536f407b68c27d1a1d45bd889b98faf216b"
+    },
+    {
+      "name": "reasoning_none",
+      "endpoint": "chat",
+      "request": {"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Compare two routing scores."}],"reasoning_effort":"none","chat_template_kwargs":{"reasoning_effort":"none","enable_thinking":false},"add_generation_prompt":true,"return_token_strs":false},
+      "token_count": 9,
+      "token_ids_sha256": "de9a590ffb5b05a91d055ff6a0c4d27275c97ffa3beeade440cb5103d949f60f"
+    },
+    {
+      "name": "reasoning_minimal",
+      "endpoint": "chat",
+      "request": {"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Compare two routing scores."}],"reasoning_effort":"minimal","chat_template_kwargs":{"reasoning_effort":"minimal","enable_thinking":true},"add_generation_prompt":true,"return_token_strs":false},
+      "token_count": 88,
+      "token_ids_sha256": "6a9016303d2b47c2b7788da90c93c536f407b68c27d1a1d45bd889b98faf216b"
+    },
+    {
+      "name": "reasoning_low",
+      "endpoint": "chat",
+      "request": {"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Compare two routing scores."}],"reasoning_effort":"low","chat_template_kwargs":{"reasoning_effort":"low","enable_thinking":true},"add_generation_prompt":true,"return_token_strs":false},
+      "token_count": 9,
+      "token_ids_sha256": "05c35684c84e5052b36d44f3019ec85b93c73f5e661da2ac82c31653a37eafe5"
+    },
+    {
+      "name": "reasoning_medium",
+      "endpoint": "chat",
+      "request": {"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Compare two routing scores."}],"reasoning_effort":"medium","chat_template_kwargs":{"reasoning_effort":"medium","enable_thinking":true},"add_generation_prompt":true,"return_token_strs":false},
+      "token_count": 88,
+      "token_ids_sha256": "6a9016303d2b47c2b7788da90c93c536f407b68c27d1a1d45bd889b98faf216b"
+    },
+    {
+      "name": "thinking_disabled",
+      "endpoint": "chat",
+      "request": {"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Return one short sentence."}],"chat_template_kwargs":{"thinking":false},"add_generation_prompt":true,"return_token_strs":false},
+      "token_count": 9,
+      "token_ids_sha256": "e3d5a53be5ef161fbd31eab6cff184b7269f9ce78b32cb65ebecf4775f26b96e"
+    },
+    {
+      "name": "normalized_content",
+      "endpoint": "chat",
+      "request": {"model":"deepseek-v4-flash","messages":[{"role":"user","content":"first part; second part"}],"add_generation_prompt":true,"return_token_strs":false},
+      "token_count": 88,
+      "token_ids_sha256": "7b5a78a6946c044b0bd5f8ea7d107266a7296e5096f4ee7e27c51e06f7eb5591"
+    }
+  ]
+}

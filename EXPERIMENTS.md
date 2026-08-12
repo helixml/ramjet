@@ -821,3 +821,666 @@ controller repeatedly oscillated among depths three, four, and five; at one
 c16 snapshot it retained only 21/80 possible draft tokens. Decision: retain
 fixed K5. Revisit dynamic capacity only after profiled-threshold activation and
 controller hysteresis are fixed or explicitly exposed for a matched retest.
+
+## 2026-08-12 — Rust rewrite r1-r4 rolling qualification
+
+The v1.1 Go work was merged before branching `agent/rust-rewrite`. The first
+Rust checkpoint reproduces typed configuration, prompt canonicalization and
+chain fingerprints, overlap/load routing, bounded per-engine LRU indexes,
+request shims, health/failover, response streaming and usage parsing, true
+generated-output TTFT, journal v3, native metric passthrough, and the existing
+`ds4proxy_*` Prometheus surface. The Go implementation remains in-tree as the
+cutover oracle; Go-generated fingerprint vectors are Rust golden tests.
+
+Local gates passed strict fmt/clippy, 22 Rust unit/integration tests, release
+build, the complete Go suite/vet/format checks, and a distroless container
+smoke test. The optimized binary is 7.3MiB. Immutable public images were
+published to GHCR. r2 fixed the journal protocol; r3 removes a duplicated
+parse/fingerprint pass before cache observation. r4 makes the compatibility
+shim and router consume one parsed object and adds persistent Cargo caches to
+the container build. The current candidate is
+`ghcr.io/helixml/ds4-loadbalancer:rust-r4-ace17cd` (digest
+`sha256:6519a0c1bad25007d9ecea83b8b60923c2f329466a2772d4d2aafef71b2a9f6f`).
+
+The Go→Rust deployment replaced only the stateless LB. Both TP4 engines and
+their KV caches stayed online and both authenticated probes remained healthy.
+Fresh-salt matched gates:
+
+| Gate | Go rc7 control | Rust r1 |
+|---|---:|---:|
+| locality cache hit (2 apps × 2 sessions × 2 turns) | 74.1% | 74.5% |
+| concurrent same-app split / failures | 6/6, 0 | 6/6, 0 |
+| concurrent same-app aggregate | 626 tok/s | 676 tok/s |
+| c16/max256 aggregate | 866.2 tok/s | 1,114.1 tok/s |
+| idle LB RSS | 11.3MiB | 8.9MiB |
+
+The throughput difference is treated as a non-regression rather than a Rust
+speedup because GPU serving and live traffic dominate this small sample. Rust
+completed every measured request and preserved exact route correlation.
+
+The first live r1 review found one observability regression: JSON tracing had
+escaped each journal record inside an outer JSON message, breaking the existing
+replay parser. r2 emits the original literal `[route_journal] {json}` protocol.
+After the LB-only r2 roll, a 4/4 request smoke paired all starts/finishes and
+`route_replay.py` parsed and reproduced 4/4 decisions across the requested
+alpha/cap sweep. This validates the experiment loop itself, not just serving.
+
+The r3 post-roll repeat retained the 74.5% locality result and completed
+c16/max256 at 1,086.0 tok/s, within 2.5% of r1 and still 25% above the adjacent
+Go sample; every request succeeded and both probes stayed up.
+
+r4's release-mode request-preparation microbenchmark measured 0.490ms for a
+256KiB request and 4.531ms for 2MiB. That is 1.07× and 1.15× faster than the
+initial two-parse Rust path, respectively. The retained Go shim + route +
+fingerprint path measured 5.355ms and 44.347ms on the same development host,
+about 10.9× and 9.8× slower. These are CPU preparation measurements, not claims
+about GPU-serving throughput. BuildKit cache mounts reduced an unchanged local
+container rebuild from 41.5s cold to 2.2s.
+
+The r4 qualification used fresh salts and an adjacent LB-only Go rc7 control;
+neither TP4 engine was restarted. The small locality gate matched exactly at
+71.6%. Same-app requests completed without failures and split 6/6 on Rust at
+682 tok/s versus 5/7 on Go at 667 tok/s. Three warmed c16/max256 runs produced
+a 1,232.0 tok/s Rust median (`1267.3, 1232.0, 1222.3`) and 1,238.1 tok/s Go
+median (`1164.8, 1238.1, 1286.0`), a -0.5% difference. The adjacent repeated
+c24 points were 1,638.0 tok/s Rust and 1,636.7 tok/s Go. An initial post-roll
+Rust c24 sample was only 1,420.3 tok/s, demonstrating why a single cold sample
+must not decide an implementation comparison.
+
+Every r4 measured request succeeded. A 36-request journal capture paired all
+starts and finishes, reproduced 36/36 deployed decisions for the full
+alpha/cap sweep, and showed an exact 18/18 engine split. Both upstream probes
+remained up; idle LB RSS was 8.8MiB. Verdict: Rust r4 reproduces Go throughput
+and routing behavior within run noise while materially reducing CPU-side
+preparation cost. Leave r4 live; retain Go rc7 as the compose-default rollback.
+
+An actual Helix control-plane request used the test account's authorized org,
+explicit `ds4-flash-node06` provider, and `deepseek-v4-flash`; it returned HTTP
+200, finish reason `stop`, and the requested exact response. The separately
+documented unmanned-org test app correctly returned 403 for this account, so no
+cross-org access was assumed. At the end of the r4 gate, both engines were
+healthy and Go rc7 remained a one-command LB-only rollback.
+
+## 2026-08-12 — Rust r5/r6 bounded tokenizer shadow
+
+r5 added a selective remote exact-token adapter without putting tokenization on
+the routing critical path. The one-pass preparation boundary derives a vLLM
+`/tokenize` payload only for supported chat/completion requests in a configured
+32KiB–2MiB window. After the client request completes, it uses a one-worker,
+eight-slot non-blocking queue, a two-second deadline, authenticated direct
+engine calls, and a 16MiB response cap. Any skip, queue pressure, timeout, HTTP
+failure, or decoding failure leaves the approximate router unchanged. Token IDs
+exist only for the lifetime of the background observation and are never logged,
+journaled, or exported.
+
+The first r5 shadow run found an observability-only bug: 48 short requests were
+correctly labeled outside the size window but were also labeled
+`invalid_payload` at completion. r6 made selection explicit across the relay
+boundary so outcomes are exclusive. A post-roll short request then emitted only
+`outside_size_window`. No client request or routing decision was affected by
+the r5 accounting issue.
+
+The live candidate is
+`ghcr.io/helixml/ds4-loadbalancer:rust-r6-ed8e595` (digest
+`sha256:49a04896fe22d1c29a962de1adb1d78f8df39fc84ea68ff871eac38d6ac8c1b4`).
+The infra compose exposes all shadow controls with mode `off` by default; the
+node06 experiment explicitly enables `remote-shadow`. Both TP4 engines remained
+running through each LB-only roll.
+
+Exactness and boundedness gates:
+
+- The first eight long-prompt shadow requests succeeded 8/8. Their exact-token
+  sum was **150,188**, exactly equal to the completion-usage prompt-token sum;
+  aggregate background tokenization time was 373ms (46.6ms/request).
+- `bench/tokenizer_parity.py` passed 7/7 direct-engine cases: plain chat,
+  system/multi-turn, declared tools, tool-call history, reasoning effort,
+  `think:false`, and normalized content. `/tokenize` count equaled real
+  completion `prompt_tokens` in every case, and a repeated in-memory token-ID
+  vector was identical. The harness prints neither prompts nor IDs.
+- A 12-request eligible same-app burst completed 12/12 client requests, split
+  6/6 at 646 tok/s, and completed all 12 shadow jobs. Queue depth returned to
+  zero with no queue-full, timeout, HTTP, size, or decode failures.
+- At capture, the r6 process had 73 intentional short-request skips and 13/13
+  exact-token successes. Idle LB RSS was 10.6MiB versus 8.8MiB for r4.
+
+Three r6 c24/max256 samples were 1,480.6, 1,672.8, and **1,637.4 tok/s median**.
+The median matches r4 Rust (1,638.0) and the adjacent Go rc7 control (1,636.7)
+to within 0.1%; the low first sample again shows cold/live-load variance. The
+decision journal paired 86/86 requests, reproduced the deployed alpha-4/cap-32
+policy exactly, and showed a balanced 43/43 split. Both readiness probes were
+up and all inflight/load/queue gauges were zero after the run.
+
+Verdict: leave r6 shadow mode live to accumulate cost and request-class data.
+It validates the remote authority and backpressure seam, but exact IDs do not
+influence routing until the KV-event index has sequence-gap replay, generation
+fencing, and an automatic approximate fallback. Go rc7 remains the compose-
+default rollback.
+
+## 2026-08-12 — Rust r7-r9 local fastokens shadow
+
+The local tokenizer gate used `dynamo-renderer` 5.0.1's native DeepSeek-V4
+formatter and `dynamo-tokenizers` 1.8.0 / NVIDIA `fastokens` 0.3.1 against the
+active node06 tokenizer artifact. A release-mode development-host probe found
+identical Hugging Face and fastokens IDs at every size. Steady-state median
+encoding cost crossed over strongly in fastokens' favor:
+
+| Prompt tokens | Hugging Face | fastokens |
+|---:|---:|---:|
+| 4,180 | 3.03ms | 0.45ms |
+| 20,564 | 16.46ms | 0.86ms |
+| 82,004 | 90.28ms | 2.11ms |
+
+The active vLLM r34 template has newer reasoning semantics than Dynamo 5.0.1.
+Direct completion usage and `/tokenize` agreed in 13/13 cases and exposed four
+effective classes: `none`/`low` render 9 tokens, default/`minimal`/`medium`/
+`high` render 88, and `xhigh`/`max` render a newer 101-token "beyond maximum"
+preamble. The local profile maps only equivalence-proven classes and fences
+`xhigh`/`max` to remote authority. An initial r8 live matrix then found tool
+history differed at the ID level despite matching counts; r9 also fences any
+prior tool/function-call history while continuing to admit declared tools.
+
+The first r7 distroless launch failed immediately because the newly linked
+tokenizer stack required `libpcre2-8.so.0`. The restart loop was observed before
+serving a request and the LB was rolled back to r6 within seconds; both engines
+remained running and healthy. r8 added the exact runtime library and passed a
+standalone container startup with the real read-only tokenizer mount before the
+next LB-only swap.
+
+r9's fresh live matrix produced **10/10 exact local-ID matches**, three explicit
+remote-only fallbacks (tool history, `xhigh`, `max`), **zero mismatches**, and
+13/13 remote-authority successes. A separate 18,762-token cold request matched
+local IDs, remote IDs, and completion usage exactly. Across the subsequent
+long-prompt and same-app gate, 14/14 admitted observations matched with equal
+local/remote token sums of 254,844; local end-to-end worker time averaged
+6.26ms versus 34.68ms remote, including JSON decode/render and first-use cost.
+The queue returned to zero. Idle RSS is about 196MiB because the tokenizer is
+resident, versus 10.6MiB for remote-only r6.
+
+The 12-request same-app gate completed 12/12, split 6/6, and delivered 639
+tok/s. Three c24/max256 samples were 1,523.9, 1,629.1, and 1,605.6 tok/s
+(1,605.6 median), 1.9% below the r6 median and within the established shared-box
+run noise; all 72 requests succeeded and were below the tokenization size
+window. Both upstream probes remained up, all route load gauges returned to
+zero, and the engines were never restarted.
+
+r10 removes an unnecessary decoder from the resident tokenizer object by using
+the underlying encode-only `fastokens::Tokenizer`. The full live matrix stayed
+at 10/10 admitted matches, three remote-only fallbacks, and zero mismatches.
+Idle/post-matrix RSS fell from r9's 196MiB to 108MiB; after two 18,762-token
+observations it was 138MiB. The warmed second local worker observation took
+6.53ms versus 34.59ms remote. This is a memory optimization, not a routing
+change.
+
+The live node06 image is locally built
+`ghcr.io/helixml/ds4-loadbalancer:rust-r10-e32eae9`; GHCR rejected node06's
+stored credential, so GitHub Actions owns public publishing. r10 remains
+observation only: exact IDs do not influence routing. Next gates are an
+Anthropic-input golden adapter, a versioned compatibility manifest, and the
+fenced KV-event shadow index. Go rc7 remains the compose-default rollback.
+
+r11 makes the first compatibility-manifest constraint executable: local mode
+will not start unless the mounted tokenizer matches the configured SHA-256 and
+the explicit `deepseek-v4-r34` profile is recognized. The node06 artifact hash
+is `8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf`.
+A standalone startup and LB-only roll passed; a fresh 18,762-token request
+again matched local IDs, remote IDs, and completion usage, with both probes up
+and no restart. The live local image is
+`ghcr.io/helixml/ds4-loadbalancer:rust-r11-8e38ec7`.
+
+The legacy `ghcr.io/helixml/ds4-loadbalancer` package also denied the
+repository Actions token despite job-level `packages: write`; its package ACL
+is not inherited from mini-dynamo. The exact r11 image was retagged and
+published publicly as `ghcr.io/helixml/mini-dynamo:rust-r11-8e38ec7`
+(`sha256:e01f57188b87b80426bcf5a2e0b29964d27e4e78a272903705a4c303cdeda86b`).
+An anonymous manifest read succeeded, node06 pulled that public tag, and the
+post-swap 18,762-token observation matched local/remote/usage with both probes
+up. CI now targets the repository-owned package.
+
+## 2026-08-12 — r34 KV-event wire decoder and CI publish boundary
+
+The exact installed vLLM r34 source on node06 defines a three-frame PUB feed:
+topic, unsigned 8-byte big-endian sequence, and a MessagePack `KVEventBatch`
+array. Events are tagged maps. `BlockStored` includes bytes-or-integer block
+hashes, parent hash, exact token IDs, block size, and optional cache-group/spec
+metadata; the replay ROUTER streams the same batches from an inclusive starting
+sequence and terminates with sequence `-1`. No engine configuration changed
+while inspecting this source.
+
+`src/kv_wire.rs` now provides a transport-independent bounded decoder. A
+synthetic fixture was encoded inside the active r34 container from its actual
+`msgspec` classes, then checked into the Rust test without production hashes or
+token IDs. Five tests cover exact decoding, payload and aggregate limits,
+unknown-event fail-closed behavior, and block/token shape validation. Decoder
+errors contain invariant names only. Strict Clippy, all **45 Rust tests**, all
+retained Go tests, `go vet`, and both format gates pass. Sockets, event ports,
+cache indexes, and routing remain untouched.
+
+`examples/kv_wire_bench.rs` provides a reproducible release-mode allocation and
+decode baseline using synthetic full-attention batches. On the development
+host it measured 4.76µs for 256 token IDs (521 bytes), 324µs for 18,944 IDs
+(56,660 bytes), and 1.408ms for 82,176 IDs (280,143 bytes): approximately
+54–58M token IDs/s and 104–190MiB/s. Decode cost is far below the measured
+local-render/tokenize cost at long context, so the initial consumer should
+prioritize bounded queues, replay correctness, and index-update contention over
+custom MessagePack parsing.
+
+Manual workflow run
+[`31579218509`](https://github.com/helixml/mini-dynamo/actions/runs/31579218509)
+passed fmt, strict Clippy, tests, release compilation, and the complete
+distroless image build. GHCR rejected only the final push with
+`permission_denied: write_package`. GitHub's documented package model requires
+the private repository to be added separately under **Manage Actions access**
+when a granular package was created by a manual push; repository linkage alone
+is insufficient. The package remains public and node06 remains on immutable
+`rust-r11-8e38ec7`. No package was deleted/recreated and no long-lived personal
+token was added as an Actions secret.
+
+A final read-only node06 check found the Rust LB and both engines running with
+zero restarts, both probe gauges at one, all inflight/load gauges at zero, and
+the tokenizer queue at zero. The engines were not restarted.
+
+## 2026-08-12 — bounded exact index and recovery integration
+
+The next shadow-only layer follows Dynamo's correctness model without taking
+its multi-thousand-worker concurrency machinery into this two-engine process.
+`src/exact_index.rs` stores exact token blocks in a per-engine trie, retains
+opaque vLLM hashes only for reverse removal/parent lookup, and verifies full
+token-slice equality on every prefix step. Store batches preflight parent,
+hash, path, and capacity invariants before mutation; removals are idempotent and
+prune unreachable tombstones. Main-attention group metadata is learned exactly
+as events arrive, while non-main, unknown, non-local, non-GPU, LoRA,
+cache-salted, and extra-key state fails closed.
+
+The sequence fence and index now compose as one state machine. Startup events
+remain observation-only, live gaps suspend queries until a complete inclusive
+replay is validated, a clear inside replay can establish an authoritative
+generation, and invalid replay/index/capacity state clears the inventory and
+increments the generation. Exact lookup returns no result whenever the fence
+is untrusted. Eleven index/integration tests cover branching, duplicate stores,
+eviction/re-add, atomic failures, mixed block geometry, group/namespace
+filtering, concurrent reads, startup fencing, replay recovery, and failure
+cleanup. Together with the replay-boundary test, the full Rust suite is now
+**57 tests**.
+
+`examples/exact_index_bench.rs` builds 48 synthetic 80.9K-token sequences: a
+3,883,008-token inventory matching node06's measured engine KV capacity. On the
+development host it built 15,168 blocks at 619K blocks/s and increased RSS by
+21,936KiB. Exact lookup measured 2.55µs at 4,096 tokens, 11.54µs at 18,944,
+and 50.33µs at 80,896. Store+remove pairs sustained 1.59M/s. Eight concurrent
+long-context readers reached 101.8K lookups/s, about 5.1× single-thread
+throughput. The simple per-engine `RwLock` therefore has substantial headroom;
+ZMQ queueing/recovery and real event-shape qualification remain the next gate.
+
+This code is not constructed by the running binary and exact IDs still never
+influence placement. No node06 container or engine configuration changed.
+
+## 2026-08-12 — bounded pure-Rust ZMQ transport interoperability
+
+`src/kv_transport.rs` adds a pure-Rust vLLM event source: SUB receives the
+three-frame live stream and DEALER consumes the ROUTER replay stream because
+one replay request has multiple responses. It validates exact frame counts,
+topic and unsigned big-endian sequence fields, applies the existing bounded
+MessagePack decoder, and enforces one total replay deadline plus explicit
+requested-batch and newer-tail limits. Missing, duplicate, out-of-order, early
+tail, malformed, or incomplete replay fails closed without rendering payload,
+hash, or token values in errors. The release probe links only the standard C,
+math, and compiler runtime libraries; it has no native `libzmq` dependency.
+
+A temporary node06 CPU-only container from the already-local r34 image exposed
+Python `pyzmq` PUB and ROUTER sockets with the exact vLLM framing. The standalone
+Rust release probe received live sequence 3, requested inclusive replay 1–3,
+and validated all three batches plus the `-1` end marker. The Python peer
+confirmed the DEALER request arrived as identity, empty delimiter, and starting
+sequence. The probe binary and temporary container were removed after the run.
+
+All **62 Rust tests**, Rust formatting, and strict all-target/all-feature
+Clippy pass. Both production engines and the live Rust r11 load balancer stayed
+up with zero restarts and both readiness gauges at one. This transport is not
+yet constructed by the serving binary, so exact IDs still cannot affect
+routing. The next gate is a supervised per-engine shadow consumer with bounded
+reconnect backoff, trust/gap/replay metrics, and real-feed observation.
+
+## 2026-08-12 — supervised shadow consumer lifecycle
+
+The serving binary now has a default-off `off|shadow` KV-event mode. Shadow
+startup requires exactly one validated TCP live/replay endpoint pair per
+configured upstream. Each task owns an independent fenced exact inventory,
+bounded transport/replay configuration, capped initial-connect backoff,
+graceful shutdown, and `ds4proxy_kv_event_*` connection, trust, generation,
+batch-outcome, replay-size, and resident-index metrics. The inventories are not
+passed to the router, so this cannot change placement.
+
+An initial standalone node06 lifecycle run exposed that the pure-Rust SUB
+socket reconnects transparently: its message receive stays pending when TCP
+disconnects, which made a naive connection gauge remain at one. The transport
+now consumes the library's socket-monitor stream alongside messages. A repeat
+CPU-only Python-peer run proved the corrected transitions:
+
+- after reconnect, 22 startup batches remained observation-only;
+- an explicit `AllBlocksCleared` advanced generation 2 and set
+  `up=1`, `trusted=1`;
+- 21 subsequent batches applied authoritatively;
+- peer shutdown advanced generation 3, immediately set `up=0`, `trusted=0`,
+  and cleared the zero-entry synthetic inventory.
+
+The standalone binary and temporary containers were removed. Both production
+engines and the live r11 LB remained at zero restarts with readiness one. All
+**67 Rust tests**, strict all-target/all-feature Clippy, release compilation,
+the retained Go tests/vet, and both format gates pass. The next gate is a
+rolling one-engine real-feed observation; neither production engine has been
+reconfigured in this experiment.
+
+The immutable node06 build
+`ghcr.io/helixml/ds4-loadbalancer:rust-r12-5a455fe` has manifest-list digest
+`sha256:fe5d5c409988ea7d703a76389d945b07ffd8015af62b18b5348b31754d93ba58`.
+The first LB-only recreate exposed that r11's `local-shadow` setting had been a
+one-off compose override: r12 correctly defaulted to off from the checked-in
+compose. It was restored within seconds, and infra commit `c5316b3` now makes
+local shadow the persistent compose default while keeping KV events off.
+
+A fresh 18,762-token request completed in 1.95s and produced exact equal local
+and remote token sums of 18,762 with one `parity_match`; the first warmed r12
+observation took 21.1ms locally and 38.0ms remotely. The 12-request same-app
+gate completed 12/12, split 6/6, at 567 tok/s. Three r12 c24/max256 samples
+were 1,504.8, 1,508.3, and 1,596.2 tok/s. Because these were below the historical
+box class, an adjacent r11 rollback control measured 1,497.2 and 1,507.3 tok/s;
+r12 then measured 1,572.0 after re-promotion. The matched control rules out an
+r12 regression and attributes the low absolute run to current shared-engine
+state/noise.
+
+r12 remains live with `LocalShadow`, `KvEventMode Off`, both probes at one,
+zero inflight/load/tokenizer queue, and zero engine or LB restarts. No engine
+configuration or process changed during this rollout.
+
+## 2026-08-12 — real r34 KV-event replay and exact-index qualification
+
+Production was first single-homed on engine A through a brief r12 LB-only
+recreate; engine A stayed up with zero restarts throughout. Engine B was then
+rolled with r34's native ZMQ publisher enabled on container-only ports
+5557/5558. The accepted r34 CLI keys use underscores
+(`enable_kv_cache_events`, `replay_endpoint`, `buffer_steps`, `max_queue_size`);
+JSON quoting through Compose and hyphenated nested keys were rejected before
+model load. The corrected B process booted with publisher `zmq`, topic `kv`, a
+10,000-step replay buffer, 100,000 HWM/queue bounds, and zero restarts. B was
+never advertised by the production LB during this gate.
+
+The first real 18.6K-token request correctly exposed a decoder incompatibility
+instead of silently accepting incomplete state. A privacy-bounded live probe
+showed that one request produced five KV groups: group 0 `mla_attention` at
+256-token blocks and four `sliding_window_mla` groups at 64/64/4/8 tokens.
+Only group 0 had one hash per token block; the masked non-main groups retained
+the full token slice while omitting hashes. Decoding now accepts that wire
+shape so the existing semantic group filter can discard it, while the exact
+main-attention index still enforces one hash per token chunk.
+
+A bounded replay probe then checked only in-memory hash membership and emitted
+counts, never token or hash values. Replay from zero returned 37 contiguous
+batches and 220 stores with 1,259 hashes. Of 579 main-attention hashes, exactly
+two 4-token partial stores referenced parents absent from the entire event
+stream (sequences 22 and 32); the normal 256-token MLA chain was complete.
+This matches r34's partial-block implementation: it can reference an internal
+fine-grained chain hash that is not itself emitted. The index now filters only
+missing-parent stores whose block size is smaller than the cache group's
+already observed root geometry. A missing canonical-size parent remains a
+generation-fencing error.
+
+Startup recovery was also corrected. Sequence zero directly establishes the
+new process generation; a late subscriber requests a bounded replay from zero
+through its first live sequence. Transport and index errors now expose only a
+fixed reason label (`invalid_messagepack`, `invalid_replay`,
+`index_parent_not_found`, and peers), retaining privacy and bounded metric
+cardinality. These reason codes drove the real-feed fixes without rendering a
+payload.
+
+The final isolated r17 consumer requested and applied sequences 0–37, set
+`trusted=1`, and built 650 exact blocks / 166,400 resident token IDs. Two
+fresh locality turns raised the live applied count to five while preserving a
+49.5% cache hit (18,432 cached on the returning turn). An eight-request direct
+B same-app load completed 8/8 at 327 generated tok/s; afterward the consumer
+had applied 14 live batches, remained trusted, grew to 728 blocks / 186,368
+token IDs, and had exactly one initial connection with no reconnect, decode,
+replay, or index errors. Exact state remained unreachable from route selection.
+
+The canary was stopped, B was recreated with `EXTRA_VLLM_ARGS` explicitly
+empty, and its normal warm boot completed in 545 seconds with zero restarts.
+After model and health probes passed, r12 was restored to both engines with KV
+events off and local tokenization shadow on. The post-restore gates were:
+
+- locality: 8/8 requests, 74.2% aggregate cache hit, exactly two cold prefills
+  for two fresh apps;
+- same-app c12/max128: 12/12, exact 6/6 split, 397 tok/s;
+- aggregate c16/max512: 16/16, 1,230.8 generated tok/s;
+- both upstream readiness gauges one, zero residual inflight/load, and zero
+  unexpected container restart counts after the intentional recreates.
+
+All **71 Rust tests**, Rust formatting, strict all-target/all-feature Clippy,
+the retained Go tests/vet/build, Go formatting, Python probe syntax checks, and
+`git diff --check` pass. The locally built r17 canary is intentionally not the
+production LB; production remains immutable r12. Next qualify the same feed on
+A, add a longer removal/eviction soak and filter-reason counters, then compare
+exact-score shadow choices with the approximate router before exact placement
+is considered.
+
+## 2026-08-12 — symmetric A feed and forced-removal qualification
+
+The matching A-engine gate kept production single-homed on healthy B through
+r12 while A was rolled with the same r34 ZMQ publisher configuration used on
+B. A and the isolated r18 consumer both started with zero restarts. The
+consumer connected before the first publisher batch, so sequence zero directly
+established trust without replay. A fresh two-turn 18.6K locality request and
+eight direct same-app requests produced 16 contiguous live batches. The exact
+inventory remained trusted with 151 main MLA blocks / 38,656 token IDs and no
+decode, replay, transport, or index error. B-only production returned HTTP 200
+throughout.
+
+r18 adds `ds4proxy_kv_event_filtered_total{upstream,source,reason}` with a fixed
+seven-value reason vocabulary. It counted 92 non-main-attention events and nine
+unreconstructable partial-block events in that first A workload, directly
+confirming the two conservative exclusions inferred during the B probe. The
+metric contains only bounded labels and counts—no prompt, token, or hash data.
+
+r34 does not expose its internal prefix-cache reset method through this API
+build; an authenticated `POST /reset_prefix_cache` returned 404 and changed no
+state. To exercise real removals, A was therefore rolled once more with its KV
+allocation temporarily constrained to 10GiB while all other engine settings
+remained fixed. It initialized a 785,171-token pool, still 2.00× the configured
+393,216-token maximum request context. A fresh 48-app × one-turn sweep then
+processed 893,232 uncached prompt tokens successfully off the production path.
+
+The retained replay was contiguous from sequence 0 through 191 and contained
+1,200 store events plus 2,442 removal events. Per-group removed hashes were
+group 0: 882, group 1: 195, group 2: 195, group 3: 130, and group 4: 1,040.
+The main MLA stream contained 3,456 stored hashes, no orphan parents, and exact
+256-token geometry. The live Rust consumer applied all 192 batches, filtered
+2,520 non-main events, stayed trusted, and retained exactly 2,574 main blocks /
+658,944 IDs: `3,456 stores − 882 group-0 removals = 2,574`. There was one
+successful connection after bounded boot retries and no post-connect reconnect,
+decode, replay, index, or generation error. This qualifies real eviction and
+reverse-hash removal behavior, not only store/replay startup.
+
+The canary was stopped and A was restored to automatic KV sizing, event mode
+off, and 3,838,897 KV tokens with zero restart count. r12 was then restored to
+both engines with local tokenizer shadow on and KV events off. Post-restore
+gates completed as follows:
+
+- locality: 8/8, 74.2% cache hit, exactly two cold prefills for two fresh apps;
+- same-app c12/max128: 12/12, exact 6/6 split, 199 tok/s during shared-box noise;
+- aggregate c16/max512: 16/16, 1,213.6 generated tok/s;
+- both upstream gauges one, no residual inflight/load, and zero unexpected
+  container restart counts after the intentional recreates.
+
+All **72 Rust tests**, strict all-target/all-feature Clippy, Rust release build,
+the retained Go tests/vet/build, both format gates, Python probe syntax, and
+`git diff --check` pass locally. The r18 canary remains shadow-only and is not
+the production LB. With both engines, sequence-zero/replay startup, hybrid
+filtering, and real eviction now qualified, the next gate is exact-score shadow
+telemetry against approximate production choices before request-side exact IDs
+can influence placement.
+
+## 2026-08-12 — r19 revision-fenced exact-score shadow
+
+r19 connects exact tokenization and the fenced KV inventories only to
+counterfactual telemetry. A naive post-response lookup would be self-biased:
+the selected engine may publish the just-completed request before tokenization
+finishes. The implementation instead captures each trusted inventory's
+generation and monotonic revision at the approximate decision, then uses the
+selected engine's response-reported pre-request `cached_tokens`. Alternative
+engines are queried only if their generation and revision are unchanged. The
+original candidate health/load snapshot, alpha, and overlap cap remain fixed;
+exact overlap replaces only the cache term and never reaches placement. All
+outcomes and overlap/gain histograms are bounded and contain no identifiers.
+
+Both r34 engines were rolled publisher-on one at a time. Production stayed
+single-homed on the opposite engine through immutable r12 during each 531s/541s
+boot, and a direct authenticated short completion passed before traffic moved.
+Both publisher threads started with zero container restarts. After the isolated
+r19 subscriber connected late, one fresh 18.8K prefill per engine triggered
+bounded replay from zero. Both inventories became trusted at generation zero,
+each initially holding 73 main blocks / 18,688 token IDs, with one connection
+and no reconnect or error.
+
+The controlled exact-score gates were:
+
+- 3 apps × 3 sessions × 2 turns: 18/18 responses, 82.3% engine cache hit,
+  18/18 local-fastokens versus remote-vLLM parity, 15 `agree`, three
+  `all_zero`, and zero exact token gain over the selected engine;
+- forced miss: a fresh prompt was warmed directly on A without teaching the
+  approximate router, then the identical request was cold-routed to B. Both
+  calls returned HTTP 200; B reported zero cached tokens while unchanged A
+  exact state held 14,336 tokens, yielding one `would_move` and a 14,336-token
+  gain;
+- c12 same-app/max128: 12/12, exact 6/6 split, 379 generated tok/s. All twelve
+  post-response comparisons reported `inventory_changed`, correctly rejecting
+  alternatives mutated by concurrent requests;
+- c16/max512 with `TOKENIZER_MIN_BYTES=0`: 16/16 at 1,130.7 tok/s; all sixteen
+  comparisons again failed closed on concurrent alternative mutation. This is
+  a correctness stress, not a production-threshold performance comparison.
+
+A second r19 canary used the production 32KiB tokenizer admission threshold.
+Five interleaved c16/max512 runs per image produced a 1,343.4 tok/s r19 median
+versus 1,362.1 for r12, a -1.4% difference inside the normal shared-box noise
+band; all 160 requests succeeded. The r19 canary split its 32-request initial
+pair exactly 16/16 and admitted no tokenizer jobs for the small payloads. A
+reverse-order 2-app × 2-session × 2-turn locality pair then reused exactly
+112,128 tokens through each LB (74.1% r19 versus 74.5% r12 because the fresh
+prompt strings tokenized to different totals), with overlapping 0.59–0.69s
+warm wall times. r19 recorded 12 `agree`, four `all_zero`, zero gain, full
+parity, zero queue depth, and no KV reconnect.
+
+All **76 Rust tests**, strict all-target/all-feature Clippy, Rust release build,
+the retained Go tests/vet/build, both format gates, Python bench syntax, and
+`git diff --check` pass locally and the GitHub Actions check passed. The public
+r19 manifest-list digest is
+`sha256:0e04dca9cc2f44733ccb31b09820cc96f81b70550be7228ca9021f4296aacc95`.
+
+After CI, production was swapped LB-only from r12 to r19 with both engines and
+their KV caches untouched. Late-subscriber replay recovered 348 A batches and
+430 B batches; both generation-zero inventories became trusted with one
+connection and no reconnect. Post-deploy gates were 8/8 locality at 64.8%
+(six `agree`, two `all_zero`), c12 same-app 12/12 with a 6/6 split at 568
+tok/s, and c16/max512 16/16 at 1,351.9 tok/s. One c12 tokenizer job exceeded
+the bounded queue and was dropped without affecting any user request. Infra
+now persists public r19, both container-only publishers, and event shadow mode
+as the recreate-safe defaults. Exact placement remains disabled; r12 plus
+event mode off is the LB-only rollback. The next architectural gate is
+selective pre-route tokenization plus a versioned renderer/engine attestation;
+pre-route lookup is required to observe useful counterfactuals under concurrent
+cache mutation.
+
+## 2026-08-12 — r20 manifest-attested pre-route exact shadow
+
+r20 moves selective local tokenization ahead of the approximate decision, but
+still does not allow exact state to change candidate order. The new
+`off|shadow` exact-route mode requires local-shadow tokenization, KV-event
+shadow, and a SHA-pinned compatibility manifest. The node06 r34 manifest binds:
+
+- model `deepseek-v4-flash`, root
+  `deepseek-ai/DeepSeek-V4-Flash-0731`, and context 393,216;
+- runtime `/version`
+  `0.11.2.dev280+gilded.gnosis.v20.vllm4d006a4.b12xcd3ce19.fi1ac6942.cu132.20260810.r34`;
+- engine-image provenance
+  `sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b`;
+- tokenizer SHA-256
+  `8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf`,
+  renderer profile `deepseek-v4-r34`, nine admitted request classes, and ten
+  synthetic token-vector count/digest goldens.
+
+The local tokenizer re-renders every golden at startup. Each 15-second health
+probe also matches `/v1/models` and `/version` for every engine. Attestation is
+cleared before the asynchronous version check; a monotonic attestation revision
+rejects tokenization that overlaps an identity transition. Request admission
+also rejects known template gaps and ungoldened combinations, including tool
+history, `max`/`xhigh`, tools plus reasoning, custom templates/kwargs,
+truncation, and non-generation-prompt rendering. Eight non-blocking CPU permits
+are independent from the single post-response remote-parity worker. Permit
+pressure, timeout, unsupported input, attestation change, untrusted KV state,
+or an inventory revision change drops only the observation.
+
+The committed manifest was generated twice from direct authenticated r34
+`/tokenize` calls per case; all IDs were stable and only vector digests were
+persisted. Loading the real node06 tokenizer artifact then passed all ten local
+goldens before the test binary bound a port. The full local gate passed **84
+Rust tests**, formatting, strict all-target/all-feature Clippy, release build,
+the retained Go tests/vet/build and formatting, Python syntax, and
+`git diff --check`.
+
+Three isolated canary concurrency settings established the admission budget:
+
+- one permit: c12/max128 passed 12/12, split 6/6, at 545 tok/s; 3 tokenized and
+  9 immediately fell back as busy;
+- four permits: matched c12 runs passed at 552–556 tok/s; 4–5 tokenized before
+  the remainder fell back;
+- eight permits: c12 passed at 561 tok/s with all 12 tokenized in one
+  authoritative run. The final production-threshold build passed at 564 tok/s;
+  eight tokenized, three were busy, and one deliberately conservative fallback
+  overlapped the periodic identity recheck.
+
+Sequential local tokenization averaged about 4.1ms across short and 18.8K-token
+requests; revision-stable exact lookup averaged about 44µs. The final 32KiB-
+threshold 3 apps × 3 sessions × 2 turns gate returned 18/18, reused 266,496 of
+337,923 prompt tokens (78.9%), maintained 0.58–0.70s warm walls, and added 15
+pre-route `agree` plus three cold `all_zero` decisions. All admitted jobs later
+matched the remote r34 authority; short c16 aggregate inputs were correctly
+outside the production admission window.
+
+The decisive forced-miss control warmed a fresh 228,791-byte prompt directly
+only on A, then sent the identical request through a cold approximate router.
+The proxy chose B and B reported zero cached tokens, while the pre-route exact
+inventory found **36,096** tokens on A and emitted one `would_move` before the
+request could mutate either cache. A separate manifest with an intentionally
+wrong runtime version kept both `ds4proxy_compat_attested` gauges at zero;
+its request still returned HTTP 200 through approximate routing and recorded
+only `unattested`.
+
+Two reverse-order short c16/max512 pairs averaged 1,342.4 tok/s through r20 and
+1,350.2 through production r19, a -0.6% difference inside shared-box noise.
+All canaries had zero restarts and no proxy error/panic/fatal logs. A fresh
+late subscriber stays connected but untrusted until a publisher emits its first
+full-block event; a fresh long prefill then triggered bounded replay of roughly
+436–523 retained batches per engine and restored trust. This is a safe readiness
+property and should remain visible in rollout checks.
+
+Production was then swapped LB-only to the exact commit image
+`rust-r20-attested-shadow-195ea1f` (manifest-list digest
+`sha256:53bdca913af8b48c76e5af76e5b938ad90a7efa003ea5baa29c9a4336150a08e`).
+Both engine containers retained their original start times and zero restart
+counts. The new LB started at 2026-08-12T13:54:46Z with both runtime identity
+gauges attested and both event inventories connected and trusted. A fresh
+2-app × 2-session × 2-turn locality gate returned 8/8 at 71.6% cache hit with
+six exact/approximate agreements and two cold decisions. The c12 same-app gate
+returned 12/12, split 6/6, at 578 tok/s; c16/max512 returned 16/16 at
+1,370.3 tok/s. Across the startup trigger and gates, pre-route shadow admitted
+17 requests, reported six `agree` and 11 `all_zero`, and fell back three times
+under CPU-permit pressure. All containers remained at zero restarts and the LB
+logged no error, panic, or fatal. A real internal-account Helix
+`POST /api/v1/sessions/chat` through provider `ds4-flash-node06` also returned
+HTTP 200 with the requested exact sentinel. The exact placement mode remains
+absent; rollback is the stateless r19 LB image or
+`DS4_EXACT_ROUTE_MODE=off`.
+
+Verdict: r20 proves exact IDs and exact KV overlap can be joined before cache
+mutation with bounded single-digit-millisecond frontend cost and independent
+fail-closed fences. It was promoted only in `shadow` mode at the 32KiB
+threshold with eight pre-route permits. Exact placement remains disabled until
+production shadow distributions cover move gain, load conflict, attestation
+transitions, and event recovery long enough to set a conservative route gate.
