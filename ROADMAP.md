@@ -156,7 +156,11 @@ node06). The design rationale for each lives in DESIGN.md.
   legitimate sequence holes. Validation now accepts strictly increasing
   in-range events ending at the requested boundary while still rejecting
   duplicates, regressions, out-of-range data, and incomplete tails. Exact
-  placement remains shadow-only while #13 collects organic gain/load evidence.
+  index replay also omits a bounded `orphaned_parent` store when its ancestor
+  has already left the retained/indexable set; this can only under-estimate KV
+  availability, while structural/path/capacity errors still fence all state.
+  Exact placement remains shadow-only while #13 collects organic gain/load
+  evidence.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
   vectors rather than restarting; benchmark memory, p99 preparation latency,

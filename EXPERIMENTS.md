@@ -2226,3 +2226,15 @@ The public `rust-r28-sparse-replay-0f49a6d` image has digest
 `sha256:f7d79cff932bc514b632188b97ab8b48b8495058a05028d80ca43fb793895f74`;
 its registry promotion took 9.24s. The canonical Compose pins this tested
 digest.
+
+The first public-digest roll found B's sparse transport replay valid but its
+index replay failed at the probe's single full-size missing-parent event
+(`sequence=3542`, block size 256). Runtime was rolled back to r27 in 1.02s;
+serving stayed 2/2 and engines again remained untouched. A child whose parent
+was already removed or omitted from the retained/indexable generation cannot
+be placed in the radix index. Omitting that child is nevertheless safe: exact
+lookup under-estimates cache state and cannot manufacture a false hit. Such
+stores now increment the bounded `orphaned_parent` filter reason. True shape,
+duplicate-hash, conflicting-path, or capacity errors still fence and clear the
+entire inventory. Unit tests distinguish this safe under-estimation from a
+structurally inconsistent store.

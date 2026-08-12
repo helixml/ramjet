@@ -85,10 +85,11 @@ pub enum FilterReason {
     UnknownAttentionKind,
     UnlearnedAttentionGroup,
     UnsupportedPartialBlock,
+    OrphanedParent,
 }
 
 impl FilterReason {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::NonLocal,
         Self::UnsupportedMedium,
         Self::Namespaced,
@@ -96,6 +97,7 @@ impl FilterReason {
         Self::UnknownAttentionKind,
         Self::UnlearnedAttentionGroup,
         Self::UnsupportedPartialBlock,
+        Self::OrphanedParent,
     ];
 
     #[must_use]
@@ -108,6 +110,7 @@ impl FilterReason {
             Self::UnknownAttentionKind => "unknown_attention_kind",
             Self::UnlearnedAttentionGroup => "unlearned_attention_group",
             Self::UnsupportedPartialBlock => "unsupported_partial_block",
+            Self::OrphanedParent => "orphaned_parent",
         }
     }
 
@@ -120,6 +123,7 @@ impl FilterReason {
             Self::UnknownAttentionKind => 4,
             Self::UnlearnedAttentionGroup => 5,
             Self::UnsupportedPartialBlock => 6,
+            Self::OrphanedParent => 7,
         }
     }
 }
@@ -544,13 +548,13 @@ impl ExactKvInventory {
                 }
                 match self.index.store(stored) {
                     Ok(blocks) => Ok(ApplyOutcome::Stored { blocks }),
-                    Err(ExactIndexError::ParentNotFound)
-                        if self.is_unsupported_partial(data_parallel_rank, stored) =>
-                    {
-                        Ok(ApplyOutcome::Filtered(
-                            FilterReason::UnsupportedPartialBlock,
-                        ))
-                    }
+                    Err(ExactIndexError::ParentNotFound) => Ok(ApplyOutcome::Filtered(
+                        if self.is_unsupported_partial(data_parallel_rank, stored) {
+                            FilterReason::UnsupportedPartialBlock
+                        } else {
+                            FilterReason::OrphanedParent
+                        },
+                    )),
                     Err(error) => Err(error),
                 }
             }
@@ -1112,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_filters_only_orphaned_smaller_partial_geometry() {
+    fn inventory_safely_underestimates_orphaned_state() {
         let mut inventory = ExactKvInventory::new(ExactIndexLimits::default());
         let mut root = store_event(&[1], None, &[1, 2, 3, 4], 4);
         root.kv_cache_spec_kind = Some("mla_attention".to_owned());
@@ -1132,8 +1136,10 @@ mod tests {
         let mut missing_full_parent = store_event(&[3], Some(99), &[5, 6, 7, 8], 4);
         missing_full_parent.kv_cache_spec_kind = Some("mla_attention".to_owned());
         assert_eq!(
-            inventory.apply_event(0, &KvEvent::BlockStored(missing_full_parent)),
-            Err(ExactIndexError::ParentNotFound)
+            inventory
+                .apply_event(0, &KvEvent::BlockStored(missing_full_parent))
+                .unwrap(),
+            ApplyOutcome::Filtered(FilterReason::OrphanedParent)
         );
     }
 
@@ -1300,14 +1306,14 @@ mod tests {
             .ingest_live(3, &batch(vec![KvEvent::AllBlocksCleared]))
             .unwrap();
         let invalid = batch(vec![KvEvent::BlockStored(store_event(
-            &[9],
-            Some(8),
-            &[1, 2],
+            &[9, 10],
+            None,
+            &[1],
             2,
         ))]);
         assert_eq!(
             state.ingest_live(4, &invalid),
-            Err(ExactIndexError::ParentNotFound)
+            Err(ExactIndexError::InconsistentBlockShape)
         );
         assert!(!state.trusted());
         assert_eq!(state.stats(), ExactIndexStats::default());

@@ -104,6 +104,11 @@ events are strictly increasing, stay inside the requested range, and include
 the requested upper boundary; absent intermediate numbers are authoritative
 no-op steps. Duplicate, decreasing, out-of-range, or incomplete-tail responses
 remain invalid and fail closed.
+An otherwise valid main-attention store whose parent is no longer present is
+counted as `orphaned_parent` and omitted. This is conservative: the exact index
+can under-estimate reusable KV but cannot claim a child path it cannot prove.
+Structural shape conflicts, duplicate hashes, path conflicts, and capacity
+overflow still fence the complete inventory.
 
 The cache scorecard uses upstream response usage as its authority.
 `ds4proxy_cache_requests_total{endpoint,outcome}` classifies each completed
