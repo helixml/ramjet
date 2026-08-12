@@ -2522,3 +2522,54 @@ decoded batch before applying it. The next router slice is a streaming full
 replay into a scratch exact inventory followed by end/cursor validation and an
 atomic swap. That recovers histories still inside vLLM's 10,000-step window;
 Dynamo-style worker snapshot/tree-dump remains necessary after zero ages out.
+
+## 2026-08-13 — r31 streaming full replay recovers long-lived A
+
+Commit `23abc26` changes only full replay ranges that start at sequence zero.
+The blocking ZMQ worker now validates and folds each decoded batch directly
+into a private `FullReplayStage`; the trusted inventory is not visible or
+mutated until the requested end/cursor is complete and the stage is committed
+atomically. Invalid transport, index, capacity, or boundary state discards the
+entire scratch generation and leaves the engine fenced. Nonzero gap replay
+retains the existing bounded vector path. Unit tests cover invisibility before
+commit, successful atomic replacement, failed-stage discard, transport fold,
+and the consumer's failed-startup/reconnect path. Review then found and closed
+two additional boundedness gaps: a dropped async replay now wakes its libzmq
+worker within 50ms instead of retaining scratch state until the deadline, and
+filtered cache-group metadata shares the exact index's node-count capacity.
+The strict local Rust gate passed 119 tests, Clippy with warnings denied,
+formatting, and a locked release build.
+
+The LB-only image
+`ghcr.io/helixml/ds4-loadbalancer:rust-r31-streaming-replay-23abc26`
+(`sha256:f3a4a730f7c1bcd3d35382e81677bb39ed5943b15dac8e4a49f4e478ec6031a6`)
+was built locally and loaded onto node06 in 29.38s total (23.42s build, 5.96s
+transfer). The first diagnostic used the new 10,000-message limit but stopped
+its observation after 60s and rolled the LB back automatically; both engines
+remained untouched and healthy. A read-only tail probe then confirmed that the
+publisher delivered sequences 9,300–9,392 in 83.9ms, narrowing the uncertainty
+to full decode/index construction rather than replay availability.
+
+The repeated canary recovered both exact inventories in roughly six seconds.
+A applied 5,610 replay batches containing 69,262 stores and 32,220 removals,
+ending trusted at 36,612 resident blocks / 9,372,672 token IDs. Fresh B applied
+19 batches and ended at 59 blocks / 15,104 token IDs. Sampled LB RSS peaked at
+427,184,128 bytes (407MiB) and host available memory never fell below
+8,891,994,112 bytes (8.28GiB). Both engines retained restart count zero. A
+post-recovery request through the LB returned HTTP 200 in 171ms and health
+remained 2/2 with both exact generations trusted.
+
+The review-hardened image
+`ghcr.io/helixml/ds4-loadbalancer:rust-r31-streaming-replay-99da044`
+(`sha256:5c560e5b8a56c8ff40f43b17baff33edb53eab5b4610d00292e26967ed2b750b`)
+was built and transferred in 28.30s total (22.38s build, 5.92s transfer). Its
+LB-only final canary retained the qualified 10,000/20s settings, re-established
+both exact inventories two seconds after the direct event triggers, and left
+both engine restart counts at zero.
+
+Verdict: promote the streaming replay path and set node06's deployment replay
+limit to the publisher's 10,000-step retention. Keep the existing 20-second
+timeout: the temporary 180-second value was diagnostic only and measured replay
+does not justify slowing failure detection. Exact placement remains shadow-only.
+Histories whose sequence zero has aged out still require a Dynamo-style
+snapshot/tree-dump recovery protocol.
