@@ -90,9 +90,25 @@ CASES = {
         "messages": [{"role": "user", "content": "Compare two routing scores."}],
         "reasoning_effort": "none",
     },
+    "reasoning_minimal": {
+        "messages": [{"role": "user", "content": "Compare two routing scores."}],
+        "reasoning_effort": "minimal",
+    },
+    "reasoning_low": {
+        "messages": [{"role": "user", "content": "Compare two routing scores."}],
+        "reasoning_effort": "low",
+    },
+    "reasoning_medium": {
+        "messages": [{"role": "user", "content": "Compare two routing scores."}],
+        "reasoning_effort": "medium",
+    },
     "reasoning_max": {
         "messages": [{"role": "user", "content": "Compare two routing scores."}],
         "reasoning_effort": "max",
+    },
+    "reasoning_xhigh": {
+        "messages": [{"role": "user", "content": "Compare two routing scores."}],
+        "reasoning_effort": "xhigh",
     },
     "thinking_disabled": {
         "messages": [{"role": "user", "content": "Return one short sentence."}],

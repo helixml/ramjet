@@ -1,8 +1,15 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use anyhow::Context;
 use axum::body::Bytes;
+use dynamo_protocols::types::CreateChatCompletionRequest;
+use dynamo_renderer::{
+    OAIChatLikeRequest, PromptFormatter, TextInput, deepseek_formatter_for,
+    dynamo_tokenizers::{FastTokenizer, traits::Encoder},
+};
 use futures_util::StreamExt;
 use serde::Deserialize;
+use serde_json::Value;
 use tokio::{sync::mpsc, time::Instant};
 use url::Url;
 
@@ -13,11 +20,13 @@ use crate::{
 };
 
 const REMOTE_BACKEND: &str = "remote";
+const LOCAL_BACKEND: &str = "fastokens";
 const MAX_RESPONSE_BYTES: usize = 16 << 20;
 
 #[derive(Clone)]
 pub struct TokenizerObserver {
     sender: Option<mpsc::Sender<Job>>,
+    backend_label: &'static str,
     min_bytes: usize,
     max_bytes: usize,
     metrics: Arc<Metrics>,
@@ -33,6 +42,10 @@ struct Job {
 #[derive(Clone)]
 enum Backend {
     Remote(RemoteTokenizer),
+    LocalShadow {
+        local: Arc<LocalTokenizer>,
+        remote: RemoteTokenizer,
+    },
 }
 
 #[derive(Clone)]
@@ -41,6 +54,17 @@ struct RemoteTokenizer {
     upstreams: Vec<Url>,
     token: Option<String>,
     timeout: Duration,
+}
+
+struct LocalTokenizer {
+    tokenizer: FastTokenizer,
+    formatter: Arc<dyn dynamo_renderer::OAIPromptFormatter>,
+}
+
+struct RenderRequest {
+    inner: CreateChatCompletionRequest,
+    args: HashMap<String, Value>,
+    add_generation_prompt: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -63,6 +87,15 @@ enum Failure {
     Decode,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum LocalFailure {
+    Unsupported,
+    Decode,
+    Render,
+    Encode,
+    Join,
+}
+
 impl Failure {
     const fn label(self) -> &'static str {
         match self {
@@ -75,30 +108,71 @@ impl Failure {
     }
 }
 
+impl LocalFailure {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported_request",
+            Self::Decode => "decode_error",
+            Self::Render => "render_error",
+            Self::Encode => "encode_error",
+            Self::Join => "join_error",
+        }
+    }
+}
+
 impl TokenizerObserver {
-    #[must_use]
-    pub fn new(config: &Config, client: reqwest::Client, metrics: Arc<Metrics>) -> Self {
+    /// Creates the bounded tokenizer observer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when explicit local-shadow mode cannot load its
+    /// tokenizer or DeepSeek-V4 formatter. Off and remote-shadow cannot fail.
+    pub fn new(
+        config: &Config,
+        client: reqwest::Client,
+        metrics: Arc<Metrics>,
+    ) -> anyhow::Result<Self> {
         let sender = match config.tokenizer_mode {
             TokenizerMode::Off => None,
             TokenizerMode::RemoteShadow => {
                 let (sender, receiver) = mpsc::channel(config.tokenizer_queue_capacity);
-                let timeout_ms = u64::try_from(config.tokenizer_timeout_ms).unwrap_or(u64::MAX);
-                let backend = Backend::Remote(RemoteTokenizer {
-                    client,
-                    upstreams: config.upstreams.clone(),
-                    token: config.upstream_token.clone(),
-                    timeout: Duration::from_millis(timeout_ms),
-                });
+                let backend = Backend::Remote(remote_tokenizer(config, client));
+                spawn_workers(receiver, config.tokenizer_workers, &backend, &metrics);
+                Some(sender)
+            }
+            TokenizerMode::LocalShadow => {
+                let path = config
+                    .tokenizer_path
+                    .as_deref()
+                    .context("DS4_TOKENIZER_PATH is required in local-shadow mode")?;
+                let tokenizer = FastTokenizer::from_file(path)
+                    .with_context(|| format!("load fastokens tokenizer from {path}"))?;
+                let PromptFormatter::OAI(formatter) =
+                    deepseek_formatter_for(&Some("deepseek_v4".to_owned()), "deepseek-v4-flash")
+                        .context("DeepSeek-V4 formatter unavailable")?;
+                let (sender, receiver) = mpsc::channel(config.tokenizer_queue_capacity);
+                let backend = Backend::LocalShadow {
+                    local: Arc::new(LocalTokenizer {
+                        tokenizer,
+                        formatter,
+                    }),
+                    remote: remote_tokenizer(config, client),
+                };
                 spawn_workers(receiver, config.tokenizer_workers, &backend, &metrics);
                 Some(sender)
             }
         };
-        Self {
+        let backend_label = match config.tokenizer_mode {
+            TokenizerMode::LocalShadow => LOCAL_BACKEND,
+            TokenizerMode::Off | TokenizerMode::RemoteShadow => REMOTE_BACKEND,
+        };
+        Ok(Self {
             sender,
+            backend_label,
             min_bytes: config.tokenizer_min_bytes,
             max_bytes: config.tokenizer_max_bytes,
             metrics,
-        }
+        })
     }
 
     /// Decides whether request preparation should derive an exact-token payload.
@@ -150,8 +224,18 @@ impl TokenizerObserver {
     fn record(&self, endpoint: Endpoint, outcome: &str) {
         self.metrics
             .tokenizer_shadow
-            .with_label_values(&[REMOTE_BACKEND, endpoint.label(), outcome])
+            .with_label_values(&[self.backend_label, endpoint.label(), outcome])
             .inc();
+    }
+}
+
+fn remote_tokenizer(config: &Config, client: reqwest::Client) -> RemoteTokenizer {
+    let timeout_ms = u64::try_from(config.tokenizer_timeout_ms).unwrap_or(u64::MAX);
+    RemoteTokenizer {
+        client,
+        upstreams: config.upstreams.clone(),
+        token: config.upstream_token.clone(),
+        timeout: Duration::from_millis(timeout_ms),
     }
 }
 
@@ -183,15 +267,88 @@ fn spawn_workers(
 }
 
 async fn observe(backend: &Backend, metrics: &Metrics, job: Job) {
-    let started = Instant::now();
     let endpoint = job.endpoint.label();
-    let result = match backend {
-        Backend::Remote(remote) => remote.tokenize(&job).await,
-    };
+    match backend {
+        Backend::Remote(remote) => {
+            let started = Instant::now();
+            let result = remote.tokenize(&job).await;
+            record_remote(metrics, endpoint, started.elapsed(), &result);
+        }
+        Backend::LocalShadow { local, remote } => {
+            let local = Arc::clone(local);
+            let local_endpoint = job.endpoint;
+            let local_body = job.body.clone();
+            let local_future = async move {
+                let started = Instant::now();
+                let result = tokio::task::spawn_blocking(move || {
+                    local.tokenize(local_endpoint, &local_body)
+                })
+                .await
+                .map_err(|_| LocalFailure::Join)
+                .and_then(std::convert::identity);
+                (started.elapsed(), result)
+            };
+            let remote_future = async {
+                let started = Instant::now();
+                let result = remote.tokenize(&job).await;
+                (started.elapsed(), result)
+            };
+            let ((local_duration, local_result), (remote_duration, remote_result)) =
+                tokio::join!(local_future, remote_future);
+            record_remote(metrics, endpoint, remote_duration, &remote_result);
+            metrics
+                .tokenizer_duration
+                .with_label_values(&[LOCAL_BACKEND, endpoint])
+                .observe(local_duration.as_secs_f64());
+            match (&local_result, &remote_result) {
+                (Ok(local), Ok(remote)) => {
+                    metrics
+                        .tokenizer_tokens
+                        .with_label_values(&[LOCAL_BACKEND, endpoint])
+                        .observe(usize_to_f64(local.token_ids.len()));
+                    let outcome = if local == remote {
+                        "parity_match"
+                    } else {
+                        "parity_mismatch"
+                    };
+                    metrics
+                        .tokenizer_shadow
+                        .with_label_values(&[LOCAL_BACKEND, endpoint, outcome])
+                        .inc();
+                }
+                (Err(error), _) => metrics
+                    .tokenizer_shadow
+                    .with_label_values(&[LOCAL_BACKEND, endpoint, error.label()])
+                    .inc(),
+                (Ok(local), Err(_)) => {
+                    metrics
+                        .tokenizer_tokens
+                        .with_label_values(&[LOCAL_BACKEND, endpoint])
+                        .observe(usize_to_f64(local.token_ids.len()));
+                    metrics
+                        .tokenizer_shadow
+                        .with_label_values(&[
+                            LOCAL_BACKEND,
+                            endpoint,
+                            "remote_authority_unavailable",
+                        ])
+                        .inc();
+                }
+            }
+        }
+    }
+}
+
+fn record_remote(
+    metrics: &Metrics,
+    endpoint: &str,
+    duration: Duration,
+    result: &Result<ExactTokens, Failure>,
+) {
     metrics
         .tokenizer_duration
         .with_label_values(&[REMOTE_BACKEND, endpoint])
-        .observe(started.elapsed().as_secs_f64());
+        .observe(duration.as_secs_f64());
     match result {
         Ok(tokens) => {
             metrics
@@ -209,6 +366,149 @@ async fn observe(backend: &Backend, metrics: &Metrics, job: Job) {
                 .with_label_values(&[REMOTE_BACKEND, endpoint, error.label()])
                 .inc();
         }
+    }
+}
+
+impl LocalTokenizer {
+    fn tokenize(&self, endpoint: Endpoint, body: &[u8]) -> Result<ExactTokens, LocalFailure> {
+        let request: Value = serde_json::from_slice(body).map_err(|_| LocalFailure::Decode)?;
+        match endpoint {
+            Endpoint::Chat => self.tokenize_chat(request),
+            Endpoint::Completions => {
+                let prompt = request
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .ok_or(LocalFailure::Unsupported)?;
+                self.encode(prompt)
+            }
+            _ => Err(LocalFailure::Unsupported),
+        }
+    }
+
+    fn tokenize_chat(&self, request: Value) -> Result<ExactTokens, LocalFailure> {
+        let object = request.as_object().ok_or(LocalFailure::Decode)?;
+        if object
+            .get("documents")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Err(LocalFailure::Unsupported);
+        }
+        let add_generation_prompt = object
+            .get("add_generation_prompt")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if !add_generation_prompt {
+            return Err(LocalFailure::Unsupported);
+        }
+        let mut args = object
+            .get("chat_template_kwargs")
+            .and_then(Value::as_object)
+            .map(|object| {
+                object
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        apply_node06_vllm_profile(&mut args)?;
+        let inner = serde_json::from_value::<CreateChatCompletionRequest>(request)
+            .map_err(|_| LocalFailure::Decode)?;
+        let request = RenderRequest {
+            inner,
+            args,
+            add_generation_prompt,
+        };
+        let prompt = self
+            .formatter
+            .render(&request)
+            .map_err(|_| LocalFailure::Render)?;
+        self.encode(&prompt)
+    }
+
+    fn encode(&self, prompt: &str) -> Result<ExactTokens, LocalFailure> {
+        let encoding = self
+            .tokenizer
+            .encode(prompt)
+            .map_err(|_| LocalFailure::Encode)?;
+        Ok(ExactTokens {
+            token_ids: encoding.token_ids().to_vec(),
+        })
+    }
+}
+
+/// Translate the active node06 vLLM r34 DeepSeek-V4 template profile into
+/// Dynamo renderer semantics. `max`/`xhigh` deliberately fall back to the
+/// remote authority because this renderer release lacks vLLM's newer
+/// "Beyond maximum" preamble.
+fn apply_node06_vllm_profile(args: &mut HashMap<String, Value>) -> Result<(), LocalFailure> {
+    let thinking = args
+        .get("enable_thinking")
+        .or_else(|| args.get("thinking"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if !thinking {
+        args.insert("thinking".to_owned(), Value::Bool(false));
+        args.insert(
+            "reasoning_effort".to_owned(),
+            Value::String("none".to_owned()),
+        );
+        return Ok(());
+    }
+    let effort = args
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .unwrap_or("high");
+    let mapped = match effort {
+        "none" | "low" => "none",
+        "minimal" | "medium" | "high" | "auto" => "max",
+        _ => return Err(LocalFailure::Unsupported),
+    };
+    args.insert(
+        "reasoning_effort".to_owned(),
+        Value::String(mapped.to_owned()),
+    );
+    Ok(())
+}
+
+impl OAIChatLikeRequest for RenderRequest {
+    fn model(&self) -> String {
+        OAIChatLikeRequest::model(&self.inner)
+    }
+
+    fn messages(&self) -> minijinja::Value {
+        OAIChatLikeRequest::messages(&self.inner)
+    }
+
+    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
+        Some(self.inner.messages.as_slice())
+    }
+
+    fn tools(&self) -> Option<minijinja::Value> {
+        OAIChatLikeRequest::tools(&self.inner)
+    }
+
+    fn tool_choice(&self) -> Option<minijinja::Value> {
+        OAIChatLikeRequest::tool_choice(&self.inner)
+    }
+
+    fn response_format(&self) -> Option<minijinja::Value> {
+        OAIChatLikeRequest::response_format(&self.inner)
+    }
+
+    fn reasoning_effort(&self) -> Option<minijinja::Value> {
+        OAIChatLikeRequest::reasoning_effort(&self.inner)
+    }
+
+    fn should_add_generation_prompt(&self) -> bool {
+        self.add_generation_prompt
+    }
+
+    fn chat_template_args(&self) -> Option<&HashMap<String, Value>> {
+        Some(&self.args)
+    }
+
+    fn extract_text(&self) -> Option<TextInput> {
+        Some(TextInput::Single(String::new()))
     }
 }
 
@@ -333,7 +633,7 @@ mod tests {
     fn off_mode_does_not_prepare_or_enqueue() {
         let config = Config::from_lookup(|_| None).unwrap();
         let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
-        let observer = TokenizerObserver::new(&config, reqwest::Client::new(), metrics);
+        let observer = TokenizerObserver::new(&config, reqwest::Client::new(), metrics).unwrap();
         assert!(!observer.wants_payload(Endpoint::Chat, 100_000));
         observer.submit(Endpoint::Chat, 0, None);
     }
@@ -355,7 +655,7 @@ mod tests {
         let config = Config::from_lookup(|key| values.get(key).cloned()).unwrap();
         let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
         let observer =
-            TokenizerObserver::new(&config, reqwest::Client::new(), Arc::clone(&metrics));
+            TokenizerObserver::new(&config, reqwest::Client::new(), Arc::clone(&metrics)).unwrap();
         assert!(observer.wants_payload(Endpoint::Chat, 16));
         observer.submit(Endpoint::Chat, 0, Some(br#"{"messages":[]}"#.to_vec()));
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -374,5 +674,30 @@ mod tests {
         .unwrap();
         assert!(metrics.tokenizer_queue_depth.get().abs() < f64::EPSILON);
         server.abort();
+    }
+
+    #[test]
+    fn node06_profile_matches_observed_vllm_effort_classes() {
+        for (effort, expected) in [
+            ("none", "none"),
+            ("low", "none"),
+            ("minimal", "max"),
+            ("medium", "max"),
+            ("high", "max"),
+        ] {
+            let mut args = HashMap::from([(
+                "reasoning_effort".to_owned(),
+                Value::String(effort.to_owned()),
+            )]);
+            apply_node06_vllm_profile(&mut args).unwrap();
+            assert_eq!(args["reasoning_effort"], expected);
+        }
+        for effort in ["xhigh", "max"] {
+            let mut args = HashMap::from([(
+                "reasoning_effort".to_owned(),
+                Value::String(effort.to_owned()),
+            )]);
+            assert!(apply_node06_vllm_profile(&mut args).is_err());
+        }
     }
 }

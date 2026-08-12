@@ -45,7 +45,8 @@ async fn main() -> anyhow::Result<()> {
         .tcp_keepalive(Duration::from_secs(30))
         .build()
         .context("build upstream client")?;
-    let proxy = Proxy::new(config.clone(), client, metrics, routing);
+    let proxy = Proxy::new(config.clone(), client, metrics, routing)
+        .context("initialize mini-dynamo proxy")?;
 
     let api = Router::new()
         .fallback(any(Proxy::handle))

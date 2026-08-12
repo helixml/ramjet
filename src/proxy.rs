@@ -78,16 +78,20 @@ impl Drop for RoutedLoad {
 }
 
 impl Proxy {
-    #[must_use]
+    /// Builds the proxy and its optional tokenizer workers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when explicit local tokenizer initialization fails.
     pub fn new(
         config: Config,
         client: reqwest::Client,
         metrics: Arc<Metrics>,
         router: Arc<Router>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let journal = RouteJournal::new(config.route_journal);
-        let tokenizer = TokenizerObserver::new(&config, client.clone(), Arc::clone(&metrics));
-        Self {
+        let tokenizer = TokenizerObserver::new(&config, client.clone(), Arc::clone(&metrics))?;
+        Ok(Self {
             inner: Arc::new(Inner {
                 config,
                 client,
@@ -96,7 +100,7 @@ impl Proxy {
                 journal,
                 tokenizer,
             }),
-        }
+        })
     }
 
     #[must_use]
@@ -825,7 +829,7 @@ mod tests {
             max_load_units: config.route_max_load_units,
             affinity: config.affinity,
         }));
-        Proxy::new(config, reqwest::Client::new(), metrics, router)
+        Proxy::new(config, reqwest::Client::new(), metrics, router).unwrap()
     }
 
     #[test]

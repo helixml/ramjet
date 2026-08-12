@@ -19,6 +19,7 @@ pub struct Config {
     pub affinity: Affinity,
     pub route_journal: bool,
     pub tokenizer_mode: TokenizerMode,
+    pub tokenizer_path: Option<String>,
     pub tokenizer_min_bytes: usize,
     pub tokenizer_max_bytes: usize,
     pub tokenizer_workers: usize,
@@ -36,6 +37,7 @@ pub enum Affinity {
 pub enum TokenizerMode {
     Off,
     RemoteShadow,
+    LocalShadow,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -111,31 +113,8 @@ impl Config {
             "load" => Affinity::Load,
             value => return Err(invalid("DS4_AFFINITY", value.to_owned(), "prefix or load")),
         };
-        let tokenizer_mode = match get("DS4_TOKENIZER_MODE").as_deref().unwrap_or("off") {
-            "off" => TokenizerMode::Off,
-            "remote-shadow" => TokenizerMode::RemoteShadow,
-            value => {
-                return Err(invalid(
-                    "DS4_TOKENIZER_MODE",
-                    value.to_owned(),
-                    "off or remote-shadow",
-                ));
-            }
-        };
-        let tokenizer_min_bytes = parse(
-            &mut get,
-            "DS4_TOKENIZER_MIN_BYTES",
-            32 << 10,
-            "a non-negative integer",
-        )?;
-        let tokenizer_max_bytes = positive(&mut get, "DS4_TOKENIZER_MAX_BYTES", 2 << 20)?;
-        if tokenizer_min_bytes > tokenizer_max_bytes {
-            return Err(invalid(
-                "DS4_TOKENIZER_MIN_BYTES",
-                tokenizer_min_bytes.to_string(),
-                "no greater than DS4_TOKENIZER_MAX_BYTES",
-            ));
-        }
+        let (tokenizer_mode, tokenizer_path, tokenizer_min_bytes, tokenizer_max_bytes) =
+            tokenizer_settings(&mut get)?;
 
         Ok(Self {
             upstreams,
@@ -157,6 +136,7 @@ impl Config {
             affinity,
             route_journal: parse(&mut get, "DS4_ROUTE_JOURNAL", false, "a boolean")?,
             tokenizer_mode,
+            tokenizer_path,
             tokenizer_min_bytes,
             tokenizer_max_bytes,
             tokenizer_workers: positive(&mut get, "DS4_TOKENIZER_WORKERS", 1)?,
@@ -164,6 +144,46 @@ impl Config {
             tokenizer_timeout_ms: positive(&mut get, "DS4_TOKENIZER_TIMEOUT_MS", 2_000)?,
         })
     }
+}
+
+fn tokenizer_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+) -> Result<(TokenizerMode, Option<String>, usize, usize), ConfigError> {
+    let mode = match get("DS4_TOKENIZER_MODE").as_deref().unwrap_or("off") {
+        "off" => TokenizerMode::Off,
+        "remote-shadow" => TokenizerMode::RemoteShadow,
+        "local-shadow" => TokenizerMode::LocalShadow,
+        value => {
+            return Err(invalid(
+                "DS4_TOKENIZER_MODE",
+                value.to_owned(),
+                "off, remote-shadow, or local-shadow",
+            ));
+        }
+    };
+    let path = get("DS4_TOKENIZER_PATH").filter(|value| !value.is_empty());
+    if mode == TokenizerMode::LocalShadow && path.is_none() {
+        return Err(invalid(
+            "DS4_TOKENIZER_PATH",
+            String::new(),
+            "a tokenizer.json path in local-shadow mode",
+        ));
+    }
+    let min_bytes = parse(
+        get,
+        "DS4_TOKENIZER_MIN_BYTES",
+        32 << 10,
+        "a non-negative integer",
+    )?;
+    let max_bytes = positive(get, "DS4_TOKENIZER_MAX_BYTES", 2 << 20)?;
+    if min_bytes > max_bytes {
+        return Err(invalid(
+            "DS4_TOKENIZER_MIN_BYTES",
+            min_bytes.to_string(),
+            "no greater than DS4_TOKENIZER_MAX_BYTES",
+        ));
+    }
+    Ok((mode, path, min_bytes, max_bytes))
 }
 
 fn parse<T: std::str::FromStr>(
@@ -213,6 +233,7 @@ mod tests {
         assert_eq!(config.affinity, Affinity::Prefix);
         assert!(!config.route_journal);
         assert_eq!(config.tokenizer_mode, TokenizerMode::Off);
+        assert!(config.tokenizer_path.is_none());
         assert_eq!(config.tokenizer_min_bytes, 32 << 10);
         assert_eq!(config.tokenizer_max_bytes, 2 << 20);
         assert_eq!(config.tokenizer_workers, 1);
@@ -250,6 +271,20 @@ mod tests {
             error,
             ConfigError::InvalidValue {
                 key: "DS4_TOKENIZER_MIN_BYTES",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn local_tokenizer_requires_an_artifact_path() {
+        let values = HashMap::from([("DS4_TOKENIZER_MODE", "local-shadow")]);
+        let error =
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "DS4_TOKENIZER_PATH",
                 ..
             }
         ));
