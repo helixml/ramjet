@@ -2174,3 +2174,23 @@ becoming trusted. Serving health remained 2/2 throughout because exact state
 is shadow-only. This is a recovery-latency opportunity: a failed replay should
 be able to retry its known range after reconnect without waiting for a second
 live event, while preserving the current publisher-backpressure protections.
+
+## 2026-08-12 — replay-range retry without a second allocation
+
+The r27 recovery observation is addressed narrowly. When a replay fails after
+the consumer has learned its upper sequence, reconnect now discards the prior
+generation and re-arms only a bounded complete `0..through` replay. It never
+continues a partial nonzero range against cleared state. A range outside the
+configured replay limit remains fenced and falls back to waiting for an
+authoritative boundary. Retries retain r23's fresh libzmq DEALER identity,
+drain-through-validation, timeout floor, and exponential backoff; serving and
+approximate routing remain independent.
+
+A real in-process PUB/ROUTER regression sends exactly one live sequence, makes
+the first startup replay incomplete, then serves a valid second replay. The
+consumer reconnects, requests zero again, and becomes trusted without any
+second live message. The focused test plus incremental compile completed in
+4.84s. Node06 qualification should reproduce the final public-roll condition:
+force one malformed/invalid replay in an isolated mock only, never mutate the
+production publisher, then confirm ordinary retained replay still restores
+both real inventories.

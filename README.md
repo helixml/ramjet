@@ -79,7 +79,12 @@ per upstream. It observes bounded vLLM live/replay events and exports only
 controlled connection, trust, generation, batch/filter-outcome, and
 resident-size metrics. Startup and every disconnect are untrusted; publisher
 sequence zero or a complete bounded replay from zero establishes the initially
-empty engine generation. When selective tokenization succeeds, the inventories
+empty engine generation. If a requested replay fails after its range is known,
+the consumer clears the old generation and retries a bounded full range from
+zero after reconnecting; it does not wait for another live allocation merely
+to rediscover the same boundary. Every retry still uses a fresh DEALER identity,
+deadline, drain-through-validation, and exponential backoff. When selective
+tokenization succeeds, the inventories
 also feed an observation-only counterfactual: the selected engine's pre-request
 cache hit comes from response usage, while every alternative lookup requires
 the same trusted generation and inventory revision captured at approximate

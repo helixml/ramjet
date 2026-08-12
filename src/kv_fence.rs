@@ -203,6 +203,28 @@ impl KvEventFence {
         self.trusted = false;
     }
 
+    /// Re-arm a bounded full replay after reconnecting with a fresh transport.
+    ///
+    /// The caller must already have discarded the prior generation's index.
+    /// Only a complete range beginning at sequence zero can establish trust
+    /// without retaining any state from the disconnected generation.
+    pub fn prepare_full_replay(&mut self, through: u64) -> bool {
+        let Some(next_sequence) = through.checked_add(1) else {
+            return false;
+        };
+        if next_sequence > self.replay_limit {
+            return false;
+        }
+        self.next_sequence = Some(next_sequence);
+        self.pending = Some(PendingReplay {
+            from: 0,
+            through,
+            restore_trust: true,
+        });
+        self.trusted = false;
+        true
+    }
+
     fn fence_after(&mut self, sequence: u64) {
         self.generation = self.generation.saturating_add(1);
         self.next_sequence = Some(sequence.saturating_add(1));
@@ -239,6 +261,24 @@ mod tests {
             ReplayAction::Recovered
         );
         assert!(fence.trusted());
+    }
+
+    #[test]
+    fn reconnect_can_rearm_only_a_bounded_full_replay() {
+        let mut fence = KvEventFence::new(4);
+        fence.generation_changed();
+        assert!(fence.prepare_full_replay(3));
+        assert!(!fence.trusted());
+        assert_eq!(
+            fence.accept_replay(&[0, 1, 2, 3], false),
+            ReplayAction::Recovered
+        );
+        assert!(fence.trusted());
+
+        fence.generation_changed();
+        assert!(!fence.prepare_full_replay(4));
+        assert!(!fence.prepare_full_replay(u64::MAX));
+        assert!(!fence.trusted());
     }
 
     #[test]

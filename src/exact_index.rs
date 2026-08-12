@@ -801,6 +801,14 @@ impl FencedExactKvInventory {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// Clear the disconnected generation and prepare a bounded replay from
+    /// sequence zero through the last known live sequence.
+    #[must_use]
+    pub fn prepare_full_replay_retry(&mut self, through: u64) -> bool {
+        self.generation_changed();
+        self.fence.prepare_full_replay(through)
+    }
+
     /// Query only while the sequence fence declares the inventory complete.
     ///
     /// # Errors
@@ -1301,6 +1309,34 @@ mod tests {
             state.ingest_live(4, &invalid),
             Err(ExactIndexError::ParentNotFound)
         );
+        assert!(!state.trusted());
+        assert_eq!(state.stats(), ExactIndexStats::default());
+    }
+
+    #[test]
+    fn reconnect_retry_rebuilds_only_from_a_complete_generation() {
+        let mut state = FencedExactKvInventory::new(4, ExactIndexLimits::default());
+        assert!(state.prepare_full_replay_retry(1));
+        let replay = vec![
+            (0, batch(vec![KvEvent::AllBlocksCleared])),
+            (
+                1,
+                batch(vec![KvEvent::BlockStored(store_event(
+                    &[1],
+                    None,
+                    &[1, 2],
+                    2,
+                ))]),
+            ),
+        ];
+        assert!(matches!(
+            state.ingest_replay(&replay).unwrap(),
+            ReplayBatchOutcome::Applied(_)
+        ));
+        assert!(state.trusted());
+        assert_eq!(state.stats().token_ids, 2);
+
+        assert!(!state.prepare_full_replay_retry(4));
         assert!(!state.trusted());
         assert_eq!(state.stats(), ExactIndexStats::default());
     }

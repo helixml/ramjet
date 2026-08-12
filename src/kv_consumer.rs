@@ -112,6 +112,18 @@ struct ConsumerConfig {
     stagger: Duration,
 }
 
+struct ConnectionEnd {
+    reason: &'static str,
+    restored_authority: bool,
+    full_replay_through: Option<u64>,
+}
+
+enum ReplayAttempt {
+    Applied { authoritative: bool },
+    Failed(&'static str),
+    Shutdown,
+}
+
 async fn run_consumer(
     config: ConsumerConfig,
     upstream: String,
@@ -122,6 +134,7 @@ async fn run_consumer(
     initialize_event_metrics(&metrics, &upstream);
     let mut backoff = config.reconnect_min;
     let mut first_attempt = true;
+    let mut full_replay_through = None;
     loop {
         if first_attempt
             && !config.stagger.is_zero()
@@ -149,13 +162,14 @@ async fn run_consumer(
             backoff = next_backoff(backoff, config.reconnect_max);
             continue;
         };
-        let Some((disconnect_reason, restored_authority)) = consume_connection(
+        let Some(ended) = consume_connection(
             &config,
             &upstream,
             &inventory,
             &metrics,
             &mut shutdown,
             &mut source,
+            full_replay_through.take(),
         )
         .await
         else {
@@ -165,21 +179,29 @@ async fn run_consumer(
         metrics.kv_event_up.with_label_values(&[&upstream]).set(0.0);
         metrics
             .kv_event_reconnects
-            .with_label_values(&[&upstream, disconnect_reason])
+            .with_label_values(&[&upstream, ended.reason])
             .inc();
-        inventory.write().generation_changed();
+        full_replay_through = match ended.full_replay_through {
+            Some(through) if inventory.write().prepare_full_replay_retry(through) => Some(through),
+            Some(_) => None,
+            None => {
+                inventory.write().generation_changed();
+                None
+            }
+        };
         update_state_metrics(&inventory, &metrics, &upstream);
         tracing::warn!(
             upstream_index = config.upstream_index,
-            reason = disconnect_reason,
+            reason = ended.reason,
+            replay_retry_through = full_replay_through,
             "KV-event shadow consumer disconnected"
         );
         let delay = recovery_delay(
             &mut backoff,
             config.reconnect_min,
             config.reconnect_max,
-            restored_authority,
-            if disconnect_reason == "replay_timeout_undrained" {
+            ended.restored_authority,
+            if ended.reason == "replay_timeout_undrained" {
                 config.transport.replay_timeout
             } else {
                 Duration::ZERO
@@ -211,12 +233,35 @@ async fn consume_connection(
     metrics: &Metrics,
     shutdown: &mut broadcast::Receiver<()>,
     source: &mut ZmqKvEventSource,
-) -> Option<(&'static str, bool)> {
+    full_replay_through: Option<u64>,
+) -> Option<ConnectionEnd> {
     // Merely receiving a live event is not recovery progress: an untrusted
     // startup fence uses that event to request a full replay. Resetting the
     // reconnect delay before that replay becomes authoritative can create a
     // rapid request storm behind one abandoned publisher-side replay.
     let mut restored_authority = false;
+    if let Some(through) = full_replay_through {
+        match replay_range(source, inventory, metrics, upstream, shutdown, 0, through).await {
+            ReplayAttempt::Applied { authoritative } => {
+                restored_authority = authoritative;
+                if !authoritative {
+                    return Some(ConnectionEnd {
+                        reason: "replay_not_authoritative",
+                        restored_authority,
+                        full_replay_through: Some(through),
+                    });
+                }
+            }
+            ReplayAttempt::Failed(reason) => {
+                return Some(ConnectionEnd {
+                    reason,
+                    restored_authority,
+                    full_replay_through: Some(through),
+                });
+            }
+            ReplayAttempt::Shutdown => return None,
+        }
+    }
     loop {
         let received = tokio::select! {
             _ = shutdown.recv() => {
@@ -227,7 +272,13 @@ async fn consume_connection(
         };
         let activity = match received {
             Ok(activity) => activity,
-            Err(error) => return Some((error.reason(), restored_authority)),
+            Err(error) => {
+                return Some(ConnectionEnd {
+                    reason: error.reason(),
+                    restored_authority,
+                    full_replay_through: None,
+                });
+            }
         };
         let live = match activity {
             LiveActivity::Connected => {
@@ -243,26 +294,60 @@ async fn consume_connection(
         let replay = ingest_live(inventory, metrics, upstream, &live);
         restored_authority |= inventory.read().trusted();
         if let Ok(Some((from, through))) = replay {
-            let replayed = tokio::select! {
-                _ = shutdown.recv() => {
-                    metrics.kv_event_up.with_label_values(&[upstream]).set(0.0);
-                    return None;
+            match replay_range(
+                source, inventory, metrics, upstream, shutdown, from, through,
+            )
+            .await
+            {
+                ReplayAttempt::Applied { authoritative } => {
+                    if !authoritative {
+                        return Some(ConnectionEnd {
+                            reason: "replay_not_authoritative",
+                            restored_authority,
+                            full_replay_through: Some(through),
+                        });
+                    }
                 }
-                result = source.replay(from, through) => result,
-            };
-            let replayed = match replayed {
-                Ok(replayed) => replayed,
-                Err(error) => return Some((error.reason(), restored_authority)),
-            };
-            metrics
-                .kv_event_replay_batches
-                .with_label_values(&[upstream])
-                .observe(metric_usize(replayed.len()));
-            if !ingest_replay(inventory, metrics, upstream, replayed) {
-                return Some(("replay_not_authoritative", restored_authority));
+                ReplayAttempt::Failed(reason) => {
+                    return Some(ConnectionEnd {
+                        reason,
+                        restored_authority,
+                        full_replay_through: Some(through),
+                    });
+                }
+                ReplayAttempt::Shutdown => return None,
             }
             restored_authority = true;
         }
+    }
+}
+
+async fn replay_range(
+    source: &mut ZmqKvEventSource,
+    inventory: &SharedFencedInventory,
+    metrics: &Metrics,
+    upstream: &str,
+    shutdown: &mut broadcast::Receiver<()>,
+    from: u64,
+    through: u64,
+) -> ReplayAttempt {
+    let replayed = tokio::select! {
+        _ = shutdown.recv() => {
+            metrics.kv_event_up.with_label_values(&[upstream]).set(0.0);
+            return ReplayAttempt::Shutdown;
+        }
+        result = source.replay(from, through) => result,
+    };
+    let replayed = match replayed {
+        Ok(replayed) => replayed,
+        Err(error) => return ReplayAttempt::Failed(error.reason()),
+    };
+    metrics
+        .kv_event_replay_batches
+        .with_label_values(&[upstream])
+        .observe(metric_usize(replayed.len()));
+    ReplayAttempt::Applied {
+        authoritative: ingest_replay(inventory, metrics, upstream, replayed),
     }
 }
 
@@ -446,10 +531,60 @@ fn metric_u64(value: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use prometheus::Registry;
+    use zeromq::{PubSocket, RouterSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
     use super::*;
     use crate::kv_wire::{BlockRemoved, BlockStored, ExternalBlockHash, KvEvent, KvEventBatch};
+
+    const EMPTY_BATCH: &[u8] = &[
+        0x93, 0xcb, 0x3f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x90, 0x00,
+    ];
+
+    fn message(frames: Vec<Bytes>) -> ZmqMessage {
+        ZmqMessage::try_from(frames).unwrap()
+    }
+
+    async fn serve_incomplete_then_complete_replay(
+        mut replay_server: RouterSocket,
+        first_request: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let mut first_request = Some(first_request);
+        for attempt in 0..2 {
+            let request = replay_server.recv().await.unwrap();
+            if let Some(first_request) = first_request.take() {
+                first_request.send(()).unwrap();
+            }
+            assert_eq!(request.get(2).unwrap().as_ref(), 0_u64.to_be_bytes());
+            let identity = request.get(0).unwrap().clone();
+            let sequences: &[u64] = if attempt == 0 { &[1] } else { &[0, 1] };
+            for sequence in sequences {
+                replay_server
+                    .send(message(vec![
+                        identity.clone(),
+                        Bytes::new(),
+                        Bytes::from_static(b"kv"),
+                        Bytes::copy_from_slice(&sequence.to_be_bytes()),
+                        Bytes::from_static(EMPTY_BATCH),
+                    ]))
+                    .await
+                    .unwrap();
+            }
+            replay_server
+                .send(message(vec![
+                    identity,
+                    Bytes::new(),
+                    Bytes::new(),
+                    Bytes::from_static(&[u8::MAX; 8]),
+                    Bytes::new(),
+                ]))
+                .await
+                .unwrap();
+        }
+        release.await.unwrap();
+    }
 
     #[test]
     fn live_shadow_requests_startup_replay_and_clear_establishes_generation() {
@@ -669,6 +804,104 @@ mod tests {
 
         assert!(!ingest_replay(&inventory, &metrics, "engine", Vec::new()));
         assert!(!inventory.read().trusted());
+    }
+
+    #[tokio::test]
+    async fn failed_startup_replay_retries_after_reconnect_without_new_live_event() {
+        let mut publisher = PubSocket::new();
+        let live_endpoint = publisher.bind("tcp://127.0.0.1:0").await.unwrap();
+        let mut replay_server = RouterSocket::new();
+        let replay_endpoint = replay_server.bind("tcp://127.0.0.1:0").await.unwrap();
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        let inventory = Arc::new(RwLock::new(FencedExactKvInventory::new(
+            8,
+            ExactIndexLimits::default(),
+        )));
+        let consumer = tokio::spawn(run_consumer(
+            ConsumerConfig {
+                upstream_index: 0,
+                transport: KvTransportConfig {
+                    live_endpoint: live_endpoint.to_string(),
+                    replay_endpoint: Some(replay_endpoint.to_string()),
+                    topic: "kv".to_owned(),
+                    connect_timeout: Duration::from_secs(2),
+                    replay_timeout: Duration::from_secs(2),
+                    max_replay_batches: 8,
+                    max_replay_tail_batches: 2,
+                    wire_limits: KvWireLimits::default(),
+                },
+                reconnect_min: Duration::from_millis(10),
+                reconnect_max: Duration::from_millis(50),
+                stagger: Duration::ZERO,
+            },
+            "engine".to_owned(),
+            Arc::clone(&inventory),
+            Arc::clone(&metrics),
+            shutdown_rx,
+        ));
+
+        let (first_request_tx, first_request_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let replay_server = tokio::spawn(serve_incomplete_then_complete_replay(
+            replay_server,
+            first_request_tx,
+            release_rx,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while metrics.kv_event_up.with_label_values(&["engine"]).get() == 0.0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut first_request_rx = Box::pin(first_request_rx);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                publisher
+                    .send(message(vec![
+                        Bytes::from_static(b"kv"),
+                        Bytes::copy_from_slice(&1_u64.to_be_bytes()),
+                        Bytes::from_static(EMPTY_BATCH),
+                    ]))
+                    .await
+                    .unwrap();
+                tokio::select! {
+                    result = &mut first_request_rx => {
+                        result.unwrap();
+                        break;
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+            }
+        })
+        .await
+        .expect("the first live batch should trigger replay");
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !inventory.read().trusted() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("full replay should retry without a second live batch");
+        release_tx.send(()).unwrap();
+        replay_server.await.unwrap();
+        shutdown_tx.send(()).unwrap();
+        consumer.await.unwrap();
+        let invalid_replays = metrics
+            .kv_event_reconnects
+            .with_label_values(&["engine", "invalid_replay"])
+            .get();
+        assert!((invalid_replays - 1.0).abs() < f64::EPSILON);
+        assert_eq!(
+            metrics
+                .kv_event_replay_batches
+                .with_label_values(&["engine"])
+                .get_sample_count(),
+            1
+        );
     }
 
     #[test]
