@@ -1,6 +1,6 @@
 import unittest
 
-from engine_metrics import delta, metric_value
+from engine_metrics import delta, metric_value, position_values, speculative_delta
 
 
 class EngineMetricsTest(unittest.TestCase):
@@ -70,6 +70,75 @@ vllm:num_requests_running 7
         result = delta(before, after)
         self.assertTrue(all(result[key] is None for key in before))
         self.assertIsNone(result["queue_ms_mean"])
+
+    def test_speculative_delta_reports_fixed_k5_and_reconciles_client_work(self):
+        before = {
+            "draft_steps": 10,
+            "proposed_tokens": 50,
+            "accepted_tokens": 20,
+            "generation_tokens": 100,
+            "finished_requests": 2,
+            "accepted_per_position": {0: 10, 1: 6, 2: 4},
+        }
+        after = {
+            "draft_steps": 14,
+            "proposed_tokens": 70,
+            "accepted_tokens": 30,
+            "generation_tokens": 124,
+            "finished_requests": 4,
+            "accepted_per_position": {0: 14, 1: 10, 2: 6},
+        }
+        result = speculative_delta(before, after, 24, 2, expected_enabled=True)
+        self.assertEqual(result["state"], "enabled")
+        self.assertTrue(result["reconciled"])
+        self.assertEqual(result["strict_acceptance_pct"], 50)
+        self.assertEqual(result["proposed_tokens_per_step"], 5)
+        self.assertEqual(result["accepted_tokens_per_step"], 2.5)
+        self.assertEqual(result["effective_tokens_per_step"], 3.5)
+        self.assertEqual(result["accepted_per_position"], {"0": 4, "1": 4, "2": 2})
+
+    def test_speculative_state_distinguishes_disabled_reset_and_contamination(self):
+        absent = {
+            "draft_steps": None,
+            "proposed_tokens": None,
+            "accepted_tokens": None,
+        }
+        self.assertEqual(
+            speculative_delta(absent, absent, 0, 0, expected_enabled=False)["state"],
+            "disabled",
+        )
+        before = {
+            "draft_steps": 2,
+            "proposed_tokens": 10,
+            "accepted_tokens": 5,
+            "generation_tokens": 20,
+            "finished_requests": 1,
+            "accepted_per_position": {0: 2},
+        }
+        reset = {key: 0 for key in before if key != "accepted_per_position"}
+        reset["accepted_per_position"] = {0: 0}
+        self.assertEqual(speculative_delta(before, reset, 0, 0)["state"], "counter_reset")
+        after = dict(before)
+        after.update(
+            draft_steps=4,
+            proposed_tokens=20,
+            accepted_tokens=10,
+            generation_tokens=30,
+            finished_requests=2,
+        )
+        after["accepted_per_position"] = {0: 4}
+        contaminated = speculative_delta(before, after, 9, 1)
+        self.assertEqual(contaminated["state"], "contaminated")
+        self.assertFalse(contaminated["reconciled"])
+
+    def test_position_values_sums_engines_and_bounds_positions(self):
+        body = '''
+vllm:spec_decode_num_accepted_tokens_per_pos_total{engine="0",position="0"} 3
+vllm:spec_decode_num_accepted_tokens_per_pos_total{engine="1",position="0"} 4
+vllm:spec_decode_num_accepted_tokens_per_pos_total{engine="0",position="4"} 2
+vllm:spec_decode_num_accepted_tokens_per_pos_total{engine="0",position="999"} 9
+'''
+        self.assertEqual(position_values(body), {0: 7, 4: 2})
 
 
 if __name__ == "__main__":

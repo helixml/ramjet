@@ -22,6 +22,14 @@ GAUGES = {
     "waiting": "vllm:num_requests_waiting",
     "kv_cache_usage": "vllm:kv_cache_usage_perc",
 }
+SPEC_COUNTERS = {
+    "draft_steps": "vllm:spec_decode_num_drafts_total",
+    "proposed_tokens": "vllm:spec_decode_num_draft_tokens_total",
+    "accepted_tokens": "vllm:spec_decode_num_accepted_tokens_total",
+    "generation_tokens": "vllm:generation_tokens_total",
+    "finished_requests": "vllm:request_success_total",
+}
+SPEC_POSITION_COUNTER = "vllm:spec_decode_num_accepted_tokens_per_pos_total"
 
 
 def metric_value(body, name, required_labels=None):
@@ -47,6 +55,96 @@ def fetch(url, timeout=10):
     return {
         key: metric_value(body, name)
         for key, name in {**COUNTERS, **GAUGES}.items()
+    }
+
+
+def position_values(body, name=SPEC_POSITION_COUNTER):
+    """Return summed speculative counters keyed by bounded integer position."""
+    matches = re.findall(
+        r"^" + re.escape(name) + r"\{([^\n}]*)\}\s+([0-9.eE+-]+)$",
+        body,
+        re.MULTILINE,
+    )
+    result = {}
+    for raw_labels, value in matches:
+        labels = dict(re.findall(r'(\w+)="((?:\\.|[^"\\])*)"', raw_labels))
+        raw_position = labels.get("position")
+        try:
+            position = int(raw_position)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= position <= 64:
+            result[position] = result.get(position, 0.0) + float(value)
+    return result
+
+
+def fetch_speculative(url, timeout=10):
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        body = response.read().decode("utf-8", "replace")
+    result = {key: metric_value(body, name) for key, name in SPEC_COUNTERS.items()}
+    result["accepted_per_position"] = position_values(body)
+    return result
+
+
+def speculative_delta(
+    before,
+    after,
+    client_completion_tokens,
+    client_requests,
+    expected_enabled=None,
+):
+    """Normalize speculative work and reject reset or contaminated intervals."""
+    if before is None or after is None:
+        return {"state": "unavailable", "reconciled": False}
+    core = ("draft_steps", "proposed_tokens", "accepted_tokens")
+    present = [before.get(key) is not None and after.get(key) is not None for key in core]
+    if not any(present):
+        state = "disabled" if expected_enabled is False else "unavailable"
+        return {"state": state, "reconciled": state == "disabled"}
+    if not all(present):
+        return {"state": "incomplete", "reconciled": False}
+    keys = (*core, "generation_tokens", "finished_requests")
+    values = {}
+    for key in keys:
+        left, right = before.get(key), after.get(key)
+        if left is None or right is None:
+            return {"state": "incomplete", "reconciled": False}
+        if right < left:
+            return {"state": "counter_reset", "reconciled": False}
+        values[key] = right - left
+    positions = {}
+    before_positions = before.get("accepted_per_position") or {}
+    after_positions = after.get("accepted_per_position") or {}
+    for position in sorted(set(before_positions) | set(after_positions)):
+        left = before_positions.get(position, 0)
+        right = after_positions.get(position, 0)
+        if right < left:
+            return {"state": "counter_reset", "reconciled": False}
+        positions[str(position)] = int(right - left)
+    draft_steps = values["draft_steps"]
+    proposed = values["proposed_tokens"]
+    accepted = values["accepted_tokens"]
+    if draft_steps <= 0 or proposed <= 0:
+        return {"state": "no_drafts", "reconciled": False}
+    reconciled = (
+        values["generation_tokens"] == client_completion_tokens
+        and values["finished_requests"] == client_requests
+    )
+    return {
+        "state": "enabled" if reconciled else "contaminated",
+        "reconciled": reconciled,
+        "client_completion_tokens": int(client_completion_tokens),
+        "engine_generation_tokens": int(values["generation_tokens"]),
+        "client_requests": int(client_requests),
+        "engine_finished_requests": int(values["finished_requests"]),
+        "draft_steps": int(draft_steps),
+        "proposed_tokens": int(proposed),
+        "accepted_tokens": int(accepted),
+        "strict_acceptance_pct": round(100 * accepted / proposed, 2),
+        "proposed_tokens_per_step": round(proposed / draft_steps, 3),
+        "accepted_tokens_per_step": round(accepted / draft_steps, 3),
+        "effective_tokens_per_step": round(1 + accepted / draft_steps, 3),
+        "accepted_per_position": positions,
     }
 
 

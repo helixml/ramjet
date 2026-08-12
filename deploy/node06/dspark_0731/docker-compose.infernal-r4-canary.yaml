@@ -1,0 +1,38 @@
+# One-engine Infernal Invocation r4 qualification overlay for node06.
+# Keep the LB single-homed on A while B starts and passes direct gates:
+#   DS4_UPSTREAM=http://dspark-0731:8000 \
+#   DS4_KV_EVENT_LIVE_ENDPOINTS=tcp://dspark-0731:5557 \
+#   DS4_KV_EVENT_REPLAY_ENDPOINTS=tcp://dspark-0731:5558 \
+#     docker compose up -d --no-deps ds4-loadbalancer
+#   docker compose -f docker-compose.yaml \
+#     -f docker-compose.infernal-r4-canary.yaml up -d --no-deps dspark-0731-b
+# The base Compose remains the one-command r34 rollback.
+services:
+  dspark-0731-b:
+    image: voipmonitor/vllm:infernal-invocation-vllm3226eb7-b12x1584743-fi1ac6942-cu133-torch213-20260812-r4@sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6
+    volumes:
+      - /prod/sglang-cache/infernal-invocation-cu133-r4:/cache
+      - /prod/sglang-cache/infernal-invocation-cu133-r4/tmp:/container-tmp
+    environment:
+      MODEL_PATH: /workspace/model
+      MODEL_REVISION: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
+      TOKENIZER_REVISION: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
+      MODE: dspark
+      BACKEND: b12x-a16
+      TP_SIZE: "4"
+      DCP_SIZE: "1"
+      ALLREDUCE_MODE: nccl
+      DSPARK_DEPTH_MODE: fixed
+      DSPARK_TOKENS: "5"
+      DRAFT_SAMPLE_METHOD: probabilistic
+      REJECTION_SAMPLE_METHOD: standard
+      MAX_NUM_SEQS: "16"
+      GRAPH: "96"
+      MAX_MODEL_LEN: "393216"
+      MAX_NUM_BATCHED_TOKENS: "4096"
+      GPU_MEMORY_UTILIZATION: "0.975"
+      BLOCK_SIZE: "256"
+      LOAD_FORMAT: instanttensor
+      INSTANTTENSOR_BACKEND: BUFFERED
+      LMCACHE_MODE: "off"
+      KV_OFFLOADING_SIZE: ""

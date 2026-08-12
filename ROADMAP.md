@@ -386,6 +386,22 @@ node06). The design rationale for each lives in DESIGN.md.
   with materially more RAM or a backend whose inactive path is demonstrably
   zero-overhead.
 
+- ✅ **Infernal Invocation r4 one-engine qualification rejected (#32).** The r2 target
+  in the original issue was superseded during investigation by immutable r4
+  (`sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6`),
+  with DS4 response-integrity fixes and a CUDA 13.3 / Torch 2.13 / NCCL 2.31
+  base. Published A8/MNS8/MBT8192/131K results are not comparable to node06's
+  A16/MNS16/MBT4096/393K control or its direct-root dual-socket topology.
+  The exact image passed driver 595.84 CUDA execution and receipt verification,
+  started in 12m51s, and increased GPU KV capacity 9.3%. After rejecting one
+  JIT-contaminated interval, a zero-JIT matched matrix was 1.7-18.7% slower on
+  code and 5.6-14.9% slower on prose, despite 11-23% better c8/c16 TTFT. The
+  hard stop was correctness: r4 leaked a DSML marker in the deterministic
+  parallel-tool case (4/5), while adjacent r34 passed 5/5 cold and warm. B was
+  rolled back. Do not test MBT8192, MTP0, offload, or custom all-reduce on this
+  image; retest a fixed successor from the retained JIT cache and immutable
+  one-engine overlay.
+
 - 🔨 **KV-event ground truth.** Subscribe to vLLM `kv_events` (block
   stored/removed) and replace the approximate LRU index with the engine's
   actual block inventory. The r34 interface has native sequence numbers and a
@@ -396,7 +412,11 @@ node06). The design rationale for each lives in DESIGN.md.
   were within -1.4% to +2.0%. The Rust shadow consumer has now passed a complete
   real replay plus live-update qualification on B. A then passed live startup
   and a forced-eviction soak whose exact group-0 store/removal arithmetic
-  matched the resident index. Compare exact versus approximate decisions in
+  matched the resident index. The Infernal canary's LB roll later reproduced
+  the remaining recovery boundary: fresh B re-armed from sequence zero, while
+  long-lived A was beyond replay history and correctly remained fenced. Do not
+  restart a healthy engine only to recover shadow telemetry; add Dynamo-style
+  snapshot/tree-dump recovery. Compare exact versus approximate decisions in
   telemetry before the router may consume this state; Dynamo's additional
   tree-dump recovery remains the scale-out reference.
 - ✅ **True TTFT instrumentation.** rc6's journal and Prometheus histogram

@@ -79,7 +79,7 @@ services:
       DS4_KV_EVENT_TIMEOUT_MS: ${DS4_KV_EVENT_TIMEOUT_MS:-20000}
 
   dspark-0731:
-    image: ${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}
+    image: ${IMAGE_A:-${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}}
     container_name: ${NAME:-dspark-0731}
     entrypoint: ["/usr/local/bin/serve-ds4-flash.sh"]
     restart: unless-stopped
@@ -149,7 +149,7 @@ services:
   # aliases dspark / dspark-b for the load balancer's sticky routing (launch order:
   # docker network connect --alias dspark-b ds4_flash_default dspark-0731-b).
   dspark-0731-b:
-    image: ${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}
+    image: ${IMAGE_B:-${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}}
     container_name: dspark-0731-b
     entrypoint: ["/usr/local/bin/serve-ds4-flash.sh"]
     restart: unless-stopped

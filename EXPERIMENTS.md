@@ -2270,3 +2270,210 @@ inventory boundaries, and reached 98.07% reuse-wave token hits in 1.56s. This
 qualifies both the bounded failure path and live-event recovery, while also
 leaving replay-drain throughput as a follow-up optimization rather than hiding
 it behind unbounded retries.
+
+## 2026-08-12 — repeated 52/64 residency boundary and faster observability
+
+Before spending another long cell on the cache cliff, a matched four-app
+512 KiB concurrency check tested whether more host parallelism would shorten
+the loop. Concurrency two completed 8/8 in 37.14s with 0.05ms mean native
+queue time and 18.15s cold p95. Concurrency four was 13% slower at 42.06s,
+introduced 4.35s mean queue time, and raised cold p95 to 40.42s. The existing
+c2 wave schedule is therefore the efficient setting: it keeps one long
+prefill on each TP4 pair without queueing a second behind it.
+
+The first fresh r28.1 52-app × 512 KiB attempt completed 104/104 in 594.58s,
+split 50/54, and reconciled response, LB, and native vLLM counters with zero
+spread. All 52 reuse requests remained partial hits with 99.91% reuse-wave
+token hits. There were zero preemptions. Live block removals reached 106.02%
+of stores, again confirming that gross publisher churn is not itself a
+cache-survival measure. Both exact inventories were trusted at both snapshots:
+replica 0 changed by -547,072 resident token IDs and replica 1 by +40,704
+while reuse still survived.
+
+This is a valid stress cell but not a matched repeat: its prompts averaged
+161,818 tokens, 11.0% above the original cell's 145,723. The generator had
+repeated the caller-provided salt throughout the entire 512 KiB prefix, so the
+new `r29-*` spelling changed tokenizer density on every repetition. The runner
+now hashes the salt/app into one fixed-size leading nonce and repeats a fixed
+representative payload. Fresh salts still invalidate cache identity at the
+first block, but salt spelling can no longer change the bulk token density.
+Future boundary runs must first calibrate the corrected generator's reported
+prompt count and must compare actual tokens, not the nominal byte size alone.
+
+The corresponding oversized 64-app stress cell completed 128/128 in
+1,715.73s with exact zero-spread reconciliation, zero preemptions, and a 60/68
+request split. It averaged 161,742 prompt tokens per request, 10.99% above the
+original 145,723-token cell. All 64 reuse requests were cold, reuse-wave token
+hits were zero, and live removals were 100.19% of stores. Both exact
+inventories remained trusted at both snapshots and changed by only -19,456
+and -18,944 resident token IDs after the full churn cycle. This usefully
+confirms complete thrash above the boundary, but it is explicitly excluded
+from the matched 64-app repetition count because of the generator-density
+confounder.
+
+Corrected one-app calibration at 512 KiB produced 140,952 initial prompt
+tokens, 3.27% below the historical target. Scaling only the fixed payload to
+529 KiB produced 145,631 tokens, within 0.063% of the original 145,723-token
+mean. The matched repetition therefore uses 529 KiB and records its actual
+initial-wave mean; the nominal byte change compensates tokenizer density and
+does not enlarge the token working set.
+
+The corrected 52-app cell completed 104/104 in 654.55s with an actual
+145,632-token initial mean, a 50/54 request split, zero-spread reconciliation,
+and zero preemptions. All 52 reuse requests survived as partial hits with a
+99.85% reuse-wave token-hit rate. Both inventories stayed trusted; their
+signed changes were +2,560 and +55,296 resident token IDs. The now-joined cold
+shadow deltas were 26 `kept_all_zero`, 26 `kept_balance_delta_gate`, zero
+`kept_balance_load_gate`, and zero `would_balance`; all 52 reuse decisions
+agreed with exact lookup. At this below-cliff working set there is no admitted
+cold-residency move to evaluate, so the calibrated 64-app cell remains the
+decision point.
+
+Long cells previously emitted nothing until their final JSON record, making
+iteration progress dependent on manual SSH and production-wide metric reads.
+`cachebench.py --progress-every N` now emits only cell size, bounded completion
+and success counts, wave ordinal, and elapsed time to stderr; stdout remains
+clean JSONL. The same snapshot now includes zero-safe deltas for exact shadow
+agreement and cold-residency `would_balance`, delta-gate, load-gate, and
+all-zero outcomes. This directly joins the counterfactual with per-replica
+residency without exposing prompts, fingerprints, token vectors, or upstream
+addresses. All 35 cache/benchmark Python tests pass.
+
+## 2026-08-13 — issue #32 Infernal Invocation r4 preflight boundary
+
+Parallel upstream, node06, and benchmark-tooling reviews found that issue
+#32's r2 target had already been superseded by Infernal Invocation r4. The
+candidate is pinned as
+`voipmonitor/vllm:infernal-invocation-vllm3226eb7-b12x1584743-fi1ac6942-cu133-torch213-20260812-r4`
+at registry digest
+`sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6`.
+It retains the exact node06 model/tokenizer revision but moves to vLLM
+0.26.1rc0, B12X 1.2.3, Torch 2.13, CUDA 13.3, and NCCL 2.31.2. The integration
+trees remain the immutable identity because their constituent upstream PRs are
+not all merged.
+
+No engine or driver was changed. The image is not cached on node06; its
+13.69GB compressed / 30.64GB unpacked footprint fits current disk headroom,
+and the existing 152GB model snapshot is reusable. Driver 595.84 meets CUDA
+13.x minor compatibility but is below CUDA 13.3's corresponding 610.43
+driver. The image carries the forward-compat path, but CUDA/CuTe/FlashInfer/
+B12X PTX/JIT startup remains an empirical hard gate. The first candidate must
+therefore isolate B, keep A on r34, run a disposable GPU compatibility smoke,
+force NCCL, and preserve current A16/K5/standard/MNS16/MBT4096/393K/GMU0.975
+settings. Custom all-reduce is a later maintenance-window experiment because
+node06 lacks the upstream direct-P2P registry configuration.
+
+Benchmark provenance was the first implementation slice. The new one-engine
+capture records configured image, local image ID and repo digests,
+model/tokenizer revisions and artifact hashes, runtime packages, container
+start/restart identity, CPU/NUMA placement, topology hash, an allow-listed
+effective serving contract, and a secret-independent argv hash. An optional
+upstream receipt is compacted to immutable source trees/packages and hard-fails
+bounded image/digest/model/tokenizer/runtime mismatches. It never writes the
+raw argv or credential values. Live r34 B capture succeeded and matched its
+deployed digest/revisions; a synthetic live-r4 fixture verified against the
+immutable upstream receipt. Thirty-eight Python tests pass across the full
+benchmark suite.
+
+The next local slice centralizes speculative accounting for direct decode
+cells. It reports strict accepted/proposed tokens, proposed and accepted
+tokens per speculative step, effective tokens per target step, and bounded
+per-position deltas. Target-only, absent, partial, reset, no-draft, and
+contaminated intervals remain distinct states. A cell is reconciled only when
+native generation-token and finished-request deltas equal client completion
+usage and successful request count; acceptance from production cross-traffic
+can no longer appear valid silently. Direct requests also require generated
+output and authoritative usage before counting as successful. The full Python
+suite is now 41 tests.
+
+The calibrated 64-app cell completed 128/128 in 1,634.03s with an actual
+145,632-token initial mean, a 62/66 request split, zero-spread reconciliation,
+zero preemptions, and trusted inventory boundaries. It reproduced the cliff:
+31 reuse requests remained partial hits and 33 were cold, for 48.36%
+reuse-wave token hits. Partial TTFT p50/p95 was 841/878ms; cold p50/p95 was
+28.27/46.75s. Replica residency changed by +117,760 and -58,880 token IDs,
+while live removals reached 99.58% of stores.
+
+The joined counterfactual explains why the current cold-balancing proposal is
+not yet a fix. It recorded 35 all-zero decisions, four below the one-prompt
+residency-delta threshold, 26 blocked by the existing load-delta gate, and
+zero `would_balance`. Under the efficient c2 schedule, the other TP4 pair is
+already processing one full-load cold prefill when the residency imbalance is
+observable. Removing that gate would trade cache capacity against known queue
+isolation; keeping it means the candidate cannot affect this workload. Do not
+promote cold-residency placement from this evidence. The next policy slice
+must either model projected post-request residency under equal parallel load
+or add an admission/capacity budget, and must remain shadow-only until it can
+predict the 31/33 survival outcome without collapsing both requests onto one
+engine.
+
+A quiet direct r34 B smoke validated the new speculation reconciliation on
+real native metrics. One measured 64-token code response reconciled exactly to
+64 engine generation tokens and one finished request. Fixed K5 proposed five
+tokens per speculative step, accepted 4.077, and delivered 5.077 effective
+tokens per target step at 81.54% strict accepted/proposed tokens. Per-position
+accepted deltas were 11/11/11/11/9. This is an accounting gate, not a new
+performance result; it proves a clean interval is accepted before the r4 A/B.
+
+## 2026-08-13 — Infernal Invocation r4 live canary rejected
+
+The exact r4 registry manifest was pulled in 313.95s. Its manifest digest is
+`sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6`;
+the manifest config digest is the receipt's historical Docker image ID,
+`sha256:b0cac4ef4037ed8880809df87c14ddc592ef234d59499864e1468448eb928cbf`.
+Docker 29's containerd image store reports the manifest descriptor as `.Id`,
+so identity capture now records and verifies descriptor and config digests
+separately. The live process verified against the immutable upstream receipt,
+including model/tokenizer revision and observed runtime packages.
+
+The pull exposed a disk-safety boundary: root fell from 57GB free to 14GB
+(97% used). Three exact, unused historical inference images were removed
+(`vllm-openai:latest`, `ds4-flash:upstream-84cc882-sm120`, and the June DS4 v7
+image), recovering 44GB and returning root to 58-59GB free / 85% used. Live
+r34, r4, the Helix runner, and all load-balancer rollback images were retained.
+
+Production was single-homed on r34 A before B changed. A first LB recreate
+failed closed because one upstream was paired with two KV live/replay
+endpoints; it was corrected in under a minute with matching A-only endpoint
+lists. The reusable canary overlay now documents this cardinality requirement.
+The exact image passed a one-GPU CUDA 13.3 / Torch 2.13 FP16 matmul on driver
+595.84. The real B startup completed in 12m51s with NCCL 2.31.2/PyNCCL, A16,
+fixed probabilistic K5, standard rejection, graph96, 393216 context, MBT4096,
+GMU0.975, and no offload. It exposed 4,198,887 GPU KV tokens, 9.3% above
+r34's approximately 3.843M.
+
+The first smoke and first six-cell matrix were rejected because the inference
+JIT monitor found ten late Triton/CuTeDSL compilations. With the persistent
+75MB r4 cache populated, the repeated matrix had zero JIT, CUDA, NCCL, OOM,
+Xid, or traceback markers. Every measured request and native engine interval
+reconciled exactly:
+
+| workload | c | r34 tok/s | r4 tok/s | delta | r34 TTFT ms | r4 TTFT ms |
+|---|---:|---:|---:|---:|---:|---:|
+| code | 1 | 236.4 | 232.4 | -1.7% | 342.4 | 345.0 |
+| code | 8 | 736.4 | 641.1 | -12.9% | 851.7 | 759.0 |
+| code | 16 | 1110.0 | 902.0 | -18.7% | 1031.8 | 820.0 |
+| prose | 1 | 165.6 | 141.0 | -14.9% | 334.2 | 344.5 |
+| prose | 8 | 547.1 | 471.9 | -13.7% | 858.3 | 754.2 |
+| prose | 16 | 758.7 | 716.4 | -5.6% | 1055.1 | 814.0 |
+
+The high-concurrency TTFT reduction and larger KV pool are useful, but matched
+throughput regressed. More importantly, the production-shaped agent corpus
+rejected r4 independently of performance. Its deterministic parallel-required
+tool case emitted the requested two calls but leaked a DSML marker into
+response content (4/5 valid). Its seeded temperature-1 profile also failed the
+same case with three malformed/non-unique calls (4/5 valid). The adjacent r34
+deterministic control passed 5/5 cold and 5/5 warm with the same model revision
+and corpus. No response content or tool arguments were retained.
+
+Verdict: reject r4 for node06 and do not spend another engine roll on MBT8192
+or MTP0 until the deterministic DSML leak is fixed upstream. B was recreated
+from the exact r34 control; production remained on A during its warm start.
+The r4 image and versioned JIT cache remain available for a fixed successor.
+The rollback smoke reconciled 64 client/engine tokens and one finished request;
+the dual-homed LB then returned 2/2 healthy. B's fresh KV publisher became
+authoritative after a direct 8K-token seed (32 blocks / 8,192 token IDs). A's
+long-lived replay history was already too old for the new LB generation and
+remained fenced, so exact routing safely stayed shadow-only. Do not restart A
+for telemetry; this is a production reproduction of the snapshot/tree-dump
+recovery gap already tracked in the KV-event roadmap.
