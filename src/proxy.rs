@@ -414,7 +414,23 @@ impl Proxy {
         let mut first_token = None;
         let mut result = "complete";
         let mut stream = response.bytes_stream();
-        while let Some(item) = stream.next().await {
+        loop {
+            let item = tokio::select! {
+                biased;
+                () = sender.closed() => {
+                    result = "client_disconnect";
+                    self.inner
+                        .metrics
+                        .client_disconnects
+                        .with_label_values(&[endpoint_label])
+                        .inc();
+                    break;
+                }
+                item = stream.next() => item,
+            };
+            let Some(item) = item else {
+                break;
+            };
             match item {
                 Ok(chunk) => {
                     let received = started.elapsed();
@@ -929,7 +945,7 @@ fn unix_seconds() -> f64 {
 mod tests {
     use std::{
         collections::HashMap,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use axum::{Router as AxumRouter, routing::any};
@@ -940,6 +956,18 @@ mod tests {
         exact_index::{ExactIndexLimits, FencedExactKvInventory},
         kv_wire::{BlockStored, ExternalBlockHash, KvEvent, KvEventBatch},
     };
+
+    struct DropSignal {
+        dropped: Arc<AtomicBool>,
+        notify: Arc<tokio::sync::Notify>,
+    }
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+            self.notify.notify_waiters();
+        }
+    }
 
     async fn start_upstream(app: AxumRouter) -> (Url, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1307,6 +1335,73 @@ mod tests {
         let response = proxy.serve(request).await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(requests.load(Ordering::Relaxed), 0);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn dropping_downstream_body_immediately_cancels_a_silent_upstream() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let upstream_dropped = Arc::clone(&dropped);
+        let upstream_notify = Arc::clone(&notify);
+        let upstream = AxumRouter::new().fallback(any(move || {
+            let signal = DropSignal {
+                dropped: Arc::clone(&upstream_dropped),
+                notify: Arc::clone(&upstream_notify),
+            };
+            async move {
+                let silent = futures_util::stream::unfold(signal, |signal| async move {
+                    std::future::pending::<()>().await;
+                    Some((Ok::<Bytes, io::Error>(Bytes::new()), signal))
+                });
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(silent))
+                    .unwrap()
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let proxy = proxy_for(&[url]);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                r#"{"messages":[{"role":"user","content":"cancel me"}]}"#,
+            ))
+            .unwrap();
+
+        let response = proxy.serve(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(proxy.router().state(0).unwrap().0, 1);
+        drop(response);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !dropped.load(Ordering::Acquire) {
+                notify.notified().await;
+            }
+        })
+        .await
+        .expect("dropping the downstream must promptly drop the upstream body");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while proxy.router().state(0).unwrap().0 != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("route load must be released when the upstream request is cancelled");
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .client_disconnects
+                .with_label_values(&["chat"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+        assert_eq!(proxy.router().state(0).unwrap().1, 0);
         task.abort();
     }
 
