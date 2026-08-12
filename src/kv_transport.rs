@@ -475,7 +475,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn async_live_and_libzmq_streaming_replay_interoperate() {
         let mut publisher = PubSocket::new();
         let live_endpoint = publisher.bind("tcp://127.0.0.1:0").await.unwrap();
@@ -515,6 +515,7 @@ mod tests {
         };
         assert_eq!(live.sequence, 4);
 
+        let (replay_drained_tx, replay_drained_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let request = replay_server.recv().await.unwrap();
             assert_eq!(request.len(), 3);
@@ -543,8 +544,12 @@ mod tests {
                 ]))
                 .await
                 .unwrap();
+            // `send` queues data to the socket actor; retain the ROUTER until
+            // the real client confirms that it drained the end marker.
+            replay_drained_rx.await.unwrap();
         });
         let replay = source.replay(5, 6).await.unwrap();
+        replay_drained_tx.send(()).unwrap();
         assert_eq!(
             replay
                 .iter()
@@ -582,6 +587,7 @@ mod tests {
         .await
         .unwrap();
 
+        let (replay_drained_tx, replay_drained_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let request = replay_server.recv().await.unwrap();
             let identity = request.get(0).unwrap().clone();
@@ -605,12 +611,12 @@ mod tests {
                 ]))
                 .await
                 .unwrap();
+            replay_drained_rx.await.unwrap();
         });
 
-        assert_eq!(
-            source.replay(5, 6).await,
-            Err(KvTransportError::InvalidReplay)
-        );
+        let replay = source.replay(5, 6).await;
+        replay_drained_tx.send(()).unwrap();
+        assert_eq!(replay, Err(KvTransportError::InvalidReplay));
         server.await.unwrap();
     }
 
