@@ -94,6 +94,12 @@ the approximate fallback with `inventory_untrusted`. B replayed 943 retained
 batches; A remained fenced until its next full-block event and replayed 885.
 With both inventories trusted again, the same four-request gate reproduced two
 exact moves, two agreements, and 32,768 cached tokens on every request.
+The follow-up `718012c` shadow-policy canary then observed a constructed
+8,192-token/load-gated `would_move` while leaving the request on B with zero
+cached tokens, proving the counterfactual metric cannot affect placement. Two
+reverse-order c16/max256 pairs averaged 1,192 tok/s through the canary versus
+1,221 through r20 (-2.3%, within the shared-box noise band); all 64 requests
+succeeded.
 
 ## Cache locality — TIE (no regression, no win at this scale)
 

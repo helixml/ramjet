@@ -1554,6 +1554,42 @@ both inventories are authoritative. The remaining promotion gate is an
 organic distribution of exact gain versus load conflict, not another basic
 recovery mechanism.
 
+To make that distribution observable without enabling placement, commit
+`718012c` splits the policy into an immutable evaluation and a separately
+invoked mutation. `ds4proxy_exact_route_placement_total` now has a bounded
+`mode="shadow|placement"` label. Shadow computes the same unique-winner,
+8,192-token-gain, and zero-extra-load decision but never calls the candidate-
+order mutation. Placement applies only a returned `Move(upstream)` outcome.
+Unit tests compare the complete route before/after shadow `would_move` and
+`kept_load_gate` evaluations; both remain identical. The full local gate passed
+strict Clippy, release build, the Go oracle, and **97 Rust tests**.
+
+The node06-local `rust-r21-shadow-policy-718012c` image replaced only the
+isolated canary and ran with `DS4_EXACT_ROUTE_MODE=shadow`. A fresh A/B event
+pair replayed 930/947 retained batches and made both inventories authoritative.
+The controlled two-request proof then behaved as follows:
+
+- an approximate agreement stayed on A and reused 32,768 tokens; policy
+  telemetry reported `mode="shadow", outcome="kept_agree"`;
+- the next prompt was again warmed only on A but approximately routed to B.
+  It stayed on B, reused zero tokens, and telemetry reported
+  `mode="shadow", outcome="would_move"` plus exact `would_move`.
+
+Both tokenizations matched remote vLLM and both health, attestation, and trust
+gauges remained one. A c8 same-app gate split 4/4 with 8/8 success at 388 tok/s
+versus 401 for r20. Two reverse-order c16/max256 pairs measured 1,169.8 and
+1,214.7 tok/s through r21 versus 1,252.5 and 1,189.2 through r20: 1,192.3
+versus 1,220.9 tok/s averages (-2.3%, inside the established shared-box noise
+band), with 64/64 successful responses. Production remained r20 and neither
+engine restarted.
+
+The pre-existing r20 mixed production/qualification sample at this point held
+120 routed requests and 33 admitted pre-route exact lookups: 12 agreements, 21
+cold/all-zero decisions, zero `would_move`, and zero aggregate exact token
+gain. Because that sample includes synthetic qualification traffic and lacks
+the new gain/load-gate breakdown, it is not sufficient for placement
+promotion; r21 shadow telemetry is the safe collection mechanism.
+
 The post-merge public image workflow is a separate infrastructure blocker: the
 image compiled successfully, then GHCR rejected the push with
 `permission_denied: write_package`. Grant the repository package Actions
