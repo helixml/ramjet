@@ -1,0 +1,32 @@
+---
+kind: pipeline
+type: docker
+name: quality
+
+platform:
+  os: linux
+  arch: amd64
+
+steps:
+  - name: rust
+    image: rust:1.95-bookworm
+    pull: if-not-exists
+    commands:
+      - rustup component add rustfmt clippy
+      - cargo fmt --check
+      - cargo clippy --locked --all-targets --all-features -- -D warnings
+      - cargo test --locked
+      - cargo build --release --locked
+
+  - name: go-parity-oracle
+    image: golang:1.26.0-bookworm
+    pull: if-not-exists
+    commands:
+      - go test ./...
+      - go vet ./...
+      - test -z "$(gofmt -l .)"
+
+trigger:
+  event:
+    - push
+    - pull_request
