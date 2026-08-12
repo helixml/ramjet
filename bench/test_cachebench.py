@@ -1,8 +1,10 @@
 import unittest
+from unittest import mock
 
 from cachebench import (
     aggregate_engine_delta,
     cache_outcome,
+    fetch_lb_metrics,
     latency_by_outcome,
     nonnegative_delta,
     parse_apps,
@@ -13,6 +15,26 @@ from cachebench import (
 
 
 class CacheBenchTest(unittest.TestCase):
+    def test_registered_but_unobserved_lb_metric_is_zero(self):
+        body = b"""# HELP ds4proxy_prompt_tokens_total prompts
+# TYPE ds4proxy_prompt_tokens_total counter
+# HELP ds4proxy_cached_prompt_tokens_total cached
+# TYPE ds4proxy_cached_prompt_tokens_total counter
+# HELP ds4proxy_cache_requests_total requests
+# TYPE ds4proxy_cache_requests_total counter
+# HELP ds4proxy_cache_ttft_seconds TTFT
+# TYPE ds4proxy_cache_ttft_seconds histogram
+# HELP ds4proxy_kv_event_blocks_total blocks
+# TYPE ds4proxy_kv_event_blocks_total counter
+# HELP ds4proxy_kv_event_clears_total clears
+# TYPE ds4proxy_kv_event_clears_total counter
+"""
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = body
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            metrics = fetch_lb_metrics("http://metrics")
+        self.assertTrue(all(value == 0 for value in metrics.values()))
+
     def test_workload_round_robins_apps_before_reuse(self):
         self.assertEqual(
             list(workload_coordinates(2, 2, 1)),
@@ -71,6 +93,9 @@ class CacheBenchTest(unittest.TestCase):
             "cached_prompt_tokens": 64,
             "cache_requests": 1,
             "cache_ttft_samples": 1,
+            "live_stored_blocks": 1,
+            "live_removed_blocks": 0,
+            "live_clear_events": 0,
         }
         engine = {
             "prompt_tokens": 100,
@@ -130,6 +155,33 @@ class CacheBenchTest(unittest.TestCase):
         encoded = str(summary).lower()
         for forbidden in ("message", "content", "fingerprint", "token_ids"):
             self.assertNotIn(forbidden, encoded)
+
+    def test_summary_reports_live_block_churn_without_calling_it_eviction(self):
+        records = [
+            {
+                "app": 0,
+                "ok": True,
+                "route": "0",
+                "prompt_tokens": 10,
+                "cached_tokens": 0,
+                "completion_tokens": 1,
+                "cache_outcome": "cold",
+                "ttft_ms": 100,
+                "wall_ms": 110,
+            }
+        ]
+        lb = {
+            "prompt_tokens": 10,
+            "cached_prompt_tokens": 0,
+            "cache_requests": 1,
+            "cache_ttft_samples": 1,
+            "live_stored_blocks": 20,
+            "live_removed_blocks": 5,
+            "live_clear_events": 0,
+        }
+        summary = summarize(records, 1, 1, 1, 1, 1.0, lb, None, 0)
+        self.assertEqual(summary["live_block_churn_pct"], 25)
+        self.assertNotIn("eviction", str(summary).lower())
 
 
 if __name__ == "__main__":

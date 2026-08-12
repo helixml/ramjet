@@ -9,6 +9,7 @@ import argparse
 import collections
 import json
 import os
+import re
 import statistics
 import sys
 import time
@@ -23,10 +24,19 @@ from engine_metrics import metric_value
 
 
 LB_COUNTERS = {
-    "prompt_tokens": "ds4proxy_prompt_tokens_total",
-    "cached_prompt_tokens": "ds4proxy_cached_prompt_tokens_total",
-    "cache_requests": "ds4proxy_cache_requests_total",
-    "cache_ttft_samples": "ds4proxy_cache_ttft_seconds_count",
+    "prompt_tokens": ("ds4proxy_prompt_tokens_total", None),
+    "cached_prompt_tokens": ("ds4proxy_cached_prompt_tokens_total", None),
+    "cache_requests": ("ds4proxy_cache_requests_total", None),
+    "cache_ttft_samples": ("ds4proxy_cache_ttft_seconds_count", None),
+    "live_stored_blocks": (
+        "ds4proxy_kv_event_blocks_total",
+        {"source": "live", "action": "stored"},
+    ),
+    "live_removed_blocks": (
+        "ds4proxy_kv_event_blocks_total",
+        {"source": "live", "action": "removed"},
+    ),
+    "live_clear_events": ("ds4proxy_kv_event_clears_total", {"source": "live"}),
 }
 
 
@@ -45,7 +55,17 @@ def fetch_lb_metrics(url, timeout=10):
         return None
     with urllib.request.urlopen(url, timeout=timeout) as response:
         body = response.read().decode("utf-8", "replace")
-    return {key: metric_value(body, name) for key, name in LB_COUNTERS.items()}
+    result = {}
+    for key, (name, required_labels) in LB_COUNTERS.items():
+        value = metric_value(body, name, required_labels)
+        # prometheus client families do not emit a labeled child until its
+        # first observation. A registered HELP descriptor proves a missing
+        # child is an authoritative zero; a missing family stays fail-closed.
+        family = re.sub(r"_(?:count|sum|bucket)$", "", name)
+        if value is None and f"# HELP {family} " in body:
+            value = 0.0
+        result[key] = value
+    return result
 
 
 def nonnegative_delta(before, after, keys):
@@ -298,6 +318,13 @@ def summarize(records, apps, sessions, turns, prefix_kib, elapsed, lb, engine, t
         else None,
         "reuse_distance_requests_max": max(reuse_distances) if reuse_distances else None,
         "lb_metrics_delta": lb,
+        "live_block_churn_pct": (
+            round(100 * lb["live_removed_blocks"] / lb["live_stored_blocks"], 2)
+            if lb
+            and lb["live_stored_blocks"]
+            and lb["live_removed_blocks"] is not None
+            else None
+        ),
         "engine_metrics_delta": engine,
         "reconciliation": reconcile(records, lb, engine, tolerance),
     }
