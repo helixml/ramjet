@@ -89,6 +89,11 @@ was 1,110 versus 1,147 tok/s, differences of about 3% inside shared-box noise.
 An independent negative-health canary reported one healthy replica as
 `degraded` and sent 4/4 requests only to that replica. All 96 Rust tests, both
 Drone triggers, and GitHub Actions passed; no production component changed.
+An intentional canary-only restart then served the first long request through
+the approximate fallback with `inventory_untrusted`. B replayed 943 retained
+batches; A remained fenced until its next full-block event and replayed 885.
+With both inventories trusted again, the same four-request gate reproduced two
+exact moves, two agreements, and 32,768 cached tokens on every request.
 
 ## Cache locality — TIE (no regression, no win at this scale)
 

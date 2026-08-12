@@ -117,10 +117,13 @@ node06). The design rationale for each lives in DESIGN.md.
   timeout fences. An isolated node06 trial corrected 2/2 constructed
   approximate misses and kept 2/2 existing exact agreements; all four requests
   reused 32,768 tokens on the deliberately warmed engine. Production remains
-  r20 shadow-only. Next collect representative organic move/gain/load
-  distributions and exercise event recovery before considering a narrowly
-  admitted placement rollout. Raw token IDs, block hashes, and prompts remain
-  out of logs.
+  r20 shadow-only. An intentional canary-only restart then proved recovery:
+  the first long request fell back as `inventory_untrusted`, B replayed 943
+  batches, A stayed fenced until its own event and replayed 885 batches, and
+  the recovered gate again corrected 2/2 forced misses. Next collect
+  representative organic move/gain/load distributions before considering a
+  narrowly admitted placement rollout. Raw token IDs, block hashes, and
+  prompts remain out of logs.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
   vectors rather than restarting; benchmark memory, p99 preparation latency,

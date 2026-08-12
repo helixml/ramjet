@@ -1533,7 +1533,26 @@ both runtime identities attested. The controlled gates were:
 Both the production r20 LB and the isolated r21 canary retained zero restarts
 and both production upstream health gauges stayed one. r21 remains up only as
 an isolated soak canary; production exact placement remains disabled pending
-organic gain/load distributions and explicit event-recovery canaries.
+organic gain/load distributions and the recovery gate below.
+
+The event-recovery gate then intentionally restarted only the isolated r21
+container at 14:49:08Z. It returned to `ok` serving health with neither exact
+trust gauge instantiated. The first fresh 18.8K-token request returned HTTP
+200 cold through approximate routing and recorded one `inventory_untrusted`;
+its B-side event triggered a 943-batch replay and trusted only B. A stayed
+fenced until a direct full-block A event triggered an independent 885-batch
+replay. Both generation-zero inventories then reported trusted, both runtime
+attestations remained one, and the post-recovery four-request forced-warm gate
+again produced two exact moves plus two agreements with 32,768 cached tokens
+on every request. All five admitted local tokenizations matched remote vLLM.
+There were no canary error/panic/fatal logs, no unexpected restart, and
+production remained r20 with both upstream health gauges one throughout.
+
+Verdict: startup and asymmetric per-engine replay fail closed without making
+the inference path unavailable, and placement resumes automatically only after
+both inventories are authoritative. The remaining promotion gate is an
+organic distribution of exact gain versus load conflict, not another basic
+recovery mechanism.
 
 The post-merge public image workflow is a separate infrastructure blocker: the
 image compiled successfully, then GHCR rejected the push with
