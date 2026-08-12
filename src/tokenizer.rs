@@ -13,7 +13,10 @@ use url::Url;
 
 use crate::{
     config::{Config, TokenizerMode},
+    exact_shadow::{ExactRouteShadow, ExactRouteSnapshot},
+    kv_consumer::SharedFencedInventory,
     metrics::Metrics,
+    router::Decision,
     shims::Endpoint,
 };
 
@@ -28,6 +31,7 @@ pub struct TokenizerObserver {
     min_bytes: usize,
     max_bytes: usize,
     metrics: Arc<Metrics>,
+    exact_shadow: ExactRouteShadow,
 }
 
 #[derive(Debug)]
@@ -35,14 +39,20 @@ struct Job {
     endpoint: Endpoint,
     upstream: usize,
     body: Bytes,
+    cached_tokens: Option<usize>,
+    route_snapshot: Option<ExactRouteSnapshot>,
 }
 
 #[derive(Clone)]
 enum Backend {
-    Remote(RemoteTokenizer),
+    Remote {
+        tokenizer: RemoteTokenizer,
+        exact_shadow: ExactRouteShadow,
+    },
     LocalShadow {
         local: Arc<LocalTokenizer>,
         remote: RemoteTokenizer,
+        exact_shadow: ExactRouteShadow,
     },
 }
 
@@ -129,12 +139,22 @@ impl TokenizerObserver {
         config: &Config,
         client: reqwest::Client,
         metrics: Arc<Metrics>,
+        inventories: Arc<[SharedFencedInventory]>,
     ) -> anyhow::Result<Self> {
+        let exact_shadow = ExactRouteShadow::new(
+            inventories,
+            Arc::clone(&metrics),
+            config.route_alpha,
+            config.route_max_overlap_blocks,
+        );
         let sender = match config.tokenizer_mode {
             TokenizerMode::Off => None,
             TokenizerMode::RemoteShadow => {
                 let (sender, receiver) = mpsc::channel(config.tokenizer_queue_capacity);
-                let backend = Backend::Remote(remote_tokenizer(config, client));
+                let backend = Backend::Remote {
+                    tokenizer: remote_tokenizer(config, client),
+                    exact_shadow: exact_shadow.clone(),
+                };
                 spawn_workers(receiver, config.tokenizer_workers, &backend, &metrics);
                 Some(sender)
             }
@@ -161,6 +181,7 @@ impl TokenizerObserver {
                         formatter,
                     }),
                     remote: remote_tokenizer(config, client),
+                    exact_shadow: exact_shadow.clone(),
                 };
                 spawn_workers(receiver, config.tokenizer_workers, &backend, &metrics);
                 Some(sender)
@@ -176,6 +197,7 @@ impl TokenizerObserver {
             min_bytes: config.tokenizer_min_bytes,
             max_bytes: config.tokenizer_max_bytes,
             metrics,
+            exact_shadow,
         })
     }
 
@@ -197,8 +219,21 @@ impl TokenizerObserver {
         true
     }
 
+    /// Captures the fenced inventory versions visible to the approximate route.
+    #[must_use]
+    pub fn capture_route(&self, decision: &Decision) -> ExactRouteSnapshot {
+        self.exact_shadow.capture(decision)
+    }
+
     /// Enqueues a post-request shadow observation without waiting for capacity.
-    pub fn submit(&self, endpoint: Endpoint, upstream: usize, body: Option<Vec<u8>>) {
+    pub fn submit(
+        &self,
+        endpoint: Endpoint,
+        upstream: usize,
+        body: Option<Vec<u8>>,
+        cached_tokens: Option<usize>,
+        route_snapshot: ExactRouteSnapshot,
+    ) {
         let Some(sender) = &self.sender else {
             return;
         };
@@ -211,6 +246,8 @@ impl TokenizerObserver {
             endpoint,
             upstream,
             body: Bytes::from(body),
+            cached_tokens,
+            route_snapshot: Some(route_snapshot),
         };
         match sender.try_send(job) {
             Ok(()) => {}
@@ -294,12 +331,22 @@ fn spawn_workers(
 async fn observe(backend: &Backend, metrics: &Metrics, job: Job) {
     let endpoint = job.endpoint.label();
     match backend {
-        Backend::Remote(remote) => {
+        Backend::Remote {
+            tokenizer: remote,
+            exact_shadow,
+        } => {
             let started = Instant::now();
             let result = remote.tokenize(&job).await;
             record_remote(metrics, endpoint, started.elapsed(), &result);
+            if let Ok(tokens) = &result {
+                observe_exact(exact_shadow, &job, REMOTE_BACKEND, tokens);
+            }
         }
-        Backend::LocalShadow { local, remote } => {
+        Backend::LocalShadow {
+            local,
+            remote,
+            exact_shadow,
+        } => {
             let local = Arc::clone(local);
             let local_endpoint = job.endpoint;
             let local_body = job.body.clone();
@@ -340,11 +387,26 @@ async fn observe(backend: &Backend, metrics: &Metrics, job: Job) {
                         .tokenizer_shadow
                         .with_label_values(&[LOCAL_BACKEND, endpoint, outcome])
                         .inc();
+                    observe_exact(
+                        exact_shadow,
+                        &job,
+                        if local == remote {
+                            LOCAL_BACKEND
+                        } else {
+                            REMOTE_BACKEND
+                        },
+                        if local == remote { local } else { remote },
+                    );
                 }
-                (Err(error), _) => metrics
-                    .tokenizer_shadow
-                    .with_label_values(&[LOCAL_BACKEND, endpoint, error.label()])
-                    .inc(),
+                (Err(error), remote) => {
+                    metrics
+                        .tokenizer_shadow
+                        .with_label_values(&[LOCAL_BACKEND, endpoint, error.label()])
+                        .inc();
+                    if let Ok(remote) = remote {
+                        observe_exact(exact_shadow, &job, REMOTE_BACKEND, remote);
+                    }
+                }
                 (Ok(local), Err(_)) => {
                     metrics
                         .tokenizer_tokens
@@ -362,6 +424,20 @@ async fn observe(backend: &Backend, metrics: &Metrics, job: Job) {
             }
         }
     }
+}
+
+fn observe_exact(shadow: &ExactRouteShadow, job: &Job, token_backend: &str, tokens: &ExactTokens) {
+    let Some(route_snapshot) = &job.route_snapshot else {
+        return;
+    };
+    shadow.observe(
+        token_backend,
+        job.endpoint,
+        job.upstream,
+        job.cached_tokens,
+        &tokens.token_ids,
+        route_snapshot,
+    );
 }
 
 fn record_remote(
@@ -631,6 +707,27 @@ mod tests {
 
     use super::*;
 
+    fn route_decision() -> crate::router::Decision {
+        crate::router::Decision {
+            candidates: vec![0],
+            candidate_state: vec![crate::router::CandidateState {
+                index: 0,
+                rank: 0,
+                overlap_blocks: 0,
+                affinity_blocks: 0,
+                load_units: 0,
+                request_load_units: 1,
+                healthy: true,
+            }],
+            overlap_blocks: 0,
+            total_blocks: 1,
+            affinity_blocks: 0,
+            load_units: 1,
+            rotation: 0,
+            outcome: crate::router::Outcome::Single,
+        }
+    }
+
     #[tokio::test]
     async fn remote_backend_returns_exact_ids_and_authenticates() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -662,6 +759,8 @@ mod tests {
                 endpoint: Endpoint::Chat,
                 upstream: 0,
                 body: Bytes::from_static(br#"{"messages":[]}"#),
+                cached_tokens: None,
+                route_snapshot: None,
             })
             .await
             .unwrap();
@@ -674,9 +773,17 @@ mod tests {
     fn off_mode_does_not_prepare_or_enqueue() {
         let config = Config::from_lookup(|_| None).unwrap();
         let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
-        let observer = TokenizerObserver::new(&config, reqwest::Client::new(), metrics).unwrap();
+        let observer =
+            TokenizerObserver::new(&config, reqwest::Client::new(), metrics, Arc::from([]))
+                .unwrap();
         assert!(!observer.wants_payload(Endpoint::Chat, 100_000));
-        observer.submit(Endpoint::Chat, 0, None);
+        observer.submit(
+            Endpoint::Chat,
+            0,
+            None,
+            None,
+            observer.capture_route(&route_decision()),
+        );
     }
 
     #[tokio::test]
@@ -695,10 +802,21 @@ mod tests {
         ]);
         let config = Config::from_lookup(|key| values.get(key).cloned()).unwrap();
         let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
-        let observer =
-            TokenizerObserver::new(&config, reqwest::Client::new(), Arc::clone(&metrics)).unwrap();
+        let observer = TokenizerObserver::new(
+            &config,
+            reqwest::Client::new(),
+            Arc::clone(&metrics),
+            Arc::from([]),
+        )
+        .unwrap();
         assert!(observer.wants_payload(Endpoint::Chat, 16));
-        observer.submit(Endpoint::Chat, 0, Some(br#"{"messages":[]}"#.to_vec()));
+        observer.submit(
+            Endpoint::Chat,
+            0,
+            Some(br#"{"messages":[]}"#.to_vec()),
+            None,
+            observer.capture_route(&route_decision()),
+        );
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let successes = metrics

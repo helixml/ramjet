@@ -1,5 +1,6 @@
 pub mod config;
 pub mod exact_index;
+pub mod exact_shadow;
 pub mod journal;
 pub mod kv_consumer;
 pub mod kv_fence;

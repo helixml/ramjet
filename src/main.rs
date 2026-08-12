@@ -46,10 +46,16 @@ async fn main() -> anyhow::Result<()> {
         .tcp_keepalive(Duration::from_secs(30))
         .build()
         .context("build upstream client")?;
-    let proxy = Proxy::new(config.clone(), client, metrics.clone(), routing)
-        .context("initialize mini-dynamo proxy")?;
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let kv_consumers = KvEventConsumers::start(&config, &metrics, &shutdown_tx);
+    let proxy = Proxy::new(
+        config.clone(),
+        client,
+        metrics.clone(),
+        routing,
+        kv_consumers.inventories(),
+    )
+    .context("initialize mini-dynamo proxy")?;
 
     let api = Router::new()
         .fallback(any(Proxy::handle))

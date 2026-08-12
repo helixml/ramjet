@@ -673,6 +673,7 @@ impl SharedExactKvInventory {
 pub struct FencedExactKvInventory {
     fence: KvEventFence,
     inventory: ExactKvInventory,
+    revision: u64,
 }
 
 impl FencedExactKvInventory {
@@ -681,6 +682,7 @@ impl FencedExactKvInventory {
         Self {
             fence: KvEventFence::new(replay_limit),
             inventory: ExactKvInventory::new(index_limits),
+            revision: 0,
         }
     }
 
@@ -692,6 +694,14 @@ impl FencedExactKvInventory {
     #[must_use]
     pub const fn generation(&self) -> u64 {
         self.fence.generation()
+    }
+
+    /// Monotonic process-local version of the observable inventory state.
+    /// Shadow comparisons use this to reject an alternative cache that changed
+    /// between the approximate route decision and the later exact lookup.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
     }
 
     #[must_use]
@@ -710,7 +720,7 @@ impl FencedExactKvInventory {
         sequence: u64,
         batch: &KvEventBatch,
     ) -> Result<LiveBatchOutcome, ExactIndexError> {
-        match self.fence.ingest(sequence, batch.clears_all()) {
+        let outcome = match self.fence.ingest(sequence, batch.clears_all()) {
             IngestAction::Apply => self
                 .apply_authoritative(batch)
                 .map(LiveBatchOutcome::Applied),
@@ -728,7 +738,14 @@ impl FencedExactKvInventory {
                 self.inventory.reset_generation();
                 Ok(LiveBatchOutcome::Fenced)
             }
+        };
+        if matches!(
+            &outcome,
+            Ok(LiveBatchOutcome::Applied(_) | LiveBatchOutcome::Fenced) | Err(_)
+        ) {
+            self.revision = self.revision.wrapping_add(1);
         }
+        outcome
     }
 
     /// Validate and apply a complete inclusive replay response.
@@ -746,7 +763,7 @@ impl FencedExactKvInventory {
             .map(|(sequence, _)| *sequence)
             .collect::<Vec<_>>();
         let establishes_boundary = batches.iter().any(|(_, batch)| batch.clears_all());
-        match self.fence.accept_replay(&sequences, establishes_boundary) {
+        let outcome = match self.fence.accept_replay(&sequences, establishes_boundary) {
             ReplayAction::Invalid => {
                 self.inventory.reset_generation();
                 Ok(ReplayBatchOutcome::Invalid)
@@ -760,19 +777,28 @@ impl FencedExactKvInventory {
                         Err(error) => {
                             self.fence.generation_changed();
                             self.inventory.reset_generation();
+                            self.revision = self.revision.wrapping_add(1);
                             return Err(error);
                         }
                     }
                 }
                 Ok(ReplayBatchOutcome::Applied(summary))
             }
+        };
+        if matches!(
+            &outcome,
+            Ok(ReplayBatchOutcome::Applied(_) | ReplayBatchOutcome::Invalid) | Err(_)
+        ) {
+            self.revision = self.revision.wrapping_add(1);
         }
+        outcome
     }
 
     /// Fence and clear state when the engine process/cache generation changes.
     pub fn generation_changed(&mut self) {
         self.fence.generation_changed();
         self.inventory.reset_generation();
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Query only while the sequence fence declares the inventory complete.

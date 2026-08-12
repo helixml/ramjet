@@ -16,7 +16,9 @@ use url::Url;
 
 use crate::{
     config::Config,
+    exact_shadow::ExactRouteSnapshot,
     journal::RouteJournal,
+    kv_consumer::SharedFencedInventory,
     metrics::Metrics,
     prepare::PreparedRequest,
     router::{Decision, LoadGuard, Router},
@@ -88,9 +90,11 @@ impl Proxy {
         client: reqwest::Client,
         metrics: Arc<Metrics>,
         router: Arc<Router>,
+        inventories: Arc<[SharedFencedInventory]>,
     ) -> anyhow::Result<Self> {
         let journal = RouteJournal::new(config.route_journal);
-        let tokenizer = TokenizerObserver::new(&config, client.clone(), Arc::clone(&metrics))?;
+        let tokenizer =
+            TokenizerObserver::new(&config, client.clone(), Arc::clone(&metrics), inventories)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 config,
@@ -133,6 +137,8 @@ impl Proxy {
             prepare_tokenizer_body,
         );
         let decision = prepared.route(&self.inner.router);
+        let exact_route_snapshot =
+            prepare_tokenizer_body.then(|| self.inner.tokenizer.capture_route(&decision));
         let fingerprints = if endpoint == Endpoint::Other {
             Vec::new()
         } else {
@@ -273,6 +279,7 @@ impl Proxy {
                     fingerprints,
                     tokenizer_body,
                     prepare_tokenizer_body,
+                    exact_route_snapshot,
                     decision,
                     load_guard,
                     inflight_guard,
@@ -298,6 +305,7 @@ impl Proxy {
         fingerprints: Vec<u64>,
         tokenizer_body: Option<Vec<u8>>,
         tokenizer_selected: bool,
+        exact_route_snapshot: Option<ExactRouteSnapshot>,
         decision: Decision,
         _load_guard: RoutedLoad,
         _inflight_guard: InflightGuard,
@@ -373,10 +381,14 @@ impl Proxy {
             if status == StatusCode::OK && endpoint != Endpoint::Other {
                 self.record_usage(endpoint_label, &usage, started.elapsed(), first_token);
                 self.inner.router.observe(upstream, &fingerprints);
-                if tokenizer_selected {
-                    self.inner
-                        .tokenizer
-                        .submit(endpoint, upstream, tokenizer_body);
+                if tokenizer_selected && let Some(route_snapshot) = exact_route_snapshot {
+                    self.inner.tokenizer.submit(
+                        endpoint,
+                        upstream,
+                        tokenizer_body,
+                        usage.cached.and_then(f64_to_usize),
+                        route_snapshot,
+                    );
                 }
             }
         }
@@ -785,6 +797,14 @@ fn usize_to_f64(value: usize) -> f64 {
     value as f64
 }
 
+fn f64_to_usize(value: f64) -> Option<usize> {
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > f64::from(u32::MAX) {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(value as usize)
+}
+
 fn unix_seconds() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -794,10 +814,16 @@ fn unix_seconds() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use axum::{Router as AxumRouter, routing::any};
     use prometheus::Registry;
 
     use super::*;
+    use crate::{
+        exact_index::{ExactIndexLimits, FencedExactKvInventory},
+        kv_wire::{BlockStored, ExternalBlockHash, KvEvent, KvEventBatch},
+    };
 
     async fn start_upstream(app: AxumRouter) -> (Url, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -829,7 +855,48 @@ mod tests {
             max_load_units: config.route_max_load_units,
             affinity: config.affinity,
         }));
-        Proxy::new(config, reqwest::Client::new(), metrics, router).unwrap()
+        Proxy::new(
+            config,
+            reqwest::Client::new(),
+            metrics,
+            router,
+            Arc::from([]),
+        )
+        .unwrap()
+    }
+
+    fn trusted_inventory(tokens: &[u32]) -> SharedFencedInventory {
+        let events = (!tokens.is_empty())
+            .then(|| {
+                KvEvent::BlockStored(BlockStored {
+                    block_hashes: vec![ExternalBlockHash::Unsigned(1)],
+                    parent_block_hash: None,
+                    token_ids: tokens.to_vec(),
+                    block_size: tokens.len(),
+                    group_idx: Some(0),
+                    kv_cache_spec_kind: None,
+                    kv_cache_spec_sliding_window: None,
+                    medium: Some("GPU".to_owned()),
+                    locality: Some("LOCAL".to_owned()),
+                    lora_name: None,
+                    cache_namespace: None,
+                    has_extra_keys: false,
+                })
+            })
+            .into_iter()
+            .collect();
+        let mut inventory = FencedExactKvInventory::new(8, ExactIndexLimits::default());
+        inventory
+            .ingest_live(
+                0,
+                &KvEventBatch {
+                    timestamp: 1.0,
+                    events,
+                    data_parallel_rank: Some(0),
+                },
+            )
+            .unwrap();
+        Arc::new(parking_lot::RwLock::new(inventory))
     }
 
     #[test]
@@ -888,6 +955,83 @@ mod tests {
         let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("prompt_tokens"));
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn response_usage_drives_unbiased_exact_route_shadow() {
+        let upstream = || {
+            AxumRouter::new().fallback(any(|request: Request<Body>| async move {
+                if request.uri().path() == "/tokenize" {
+                    return Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"count":2,"tokens":[3,5]}"#))
+                        .unwrap();
+                }
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":0}}}"#,
+                    ))
+                    .unwrap()
+            }))
+        };
+        let (url_a, task_a) = start_upstream(upstream()).await;
+        let (url_b, task_b) = start_upstream(upstream()).await;
+        let joined = format!("{url_a},{url_b}");
+        let values = HashMap::from([
+            ("DS4_UPSTREAM", joined),
+            ("DS4_TOKENIZER_MODE", "remote-shadow".to_owned()),
+            ("DS4_TOKENIZER_MIN_BYTES", "0".to_owned()),
+        ]);
+        let config = Config::from_lookup(|key| values.get(key).cloned()).unwrap();
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        let router = Arc::new(Router::new(crate::router::RouterConfig {
+            upstreams: config.upstreams.clone(),
+            alpha: config.route_alpha,
+            chunk_bytes: config.route_chunk_bytes,
+            max_prefix_bytes: config.route_max_prefix_bytes,
+            max_overlap_blocks: config.route_max_overlap_blocks,
+            index_capacity: config.route_index_capacity,
+            load_unit_bytes: config.route_load_unit_bytes,
+            max_load_units: config.route_max_load_units,
+            affinity: config.affinity,
+        }));
+        let proxy = Proxy::new(
+            config,
+            reqwest::Client::new(),
+            Arc::clone(&metrics),
+            router,
+            Arc::from([trusted_inventory(&[3, 5]), trusted_inventory(&[])]),
+        )
+        .unwrap();
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .unwrap();
+        let response = proxy.serve(request).await;
+        assert_eq!(response.headers()["x-mini-dynamo-upstream"], "1");
+        let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if metrics
+                    .exact_route_shadow
+                    .with_label_values(&["remote", "chat", "would_move"])
+                    .get()
+                    >= 1.0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task_a.abort();
+        task_b.abort();
     }
 
     #[tokio::test]

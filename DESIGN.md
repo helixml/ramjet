@@ -190,8 +190,18 @@ is the reference for the failure semantics below:
   the next live sequence requests a bounded replay from zero before trust can
   return. The task exposes controlled connection, generation, trust,
   batch-outcome, bounded filter-reason, replay, and resident-size metrics and
-  shuts down with the proxy. The inventories are retained behind a future
-  lookup seam but are not connected to routing.
+  shuts down with the proxy.
+- `src/exact_shadow.rs` connects those inventories only to post-response
+  telemetry. At approximate decision time it snapshots each trusted
+  generation plus a monotonic inventory revision and retains the router's load
+  snapshot. At completion, engine-reported `cached_tokens` supplies the
+  selected engine's pre-request overlap so blocks created by that request
+  cannot bias the result. Alternative exact lookups proceed only if their
+  generation and revision are unchanged; concurrent mutations, gaps, failover,
+  missing usage, or lookup errors produce bounded fail-closed outcomes. Exact
+  token overlap is mapped onto the existing approximate overlap-unit scale so
+  the counterfactual changes only the cache term while holding alpha and load
+  fixed. No result is returned to route selection.
 - Exact request lookup requires the rendered token sequence. Calling r34's
   `/tokenize` for every request costs 3.7ms at 299 tokens, 8.4ms at 4.3K,
   41ms at 21K, and 203ms at 83.7K, while returning up to 419KB of token IDs.

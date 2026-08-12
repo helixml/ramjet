@@ -23,6 +23,7 @@ placement. Current measured landmarks:
 | 209K cold prefill | **~7.7–8.1K effective tok/s** |
 | 209K warm cached tokens | **208,896** |
 | r34 KV shadow qualification | **both engines; replay + 2,442-removal eviction soak; trusted** |
+| r19 exact-score shadow | **15 agree / 3 cold / 1 forced move; 14,336-token miss detected** |
 
 Two r34 candidates were explicitly rejected after rolling B-only trials:
 manual KV bytes gained just 1.16% capacity while bypassing runtime profiling;
@@ -40,6 +41,19 @@ then passed the symmetric live gate. With its KV allocation temporarily reduced
 to 785,171 tokens, a 893K-token cold sweep produced 882 main-group removals;
 the exact inventory contracted from 3,456 stored blocks to exactly 2,574
 resident blocks while remaining trusted.
+
+r19 then joined exact request IDs to those inventories without changing
+placement. A sequential 3-app locality gate produced 18/18 local/remote token
+parity matches, 15 exact/approximate agreements, three correctly cold
+`all_zero` decisions, and zero missed tokens. A prompt warmed directly on A
+but hidden from the approximate router was then sent to B; engine usage
+reported zero cached tokens while exact A state found 14,336, producing the
+expected single `would_move`. Under c12 same-app and c16 aggregate concurrency,
+all 28 comparisons rejected changing alternative revisions rather than using a
+post-decision cache state. At the production 32KiB tokenizer threshold, five
+matched c16/max512 runs had a 1,343.4 tok/s r19 median versus 1,362.1 for r12
+(-1.4%, within box noise); the matched long-prompt pair had identical 112,128
+cached tokens and overlapping warm latency.
 
 ## Cache locality — TIE (no regression, no win at this scale)
 

@@ -64,9 +64,17 @@ per upstream. It observes bounded vLLM live/replay events and exports only
 controlled connection, trust, generation, batch/filter-outcome, and
 resident-size metrics. Startup and every disconnect are untrusted; publisher
 sequence zero or a complete bounded replay from zero establishes the initially
-empty engine generation. These inventories are deliberately not connected to
-route selection yet, and raw token IDs and hashes never enter logs, journals,
-or metrics.
+empty engine generation. When selective tokenization succeeds, the inventories
+also feed an observation-only counterfactual: the selected engine's pre-request
+cache hit comes from response usage, while every alternative lookup requires
+the same trusted generation and inventory revision captured at approximate
+decision time. This avoids counting KV blocks created by the request itself and
+rejects a moving alternative under concurrent traffic. The existing
+approximate decision and load snapshot remain authoritative; exact state cannot
+change placement. `ds4proxy_exact_route_shadow_total` reports bounded
+`agree`, `would_move`, `tie`, `all_zero`, and fail-closed outcomes, while the
+overlap/gain histograms contain counts only. Raw token IDs and hashes never
+enter logs, journals, or metrics.
 
 Set `DS4_ROUTE_JOURNAL=true` to emit privacy-bounded versioned `start`/`finish`
 records to the process log. Records contain only process-local sequence IDs,

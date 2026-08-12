@@ -1316,3 +1316,61 @@ the production LB. With both engines, sequence-zero/replay startup, hybrid
 filtering, and real eviction now qualified, the next gate is exact-score shadow
 telemetry against approximate production choices before request-side exact IDs
 can influence placement.
+
+## 2026-08-12 — r19 revision-fenced exact-score shadow
+
+r19 connects exact tokenization and the fenced KV inventories only to
+counterfactual telemetry. A naive post-response lookup would be self-biased:
+the selected engine may publish the just-completed request before tokenization
+finishes. The implementation instead captures each trusted inventory's
+generation and monotonic revision at the approximate decision, then uses the
+selected engine's response-reported pre-request `cached_tokens`. Alternative
+engines are queried only if their generation and revision are unchanged. The
+original candidate health/load snapshot, alpha, and overlap cap remain fixed;
+exact overlap replaces only the cache term and never reaches placement. All
+outcomes and overlap/gain histograms are bounded and contain no identifiers.
+
+Both r34 engines were rolled publisher-on one at a time. Production stayed
+single-homed on the opposite engine through immutable r12 during each 531s/541s
+boot, and a direct authenticated short completion passed before traffic moved.
+Both publisher threads started with zero container restarts. After the isolated
+r19 subscriber connected late, one fresh 18.8K prefill per engine triggered
+bounded replay from zero. Both inventories became trusted at generation zero,
+each initially holding 73 main blocks / 18,688 token IDs, with one connection
+and no reconnect or error.
+
+The controlled exact-score gates were:
+
+- 3 apps × 3 sessions × 2 turns: 18/18 responses, 82.3% engine cache hit,
+  18/18 local-fastokens versus remote-vLLM parity, 15 `agree`, three
+  `all_zero`, and zero exact token gain over the selected engine;
+- forced miss: a fresh prompt was warmed directly on A without teaching the
+  approximate router, then the identical request was cold-routed to B. Both
+  calls returned HTTP 200; B reported zero cached tokens while unchanged A
+  exact state held 14,336 tokens, yielding one `would_move` and a 14,336-token
+  gain;
+- c12 same-app/max128: 12/12, exact 6/6 split, 379 generated tok/s. All twelve
+  post-response comparisons reported `inventory_changed`, correctly rejecting
+  alternatives mutated by concurrent requests;
+- c16/max512 with `TOKENIZER_MIN_BYTES=0`: 16/16 at 1,130.7 tok/s; all sixteen
+  comparisons again failed closed on concurrent alternative mutation. This is
+  a correctness stress, not a production-threshold performance comparison.
+
+A second r19 canary used the production 32KiB tokenizer admission threshold.
+Five interleaved c16/max512 runs per image produced a 1,343.4 tok/s r19 median
+versus 1,362.1 for r12, a -1.4% difference inside the normal shared-box noise
+band; all 160 requests succeeded. The r19 canary split its 32-request initial
+pair exactly 16/16 and admitted no tokenizer jobs for the small payloads. A
+reverse-order 2-app × 2-session × 2-turn locality pair then reused exactly
+112,128 tokens through each LB (74.1% r19 versus 74.5% r12 because the fresh
+prompt strings tokenized to different totals), with overlapping 0.59–0.69s
+warm wall times. r19 recorded 12 `agree`, four `all_zero`, zero gain, full
+parity, zero queue depth, and no KV reconnect.
+
+All **76 Rust tests**, strict all-target/all-feature Clippy, Rust release build,
+the retained Go tests/vet/build, both format gates, Python bench syntax, and
+`git diff --check` pass locally. Production remains dual-engine r12 while the
+r19 branch and CI are published. Exact placement remains disabled. The next
+architectural gate is selective pre-route tokenization plus a versioned
+renderer/engine attestation; pre-route lookup is required to observe useful
+counterfactuals under concurrent cache mutation.

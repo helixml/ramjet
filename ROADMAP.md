@@ -94,9 +94,17 @@ node06). The design rationale for each lives in DESIGN.md.
   contiguous batches: 882 group-0 removals reduced the exact MLA index from
   3,456 stored blocks to 2,574 resident blocks exactly, while trust remained
   one and no reconnect/index error occurred. Both engines and eviction are now
-  qualified. Next run exact-score shadow comparisons against approximate
-  choices, then add selective request-side exact IDs before enabling placement.
-  Raw token IDs, block hashes, and prompts remain out of logs.
+  qualified. r19 now compares approximate choices with exact state without
+  changing placement: it snapshots per-engine inventory revisions at decision
+  time, uses engine-reported pre-request cached tokens for the selected engine,
+  rejects an alternative that changes during the request, and preserves the
+  original load snapshot. The node06 gate recorded 15 agreements, three cold
+  decisions, and one deliberately constructed 14,336-token `would_move`; all
+  28 concurrent comparisons failed closed on changing alternative revisions.
+  Next move selective exact IDs into the pre-route preparation boundary so
+  live concurrent choices can be observed before mutation, gated by a
+  versioned renderer/engine attestation, before enabling placement. Raw token
+  IDs, block hashes, and prompts remain out of logs.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
   vectors rather than restarting; benchmark memory, p99 preparation latency,
