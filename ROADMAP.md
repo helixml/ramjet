@@ -208,7 +208,7 @@ node06). The design rationale for each lives in DESIGN.md.
   Retain automatic sizing and do not jump to the profiler's full-memory value.
 
 - 🔨 **CI + package publishing.** GitHub Actions and Drone now both run Rust
-  fmt, strict Clippy, 96 unit tests, and the release build; Drone additionally
+  fmt, strict Clippy, 97 unit tests, and the release build; Drone additionally
   runs the retained Go tests/vet/gofmt parity oracle. Both Drone push/PR builds
   and GitHub Actions passed on r21. The post-merge image also compiled, but GHCR
   denied its final push: because `mini-dynamo` was created by a manual push,

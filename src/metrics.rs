@@ -284,8 +284,8 @@ impl Metrics {
             )?,
             exact_route_placement: counter(
                 "ds4proxy_exact_route_placement_total",
-                "Opt-in exact placement decisions by endpoint and bounded outcome",
-                &["endpoint", "outcome"],
+                "Exact placement policy decisions by mode, endpoint, and bounded outcome",
+                &["mode", "endpoint", "outcome"],
             )?,
             exact_route_preroute_duration: histogram(
                 "ds4proxy_exact_route_preroute_duration_seconds",
@@ -456,7 +456,7 @@ mod tests {
             .inc();
         metrics
             .exact_route_placement
-            .with_label_values(&["chat", "moved"])
+            .with_label_values(&["placement", "chat", "moved"])
             .inc();
         metrics
             .compat_attested

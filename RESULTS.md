@@ -87,7 +87,7 @@ usage reported 32,768 cached tokens. Its matched 2-app locality gate was
 identical to r20 at 71.6%. c8 same-app was 395 versus 406 tok/s and c16/max256
 was 1,110 versus 1,147 tok/s, differences of about 3% inside shared-box noise.
 An independent negative-health canary reported one healthy replica as
-`degraded` and sent 4/4 requests only to that replica. All 96 Rust tests, both
+`degraded` and sent 4/4 requests only to that replica. All 97 Rust tests, both
 Drone triggers, and GitHub Actions passed; no production component changed.
 An intentional canary-only restart then served the first long request through
 the approximate fallback with `inventory_untrusted`. B replayed 943 retained

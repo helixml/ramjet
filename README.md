@@ -109,10 +109,11 @@ promote only one unique exact-score winner, requires at least
 not move to an engine with any more load than the approximate choice. All
 manifest attestation, tokenizer admission, event trust, inventory revision,
 health, CPU-permit, and timeout fences remain mandatory; any failure preserves
-the approximate route. `ds4proxy_exact_route_placement_total` distinguishes
-actual moves from gain/load gates and fail-closed fallbacks. Production remains
-in `shadow` until a representative counterfactual distribution and isolated
-node06 canary justify promotion.
+the approximate route. `ds4proxy_exact_route_placement_total{mode="shadow"}`
+evaluates the same gain/load policy without changing placement, while
+`mode="placement"` distinguishes actual moves from gates and fail-closed
+fallbacks. Production remains in `shadow` until a representative
+counterfactual distribution and isolated node06 canary justify promotion.
 
 Set `DS4_ROUTE_JOURNAL=true` to emit privacy-bounded versioned `start`/`finish`
 records to the process log. Records contain only process-local sequence IDs,

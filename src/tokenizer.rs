@@ -24,7 +24,9 @@ use url::Url;
 use crate::{
     compat::{CompatibilityManifest, RuntimeOutcome, sha256_hex, token_ids_sha256},
     config::{Config, ExactRouteMode, TokenizerMode, TokenizerProfile},
-    exact_shadow::{ExactPlacementPolicy, ExactRouteShadow, ExactRouteSnapshot},
+    exact_shadow::{
+        ExactPlacementMode, ExactPlacementPolicy, ExactRouteShadow, ExactRouteSnapshot,
+    },
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
     router::Decision,
@@ -397,10 +399,17 @@ impl TokenizerObserver {
             self.record_pre_route(endpoint, "attestation_changed");
             return;
         }
-        let placement =
-            (self.exact_route_mode == ExactRouteMode::Placement).then_some(self.exact_placement);
-        self.exact_shadow
-            .route_pre_route(endpoint, &tokens.tokens.token_ids, decision, placement);
+        let mode = match self.exact_route_mode {
+            ExactRouteMode::Placement => ExactPlacementMode::Placement,
+            ExactRouteMode::Shadow | ExactRouteMode::Off => ExactPlacementMode::Shadow,
+        };
+        self.exact_shadow.route_pre_route(
+            endpoint,
+            &tokens.tokens.token_ids,
+            decision,
+            self.exact_placement,
+            mode,
+        );
     }
 
     pub async fn attest_upstream(&self, upstream: usize, models_body: &[u8]) {
