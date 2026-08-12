@@ -2087,3 +2087,25 @@ and placement modes cannot move an all-zero request, the one-prompt threshold
 holds, and the load gate fails closed. Strict Clippy and all 111 Rust tests pass;
 the focused edit/compile/test loop took under four seconds after the first
 incremental build.
+
+Before the r26 LB-only roll, the live counters showed 2,075 applied batches on
+A and 3,453 on B. The canonical 2,048 replay cap could no longer reconstruct
+B from generation zero even though the publisher retains 10,000 batches. The
+deployment cap is therefore raised to 8,192, preserving 18% publisher-history
+headroom and the existing 20-second fail-closed deadline. This is an LB memory
+and recovery-window change only; no engine restart or publisher mutation is
+required. After one fresh request triggered each live stream, r26 replayed
+3,546 B batches and 3,617 A batches from generation zero. Both inventories
+became trusted in 2.923s including the 1.122s trigger requests, well inside the
+deadline, while both engines kept their original start times.
+
+Four subsequent fresh 128KiB cold requests remained on the existing
+round-robin path and completed successfully. The new shadow evaluator reported
+two `kept_all_zero` and two `would_balance` outcomes; the latter represented a
+combined 508,672 resident-token delta. Both inventories stayed trusted and the
+final exact-index residency was 4,853,248 token IDs on A versus 4,665,856 on B.
+This proves the counterfactual sees a production-shaped capacity imbalance
+without changing placement. The published r26 image is
+`ghcr.io/helixml/mini-dynamo:rust-r26-cold-residency-b4b3b55` at digest
+`sha256:ae7dc14c2d19579bb721e475c8a0936b61d49309ea0579ec760c287d9780df8f`;
+the registry push reused all but one layer and took 4.21s.

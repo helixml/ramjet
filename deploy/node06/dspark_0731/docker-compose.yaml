@@ -27,7 +27,7 @@ services:
   # compat shims, /v1/models context-margin rewrite, Prometheus metrics
   # (:8007 -> Caddy :9105) and engine-native metrics passthrough.
   ds4-loadbalancer:
-    image: ${LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-r25-cache-churn-873a201@sha256:ab10fd4476a1b49f3052e3fc0cd122db6d9ebf3775965f377461b3f222d36db1}
+    image: ${LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-r26-cold-residency-b4b3b55@sha256:ae7dc14c2d19579bb721e475c8a0936b61d49309ea0579ec760c287d9780df8f}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:
@@ -71,9 +71,10 @@ services:
       DS4_KV_EVENT_LIVE_ENDPOINTS: ${DS4_KV_EVENT_LIVE_ENDPOINTS:-tcp://dspark-0731:5557,tcp://dspark-0731-b:5557}
       DS4_KV_EVENT_REPLAY_ENDPOINTS: ${DS4_KV_EVENT_REPLAY_ENDPOINTS:-tcp://dspark-0731:5558,tcp://dspark-0731-b:5558}
       DS4_KV_EVENT_TOPIC: "${DS4_KV_EVENT_TOPIC:-}"
-      # Production inventories now exceed 1K batches. A 2K replay window with
-      # a 20s fail-closed timeout recovers both engines after an LB-only roll.
-      DS4_KV_EVENT_REPLAY_LIMIT: ${DS4_KV_EVENT_REPLAY_LIMIT:-2048}
+      # Capacity sweeps pushed one retained generation beyond 3.4K batches.
+      # Keep the consumer below the publisher's 10K history while preserving
+      # enough headroom for LB-only rolls; timeout remains fail-closed.
+      DS4_KV_EVENT_REPLAY_LIMIT: ${DS4_KV_EVENT_REPLAY_LIMIT:-8192}
       DS4_KV_EVENT_REPLAY_TAIL_LIMIT: ${DS4_KV_EVENT_REPLAY_TAIL_LIMIT:-64}
       DS4_KV_EVENT_TIMEOUT_MS: ${DS4_KV_EVENT_TIMEOUT_MS:-20000}
 
