@@ -1823,6 +1823,16 @@ drained it. Retaining the fixture until explicit client acknowledgement passed
 Rust cache, including failed runs, so later no-lockfile iterations do not repay
 that cold compile.
 
+The local parallel pre-push gate found a second workflow trap: `/tmp` is a
+31GiB memory filesystem and was already full, so a new worktree's separate
+Cargo target failed after 4.74s with `ENOSPC` despite 283GiB remaining on the
+disk-backed filesystem. Only this task's 298MiB of partial build artifacts was
+cleaned. Reusing the canonical checkout target with compiler scratch under
+`/home/karolis/.cache/mini-dynamo-tmp` completed strict Clippy, all 104 tests,
+and the release build in 26.32s; Go and protocol lanes independently took
+1.59s and 0.12s. `AGENTS.md` now forbids Rust worktrees/build scratch on this
+shared tmpfs and documents the shared-target escape hatch.
+
 The full 0/256KiB cold/warm c1/c8/c16 matrix and three-run variance requirement
 remain intentionally deferred until the corpus/runner PR is green. This keeps
 the shared production box available and avoids spending GPU time before the

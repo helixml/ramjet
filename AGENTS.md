@@ -35,6 +35,22 @@ before waiting through repeated slow builds. Use `/usr/bin/time` or the timing
 printed by repository scripts; record build/transfer/benchmark wall time in an
 experiment entry whenever workflow speed itself changes.
 
+The development host's `/tmp` is a shared 31GiB tmpfs and can be full even when
+the main filesystem has hundreds of GiB free. Put Rust worktrees on the
+disk-backed home filesystem. If an existing temporary worktree must be used,
+reuse the canonical checkout's warm target and move compiler scratch to disk:
+
+```bash
+mkdir -p /home/karolis/.cache/mini-dynamo-tmp
+CARGO_TARGET_DIR=/home/karolis/go/src/github.com/helixml/mini-dynamo/target \
+TMPDIR=/home/karolis/.cache/mini-dynamo-tmp cargo test --locked
+```
+
+Do not launch two Rust gates concurrently against that shared target; fan out
+Go and Python beside one Rust lane instead. Check both `df -h /tmp` and target
+size before a cold build. Clean only build artifacts created by this project;
+unrelated `/tmp` worktrees and caches belong to other active tasks.
+
 Run the Go oracle in the inner loop only when changing a cross-language parity
 contract. It remains mandatory in the pre-push gate until the cutover is final.
 
