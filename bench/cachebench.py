@@ -120,23 +120,28 @@ def fetch_replica_inventory(base, timeout=10):
 def replica_inventory_change(before, after):
     if before is None or after is None or before.keys() != after.keys():
         return None
-    return {
-        index: {
+    result = {}
+    for index in before:
+        trusted_throughout = before[index]["trusted"] and after[index]["trusted"]
+        result[index] = {
             "trusted_before": before[index]["trusted"],
             "trusted_after": after[index]["trusted"],
             "resident_blocks_before": before[index]["resident_blocks"],
             "resident_blocks_after": after[index]["resident_blocks"],
             "resident_blocks_change": (
                 after[index]["resident_blocks"] - before[index]["resident_blocks"]
+                if trusted_throughout
+                else None
             ),
             "resident_tokens_before": before[index]["resident_tokens"],
             "resident_tokens_after": after[index]["resident_tokens"],
             "resident_tokens_change": (
                 after[index]["resident_tokens"] - before[index]["resident_tokens"]
+                if trusted_throughout
+                else None
             ),
         }
-        for index in before
-    }
+    return result
 
 
 def nonnegative_delta(before, after, keys):

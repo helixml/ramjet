@@ -265,7 +265,8 @@ reports request/token reuse, TTFT, route split, reuse distance, prefill/queue
 time, preemptions, cache outcomes, reuse-wave survival, and per-replica exact
 inventory before/after snapshots keyed only by route ordinal. Negative
 resident changes are preserved so a capacity cliff cannot be mistaken for a
-counter reset. `--concurrency 2`
+counter reset; changes are `null` unless that inventory was trusted at both
+snapshot boundaries. `--concurrency 2`
 uses both TP4 engine pairs while retaining a barrier between each cold/reuse
 wave, so a reuse cannot race its unfinished cold request. With both engine
 metric URLs and the LB metric URL supplied, `--require-reconciled` fails unless

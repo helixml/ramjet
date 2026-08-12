@@ -89,6 +89,10 @@ class CacheBenchTest(unittest.TestCase):
             },
         )
         self.assertIsNone(replica_inventory_change(before, {}))
+        after["0"]["trusted"] = False
+        untrusted = replica_inventory_change(before, after)["0"]
+        self.assertIsNone(untrusted["resident_blocks_change"])
+        self.assertIsNone(untrusted["resident_tokens_change"])
 
     def test_concurrent_waves_keep_cold_to_reuse_barrier(self):
         completed_cold = set()

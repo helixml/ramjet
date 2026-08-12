@@ -2136,9 +2136,26 @@ resident token count under each existing opaque replica index. It still bases
 HTTP readiness only on serving health and never emits upstream addresses,
 hashes, or token vectors. `cachebench.py` snapshots these values before and
 after each cell, retains signed residency changes, and fails closed to `null`
-for old/non-LB endpoints or malformed/missing inventory state.
+for old/non-LB endpoints, malformed/missing inventory state, or a replica that
+was not trusted at both snapshot boundaries.
 
 The implementation adds one O(1) inventory-stats read per replica per health
 call and no request-path work. Focused Rust health tests took 3.21s including
 the incremental compile; all 33 Python tests took 0.07s. This should remove the
 manual telemetry reconstruction from the three-run 52/64 boundary matrix.
+
+The first live r27 smoke demonstrated why the trust gate matters. One replica
+was still reconstructing from retained replay at the initial snapshot, so its
+raw inventory grew from zero to 4,626,688 tokens during the cell. That is
+recovery, not workload residency. The gate now preserves the start/end values
+and trust flags but reports both changes as `null` in this case. The smoke
+otherwise completed 4/4, split 2/2, reconciled every usage/counter view with
+zero spread, observed zero preemptions, and reached 98.85% reuse-wave token
+hits in 5.24s.
+
+A second trusted-boundary smoke completed 2/2 on one sticky replica and again
+reconciled with zero spread. It reported that replica's exact inventory moving
+from 4,797,696 to 4,779,008 resident tokens (-18,688) while the other remained
+at 4,626,688, alongside 37 live stores and 110 live removals. This is the
+intended output: it reveals net per-replica residency independently from gross
+publisher churn without claiming removals are evictions.
