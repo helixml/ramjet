@@ -2385,3 +2385,32 @@ usage and successful request count; acceptance from production cross-traffic
 can no longer appear valid silently. Direct requests also require generated
 output and authoritative usage before counting as successful. The full Python
 suite is now 41 tests.
+
+The calibrated 64-app cell completed 128/128 in 1,634.03s with an actual
+145,632-token initial mean, a 62/66 request split, zero-spread reconciliation,
+zero preemptions, and trusted inventory boundaries. It reproduced the cliff:
+31 reuse requests remained partial hits and 33 were cold, for 48.36%
+reuse-wave token hits. Partial TTFT p50/p95 was 841/878ms; cold p50/p95 was
+28.27/46.75s. Replica residency changed by +117,760 and -58,880 token IDs,
+while live removals reached 99.58% of stores.
+
+The joined counterfactual explains why the current cold-balancing proposal is
+not yet a fix. It recorded 35 all-zero decisions, four below the one-prompt
+residency-delta threshold, 26 blocked by the existing load-delta gate, and
+zero `would_balance`. Under the efficient c2 schedule, the other TP4 pair is
+already processing one full-load cold prefill when the residency imbalance is
+observable. Removing that gate would trade cache capacity against known queue
+isolation; keeping it means the candidate cannot affect this workload. Do not
+promote cold-residency placement from this evidence. The next policy slice
+must either model projected post-request residency under equal parallel load
+or add an admission/capacity budget, and must remain shadow-only until it can
+predict the 31/33 survival outcome without collapsing both requests onto one
+engine.
+
+A quiet direct r34 B smoke validated the new speculation reconciliation on
+real native metrics. One measured 64-token code response reconciled exactly to
+64 engine generation tokens and one finished request. Fixed K5 proposed five
+tokens per speculative step, accepted 4.077, and delivered 5.077 effective
+tokens per target step at 81.54% strict accepted/proposed tokens. Per-position
+accepted deltas were 11/11/11/11/9. This is an accounting gate, not a new
+performance result; it proves a clean interval is accepted before the r4 A/B.
