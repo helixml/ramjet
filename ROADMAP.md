@@ -31,12 +31,14 @@ node06). The design rationale for each lives in DESIGN.md.
   without workload, temperature, prompt/output lengths, and acceptance data.
 - ✅ **node06 DSpark depth sweep (K5 vs K7).** K5 passed 10/10 gates and beat
   K7 by 6.5% on code and 12.2% on prose at c8; promoted in the infra compose.
-- ⬜ **DSpark dynamic-depth/capacity gate.** r34 exposes a supported
-  `DSPARK_DEPTH_MODE=dynamic` path (dynamic draft depth, capacity verification,
-  online STS, and B12X varlen verification) while fixed K5 is the current
-  control. Qualify code/prose c1/c8/c16, draft acceptance, and the mixed
-  prefill+decode tail as one rolling experiment; retain fixed K5 unless dynamic
-  mode improves the workload mix rather than one isolated median.
+- ✅ **DSpark dynamic-depth/capacity gate (retain fixed K5).** r34's supported
+  default regressed code c1/c8/c16 by 22.8%/9.5%/8.9% and prose c1/c8 by
+  24.7%/7.9%; only prose c16 improved 2.5%. Mixed decode fell 1.8% and p95
+  worsened 11.7%, KV capacity fell 1.1%, and startup grew about two minutes.
+  Diagnostics showed frequent physical-depth oscillation and a launcher-forced
+  activation threshold of one despite auto-profiling eight. Retest only after
+  the launcher honors the profiled threshold and the controller gains enough
+  hysteresis to avoid 3↔4↔5 churn; keep fixed K5 for unified serving.
 - ✅ **Collective-path matrix.** With P2P disabled, B12X improved cache-busted
   prefill by 36% at 8.5k and 71% at 33.6k tokens, but regressed code decode by
   20% at c8 and 44% at c1. Keep NCCL for unified engines; retain B12X for a
@@ -66,14 +68,16 @@ node06). The design rationale for each lives in DESIGN.md.
   `vllm serve` argv, image digest, driver, KV capacity, NUMA topology, cpusets,
   and LB health without printing credentials. The first capture confirmed the
   r34 launcher overrides compose-facing GPU-memory and CUDA-graph values.
-- ⬜ **Explicit KV-cache-bytes qualification.** r34's post-capture profiler
-  reports 0.87GiB estimated versus 0.16GiB actual CUDA-graph memory and suggests
+- ✅ **Explicit KV-cache-bytes qualification (retain automatic sizing).**
+  r34's post-capture profiler reports 0.87GiB estimated versus 0.16GiB actual
+  CUDA-graph memory and suggests
   `--kv-cache-memory-bytes=53105596109` to remain inside the requested 0.975
-  envelope. A rolling one-engine trial could reclaim about 0.57GiB / 1.2% KV
-  capacity without changing scheduler shape; require first-use long-prefill,
-  c16, and OOM/error gates before considering promotion. Do not jump directly
-  to the profiler's full-memory 50.76GiB suggestion because transient headroom
-  is more valuable than the extra ~2.6% cache.
+  envelope. A rolling B trial raised capacity 1.16% (3,838,897→3,883,559
+  tokens) and passed 200K context and c16 gates without OOM. Decode repeated at
+  1,120.5 tok/s versus the 1,130.2 control; cold prefill improved 4.8%, but the
+  setting bypasses profiling and leaves allocation coupled to image/runtime
+  transients. The 44.7K-token gain is not worth that operational fragility.
+  Retain automatic sizing and do not jump to the profiler's full-memory value.
 
 - ⬜ **CI + package publishing.** GitHub Actions: `go test ./...`, `go vet`,
   build, and push `ghcr.io/helixml/ds4-loadbalancer:<tag>` on tag/main.

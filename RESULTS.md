@@ -5,6 +5,30 @@ Hardware: node06, 2× vLLM+DSpark TP4 instances (DeepSeek-V4-Flash-0731),
 router). Candidate = `1.1.0-rc1` (overlap+load router, `alpha=4`).
 Method: `bench/locality_bench.sh` + a concurrent-same-app harness.
 
+## Current node06 production snapshot
+
+The historical router study below remains reproducible, but the production
+stack has since advanced to mini-dynamo rc7 and r34 engines with fixed K5,
+A16 MoE kernels, NCCL PCIe P2P enabled, max-seqs 16, a 4,096 configured
+(4,032 effective) scheduler quantum, automatic KV sizing, and NUMA-local CPU
+placement. Current measured landmarks:
+
+| Gate | Result |
+|---|---:|
+| box code c24/max256, rc7 | **1,820–1,844 tok/s**, 144/144 requests |
+| box code c24 best matched gate, rc6 | **1,891 tok/s**, 72/72 requests |
+| direct TP4 code c16/max256 | **1,130 tok/s**, 48/48 requests |
+| direct TP4 prose c16/max256 | **824 tok/s**, 48/48 requests |
+| KV capacity | **3,838,897 tokens/engine** |
+| 209K cold prefill | **~7.7–8.1K effective tok/s** |
+| 209K warm cached tokens | **208,896** |
+
+Two r34 candidates were explicitly rejected after rolling B-only trials:
+manual KV bytes gained just 1.16% capacity while bypassing runtime profiling;
+dynamic DSpark depth regressed five of six code/prose concurrency points by
+8–25%, lost 1.1% KV, and worsened the mixed tail. `EXPERIMENTS.md` is the
+append-only source for configurations, comparisons, and rollback decisions.
+
 ## Cache locality — TIE (no regression, no win at this scale)
 
 Realistic ~18.5k-token system prompts, 2-3 apps × 4 sessions × 2-3 turns,
