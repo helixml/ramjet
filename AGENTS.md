@@ -283,6 +283,41 @@ Do not interpret draft acceptance alone when comparing capacity policies: a
 pruned policy can raise the percentage by reducing its denominator. Compare
 effective tokens/step and end-to-end throughput as well.
 
+### Fail-fast engine qualification — `candidate_gate.py`
+
+Every new engine image must pass the five-request deterministic agent gate
+before a performance scout or full matrix. Capture candidate and direct-engine
+metadata once, then keep the same files for resume:
+
+```bash
+bench/node06_engine_metadata.sh /tmp/candidate-engine.json dspark-0731-b \
+  /tmp/upstream-receipt.json
+BENCH_GPU_COUNT=4 bench/node06_agent_metadata.sh \
+  /tmp/candidate-agent.json dspark-0731-b
+
+python3 bench/candidate_gate.py \
+  --base http://127.0.0.1:8013 --model deepseek-v4-flash \
+  --container dspark-0731-b \
+  --engine-metadata /tmp/candidate-engine.json \
+  --agent-metadata /tmp/candidate-agent.json \
+  --output /tmp/candidate-gate.jsonl --through smoke
+```
+
+Only a green smoke may continue to `--through scout --resume` (one code and
+one prose c8 cell), then `--through matrix --resume`. Resume requires the same
+immutable candidate, process lifetime, metadata, and hashed plan/scripts.
+Every boundary rechecks image/start/restart identity and scans only that
+stage's container-log interval for late JIT, CUDA, NCCL, OOM, Xid, traceback,
+or fatal-runtime markers. A correctness/runtime failure stops before the next
+GPU stage. The mode-0600 journal contains only identity/plan hashes, bounded
+result classes, artifact hashes/sizes, and timing; privacy-safe child JSONL
+lives in a mode-0700 artifact directory. Container logs, commands, environment
+variables, prompts, responses, and credentials are not written.
+
+`engine_matrix.sh` retains its six-cell default. Narrow a scout with
+`ENGINE_WORKLOADS`, `ENGINE_CONCURRENCIES`, and `ENGINE_RUNS`; each cell and
+the full matrix emit wall-clock timing records.
+
 Before an engine image A/B, capture each engine separately with
 `bench/node06_engine_metadata.sh OUTPUT CONTAINER [RECEIPT]`. A supplied receipt
 must verify before its benchmark cells are admissible. Never combine two
@@ -369,26 +404,30 @@ EXPERIMENTS.md — add yours there too):
 2. **Build + deploy candidate** on node06 (section above) with a fresh
    `<tag>`; confirm `ds4proxy_upstream_up` shows both engines and the boot
    log line has the config you meant to ship.
-3. **Bench matrix** (fresh SALT per run, per the A/B protocol):
+3. **Correctness before capacity**: for an engine candidate, run
+   `candidate_gate.py --through smoke`; continue through its c8 scout and full
+   direct matrix only while every prior stage is green and free of runtime/JIT
+   markers.
+4. **Bench matrix** (fresh SALT per run, per the A/B protocol):
    locality (`locality_bench.sh`), concurrent same-app
    (`concurrent_sameapp.sh`), aggregate regression (`bench_serving.sh 16 512`),
    and the focused agent protocol smoke. Run the full agent matrix only for
    engine/parser/router candidates that can affect the protocol or headline
    performance.
-4. **Route telemetry**: `curl -s :8007/metrics | grep -E
+5. **Route telemetry**: `curl -s :8007/metrics | grep -E
    "route_decisions|route_overlap|upstream_inflight|upstream_load_units"` —
    confirm the decision mix moved the way the change predicts.
-5. **Helix end-to-end**: one real session via `POST $HELIX_URL/api/v1/
+6. **Helix end-to-end**: one real session via `POST $HELIX_URL/api/v1/
    sessions/chat` against the org test app (ids + creds: infra repo,
    `node06/inference/dspark_0731/README.md`). This catches harness-shim
    regressions that synthetic benches miss.
-6. **Record**: append the run to EXPERIMENTS.md (config, numbers, verdict),
+7. **Record**: append the run to EXPERIMENTS.md (config, numbers, verdict),
    update RESULTS.md if it changes a headline, and either promote the tag in
    the canonical mini-dynamo Compose (`LB_IMAGE` default) or note why not.
-7. **Mirror a promoted config**: validate the canonical Compose file, run
+8. **Mirror a promoted config**: validate the canonical Compose file, run
    `deploy/node06/dspark_0731/sync-compose.sh ../infra`, and commit the infra
    mirror. Never hand-edit the infra copy.
-8. **Watch after promote**: Grafana `ds4-flash-serving` for 10-15 min
+9. **Watch after promote**: Grafana `ds4-flash-serving` for 10-15 min
    (5xx, TTFT p95, upstream split) — rollback is one `LB_IMAGE` flip.
 
 ## Guardrails

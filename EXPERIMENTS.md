@@ -2477,3 +2477,48 @@ long-lived replay history was already too old for the new LB generation and
 remained fenced, so exact routing safely stayed shadow-only. Do not restart A
 for telemetry; this is a production reproduction of the snapshot/tree-dump
 recovery gap already tracked in the KV-event roadmap.
+
+## 2026-08-13 — fail-fast candidate gate and retained-replay boundary
+
+The rejected r4 ordering was unnecessarily expensive: its deterministic
+five-case agent corpus was already a hard correctness stop, but the first
+qualification paid the 204-request code/prose matrix (154 measured requests
+plus 50 warmups) before that oracle ran. `candidate_gate.py` now makes the
+ordering executable. It binds the engine metadata/optional verified receipt,
+container image and lifetime, agent provenance, model, and hashes of every
+invoked runner into one plan. The ordered stages are a five-request
+deterministic direct-engine correctness smoke, a one-run code/prose c8 scout,
+and the existing full c1/c8/c16 matrix. A failed child, container restart,
+identity drift, late JIT compilation, CUDA/NCCL/OOM/Xid/traceback/fatal marker,
+or unreadable log interval stops the run before the next stage. Resume skips a
+green stage only under identical candidate and plan hashes.
+
+The journal persists no command, environment, credential, prompt, response,
+reasoning, tool arguments, or container log. It records bounded status classes,
+hashes and byte counts for privacy-safe child artifacts/log intervals, process
+identity, and stage timing; benchmark JSONL artifacts retain mode 0600 beneath
+a mode-0700 directory. `engine_matrix.sh` now accepts bounded workload,
+concurrency, and run lists for scouts and emits per-cell plus total wall time
+without changing its default matrix.
+
+Eight focused unit tests cover ordering, agent fail-fast behavior, runtime
+markers, process restart fencing, candidate/plan-bound resume, metadata
+matching, journal privacy, and the real secret-free Docker inspect format. The
+first live preflight found that Docker's Go template prints a literal `\\t`
+unless the argument contains a real tab; identity therefore failed closed in
+0.10s before any request. After the test-backed fix, an idle direct r34 B smoke
+passed 5/5 protocol cases in 2.99s wall (2.731s child wall), with no runtime
+marker, zero engine restart, and load back at zero. The same journal resumed in
+0.09s without issuing GPU work. This is a workflow result, not a new engine
+performance claim.
+
+The same read-only node06 audit sharpened the remaining exact-KV recovery
+boundary. A's r34 replay endpoint still retained a complete generation from
+sequence 0 through 9,392: 8,380 sparse event-bearing messages and 408,572,558
+serialized bytes, delivered by the publisher in roughly 0.2s. The current
+8,192 fence correctly declines it. Raising the limit alone is unsafe on a host
+with only about 8.5GiB available because the current transport collects every
+decoded batch before applying it. The next router slice is a streaming full
+replay into a scratch exact inventory followed by end/cursor validation and an
+atomic swap. That recovers histories still inside vLLM's 10,000-step window;
+Dynamo-style worker snapshot/tree-dump remains necessary after zero ages out.
