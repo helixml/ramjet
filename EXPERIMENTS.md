@@ -1017,3 +1017,12 @@ stored credential, so GitHub Actions owns public publishing. r10 remains
 observation only: exact IDs do not influence routing. Next gates are an
 Anthropic-input golden adapter, a versioned compatibility manifest, and the
 fenced KV-event shadow index. Go rc7 remains the compose-default rollback.
+
+r11 makes the first compatibility-manifest constraint executable: local mode
+will not start unless the mounted tokenizer matches the configured SHA-256 and
+the explicit `deepseek-v4-r34` profile is recognized. The node06 artifact hash
+is `8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf`.
+A standalone startup and LB-only roll passed; a fresh 18,762-token request
+again matched local IDs, remote IDs, and completion usage, with both probes up
+and no restart. The live local image is
+`ghcr.io/helixml/ds4-loadbalancer:rust-r11-8e38ec7`.
