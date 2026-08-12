@@ -2126,3 +2126,51 @@ documented test app, and its visible app list was empty. This is an account/app
 authorization blocker rather than an LB result; synthetic and direct-engine
 gates remain green, but the Helix workflow gate must be repeated with an app
 shared to that account.
+
+## 2026-08-12 — issue #16 replica-residency scorecard
+
+The 64-app result required a manual join between route ordinals and raw
+upstream-labeled exact-index gauges. The next benchmark slice makes that join
+native and content-free: `/health` now nests trust, resident block count, and
+resident token count under each existing opaque replica index. It still bases
+HTTP readiness only on serving health and never emits upstream addresses,
+hashes, or token vectors. `cachebench.py` snapshots these values before and
+after each cell, retains signed residency changes, and fails closed to `null`
+for old/non-LB endpoints, malformed/missing inventory state, or a replica that
+was not trusted at both snapshot boundaries.
+
+The implementation adds one O(1) inventory-stats read per replica per health
+call and no request-path work. Focused Rust health tests took 3.21s including
+the incremental compile; all 33 Python tests took 0.07s. This should remove the
+manual telemetry reconstruction from the three-run 52/64 boundary matrix.
+
+The first live r27 smoke demonstrated why the trust gate matters. One replica
+was still reconstructing from retained replay at the initial snapshot, so its
+raw inventory grew from zero to 4,626,688 tokens during the cell. That is
+recovery, not workload residency. The gate now preserves the start/end values
+and trust flags but reports both changes as `null` in this case. The smoke
+otherwise completed 4/4, split 2/2, reconciled every usage/counter view with
+zero spread, observed zero preemptions, and reached 98.85% reuse-wave token
+hits in 5.24s.
+
+A second trusted-boundary smoke completed 2/2 on one sticky replica and again
+reconciled with zero spread. It reported that replica's exact inventory moving
+from 4,797,696 to 4,779,008 resident tokens (-18,688) while the other remained
+at 4,626,688, alongside 37 live stores and 110 live removals. This is the
+intended output: it reveals net per-replica residency independently from gross
+publisher churn without claiming removals are evictions.
+
+The public `rust-r27-residency-health-48ff0bd` image has digest
+`sha256:eceb463dd63954b826076d3eda7b7e4cd2695597c037e2a495fe91d05247a90f`.
+Its registry promotion reused all but the changed binary layer and took 4.08s;
+the canonical node06 Compose now pins that digest.
+
+The public-digest LB-only swap took 1.55s; both engines again retained their
+start times and zero restart counts. A became authoritative after a 3,647-batch
+replay. B's first 3,500-plus-batch attempt failed closed as `invalid_replay`,
+reconnected, and—because this publisher is quiet until another allocation—
+required one more direct cold request before replaying 3,577 batches and
+becoming trusted. Serving health remained 2/2 throughout because exact state
+is shadow-only. This is a recovery-latency opportunity: a failed replay should
+be able to retry its known range after reconnect without waiting for a second
+live event, while preserving the current publisher-backpressure protections.

@@ -6,10 +6,12 @@ from cachebench import (
     cache_outcome,
     execute_waves,
     fetch_lb_metrics,
+    fetch_replica_inventory,
     latency_by_outcome,
     nonnegative_delta,
     parse_apps,
     reconcile,
+    replica_inventory_change,
     summarize,
     workload_coordinates,
     workload_waves,
@@ -42,6 +44,55 @@ class CacheBenchTest(unittest.TestCase):
             list(workload_coordinates(2, 2, 1)),
             [(0, 0, 1), (1, 0, 1), (0, 1, 1), (1, 1, 1)],
         )
+
+    def test_replica_inventory_uses_only_valid_opaque_indices(self):
+        body = b'''{
+          "status":"ok",
+          "replicas":[
+            {"index":1,"exact_inventory":{"trusted":false,"resident_blocks":2,"resident_tokens":4}},
+            {"index":0,"exact_inventory":{"trusted":true,"resident_blocks":10,"resident_tokens":2560}}
+          ]
+        }'''
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = body
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            inventory = fetch_replica_inventory("http://proxy")
+        self.assertEqual(list(inventory), ["0", "1"])
+        self.assertEqual(inventory["0"]["resident_tokens"], 2560)
+        self.assertNotIn("upstream", str(inventory).lower())
+
+    def test_replica_inventory_fails_closed_and_reports_signed_change(self):
+        invalid = b'{"replicas":[{"index":0,"exact_inventory":null}]}'
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = invalid
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            self.assertIsNone(fetch_replica_inventory("http://proxy"))
+        before = {
+            "0": {"trusted": True, "resident_blocks": 10, "resident_tokens": 100}
+        }
+        after = {
+            "0": {"trusted": True, "resident_blocks": 8, "resident_tokens": 80}
+        }
+        self.assertEqual(
+            replica_inventory_change(before, after),
+            {
+                "0": {
+                    "trusted_before": True,
+                    "trusted_after": True,
+                    "resident_blocks_before": 10,
+                    "resident_blocks_after": 8,
+                    "resident_blocks_change": -2,
+                    "resident_tokens_before": 100,
+                    "resident_tokens_after": 80,
+                    "resident_tokens_change": -20,
+                }
+            },
+        )
+        self.assertIsNone(replica_inventory_change(before, {}))
+        after["0"]["trusted"] = False
+        untrusted = replica_inventory_change(before, after)["0"]
+        self.assertIsNone(untrusted["resident_blocks_change"])
+        self.assertIsNone(untrusted["resident_tokens_change"])
 
     def test_concurrent_waves_keep_cold_to_reuse_barrier(self):
         completed_cold = set()
@@ -178,6 +229,7 @@ class CacheBenchTest(unittest.TestCase):
         self.assertEqual(summary["reuse_wave_cache_hit_pct"], 80)
         self.assertEqual(summary["reuse_distance_requests_max"], 0)
         self.assertEqual(summary["route_split"], {"0": 2, "1": 2})
+        self.assertIsNone(summary["replica_exact_inventory"])
         encoded = str(summary).lower()
         for forbidden in ("message", "content", "fingerprint", "token_ids"):
             self.assertNotIn(forbidden, encoded)

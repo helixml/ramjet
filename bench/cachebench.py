@@ -69,6 +69,81 @@ def fetch_lb_metrics(url, timeout=10):
     return result
 
 
+def fetch_replica_inventory(base, timeout=10):
+    """Read content-free exact-index state keyed only by replica ordinal."""
+    if not base:
+        return None
+    request = urllib.request.Request(base.rstrip("/") + "/health")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except (OSError, ValueError, urllib.error.URLError):
+        return None
+    replicas = payload.get("replicas") if isinstance(payload, dict) else None
+    if not isinstance(replicas, list):
+        return None
+    result = {}
+    for replica in replicas:
+        if not isinstance(replica, dict):
+            return None
+        index = replica.get("index")
+        exact = replica.get("exact_inventory")
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or index < 0
+            or str(index) in result
+            or not isinstance(exact, dict)
+        ):
+            return None
+        trusted = exact.get("trusted")
+        blocks = exact.get("resident_blocks")
+        tokens = exact.get("resident_tokens")
+        if (
+            not isinstance(trusted, bool)
+            or not isinstance(blocks, int)
+            or isinstance(blocks, bool)
+            or blocks < 0
+            or not isinstance(tokens, int)
+            or isinstance(tokens, bool)
+            or tokens < 0
+        ):
+            return None
+        result[str(index)] = {
+            "trusted": trusted,
+            "resident_blocks": blocks,
+            "resident_tokens": tokens,
+        }
+    return dict(sorted(result.items(), key=lambda item: int(item[0])))
+
+
+def replica_inventory_change(before, after):
+    if before is None or after is None or before.keys() != after.keys():
+        return None
+    result = {}
+    for index in before:
+        trusted_throughout = before[index]["trusted"] and after[index]["trusted"]
+        result[index] = {
+            "trusted_before": before[index]["trusted"],
+            "trusted_after": after[index]["trusted"],
+            "resident_blocks_before": before[index]["resident_blocks"],
+            "resident_blocks_after": after[index]["resident_blocks"],
+            "resident_blocks_change": (
+                after[index]["resident_blocks"] - before[index]["resident_blocks"]
+                if trusted_throughout
+                else None
+            ),
+            "resident_tokens_before": before[index]["resident_tokens"],
+            "resident_tokens_after": after[index]["resident_tokens"],
+            "resident_tokens_change": (
+                after[index]["resident_tokens"] - before[index]["resident_tokens"]
+                if trusted_throughout
+                else None
+            ),
+        }
+    return result
+
+
 def nonnegative_delta(before, after, keys):
     if before is None or after is None:
         return None
@@ -286,7 +361,18 @@ def latency_by_outcome(records, field):
     }
 
 
-def summarize(records, apps, sessions, turns, prefix_kib, elapsed, lb, engine, tolerance):
+def summarize(
+    records,
+    apps,
+    sessions,
+    turns,
+    prefix_kib,
+    elapsed,
+    lb,
+    engine,
+    tolerance,
+    replica_inventory=None,
+):
     good = [record for record in records if record["ok"]]
     prompt = sum(record["prompt_tokens"] for record in good)
     cached = sum(record["cached_tokens"] for record in good)
@@ -355,6 +441,7 @@ def summarize(records, apps, sessions, turns, prefix_kib, elapsed, lb, engine, t
             else None
         ),
         "engine_metrics_delta": engine,
+        "replica_exact_inventory": replica_inventory,
         "reconciliation": reconcile(records, lb, engine, tolerance),
     }
 
@@ -362,6 +449,7 @@ def summarize(records, apps, sessions, turns, prefix_kib, elapsed, lb, engine, t
 def run_cell(args, apps, token):
     salt = f"{args.salt}-a{apps}"
     lb_before = fetch_lb_metrics(args.metrics_url)
+    inventory_before = fetch_replica_inventory(args.base)
     engine_before = [fetch_engine_metrics(url) for url in args.engine_metrics]
     started = time.perf_counter()
 
@@ -383,6 +471,7 @@ def run_cell(args, apps, token):
     elapsed = time.perf_counter() - started
     time.sleep(args.settle_seconds)
     lb_after = fetch_lb_metrics(args.metrics_url)
+    inventory_after = fetch_replica_inventory(args.base)
     engine_after = [fetch_engine_metrics(url) for url in args.engine_metrics]
     lb = nonnegative_delta(lb_before, lb_after, LB_COUNTERS)
     engine = aggregate_engine_delta(engine_before, engine_after)
@@ -396,6 +485,7 @@ def run_cell(args, apps, token):
         lb,
         engine,
         args.reconcile_tolerance,
+        replica_inventory_change(inventory_before, inventory_after),
     )
     summary["concurrency"] = args.concurrency
     return summary

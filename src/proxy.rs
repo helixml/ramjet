@@ -42,6 +42,7 @@ struct Inner {
     client: reqwest::Client,
     metrics: Arc<Metrics>,
     router: Arc<Router>,
+    inventories: Arc<[SharedFencedInventory]>,
     journal: RouteJournal,
     tokenizer: TokenizerObserver,
 }
@@ -61,6 +62,15 @@ struct ReplicaHealth {
     inflight: usize,
     load_units: usize,
     approximate_index_entries: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exact_inventory: Option<ExactInventoryHealth>,
+}
+
+#[derive(Serialize)]
+struct ExactInventoryHealth {
+    trusted: bool,
+    resident_blocks: usize,
+    resident_tokens: usize,
 }
 
 struct InflightGuard(GaugeHandle);
@@ -112,14 +122,19 @@ impl Proxy {
         inventories: Arc<[SharedFencedInventory]>,
     ) -> anyhow::Result<Self> {
         let journal = RouteJournal::new(config.route_journal);
-        let tokenizer =
-            TokenizerObserver::new(&config, client.clone(), Arc::clone(&metrics), inventories)?;
+        let tokenizer = TokenizerObserver::new(
+            &config,
+            client.clone(),
+            Arc::clone(&metrics),
+            Arc::clone(&inventories),
+        )?;
         Ok(Self {
             inner: Arc::new(Inner {
                 config,
                 client,
                 metrics,
                 router,
+                inventories,
                 journal,
                 tokenizer,
             }),
@@ -143,12 +158,24 @@ impl Proxy {
         let replicas = (0..proxy.inner.config.upstreams.len())
             .filter_map(|index| {
                 proxy.inner.router.state(index).map(
-                    |(inflight, load_units, approximate_index_entries, healthy)| ReplicaHealth {
-                        index,
-                        healthy,
-                        inflight,
-                        load_units,
-                        approximate_index_entries,
+                    |(inflight, load_units, approximate_index_entries, healthy)| {
+                        let exact_inventory = proxy.inner.inventories.get(index).map(|inventory| {
+                            let inventory = inventory.read();
+                            let stats = inventory.stats();
+                            ExactInventoryHealth {
+                                trusted: inventory.trusted(),
+                                resident_blocks: stats.external_hashes,
+                                resident_tokens: stats.token_ids,
+                            }
+                        });
+                        ReplicaHealth {
+                            index,
+                            healthy,
+                            inflight,
+                            load_units,
+                            approximate_index_entries,
+                            exact_inventory,
+                        }
                     },
                 )
             })
@@ -992,6 +1019,13 @@ mod tests {
     }
 
     fn proxy_for(upstreams: &[Url]) -> Proxy {
+        proxy_for_with_inventories(upstreams, Arc::from([]))
+    }
+
+    fn proxy_for_with_inventories(
+        upstreams: &[Url],
+        inventories: Arc<[SharedFencedInventory]>,
+    ) -> Proxy {
         let joined = upstreams
             .iter()
             .map(Url::as_str)
@@ -1012,14 +1046,7 @@ mod tests {
             max_load_units: config.route_max_load_units,
             affinity: config.affinity,
         }));
-        Proxy::new(
-            config,
-            reqwest::Client::new(),
-            metrics,
-            router,
-            Arc::from([]),
-        )
-        .unwrap()
+        Proxy::new(config, reqwest::Client::new(), metrics, router, inventories).unwrap()
     }
 
     fn trusted_inventory(tokens: &[u32]) -> SharedFencedInventory {
@@ -1316,6 +1343,7 @@ mod tests {
         assert_eq!(health["total_replicas"], 2);
         assert_eq!(health["replicas"][0]["healthy"], true);
         assert_eq!(health["replicas"][1]["healthy"], false);
+        assert!(health["replicas"][0].get("exact_inventory").is_none());
 
         proxy.router().set_healthy(0, false);
         let response = Proxy::health(State(proxy)).await;
@@ -1324,6 +1352,39 @@ mod tests {
         let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "unhealthy");
         assert_eq!(health["healthy_replicas"], 0);
+    }
+
+    #[tokio::test]
+    async fn health_reports_content_free_exact_inventory_by_replica_index() {
+        let proxy = proxy_for_with_inventories(
+            &[
+                Url::parse("http://127.0.0.1:1").unwrap(),
+                Url::parse("http://127.0.0.1:2").unwrap(),
+            ],
+            Arc::from([trusted_inventory(&[1, 2, 3]), trusted_inventory(&[])]),
+        );
+        let response = Proxy::health(State(proxy)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(health["replicas"][0]["exact_inventory"]["trusted"], true);
+        assert_eq!(
+            health["replicas"][0]["exact_inventory"]["resident_blocks"],
+            1
+        );
+        assert_eq!(
+            health["replicas"][0]["exact_inventory"]["resident_tokens"],
+            3
+        );
+        assert_eq!(
+            health["replicas"][1]["exact_inventory"]["resident_tokens"],
+            0
+        );
+        assert!(
+            !String::from_utf8(body.to_vec())
+                .unwrap()
+                .contains("127.0.0.1")
+        );
     }
 
     #[tokio::test]
