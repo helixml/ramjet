@@ -193,6 +193,35 @@ impl ZmqKvEventSource {
         from: u64,
         through: u64,
     ) -> Result<Vec<SequencedBatch>, KvTransportError> {
+        self.replay_fold(from, through, Vec::new(), |batches, batch| {
+            batches.push(batch);
+        })
+        .await
+    }
+
+    /// Request a replay while folding each validated batch into bounded state.
+    ///
+    /// Unlike [`Self::replay`], this never retains decoded batches unless the
+    /// caller's accumulator does so. The fold runs on the same blocking worker
+    /// that drains libzmq, making it suitable for a large full-generation
+    /// replay staged into an exact index one batch at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same bounded transport and validation errors as
+    /// [`Self::replay`]. The accumulator is returned only after a valid end
+    /// marker and complete requested range.
+    pub async fn replay_fold<T, F>(
+        &mut self,
+        from: u64,
+        through: u64,
+        accumulator: T,
+        fold: F,
+    ) -> Result<T, KvTransportError>
+    where
+        T: Send + 'static,
+        F: FnMut(&mut T, SequencedBatch) + Send + 'static,
+    {
         let expected_count = through
             .checked_sub(from)
             .and_then(|distance| distance.checked_add(1))
@@ -218,12 +247,13 @@ impl ZmqKvEventSource {
                 &endpoint,
                 from,
                 through,
-                expected_count,
                 max_messages,
                 &topic,
                 connect_timeout,
                 replay_timeout,
                 limits,
+                accumulator,
+                fold,
             )
         })
         .await
@@ -232,17 +262,21 @@ impl ZmqKvEventSource {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn blocking_replay_exchange(
+fn blocking_replay_exchange<T, F>(
     endpoint: &str,
     from: u64,
     through: u64,
-    expected_count: usize,
     max_messages: usize,
     topic: &[u8],
     connect_timeout: Duration,
     replay_timeout: Duration,
     limits: KvWireLimits,
-) -> Result<Vec<SequencedBatch>, KvTransportError> {
+    mut accumulator: T,
+    mut fold: F,
+) -> Result<T, KvTransportError>
+where
+    F: FnMut(&mut T, SequencedBatch),
+{
     let context = zmq::Context::new();
     let replay = context
         .socket(zmq::DEALER)
@@ -270,7 +304,6 @@ fn blocking_replay_exchange(
     let deadline = Instant::now() + replay_timeout;
     let mut last_requested = None;
     let mut completed_requested_range = false;
-    let mut batches = Vec::with_capacity(expected_count);
     let mut messages = 0_usize;
     let mut validation_error = None;
     loop {
@@ -303,7 +336,7 @@ fn blocking_replay_exchange(
             None => {
                 return match validation_error {
                     Some(error) => Err(error),
-                    None if completed_requested_range => Ok(batches),
+                    None if completed_requested_range => Ok(accumulator),
                     None => Err(KvTransportError::InvalidReplay),
                 };
             }
@@ -327,7 +360,7 @@ fn blocking_replay_exchange(
                 }
                 last_requested = Some(batch.sequence);
                 completed_requested_range = batch.sequence == through;
-                batches.push(batch);
+                fold(&mut accumulator, batch);
             }
         }
     }
@@ -547,15 +580,14 @@ mod tests {
             // the real client confirms that it drained the end marker.
             replay_drained_rx.await.unwrap();
         });
-        let replay = source.replay(5, 6).await.unwrap();
+        let replay = source
+            .replay_fold(5, 6, Vec::new(), |sequences, batch| {
+                sequences.push(batch.sequence);
+            })
+            .await
+            .unwrap();
         replay_drained_tx.send(()).unwrap();
-        assert_eq!(
-            replay
-                .iter()
-                .map(|batch| batch.sequence)
-                .collect::<Vec<_>>(),
-            vec![6]
-        );
+        assert_eq!(replay, vec![6]);
         server.await.unwrap();
         drop(publisher);
         assert!(matches!(
