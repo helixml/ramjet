@@ -127,6 +127,25 @@ ssh node06 'docker logs ds4-loadbalancer --tail 1; curl -s :8007/metrics | grep 
 Rollback is the same command with `LB_IMAGE=...:1.0.1`. The LB is stateless;
 swapping it never touches the engines or their KV caches.
 
+### Preflight engine flags before a rolling restart
+
+Do not discover an unsupported vLLM flag combination by restarting a resident
+engine. First exercise the pinned image's argument validation on the healthy
+peer (or in a disposable container for a new image). For example:
+
+```bash
+ssh node06 'docker exec dspark-0731 python -c "from vllm.engine.arg_utils import EngineArgs; EngineArgs(max_num_partial_prefills=2, max_long_partial_prefills=1)._check_feature_supported()"'
+```
+
+Translate the proposed CLI values into `EngineArgs` keyword arguments and
+require exit zero before touching compose. Also check `vllm serve --help` when
+adding a newly introduced flag. This private validation hook is deliberately
+pinned-image-specific: it took 16.5s to reject r34 concurrent partial prefill,
+versus entering a multi-minute engine restart/load cycle. If the candidate is
+a different image, run the same import with `docker run --rm --entrypoint
+python <engine-image> -c ...` before assigning GPUs. Record preflight wall time
+and the result in `EXPERIMENTS.md`.
+
 ## Benchmarks (run on node06)
 
 All benches are in `bench/` and mirrored to
