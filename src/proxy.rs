@@ -128,12 +128,12 @@ impl Proxy {
         self.inner.metrics.inflight.inc();
         let inflight_guard = InflightGuard(GaugeHandle(self.inner.metrics.inflight.clone()));
 
-        let decision = self.inner.router.route(&body);
+        let (decision, fingerprints) = self.inner.router.route_with_fingerprints(&body);
         self.record_decision(&decision);
         let fingerprints = if endpoint == Endpoint::Other {
             Vec::new()
         } else {
-            self.inner.router.fingerprints(&body)
+            fingerprints
         };
         let journal_sequence =
             self.inner

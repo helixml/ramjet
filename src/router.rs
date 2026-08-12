@@ -133,6 +133,20 @@ impl Router {
 
     pub fn route(&self, body: &[u8]) -> Decision {
         let fingerprints = self.fingerprints(body);
+        self.route_fingerprints(body.len(), &fingerprints)
+    }
+
+    /// Prepares fingerprints once and returns them with the decision so a
+    /// successful proxy response can update the cache index without reparsing
+    /// and rehashing a potentially multi-megabyte prompt.
+    #[must_use]
+    pub fn route_with_fingerprints(&self, body: &[u8]) -> (Decision, Vec<u64>) {
+        let fingerprints = self.fingerprints(body);
+        let decision = self.route_fingerprints(body.len(), &fingerprints);
+        (decision, fingerprints)
+    }
+
+    fn route_fingerprints(&self, body_bytes: usize, fingerprints: &[u64]) -> Decision {
         let mut inner = self.inner.lock();
         inner.rr = inner.rr.wrapping_add(1);
         let rotation = inner.rr % inner.states.len();
@@ -202,7 +216,7 @@ impl Router {
                 overlap_blocks: score.overlap,
                 affinity_blocks: score.affinity,
                 load_units: score.load,
-                request_load_units: self.estimated_load_units(body.len(), score.overlap),
+                request_load_units: self.estimated_load_units(body_bytes, score.overlap),
                 healthy: score.healthy,
             })
             .collect();
@@ -212,7 +226,7 @@ impl Router {
             overlap_blocks: winner.overlap,
             total_blocks: fingerprints.len(),
             affinity_blocks: winner.affinity,
-            load_units: self.estimated_load_units(body.len(), winner.overlap),
+            load_units: self.estimated_load_units(body_bytes, winner.overlap),
             rotation,
             outcome,
         }
@@ -532,5 +546,17 @@ mod tests {
         for (body, expected) in cases {
             assert_eq!(router.fingerprints(body), *expected);
         }
+    }
+
+    #[test]
+    fn prepared_route_reuses_returned_fingerprints() {
+        let router = Router::new(config());
+        let body = chat(&"long shared prompt ".repeat(100), "task");
+        let expected = router.fingerprints(&body);
+        let (decision, fingerprints) = router.route_with_fingerprints(&body);
+        assert_eq!(fingerprints, expected);
+        assert_eq!(decision.total_blocks, expected.len());
+        router.observe(decision.candidates[0], &fingerprints);
+        assert!(router.route(&body).overlap_blocks > 0);
     }
 }
