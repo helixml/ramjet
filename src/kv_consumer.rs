@@ -148,7 +148,7 @@ async fn run_consumer(
             backoff = next_backoff(backoff, config.reconnect_max);
             continue;
         };
-        let Some((disconnect_reason, made_progress)) = consume_connection(
+        let Some((disconnect_reason, restored_authority)) = consume_connection(
             &config,
             &upstream,
             &inventory,
@@ -173,13 +173,20 @@ async fn run_consumer(
             reason = disconnect_reason,
             "KV-event shadow consumer disconnected"
         );
-        if made_progress {
-            backoff = config.reconnect_min;
-        }
-        if wait_or_shutdown(backoff, &mut shutdown).await {
+        let delay = recovery_delay(
+            &mut backoff,
+            config.reconnect_min,
+            config.reconnect_max,
+            restored_authority,
+            if disconnect_reason == "replay_timeout_undrained" {
+                config.transport.replay_timeout
+            } else {
+                Duration::ZERO
+            },
+        );
+        if wait_or_shutdown(delay, &mut shutdown).await {
             return;
         }
-        backoff = next_backoff(backoff, config.reconnect_max);
     }
 }
 
@@ -191,7 +198,11 @@ async fn consume_connection(
     shutdown: &mut broadcast::Receiver<()>,
     source: &mut ZmqKvEventSource,
 ) -> Option<(&'static str, bool)> {
-    let mut made_progress = false;
+    // Merely receiving a live event is not recovery progress: an untrusted
+    // startup fence uses that event to request a full replay. Resetting the
+    // reconnect delay before that replay becomes authoritative can create a
+    // rapid request storm behind one abandoned publisher-side replay.
+    let mut restored_authority = false;
     loop {
         let received = tokio::select! {
             _ = shutdown.recv() => {
@@ -202,7 +213,7 @@ async fn consume_connection(
         };
         let activity = match received {
             Ok(activity) => activity,
-            Err(error) => return Some((error.reason(), made_progress)),
+            Err(error) => return Some((error.reason(), restored_authority)),
         };
         let live = match activity {
             LiveActivity::Connected => {
@@ -215,8 +226,9 @@ async fn consume_connection(
             }
             LiveActivity::Batch(batch) => batch,
         };
-        made_progress = true;
-        if let Ok(Some((from, through))) = ingest_live(inventory, metrics, upstream, &live) {
+        let replay = ingest_live(inventory, metrics, upstream, &live);
+        restored_authority |= inventory.read().trusted();
+        if let Ok(Some((from, through))) = replay {
             let replayed = tokio::select! {
                 _ = shutdown.recv() => {
                     metrics.kv_event_up.with_label_values(&[upstream]).set(0.0);
@@ -226,13 +238,16 @@ async fn consume_connection(
             };
             let replayed = match replayed {
                 Ok(replayed) => replayed,
-                Err(error) => return Some((error.reason(), made_progress)),
+                Err(error) => return Some((error.reason(), restored_authority)),
             };
             metrics
                 .kv_event_replay_batches
                 .with_label_values(&[upstream])
                 .observe(metric_usize(replayed.len()));
-            ingest_replay(inventory, metrics, upstream, replayed);
+            if !ingest_replay(inventory, metrics, upstream, replayed) {
+                return Some(("replay_not_authoritative", restored_authority));
+            }
+            restored_authority = true;
         }
     }
 }
@@ -304,7 +319,7 @@ fn ingest_replay(
     metrics: &Metrics,
     upstream: &str,
     batches: Vec<SequencedBatch>,
-) {
+) -> bool {
     let batches = batches
         .into_iter()
         .map(|batch| (batch.sequence, batch.batch))
@@ -324,6 +339,7 @@ fn ingest_replay(
         record_filtered(metrics, upstream, "replay", summary);
     }
     update_state_metrics(inventory, metrics, upstream);
+    inventory.read().trusted()
 }
 
 fn record_filtered(
@@ -372,6 +388,21 @@ async fn wait_or_shutdown(duration: Duration, shutdown: &mut broadcast::Receiver
 
 fn next_backoff(current: Duration, maximum: Duration) -> Duration {
     current.saturating_mul(2).min(maximum)
+}
+
+fn recovery_delay(
+    backoff: &mut Duration,
+    minimum: Duration,
+    maximum: Duration,
+    restored_authority: bool,
+    retry_floor: Duration,
+) -> Duration {
+    if restored_authority {
+        *backoff = minimum;
+    }
+    let delay = (*backoff).max(retry_floor);
+    *backoff = next_backoff(*backoff, maximum);
+    delay
 }
 
 fn metric_usize(value: usize) -> f64 {
@@ -445,6 +476,83 @@ mod tests {
             next_backoff(Duration::from_millis(800), Duration::from_secs(1)),
             Duration::from_secs(1)
         );
+    }
+
+    #[test]
+    fn replay_recovery_backoff_resets_only_after_authority_is_restored() {
+        let minimum = Duration::from_millis(250);
+        let maximum = Duration::from_secs(1);
+        let mut backoff = minimum;
+
+        assert_eq!(
+            recovery_delay(&mut backoff, minimum, maximum, false, Duration::ZERO),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            recovery_delay(&mut backoff, minimum, maximum, false, Duration::ZERO),
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            recovery_delay(&mut backoff, minimum, maximum, false, Duration::ZERO),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            recovery_delay(&mut backoff, minimum, maximum, true, Duration::ZERO),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            recovery_delay(&mut backoff, minimum, maximum, false, Duration::ZERO),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn undrained_replay_waits_a_full_replay_window_before_retrying() {
+        let minimum = Duration::from_millis(250);
+        let maximum = Duration::from_secs(10);
+        let mut backoff = minimum;
+
+        assert_eq!(
+            recovery_delay(
+                &mut backoff,
+                minimum,
+                maximum,
+                false,
+                Duration::from_secs(20),
+            ),
+            Duration::from_secs(20)
+        );
+        // The ordinary exponential state still advances independently, so a
+        // later non-replay transport error does not inherit a 20s penalty.
+        assert_eq!(
+            recovery_delay(&mut backoff, minimum, maximum, false, Duration::ZERO),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn incomplete_replay_does_not_claim_authoritative_progress() {
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry).unwrap();
+        let inventory = Arc::new(RwLock::new(FencedExactKvInventory::new(
+            8,
+            ExactIndexLimits::default(),
+        )));
+        let observed = SequencedBatch {
+            sequence: 4,
+            batch: KvEventBatch {
+                timestamp: 1.0,
+                events: Vec::new(),
+                data_parallel_rank: Some(0),
+            },
+        };
+        assert_eq!(
+            ingest_live(&inventory, &metrics, "engine", &observed),
+            Ok(Some((0, 4)))
+        );
+
+        assert!(!ingest_replay(&inventory, &metrics, "engine", Vec::new()));
+        assert!(!inventory.read().trusted());
     }
 
     #[test]

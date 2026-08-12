@@ -136,17 +136,17 @@ node06). The design rationale for each lives in DESIGN.md.
   move/gain/load distributions before
   considering a narrowly admitted placement rollout. Raw token IDs, block
   hashes, and prompts remain out of logs.
-- ⬜ **Replay cancellation and publisher-backpressure resilience.** Production
-  inventories crossed the old 1,024-batch replay cap, so the qualified defaults
-  are now 2,048 batches and a 20-second fail-closed deadline. After simultaneous
-  aborted full replays, stale ROUTER/DEALER identities temporarily delayed new
-  full requests even though a direct contiguous 0..1083 replay completed in
-  about one second. A first Rust retry-pacing experiment now proves fresh
-  identities and refuses to reset exponential backoff until an inventory is
-  authoritative, but its live canary was intentionally not promoted after an
-  aborted replay left the publisher busy. Add recovery telemetry and upstream
-  cancellation or chunked/snapshot replay; keep exact placement fenced
-  throughout recovery.
+- ✅ **Replay cancellation and publisher-backpressure resilience.** r23 proved
+  that vLLM's synchronous ROUTER can burst a 1,292-batch / 29.9MB replay in
+  77ms through libzmq while the async pure-Rust ZMTP receiver can stall before
+  the end marker on the same large stream. Replay now runs in a deadline-
+  bounded blocking worker with a fresh DEALER identity, high receive HWM, and
+  drain-through-validation semantics; live SUB delivery remains async Rust.
+  Reconnect progress means authoritative inventory restoration, so exponential
+  backoff cannot reset on a merely live-but-fenced event. Isolated and
+  production starts restored both inventories in parallel at 1,293/1,684 and
+  1,332/1,724 retained batches respectively, without engine restarts. Exact
+  placement remains shadow-only while #13 collects organic gain/load evidence.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
   vectors rather than restarting; benchmark memory, p99 preparation latency,

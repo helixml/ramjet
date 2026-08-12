@@ -6,16 +6,59 @@ full experiments require GPUs, so they run there, not locally.
 
 ## Local (no GPUs needed)
 
+### Fast iteration contract
+
+Do not run the complete release gate after every edit. Use the narrowest test
+that proves the code being changed, then widen once before publishing:
+
 ```bash
+# inner loop (normally 2-5s when warm)
+cargo fmt --check
+cargo test --locked <module-or-test-name>
+cargo check --locked
+
+# pre-push gate (run once after focused tests are green)
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
 cargo build --release --locked
-
-# Keep the Go parity oracle healthy until the Rust cutover is promoted.
-go test ./... && go vet ./...
-gofmt -l .             # must be empty
+go test ./... && go vet ./... && test -z "$(gofmt -l .)"
 ```
+
+On the 2026-08-12 development checkout, a focused/warm test took about 2-3s,
+all 104 Rust tests took about 3s including the crate rebuild, and the thin-LTO
+release relink took about 19s. If a routine loop is materially slower, inspect
+cache misses, downloads, disk pressure, or accidental all-target/release work
+before waiting through repeated slow builds. Use `/usr/bin/time` or the timing
+printed by repository scripts; record build/transfer/benchmark wall time in an
+experiment entry whenever workflow speed itself changes.
+
+Run the Go oracle in the inner loop only when changing a cross-language parity
+contract. It remains mandatory in the pre-push gate until the cutover is final.
+
+### Fast image build and transfer
+
+Compile on the development machine in the pinned Bookworm builder, not on the
+GPU host. node06 normally has little free host RAM while both vLLM engines are
+resident. The persistent BuildKit target/registry caches make unchanged image
+builds about 2-3s; a Rust source edit normally pays only the crate's release
+relink. The resulting runtime image is about 14MB and transferred over
+Tailscale in about 4s in the qualified r23 run.
+
+```bash
+# One-time builder creation if it is absent.
+docker buildx create --name mini-dynamo-publisher \
+  --driver docker-container --use
+
+# Build only, or build and stream into node06's Docker image store.
+bench/build_transfer.sh rust-rNN-description-$(git rev-parse --short HEAD)
+bench/build_transfer.sh rust-rNN-description-$(git rev-parse --short HEAD) --node06
+```
+
+The cold first build still downloads the Rust base and compiles dependencies;
+judge the workflow by its warm edit/rebuild time. A dependency change is a
+legitimate one-time cold build. `sccache` is a useful follow-up for cross-branch
+and CI reuse, but it does not replace Cargo incremental/BuildKit caches.
 
 The router is the interesting surface — `src/router.rs` contains the active
 Rust tests and Go-generated fingerprint goldens; `pkg/router/router_test.go`
@@ -41,10 +84,11 @@ Layout on the box:
   `grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head -1 | cut -d' ' -f2`
   (never hard-code it; it is not committed anywhere).
 
-### Build + deploy a new LB image on node06
+### Build + deploy a new LB image
 
-The interactive `gh` token lacks `write:packages`, so images are built on the
-box until CI exists (ROADMAP). From your dev checkout:
+Prefer the local cached build/transfer path above. It avoids CPU, RAM, disk, and
+dependency-download pressure on the live GPU box. The old source-build path is
+an emergency fallback only:
 
 ```bash
 # ship source, build the image tag on node06
@@ -128,6 +172,36 @@ salt, capture; deploy image Y, run the SAME bench with ANOTHER fresh salt,
 capture; compare. Never reuse a salt across the two — warm state leaks.
 Read the router's own decisions with
 `curl -s :8007/metrics | grep ds4proxy_route_decisions_total`.
+
+
+### Using both TP4 pairs without invalidating the result
+
+Parallelize direct-engine work when the two jobs are independent. For a
+baseline/candidate engine comparison, use a two-round crossover with fresh
+inputs in every cell:
+
+| round | engine A (`:8012`) | engine B (`:8013`) |
+|---|---|---|
+| 1 | baseline | candidate |
+| 2 | candidate | baseline |
+
+Launch the two cells in a round together and point each collector at that
+engine's metrics endpoint. This removes much of the time drift and engine bias
+while using all eight GPUs. It is appropriate for code/prose/agent matrices,
+context sweeps, tokenizer/protocol checks, and one-variable engine settings.
+
+Keep these tests serial because concurrent runs change the state being
+measured or contend on the same replicas:
+
+- cache locality, eviction, and cold/warm comparisons;
+- LB policies that choose between both engines;
+- aggregate box-capacity gates;
+- exact-placement tests whose answer depends on both inventories.
+
+Use offline route replay, unit tests, mock upstreams, and direct-engine probes
+to eliminate candidates before a serial GPU A/B. Do not run two nominally
+parallel jobs merely to make the clock shorter if their GPU load, KV warming,
+or event streams contaminate one another.
 
 
 ### Decision journal + offline replay (rc5+)
