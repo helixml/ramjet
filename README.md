@@ -29,7 +29,8 @@ DS4_MAX_TOKENS_STRIP (100000), DS4_ROUTE_ALPHA (4), DS4_ROUTE_CHUNK_BYTES
 DS4_ROUTE_MAX_LOAD_UNITS (8),
 DS4_AFFINITY (prefix|load), DS4_ROUTE_JOURNAL (false),
 DS4_TOKENIZER_MODE (off|remote-shadow|local-shadow),
-DS4_TOKENIZER_PATH (required by local-shadow), DS4_TOKENIZER_MIN_BYTES (32768),
+DS4_TOKENIZER_PATH, DS4_TOKENIZER_SHA256 (both required by local-shadow),
+DS4_TOKENIZER_PROFILE (deepseek-v4-r34), DS4_TOKENIZER_MIN_BYTES (32768),
 DS4_TOKENIZER_MAX_BYTES (2097152), DS4_TOKENIZER_WORKERS (1),
 DS4_TOKENIZER_QUEUE_CAPACITY (8), DS4_TOKENIZER_TIMEOUT_MS (2000). `load` is an explicit baseline or an
 escape hatch for engines without reusable prefix state; hybrid KDA models such
@@ -49,7 +50,9 @@ Rust formatter and encodes them with NVIDIA `fastokens` on bounded blocking CPU
 workers. The selected engine's authenticated `/tokenize` runs concurrently as
 the authority. Exact IDs are compared in memory and discarded; a template
 mismatch, unsupported tool-history or reasoning variant, worker failure, or
-missing remote authority cannot affect the approximate routing decision.
+missing remote authority cannot affect the approximate routing decision. The
+configured profile and expected SHA-256 must match the mounted tokenizer at
+startup, preventing silent artifact drift from inheriting old golden results.
 
 Set `DS4_ROUTE_JOURNAL=true` to emit privacy-bounded versioned `start`/`finish`
 records to the process log. Records contain only process-local sequence IDs,

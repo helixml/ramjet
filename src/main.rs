@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
         max_load_units = config.route_max_load_units,
         journal = config.route_journal,
         tokenizer_mode = ?config.tokenizer_mode,
+        tokenizer_profile = ?config.tokenizer_profile,
         tokenizer_min_bytes = config.tokenizer_min_bytes,
         tokenizer_max_bytes = config.tokenizer_max_bytes,
         tokenizer_workers = config.tokenizer_workers,

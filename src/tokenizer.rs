@@ -7,6 +7,7 @@ use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, TextInput, deepseek_f
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::{sync::mpsc, time::Instant};
 use url::Url;
 
@@ -142,6 +143,11 @@ impl TokenizerObserver {
                     .tokenizer_path
                     .as_deref()
                     .context("DS4_TOKENIZER_PATH is required in local-shadow mode")?;
+                let expected_sha256 = config
+                    .tokenizer_sha256
+                    .as_deref()
+                    .context("DS4_TOKENIZER_SHA256 is required in local-shadow mode")?;
+                validate_tokenizer_sha256(path, expected_sha256)?;
                 let tokenizer = fastokens::Tokenizer::from_file(Path::new(path))
                     .map_err(|error| anyhow::anyhow!(error.to_string()))
                     .with_context(|| format!("load fastokens tokenizer from {path}"))?;
@@ -225,6 +231,27 @@ impl TokenizerObserver {
             .with_label_values(&[self.backend_label, endpoint.label(), outcome])
             .inc();
     }
+}
+
+fn validate_tokenizer_sha256(path: &str, expected: &str) -> anyhow::Result<()> {
+    let bytes = std::fs::read(path).with_context(|| format!("read tokenizer artifact {path}"))?;
+    let actual = sha256_hex(&bytes);
+    anyhow::ensure!(
+        actual == expected,
+        "tokenizer artifact SHA-256 does not match DS4_TOKENIZER_SHA256"
+    );
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 fn remote_tokenizer(config: &Config, client: reqwest::Client) -> RemoteTokenizer {
@@ -730,5 +757,13 @@ mod tests {
             ]
         });
         assert!(has_tool_history(history.as_object().unwrap()));
+    }
+
+    #[test]
+    fn artifact_digest_is_stable() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }

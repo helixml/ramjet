@@ -20,6 +20,8 @@ pub struct Config {
     pub route_journal: bool,
     pub tokenizer_mode: TokenizerMode,
     pub tokenizer_path: Option<String>,
+    pub tokenizer_sha256: Option<String>,
+    pub tokenizer_profile: TokenizerProfile,
     pub tokenizer_min_bytes: usize,
     pub tokenizer_max_bytes: usize,
     pub tokenizer_workers: usize,
@@ -38,6 +40,20 @@ pub enum TokenizerMode {
     Off,
     RemoteShadow,
     LocalShadow,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenizerProfile {
+    DeepSeekV4R34,
+}
+
+struct TokenizerSettings {
+    mode: TokenizerMode,
+    path: Option<String>,
+    sha256: Option<String>,
+    profile: TokenizerProfile,
+    min_bytes: usize,
+    max_bytes: usize,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -113,8 +129,7 @@ impl Config {
             "load" => Affinity::Load,
             value => return Err(invalid("DS4_AFFINITY", value.to_owned(), "prefix or load")),
         };
-        let (tokenizer_mode, tokenizer_path, tokenizer_min_bytes, tokenizer_max_bytes) =
-            tokenizer_settings(&mut get)?;
+        let tokenizer = tokenizer_settings(&mut get)?;
 
         Ok(Self {
             upstreams,
@@ -135,10 +150,12 @@ impl Config {
             route_max_load_units,
             affinity,
             route_journal: parse(&mut get, "DS4_ROUTE_JOURNAL", false, "a boolean")?,
-            tokenizer_mode,
-            tokenizer_path,
-            tokenizer_min_bytes,
-            tokenizer_max_bytes,
+            tokenizer_mode: tokenizer.mode,
+            tokenizer_path: tokenizer.path,
+            tokenizer_sha256: tokenizer.sha256,
+            tokenizer_profile: tokenizer.profile,
+            tokenizer_min_bytes: tokenizer.min_bytes,
+            tokenizer_max_bytes: tokenizer.max_bytes,
             tokenizer_workers: positive(&mut get, "DS4_TOKENIZER_WORKERS", 1)?,
             tokenizer_queue_capacity: positive(&mut get, "DS4_TOKENIZER_QUEUE_CAPACITY", 8)?,
             tokenizer_timeout_ms: positive(&mut get, "DS4_TOKENIZER_TIMEOUT_MS", 2_000)?,
@@ -148,7 +165,7 @@ impl Config {
 
 fn tokenizer_settings(
     get: &mut impl FnMut(&str) -> Option<String>,
-) -> Result<(TokenizerMode, Option<String>, usize, usize), ConfigError> {
+) -> Result<TokenizerSettings, ConfigError> {
     let mode = match get("DS4_TOKENIZER_MODE").as_deref().unwrap_or("off") {
         "off" => TokenizerMode::Off,
         "remote-shadow" => TokenizerMode::RemoteShadow,
@@ -162,11 +179,45 @@ fn tokenizer_settings(
         }
     };
     let path = get("DS4_TOKENIZER_PATH").filter(|value| !value.is_empty());
-    if mode == TokenizerMode::LocalShadow && path.is_none() {
+    let sha256 = get("DS4_TOKENIZER_SHA256")
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    let profile = match get("DS4_TOKENIZER_PROFILE")
+        .as_deref()
+        .unwrap_or("deepseek-v4-r34")
+    {
+        "deepseek-v4-r34" => TokenizerProfile::DeepSeekV4R34,
+        value => {
+            return Err(invalid(
+                "DS4_TOKENIZER_PROFILE",
+                value.to_owned(),
+                "deepseek-v4-r34",
+            ));
+        }
+    };
+    if mode == TokenizerMode::LocalShadow {
+        if path.is_none() {
+            return Err(invalid(
+                "DS4_TOKENIZER_PATH",
+                String::new(),
+                "a tokenizer.json path in local-shadow mode",
+            ));
+        }
+        if sha256.is_none() {
+            return Err(invalid(
+                "DS4_TOKENIZER_SHA256",
+                String::new(),
+                "the expected 64-character tokenizer SHA-256 in local-shadow mode",
+            ));
+        }
+    }
+    if let Some(value) = &sha256
+        && (value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
         return Err(invalid(
-            "DS4_TOKENIZER_PATH",
-            String::new(),
-            "a tokenizer.json path in local-shadow mode",
+            "DS4_TOKENIZER_SHA256",
+            value.clone(),
+            "a 64-character hexadecimal SHA-256",
         ));
     }
     let min_bytes = parse(
@@ -183,7 +234,14 @@ fn tokenizer_settings(
             "no greater than DS4_TOKENIZER_MAX_BYTES",
         ));
     }
-    Ok((mode, path, min_bytes, max_bytes))
+    Ok(TokenizerSettings {
+        mode,
+        path,
+        sha256,
+        profile,
+        min_bytes,
+        max_bytes,
+    })
 }
 
 fn parse<T: std::str::FromStr>(
@@ -234,6 +292,8 @@ mod tests {
         assert!(!config.route_journal);
         assert_eq!(config.tokenizer_mode, TokenizerMode::Off);
         assert!(config.tokenizer_path.is_none());
+        assert!(config.tokenizer_sha256.is_none());
+        assert_eq!(config.tokenizer_profile, TokenizerProfile::DeepSeekV4R34);
         assert_eq!(config.tokenizer_min_bytes, 32 << 10);
         assert_eq!(config.tokenizer_max_bytes, 2 << 20);
         assert_eq!(config.tokenizer_workers, 1);
@@ -285,6 +345,24 @@ mod tests {
             error,
             ConfigError::InvalidValue {
                 key: "DS4_TOKENIZER_PATH",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn local_tokenizer_requires_a_valid_artifact_digest() {
+        let values = HashMap::from([
+            ("DS4_TOKENIZER_MODE", "local-shadow"),
+            ("DS4_TOKENIZER_PATH", "/models/tokenizer.json"),
+            ("DS4_TOKENIZER_SHA256", "not-a-digest"),
+        ]);
+        let error =
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "DS4_TOKENIZER_SHA256",
                 ..
             }
         ));

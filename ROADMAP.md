@@ -48,6 +48,9 @@ node06). The design rationale for each lives in DESIGN.md.
 - ⬜ **Versioned renderer compatibility manifest.** Bind model/tokenizer hashes,
   renderer profile, engine image digest, admitted request classes, and golden
   results so an engine or template update cannot silently widen local routing.
+  Startup now enforces the exact tokenizer SHA-256 and the
+  `deepseek-v4-r34` profile; add engine-digest discovery and a machine-readable
+  golden attestation before exact IDs can influence routing.
 - ⬜ **Exact KV-event shadow index.** Per-engine token-prefix/radix indexes,
   cache-group-aware block metadata, sequence-gap detection, bounded replay,
   generation fencing, reconnect backoff, and an automatic approximate-routing
