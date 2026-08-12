@@ -51,7 +51,11 @@ node06). The design rationale for each lives in DESIGN.md.
   Startup now enforces the exact tokenizer SHA-256 and the
   `deepseek-v4-r34` profile; add engine-digest discovery and a machine-readable
   golden attestation before exact IDs can influence routing.
-- ⬜ **Exact KV-event shadow index.** Per-engine token-prefix/radix indexes,
+- 🔨 **Exact KV-event shadow index.** The transport-independent sequence fence
+  now starts untrusted, requests bounded contiguous replay on gaps, increments
+  generations on restart/unrecoverable recovery, and admits exact state only
+  after an authoritative clear/snapshot boundary. Next wire it to per-engine
+  ZMQ consumers and token-prefix/radix indexes with
   cache-group-aware block metadata, sequence-gap detection, bounded replay,
   generation fencing, reconnect backoff, and an automatic approximate-routing
   fallback. Raw token IDs, block hashes, and prompts remain out of logs.

@@ -153,6 +153,10 @@ is the reference for the failure semantics below:
   gap clears/fences that engine's exact index and falls back to the current
   approximate router. Dynamo's worker-side radix-tree dump is the stronger
   recovery model to copy if this limitation matters operationally.
+- `src/kv_fence.rs` encodes this independently of ZMQ and the index: subscriber
+  startup is observation-only, a full clear/snapshot begins a trusted
+  generation, gaps request an inclusive bounded replay, and invalid or
+  oversized recovery increments the generation and disables exact placement.
 - Exact request lookup requires the rendered token sequence. Calling r34's
   `/tokenize` for every request costs 3.7ms at 299 tokens, 8.4ms at 4.3K,
   41ms at 21K, and 203ms at 83.7K, while returning up to 419KB of token IDs.
