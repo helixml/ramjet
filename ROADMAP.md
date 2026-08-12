@@ -412,7 +412,11 @@ node06). The design rationale for each lives in DESIGN.md.
   were within -1.4% to +2.0%. The Rust shadow consumer has now passed a complete
   real replay plus live-update qualification on B. A then passed live startup
   and a forced-eviction soak whose exact group-0 store/removal arithmetic
-  matched the resident index. Compare exact versus approximate decisions in
+  matched the resident index. The Infernal canary's LB roll later reproduced
+  the remaining recovery boundary: fresh B re-armed from sequence zero, while
+  long-lived A was beyond replay history and correctly remained fenced. Do not
+  restart a healthy engine only to recover shadow telemetry; add Dynamo-style
+  snapshot/tree-dump recovery. Compare exact versus approximate decisions in
   telemetry before the router may consume this state; Dynamo's additional
   tree-dump recovery remains the scale-out reference.
 - ✅ **True TTFT instrumentation.** rc6's journal and Prometheus histogram

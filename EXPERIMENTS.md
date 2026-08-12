@@ -2470,3 +2470,10 @@ Verdict: reject r4 for node06 and do not spend another engine roll on MBT8192
 or MTP0 until the deterministic DSML leak is fixed upstream. B was recreated
 from the exact r34 control; production remained on A during its warm start.
 The r4 image and versioned JIT cache remain available for a fixed successor.
+The rollback smoke reconciled 64 client/engine tokens and one finished request;
+the dual-homed LB then returned 2/2 healthy. B's fresh KV publisher became
+authoritative after a direct 8K-token seed (32 blocks / 8,192 token IDs). A's
+long-lived replay history was already too old for the new LB generation and
+remained fenced, so exact routing safely stayed shadow-only. Do not restart A
+for telemetry; this is a production reproduction of the snapshot/tree-dump
+recovery gap already tracked in the KV-event roadmap.
