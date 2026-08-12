@@ -822,7 +822,7 @@ c16 snapshot it retained only 21/80 possible draft tokens. Decision: retain
 fixed K5. Revisit dynamic capacity only after profiled-threshold activation and
 controller hysteresis are fixed or explicitly exposed for a matched retest.
 
-## 2026-08-12 — Rust rewrite r1/r2 first rolling qualification
+## 2026-08-12 — Rust rewrite r1-r4 rolling qualification
 
 The v1.1 Go work was merged before branching `agent/rust-rewrite`. The first
 Rust checkpoint reproduces typed configuration, prompt canonicalization and
@@ -832,13 +832,15 @@ generated-output TTFT, journal v3, native metric passthrough, and the existing
 `ds4proxy_*` Prometheus surface. The Go implementation remains in-tree as the
 cutover oracle; Go-generated fingerprint vectors are Rust golden tests.
 
-Local gates passed strict fmt/clippy, 19 Rust unit/integration tests, release
+Local gates passed strict fmt/clippy, 22 Rust unit/integration tests, release
 build, the complete Go suite/vet/format checks, and a distroless container
 smoke test. The optimized binary is 7.3MiB. Immutable public images were
 published to GHCR. r2 fixed the journal protocol; r3 removes a duplicated
-parse/fingerprint pass before cache observation. The current candidate is
-`ghcr.io/helixml/ds4-loadbalancer:rust-r3-59a8f08` (digest
-`sha256:134548ce0b06617347a56e0d87461a310c79527b969533630a57a301307bb51f`).
+parse/fingerprint pass before cache observation. r4 makes the compatibility
+shim and router consume one parsed object and adds persistent Cargo caches to
+the container build. The current candidate is
+`ghcr.io/helixml/ds4-loadbalancer:rust-r4-ace17cd` (digest
+`sha256:6519a0c1bad25007d9ecea83b8b60923c2f329466a2772d4d2aafef71b2a9f6f`).
 
 The Go→Rust deployment replaced only the stateless LB. Both TP4 engines and
 their KV caches stayed online and both authenticated probes remained healthy.
@@ -867,9 +869,34 @@ The r3 post-roll repeat retained the 74.5% locality result and completed
 c16/max256 at 1,086.0 tok/s, within 2.5% of r1 and still 25% above the adjacent
 Go sample; every request succeeded and both probes stayed up.
 
+r4's release-mode request-preparation microbenchmark measured 0.490ms for a
+256KiB request and 4.531ms for 2MiB. That is 1.07× and 1.15× faster than the
+initial two-parse Rust path, respectively. The retained Go shim + route +
+fingerprint path measured 5.355ms and 44.347ms on the same development host,
+about 10.9× and 9.8× slower. These are CPU preparation measurements, not claims
+about GPU-serving throughput. BuildKit cache mounts reduced an unchanged local
+container rebuild from 41.5s cold to 2.2s.
+
+The r4 qualification used fresh salts and an adjacent LB-only Go rc7 control;
+neither TP4 engine was restarted. The small locality gate matched exactly at
+71.6%. Same-app requests completed without failures and split 6/6 on Rust at
+682 tok/s versus 5/7 on Go at 667 tok/s. Three warmed c16/max256 runs produced
+a 1,232.0 tok/s Rust median (`1267.3, 1232.0, 1222.3`) and 1,238.1 tok/s Go
+median (`1164.8, 1238.1, 1286.0`), a -0.5% difference. The adjacent repeated
+c24 points were 1,638.0 tok/s Rust and 1,636.7 tok/s Go. An initial post-roll
+Rust c24 sample was only 1,420.3 tok/s, demonstrating why a single cold sample
+must not decide an implementation comparison.
+
+Every r4 measured request succeeded. A 36-request journal capture paired all
+starts and finishes, reproduced 36/36 deployed decisions for the full
+alpha/cap sweep, and showed an exact 18/18 engine split. Both upstream probes
+remained up; idle LB RSS was 8.8MiB. Verdict: Rust r4 reproduces Go throughput
+and routing behavior within run noise while materially reducing CPU-side
+preparation cost. Leave r4 live; retain Go rc7 as the compose-default rollback.
+
 An actual Helix control-plane request used the test account's authorized org,
 explicit `ds4-flash-node06` provider, and `deepseek-v4-flash`; it returned HTTP
 200, finish reason `stop`, and the requested exact response. The separately
 documented unmanned-org test app correctly returned 403 for this account, so no
-cross-org access was assumed. The current state is Rust r3 live on node06 with
+cross-org access was assumed. The current state is Rust r4 live on node06 with
 both engines healthy; Go rc7 remains a one-command LB-only rollback.

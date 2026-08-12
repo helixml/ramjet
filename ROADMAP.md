@@ -20,11 +20,12 @@ node06). The design rationale for each lives in DESIGN.md.
   4.53ms at 2MiB on the development host, about 10× faster than the retained Go
   data path and 15% faster than the initial two-parse Rust implementation at
   2MiB. Keep `examples/preparation_bench.rs` as the pre-tokenizer baseline.
-- 🔨 **Rolling Go/Rust node06 qualification.** Build and publish immutable
+- ✅ **Rolling Go/Rust node06 qualification.** Build and publish immutable
   `rust-*` images, then run locality, concurrent same-app, c24 aggregate, route
   telemetry, and occasional Helix workflow acceptance before promotion. Go
-  remains the instant LB-only rollback; neither engine is restarted.
-- ⬜ **Tokenizer abstraction and bounded CPU pool.** Local Rust tokenizer,
+  remains the instant LB-only rollback; neither engine is restarted. r4 matched
+  Go at c16/c24, preserved locality, replayed 36/36 decisions, and is live.
+- 🔨 **Tokenizer abstraction and bounded CPU pool.** Local Rust tokenizer,
   authenticated `/tokenize` fallback, approximate fingerprint fallback, queue
   limits, request-class telemetry, and selective exact lookup. Never tokenize
   long prompts on async I/O workers.
