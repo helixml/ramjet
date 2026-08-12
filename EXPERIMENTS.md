@@ -2221,3 +2221,8 @@ r27 scorecard reported signed net residency changes independently for each
 replica. This qualifies sparse-sequence validation on the real retained
 publisher histories; the retry branch remains a bounded fallback rather than
 the normal path.
+
+The public `rust-r28-sparse-replay-0f49a6d` image has digest
+`sha256:f7d79cff932bc514b632188b97ab8b48b8495058a05028d80ca43fb793895f74`;
+its registry promotion took 9.24s. The canonical Compose pins this tested
+digest.
