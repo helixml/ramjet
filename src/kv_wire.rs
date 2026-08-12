@@ -4,7 +4,7 @@
 //! module accepts only the payload frame and never formats token IDs or block
 //! hashes, keeping malformed-input errors safe to expose as controlled logs.
 
-use serde::Deserialize;
+use serde::{Deserialize, de::IgnoredAny};
 use serde_bytes::ByteBuf;
 use thiserror::Error;
 
@@ -65,6 +65,9 @@ pub struct BlockStored {
     pub kv_cache_spec_sliding_window: Option<u64>,
     pub medium: Option<String>,
     pub locality: Option<String>,
+    pub lora_name: Option<String>,
+    pub cache_namespace: Option<String>,
+    pub has_extra_keys: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,7 +78,7 @@ pub struct BlockRemoved {
     pub locality: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ExternalBlockHash {
     Bytes(ByteBuf),
     Signed(i64),
@@ -114,30 +117,42 @@ struct RawBatch(f64, Vec<RawEvent>, #[serde(default)] Option<i64>);
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum RawEvent {
-    BlockStored {
-        block_hashes: Vec<RawBlockHash>,
-        parent_block_hash: Option<RawBlockHash>,
-        token_ids: Vec<u32>,
-        block_size: usize,
-        #[serde(default)]
-        group_idx: Option<i64>,
-        #[serde(default)]
-        kv_cache_spec_kind: Option<String>,
-        #[serde(default)]
-        kv_cache_spec_sliding_window: Option<u64>,
-        medium: Option<String>,
-        #[serde(default)]
-        locality: Option<String>,
-    },
-    BlockRemoved {
-        block_hashes: Vec<RawBlockHash>,
-        #[serde(default)]
-        group_idx: Option<i64>,
-        medium: Option<String>,
-        #[serde(default)]
-        locality: Option<String>,
-    },
+    BlockStored(RawBlockStored),
+    BlockRemoved(RawBlockRemoved),
     AllBlocksCleared,
+}
+
+#[derive(Deserialize)]
+struct RawBlockStored {
+    block_hashes: Vec<RawBlockHash>,
+    parent_block_hash: Option<RawBlockHash>,
+    token_ids: Vec<u32>,
+    block_size: usize,
+    #[serde(default)]
+    group_idx: Option<i64>,
+    #[serde(default)]
+    kv_cache_spec_kind: Option<String>,
+    #[serde(default)]
+    kv_cache_spec_sliding_window: Option<u64>,
+    medium: Option<String>,
+    #[serde(default)]
+    locality: Option<String>,
+    #[serde(default)]
+    lora_name: Option<String>,
+    #[serde(default, rename = "cache_salt")]
+    cache_namespace: Option<String>,
+    #[serde(default)]
+    extra_keys: Option<Vec<Option<IgnoredAny>>>,
+}
+
+#[derive(Deserialize)]
+struct RawBlockRemoved {
+    block_hashes: Vec<RawBlockHash>,
+    #[serde(default)]
+    group_idx: Option<i64>,
+    medium: Option<String>,
+    #[serde(default)]
+    locality: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -176,73 +191,10 @@ pub fn decode_batch(payload: &[u8], limits: KvWireLimits) -> Result<KvEventBatch
     let mut events = Vec::with_capacity(raw_events.len());
     for raw in raw_events {
         let event = match raw {
-            RawEvent::BlockStored {
-                block_hashes,
-                parent_block_hash,
-                token_ids,
-                block_size,
-                group_idx,
-                kv_cache_spec_kind,
-                kv_cache_spec_sliding_window,
-                medium,
-                locality,
-            } => {
-                validate_block_size(block_size, limits.max_block_size)?;
-                if block_hashes.is_empty() || token_ids.is_empty() {
-                    return Err(DecodeError::InconsistentBlockShape);
-                }
-                let expected_blocks = token_ids.len().div_ceil(block_size);
-                if expected_blocks != block_hashes.len() {
-                    return Err(DecodeError::InconsistentBlockShape);
-                }
-                hash_count = checked_total(
-                    hash_count,
-                    block_hashes.len(),
-                    limits.max_block_hashes,
-                    DecodeError::TooManyBlockHashes,
-                )?;
-                token_count = checked_total(
-                    token_count,
-                    token_ids.len(),
-                    limits.max_token_ids,
-                    DecodeError::TooManyTokenIds,
-                )?;
-                KvEvent::BlockStored(BlockStored {
-                    block_hashes: convert_hashes(block_hashes, limits.max_hash_bytes)?,
-                    parent_block_hash: parent_block_hash
-                        .map(|hash| convert_hash(hash, limits.max_hash_bytes))
-                        .transpose()?,
-                    token_ids,
-                    block_size,
-                    group_idx: optional_u32(group_idx, DecodeError::InvalidGroupIndex)?,
-                    kv_cache_spec_kind,
-                    kv_cache_spec_sliding_window,
-                    medium,
-                    locality,
-                })
+            RawEvent::BlockStored(stored) => {
+                convert_stored(stored, limits, &mut hash_count, &mut token_count)?
             }
-            RawEvent::BlockRemoved {
-                block_hashes,
-                group_idx,
-                medium,
-                locality,
-            } => {
-                if block_hashes.is_empty() {
-                    return Err(DecodeError::InvalidBlockHash);
-                }
-                hash_count = checked_total(
-                    hash_count,
-                    block_hashes.len(),
-                    limits.max_block_hashes,
-                    DecodeError::TooManyBlockHashes,
-                )?;
-                KvEvent::BlockRemoved(BlockRemoved {
-                    block_hashes: convert_hashes(block_hashes, limits.max_hash_bytes)?,
-                    group_idx: optional_u32(group_idx, DecodeError::InvalidGroupIndex)?,
-                    medium,
-                    locality,
-                })
-            }
+            RawEvent::BlockRemoved(removed) => convert_removed(removed, limits, &mut hash_count)?,
             RawEvent::AllBlocksCleared => KvEvent::AllBlocksCleared,
         };
         events.push(event);
@@ -253,6 +205,76 @@ pub fn decode_batch(payload: &[u8], limits: KvWireLimits) -> Result<KvEventBatch
         events,
         data_parallel_rank,
     })
+}
+
+fn convert_stored(
+    raw: RawBlockStored,
+    limits: KvWireLimits,
+    hash_count: &mut usize,
+    token_count: &mut usize,
+) -> Result<KvEvent, DecodeError> {
+    validate_block_size(raw.block_size, limits.max_block_size)?;
+    if raw.block_hashes.is_empty() || raw.token_ids.is_empty() {
+        return Err(DecodeError::InconsistentBlockShape);
+    }
+    let expected_blocks = raw.token_ids.len().div_ceil(raw.block_size);
+    if expected_blocks != raw.block_hashes.len() {
+        return Err(DecodeError::InconsistentBlockShape);
+    }
+    *hash_count = checked_total(
+        *hash_count,
+        raw.block_hashes.len(),
+        limits.max_block_hashes,
+        DecodeError::TooManyBlockHashes,
+    )?;
+    *token_count = checked_total(
+        *token_count,
+        raw.token_ids.len(),
+        limits.max_token_ids,
+        DecodeError::TooManyTokenIds,
+    )?;
+    Ok(KvEvent::BlockStored(BlockStored {
+        block_hashes: convert_hashes(raw.block_hashes, limits.max_hash_bytes)?,
+        parent_block_hash: raw
+            .parent_block_hash
+            .map(|hash| convert_hash(hash, limits.max_hash_bytes))
+            .transpose()?,
+        token_ids: raw.token_ids,
+        block_size: raw.block_size,
+        group_idx: optional_u32(raw.group_idx, DecodeError::InvalidGroupIndex)?,
+        kv_cache_spec_kind: raw.kv_cache_spec_kind,
+        kv_cache_spec_sliding_window: raw.kv_cache_spec_sliding_window,
+        medium: raw.medium,
+        locality: raw.locality,
+        lora_name: raw.lora_name,
+        cache_namespace: raw.cache_namespace,
+        has_extra_keys: raw
+            .extra_keys
+            .as_ref()
+            .is_some_and(|keys| keys.iter().any(Option::is_some)),
+    }))
+}
+
+fn convert_removed(
+    raw: RawBlockRemoved,
+    limits: KvWireLimits,
+    hash_count: &mut usize,
+) -> Result<KvEvent, DecodeError> {
+    if raw.block_hashes.is_empty() {
+        return Err(DecodeError::InvalidBlockHash);
+    }
+    *hash_count = checked_total(
+        *hash_count,
+        raw.block_hashes.len(),
+        limits.max_block_hashes,
+        DecodeError::TooManyBlockHashes,
+    )?;
+    Ok(KvEvent::BlockRemoved(BlockRemoved {
+        block_hashes: convert_hashes(raw.block_hashes, limits.max_hash_bytes)?,
+        group_idx: optional_u32(raw.group_idx, DecodeError::InvalidGroupIndex)?,
+        medium: raw.medium,
+        locality: raw.locality,
+    }))
 }
 
 fn validate_block_size(block_size: usize, max: usize) -> Result<(), DecodeError> {

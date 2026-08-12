@@ -1078,3 +1078,38 @@ token was added as an Actions secret.
 A final read-only node06 check found the Rust LB and both engines running with
 zero restarts, both probe gauges at one, all inflight/load gauges at zero, and
 the tokenizer queue at zero. The engines were not restarted.
+
+## 2026-08-12 — bounded exact index and recovery integration
+
+The next shadow-only layer follows Dynamo's correctness model without taking
+its multi-thousand-worker concurrency machinery into this two-engine process.
+`src/exact_index.rs` stores exact token blocks in a per-engine trie, retains
+opaque vLLM hashes only for reverse removal/parent lookup, and verifies full
+token-slice equality on every prefix step. Store batches preflight parent,
+hash, path, and capacity invariants before mutation; removals are idempotent and
+prune unreachable tombstones. Main-attention group metadata is learned exactly
+as events arrive, while non-main, unknown, non-local, non-GPU, LoRA,
+cache-salted, and extra-key state fails closed.
+
+The sequence fence and index now compose as one state machine. Startup events
+remain observation-only, live gaps suspend queries until a complete inclusive
+replay is validated, a clear inside replay can establish an authoritative
+generation, and invalid replay/index/capacity state clears the inventory and
+increments the generation. Exact lookup returns no result whenever the fence
+is untrusted. Eleven index/integration tests cover branching, duplicate stores,
+eviction/re-add, atomic failures, mixed block geometry, group/namespace
+filtering, concurrent reads, startup fencing, replay recovery, and failure
+cleanup. Together with the replay-boundary test, the full Rust suite is now
+**57 tests**.
+
+`examples/exact_index_bench.rs` builds 48 synthetic 80.9K-token sequences: a
+3,883,008-token inventory matching node06's measured engine KV capacity. On the
+development host it built 15,168 blocks at 619K blocks/s and increased RSS by
+21,936KiB. Exact lookup measured 2.55µs at 4,096 tokens, 11.54µs at 18,944,
+and 50.33µs at 80,896. Store+remove pairs sustained 1.59M/s. Eight concurrent
+long-context readers reached 101.8K lookups/s, about 5.1× single-thread
+throughput. The simple per-engine `RwLock` therefore has substantial headroom;
+ZMQ queueing/recovery and real event-shape qualification remain the next gate.
+
+This code is not constructed by the running binary and exact IDs still never
+influence placement. No node06 container or engine configuration changed.

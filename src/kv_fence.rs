@@ -144,7 +144,7 @@ impl KvEventFence {
     }
 
     /// Validate a replay response before its payloads are committed.
-    pub fn accept_replay(&mut self, sequences: &[u64]) -> ReplayAction {
+    pub fn accept_replay(&mut self, sequences: &[u64], establishes_boundary: bool) -> ReplayAction {
         let Some(pending) = self.pending else {
             return ReplayAction::Invalid;
         };
@@ -163,7 +163,10 @@ impl KvEventFence {
             return ReplayAction::Invalid;
         }
         self.pending = None;
-        self.trusted = pending.restore_trust;
+        if establishes_boundary {
+            self.generation = self.generation.saturating_add(1);
+        }
+        self.trusted = pending.restore_trust || establishes_boundary;
         if self.trusted {
             ReplayAction::Recovered
         } else {
@@ -214,7 +217,10 @@ mod tests {
             }
         );
         assert!(!fence.trusted());
-        assert_eq!(fence.accept_replay(&[1, 2, 3]), ReplayAction::Recovered);
+        assert_eq!(
+            fence.accept_replay(&[1, 2, 3], false),
+            ReplayAction::Recovered
+        );
         assert!(fence.trusted());
         assert_eq!(fence.ingest(4, false), IngestAction::Apply);
     }
@@ -230,7 +236,7 @@ mod tests {
                 through: 2
             }
         );
-        assert_eq!(fence.accept_replay(&[2]), ReplayAction::Invalid);
+        assert_eq!(fence.accept_replay(&[2], false), ReplayAction::Invalid);
         assert!(!fence.trusted());
         let generation = fence.generation();
         assert_eq!(fence.ingest(10, false), IngestAction::UnrecoverableGap);
@@ -257,10 +263,30 @@ mod tests {
             }
         );
         assert_eq!(
-            fence.accept_replay(&[11, 12, 13]),
+            fence.accept_replay(&[11, 12, 13], false),
             ReplayAction::RecoveredObserveOnly
         );
         assert!(!fence.trusted());
+    }
+
+    #[test]
+    fn clear_inside_replay_establishes_an_authoritative_generation() {
+        let mut fence = KvEventFence::new(8);
+        fence.ingest(10, false);
+        assert_eq!(
+            fence.ingest(12, false),
+            IngestAction::Replay {
+                from: 11,
+                through: 12
+            }
+        );
+        let generation = fence.generation();
+        assert_eq!(
+            fence.accept_replay(&[11, 12], true),
+            ReplayAction::Recovered
+        );
+        assert!(fence.trusted());
+        assert!(fence.generation() > generation);
     }
 
     #[test]

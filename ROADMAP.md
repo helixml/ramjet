@@ -59,8 +59,13 @@ node06). The design rationale for each lives in DESIGN.md.
   node06 vLLM r34 classes and validates event, hash, token, group, and block
   shape limits. Release-mode decode on the development host sustains about
   54–58M token IDs/s (4.8µs at 256 IDs, 324µs at 18.9K, and 1.41ms at
-  82.2K). Next wire both pieces to per-engine ZMQ consumers and
-  token-prefix/radix indexes with
+  82.2K). The bounded per-engine exact block trie is also complete: it keeps
+  opaque engine hashes for O(1) removals, exact token-slice keys for collision-
+  free prefix lookup, atomic capacity failure, tombstone pruning, conservative
+  main-attention/tier/namespace filtering, and generation-safe replay
+  integration. A 3.883M-token synthetic inventory used 21.4MiB and served
+  80.9K-token lookups in 50.3µs; eight readers reached 102K lookups/s. Next
+  wire these pieces to per-engine ZMQ consumers with
   cache-group-aware block metadata, sequence-gap detection, bounded replay,
   generation fencing, reconnect backoff, and an automatic approximate-routing
   fallback. Raw token IDs, block hashes, and prompts remain out of logs.

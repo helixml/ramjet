@@ -162,6 +162,15 @@ is the reference for the failure semantics below:
   `msgspec` classes on node06 and covers bytes/integer hashes, cache-group/spec
   metadata, removals, and a full clear. Unknown event types and malformed
   shapes fail closed; errors never render token IDs, hashes, or payload bytes.
+- `src/exact_index.rs` holds one bounded inventory per engine. Engine block
+  hashes remain opaque reverse-removal keys; trie edges own exact token slices,
+  so lookup does not depend on reproducing vLLM's rolling hash and verifies
+  equality rather than trusting a fingerprint. A coarse per-engine `RwLock`
+  keeps reads concurrent and writes serialized, which the node06 capacity-scale
+  benchmark shows is ample for two engines. Capacity, parent/path, replay, or
+  lookup-budget failure clears and fences the generation. Non-local, non-GPU,
+  non-main-attention, LoRA, cache-salted, and extra-key events stay out of the
+  exact inventory until request-side namespace parity exists.
 - Exact request lookup requires the rendered token sequence. Calling r34's
   `/tokenize` for every request costs 3.7ms at 299 tokens, 8.4ms at 4.3K,
   41ms at 21K, and 203ms at 83.7K, while returning up to 419KB of token IDs.
