@@ -1581,7 +1581,10 @@ versus 401 for r20. Two reverse-order c16/max256 pairs measured 1,169.8 and
 1,214.7 tok/s through r21 versus 1,252.5 and 1,189.2 through r20: 1,192.3
 versus 1,220.9 tok/s averages (-2.3%, inside the established shared-box noise
 band), with 64/64 successful responses. Production remained r20 and neither
-engine restarted.
+engine restarted. One idle operational snapshot showed 234.2MiB RSS and 146
+PIDs for r21 versus 235.0MiB and 146 for r20. The distroless image grew only
+14,889 bytes (14,013,729 versus 13,998,840), so the additional controlled
+metric dimension has no material deployment footprint.
 
 The pre-existing r20 mixed production/qualification sample at this point held
 120 routed requests and 33 admitted pre-route exact lookups: 12 agreements, 21
