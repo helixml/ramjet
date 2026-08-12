@@ -14,6 +14,12 @@ node06). The design rationale for each lives in DESIGN.md.
   bounded request bodies, request shims, model metadata rewrite, health probes,
   retryable-status failover, opaque route headers, true generated-token TTFT,
   privacy-bounded journal v3, and the existing `ds4proxy_*` metric names.
+- ✅ **Health-gated serving contract.** `/health` reports opaque per-replica
+  health plus aggregate `ok|degraded|unhealthy` readiness, returning 503 only
+  when no replica can serve. Known-unhealthy replicas are removed from every
+  serving/failover attempt. Unit tests cover exclusion, zero-healthy behavior,
+  retryable failover, and probe recovery; a node06 negative canary sent 4/4
+  requests only to the healthy replica.
 - ✅ **Single-parse approximate preparation.** One JSON parse now feeds both
   compatibility mutations and canonical route fingerprints; cache observation
   reuses the prepared vector. Release-mode preparation is 0.49ms at 256KiB and
@@ -105,11 +111,16 @@ node06). The design rationale for each lives in DESIGN.md.
   averaged tens of microseconds, and the 3×3×2 locality gate produced 15
   agreements plus three cold decisions without post-response revision
   ambiguity. A forced approximate miss found 36,096 warm tokens on the other
-  engine before mutation. Placement is still disabled. Next accumulate a
-  production shadow distribution of move/gain/load outcomes, then add an
-  explicit opt-in exact placement mode with the same attestation, event, and
-  revision fences plus instant approximate fallback. Raw token IDs, block
-  hashes, and prompts remain out of logs.
+  engine before mutation. r21 adds an explicit default-off placement canary
+  behind unique-winner, minimum-token-gain, and maximum-load-delta gates while
+  retaining the attestation, health, event-trust, inventory-revision, CPU, and
+  timeout fences. An isolated node06 trial corrected 2/2 constructed
+  approximate misses and kept 2/2 existing exact agreements; all four requests
+  reused 32,768 tokens on the deliberately warmed engine. Production remains
+  r20 shadow-only. Next collect representative organic move/gain/load
+  distributions and exercise event recovery before considering a narrowly
+  admitted placement rollout. Raw token IDs, block hashes, and prompts remain
+  out of logs.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
   vectors rather than restarting; benchmark memory, p99 preparation latency,
@@ -193,13 +204,15 @@ node06). The design rationale for each lives in DESIGN.md.
   transients. The 44.7K-token gain is not worth that operational fragility.
   Retain automatic sizing and do not jump to the profiler's full-memory value.
 
-- 🔨 **CI + package publishing.** Rust fmt/clippy/test/release checks and an
-  amd64 distroless image publisher are present on the rewrite branch. The first
-  workflow passed all code/build gates but GHCR denied the final push: because
-  `mini-dynamo` was created by a manual push, repository linkage did not grant
-  Actions access. Add `helixml/mini-dynamo` under the package's **Manage Actions
-  access**, rerun the failed job, and verify an anonymous pull before marking
-  complete. Do not replace this one-time ACL with a long-lived PAT secret.
+- 🔨 **CI + package publishing.** GitHub Actions and Drone now both run Rust
+  fmt, strict Clippy, 96 unit tests, and the release build; Drone additionally
+  runs the retained Go tests/vet/gofmt parity oracle. Both Drone push/PR builds
+  and GitHub Actions passed on r21. The post-merge image also compiled, but GHCR
+  denied its final push: because `mini-dynamo` was created by a manual push,
+  repository linkage did not grant Actions access. Add `helixml/mini-dynamo`
+  under the package's **Manage Actions access**, rerun the failed job, and
+  verify an anonymous pull before marking complete. Do not replace this
+  one-time ACL with a long-lived PAT secret.
 - ⬜ **Secure post-deploy Helix acceptance.** The retired plaintext key now
   returns 401 and has been removed from both node06 guides. Confirm revocation,
   clean Git history if policy requires it, and inject a current smoke-test key

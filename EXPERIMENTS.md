@@ -1484,3 +1484,58 @@ fail-closed fences. It was promoted only in `shadow` mode at the 32KiB
 threshold with eight pre-route permits. Exact placement remains disabled until
 production shadow distributions cover move gain, load conflict, attestation
 transitions, and event recovery long enough to set a conservative route gate.
+
+## 2026-08-12 — r21 health contract, Drone gate, and exact-placement canary
+
+r21 makes replica health part of the serving contract and introduces an
+explicit `DS4_EXACT_ROUTE_MODE=placement` canary without changing the
+production default. `/health` returns opaque replica ordinals and aggregate
+`ok`, `degraded`, or `unhealthy` readiness; zero healthy replicas returns 503.
+The serving loop filters every known-unhealthy candidate before opening a
+connection, while successful probes restore a replica to routing. Exact
+placement is allowed only for a unique exact-score winner with at least 8,192
+additional cached tokens and no more load than the approximate choice. The
+existing renderer/runtime attestation, local-token admission, event trust,
+inventory-revision, health, non-blocking CPU, and timeout fences all preserve
+the approximate route on failure.
+
+The local gate passed formatting, strict all-target/all-feature Clippy, release
+build, all **96 Rust tests**, and the retained Go tests/vet/gofmt oracle. New
+tests directly cover unhealthy exclusion, zero-healthy 503 without a dial,
+retryable failover, probe recovery, `/health` aggregation, exact gain/load
+gates, metric registration, Anthropic and Responses usage, malformed usage
+preservation, and the existing tokenizer/attestation/fencing paths. A new Drone
+pipeline runs the same Rust gates and Go oracle on push and pull request; both
+Drone builds and GitHub Actions passed on draft PR #6.
+
+The immutable node06-local image
+`rust-r21-health-placement-0bdcb10` ran as an isolated canary on :8020/:8021.
+Production remained on `rust-r20-attested-shadow-195ea1f`; neither engine nor
+its cache was restarted. After one fresh full-block event triggered late-
+subscriber replay, both canary inventories became generation-zero trusted and
+both runtime identities attested. The controlled gates were:
+
+- forced warm placement: four fresh 228,791-byte prompts were warmed directly
+  only on A. All four proxy requests returned to A and reported 32,768 cached
+  tokens; exact placement retained two approximate agreements and corrected
+  two approximate misses (`moved=2`), with 4/4 fastokens/remote parity;
+- locality, 2 apps × 2 sessions × 2 turns: r21 and the r20 control both reused
+  107,520 / 150,188 prompt tokens (71.6%) with matching cold/warm structure;
+- c8 same-app/max128: r21 split 4/4 with 8/8 success at 395 tok/s; r20 split
+  4/4 at 406 tok/s;
+- c16/max256: r21 completed 16/16 at 1,109.6 tok/s; r20 completed 16/16 at
+  1,146.5 tok/s. The roughly 3% gaps are inside ordinary shared-box noise;
+- degraded-health negative control: a disposable canary with replica zero set
+  to a nonexistent host reported `degraded`, `0/1` health, and sent 4/4
+  successful requests only to replica one. The disposable container was then
+  removed.
+
+Both the production r20 LB and the isolated r21 canary retained zero restarts
+and both production upstream health gauges stayed one. r21 remains up only as
+an isolated soak canary; production exact placement remains disabled pending
+organic gain/load distributions and explicit event-recovery canaries.
+
+The post-merge public image workflow is a separate infrastructure blocker: the
+image compiled successfully, then GHCR rejected the push with
+`permission_denied: write_package`. Grant the repository package Actions
+access and rerun; no source/build repair is indicated by that failure.
