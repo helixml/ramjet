@@ -26,6 +26,23 @@ steps:
       - go vet ./...
       - test -z "$(gofmt -l .)"
 
+  - name: agent-protocol
+    image: python:3.13-bookworm
+    pull: if-not-exists
+    commands:
+      - python3 bench/agentbench.py validate
+      - python3 -m unittest discover -s bench -p 'test_*.py'
+
+  - name: quality-complete
+    image: alpine:3.23
+    pull: if-not-exists
+    commands:
+      - 'true'
+    depends_on:
+      - rust
+      - go-parity-oracle
+      - agent-protocol
+
 trigger:
   event:
     - push

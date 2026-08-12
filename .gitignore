@@ -1,3 +1,4 @@
 mini-dynamo
 *.test
 /target/
+__pycache__/

@@ -21,10 +21,14 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
+      - name: Restore Cargo dependency cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: quality
+          cache-on-failure: true
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked
-      - run: cargo build --release --locked
 
   image:
     if: github.event_name != 'pull_request'

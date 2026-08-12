@@ -145,6 +145,8 @@ to compare this rule with the legacy load-neutral equality behavior.
     cargo clippy --locked --all-targets --all-features -- -D warnings
     cargo test --locked
     cargo build --release --locked
+    python3 bench/agentbench.py validate
+    python3 -m unittest discover -s bench -p 'test_*.py'
 
 The Go implementation remains in-tree as the cutover reference. Rust tests
 include Go-generated fingerprint goldens and live HTTP tests for sanitization,
@@ -153,9 +155,12 @@ During the rewrite, keep both suites green:
 
     go test ./... && go vet ./... && test -z "$(gofmt -l .)"
 
-GitHub Actions and Drone both run the Rust format, strict Clippy, test, and
-release-build gates on pull requests; Drone also keeps the Go parity oracle
-green. The image publisher runs only after the post-merge Rust gate succeeds
+GitHub Actions runs Rust format, strict Clippy, and tests with a pruned
+dependency cache. Drone independently adds the release build and keeps the Go
+parity oracle and GPU-free agent protocol suite green; its three language lanes
+run in parallel. The post-merge Docker build is the second release-mode proof,
+so GitHub does not duplicate a release link in the PR check. The image publisher
+runs only after the post-merge Rust gate succeeds
 and requires GHCR package write permission for this repository.
 
 Measure the request-preparation hot path before and after tokenizer work:
@@ -190,6 +195,14 @@ against a direct engine endpoint and capture its JSONL output:
 
     bench/engine_matrix.sh http://127.0.0.1:8013 deepseek-v4-flash fixed \
       | tee fixed.jsonl
+
+`bench/agentbench.py` validates a committed synthetic DeepSeek-V4 corpus for
+streaming, DSML leakage, typed/parallel tool calls, and reasoning/tool history.
+Live results contain only structural outcomes, timings, usage, and deployment
+provenance. On node06, `bench/node06_agent_metadata.sh` produces that
+provenance; `bench/agent_matrix.sh` runs deterministic/official-agentic,
+short/long-prefix, cold/warm, and c1/c8/c16 cells. Narrow its environment lists
+for development and reserve `AGENT_RUNS=3` for final qualification.
 
 `bench/route_replay.py` sweeps router policies over privacy-bounded live
 decision records and splits observed warm/cold outcome latency. For native
