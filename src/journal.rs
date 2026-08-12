@@ -165,8 +165,10 @@ fn unix_millis() -> u128 {
 
 fn emit(record: &impl Serialize) {
     match serde_json::to_string(record) {
-        Ok(encoded) => tracing::info!("[route_journal] {encoded}"),
-        Err(error) => tracing::warn!(%error, "[route_journal_error]"),
+        // Keep this literal line protocol compatible with route_replay.py.
+        // Structured tracing would JSON-escape the record into a message field.
+        Ok(encoded) => eprintln!("[route_journal] {encoded}"),
+        Err(error) => eprintln!("[route_journal_error] {error}"),
     }
 }
 
