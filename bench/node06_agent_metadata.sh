@@ -15,15 +15,20 @@ for path in "$model_root/tokenizer.json" "$model_root/config.json"; do
   [[ -r $path ]] || { echo "missing model artifact: $path" >&2; exit 1; }
 done
 
-engine_image=$(docker inspect --format '{{.Config.Image}}' "$@" | sort -u | paste -sd, -)
-router_version=${BENCH_ROUTER_VERSION:-$(docker inspect ds4-loadbalancer --format '{{.Config.Image}}')}
+first_engine=$1
+engine_image=$(docker inspect --format '{{.Config.Image}}@{{.Image}}' "$@" | sort -u | paste -sd, -)
+router_version=${BENCH_ROUTER_VERSION:-$(docker inspect ds4-loadbalancer --format '{{.Config.Image}}@{{.Image}}')}
 tokenizer_sha256=$(sha256sum "$model_root/tokenizer.json" | cut -d' ' -f1)
 config_sha256=$(
   find "$model_root" -maxdepth 2 -type f \
     \( -name config.json -o -name generation_config.json -o -name tokenizer_config.json -o -name encoding_dsv4.py \) \
     -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
 )
-model_revision=${BENCH_MODEL_REVISION:-$(basename "$model_root")@$config_sha256}
+detected_revision=$(
+  docker exec "$first_engine" pgrep -af 'vllm serve' | awk \
+    '{for (field = 1; field <= NF; field++) if ($field == "--revision") {print $(field + 1); exit}}'
+)
+model_revision=${BENCH_MODEL_REVISION:-${detected_revision:-$(basename "$model_root")@$config_sha256}}
 
 jq -n \
   --arg engine_image "$engine_image" \
