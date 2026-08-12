@@ -1055,6 +1055,15 @@ errors contain invariant names only. Strict Clippy, all **45 Rust tests**, all
 retained Go tests, `go vet`, and both format gates pass. Sockets, event ports,
 cache indexes, and routing remain untouched.
 
+`examples/kv_wire_bench.rs` provides a reproducible release-mode allocation and
+decode baseline using synthetic full-attention batches. On the development
+host it measured 4.76µs for 256 token IDs (521 bytes), 324µs for 18,944 IDs
+(56,660 bytes), and 1.408ms for 82,176 IDs (280,143 bytes): approximately
+54–58M token IDs/s and 104–190MiB/s. Decode cost is far below the measured
+local-render/tokenize cost at long context, so the initial consumer should
+prioritize bounded queues, replay correctness, and index-update contention over
+custom MessagePack parsing.
+
 Manual workflow run
 [`31579218509`](https://github.com/helixml/mini-dynamo/actions/runs/31579218509)
 passed fmt, strict Clippy, tests, release compilation, and the complete

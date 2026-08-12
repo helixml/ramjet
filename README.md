@@ -95,6 +95,7 @@ During the rewrite, keep both suites green:
 Measure the request-preparation hot path before and after tokenizer work:
 
     cargo run --release --locked --example preparation_bench
+    cargo run --release --locked --example kv_wire_bench
     cargo run --release --locked --example local_tokenizer_probe -- /path/to/tokenizer.json
     go test ./pkg/proxy -run '^$' -bench BenchmarkPrepareLongPrompt -benchmem
 

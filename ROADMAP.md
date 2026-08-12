@@ -57,7 +57,9 @@ node06). The design rationale for each lives in DESIGN.md.
   after an authoritative clear/snapshot boundary. A bounded, privacy-safe
   MessagePack decoder now matches an exact synthetic fixture emitted by the
   node06 vLLM r34 classes and validates event, hash, token, group, and block
-  shape limits. Next wire both pieces to per-engine ZMQ consumers and
+  shape limits. Release-mode decode on the development host sustains about
+  54–58M token IDs/s (4.8µs at 256 IDs, 324µs at 18.9K, and 1.41ms at
+  82.2K). Next wire both pieces to per-engine ZMQ consumers and
   token-prefix/radix indexes with
   cache-group-aware block metadata, sequence-gap detection, bounded replay,
   generation fencing, reconnect backoff, and an automatic approximate-routing
