@@ -1003,10 +1003,17 @@ run noise; all 72 requests succeeded and were below the tokenization size
 window. Both upstream probes remained up, all route load gauges returned to
 zero, and the engines were never restarted.
 
+r10 removes an unnecessary decoder from the resident tokenizer object by using
+the underlying encode-only `fastokens::Tokenizer`. The full live matrix stayed
+at 10/10 admitted matches, three remote-only fallbacks, and zero mismatches.
+Idle/post-matrix RSS fell from r9's 196MiB to 108MiB; after two 18,762-token
+observations it was 138MiB. The warmed second local worker observation took
+6.53ms versus 34.59ms remote. This is a memory optimization, not a routing
+change.
+
 The live node06 image is locally built
-`ghcr.io/helixml/ds4-loadbalancer:rust-r9-0c03f85`; GHCR rejected node06's
-stored credential, so this tag is not yet published. r9 remains observation
-only: exact IDs do not influence routing. Next gates are an automated public
-image publish, an Anthropic-input golden adapter, a versioned compatibility
-manifest, and the fenced KV-event shadow index. Go rc7 remains the compose-
-default rollback.
+`ghcr.io/helixml/ds4-loadbalancer:rust-r10-e32eae9`; GHCR rejected node06's
+stored credential, so GitHub Actions owns public publishing. r10 remains
+observation only: exact IDs do not influence routing. Next gates are an
+Anthropic-input golden adapter, a versioned compatibility manifest, and the
+fenced KV-event shadow index. Go rc7 remains the compose-default rollback.
