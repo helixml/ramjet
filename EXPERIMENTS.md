@@ -2159,3 +2159,8 @@ from 4,797,696 to 4,779,008 resident tokens (-18,688) while the other remained
 at 4,626,688, alongside 37 live stores and 110 live removals. This is the
 intended output: it reveals net per-replica residency independently from gross
 publisher churn without claiming removals are evictions.
+
+The public `rust-r27-residency-health-48ff0bd` image has digest
+`sha256:eceb463dd63954b826076d3eda7b7e4cd2695597c037e2a495fe91d05247a90f`.
+Its registry promotion reused all but the changed binary layer and took 4.08s;
+the canonical node06 Compose now pins that digest.
