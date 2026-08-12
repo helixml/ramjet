@@ -27,7 +27,7 @@ services:
   # compat shims, /v1/models context-margin rewrite, Prometheus metrics
   # (:8007 -> Caddy :9105) and engine-native metrics passthrough.
   ds4-loadbalancer:
-    image: ${LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-r27-residency-health-48ff0bd@sha256:eceb463dd63954b826076d3eda7b7e4cd2695597c037e2a495fe91d05247a90f}
+    image: ${LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-r28.1-sparse-orphan-7ffc1d0@sha256:1a6c56820991f5fcdf3f6af2bdd0ec867967e9b84f7ce8f61e0985453a7a428f}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:

@@ -85,10 +85,11 @@ pub enum FilterReason {
     UnknownAttentionKind,
     UnlearnedAttentionGroup,
     UnsupportedPartialBlock,
+    OrphanedParent,
 }
 
 impl FilterReason {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::NonLocal,
         Self::UnsupportedMedium,
         Self::Namespaced,
@@ -96,6 +97,7 @@ impl FilterReason {
         Self::UnknownAttentionKind,
         Self::UnlearnedAttentionGroup,
         Self::UnsupportedPartialBlock,
+        Self::OrphanedParent,
     ];
 
     #[must_use]
@@ -108,6 +110,7 @@ impl FilterReason {
             Self::UnknownAttentionKind => "unknown_attention_kind",
             Self::UnlearnedAttentionGroup => "unlearned_attention_group",
             Self::UnsupportedPartialBlock => "unsupported_partial_block",
+            Self::OrphanedParent => "orphaned_parent",
         }
     }
 
@@ -120,6 +123,7 @@ impl FilterReason {
             Self::UnknownAttentionKind => 4,
             Self::UnlearnedAttentionGroup => 5,
             Self::UnsupportedPartialBlock => 6,
+            Self::OrphanedParent => 7,
         }
     }
 }
@@ -544,13 +548,13 @@ impl ExactKvInventory {
                 }
                 match self.index.store(stored) {
                     Ok(blocks) => Ok(ApplyOutcome::Stored { blocks }),
-                    Err(ExactIndexError::ParentNotFound)
-                        if self.is_unsupported_partial(data_parallel_rank, stored) =>
-                    {
-                        Ok(ApplyOutcome::Filtered(
-                            FilterReason::UnsupportedPartialBlock,
-                        ))
-                    }
+                    Err(ExactIndexError::ParentNotFound) => Ok(ApplyOutcome::Filtered(
+                        if self.is_unsupported_partial(data_parallel_rank, stored) {
+                            FilterReason::UnsupportedPartialBlock
+                        } else {
+                            FilterReason::OrphanedParent
+                        },
+                    )),
                     Err(error) => Err(error),
                 }
             }
@@ -799,6 +803,14 @@ impl FencedExactKvInventory {
         self.fence.generation_changed();
         self.inventory.reset_generation();
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Clear the disconnected generation and prepare a bounded replay from
+    /// sequence zero through the last known live sequence.
+    #[must_use]
+    pub fn prepare_full_replay_retry(&mut self, through: u64) -> bool {
+        self.generation_changed();
+        self.fence.prepare_full_replay(through)
     }
 
     /// Query only while the sequence fence declares the inventory complete.
@@ -1104,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_filters_only_orphaned_smaller_partial_geometry() {
+    fn inventory_safely_underestimates_orphaned_state() {
         let mut inventory = ExactKvInventory::new(ExactIndexLimits::default());
         let mut root = store_event(&[1], None, &[1, 2, 3, 4], 4);
         root.kv_cache_spec_kind = Some("mla_attention".to_owned());
@@ -1124,8 +1136,10 @@ mod tests {
         let mut missing_full_parent = store_event(&[3], Some(99), &[5, 6, 7, 8], 4);
         missing_full_parent.kv_cache_spec_kind = Some("mla_attention".to_owned());
         assert_eq!(
-            inventory.apply_event(0, &KvEvent::BlockStored(missing_full_parent)),
-            Err(ExactIndexError::ParentNotFound)
+            inventory
+                .apply_event(0, &KvEvent::BlockStored(missing_full_parent))
+                .unwrap(),
+            ApplyOutcome::Filtered(FilterReason::OrphanedParent)
         );
     }
 
@@ -1282,7 +1296,7 @@ mod tests {
             LiveBatchOutcome::Replay { .. }
         ));
         assert_eq!(
-            state.ingest_replay(&[(2, batch(Vec::new()))]).unwrap(),
+            state.ingest_replay(&[(3, batch(Vec::new()))]).unwrap(),
             ReplayBatchOutcome::Invalid
         );
         assert!(!state.trusted());
@@ -1292,15 +1306,43 @@ mod tests {
             .ingest_live(3, &batch(vec![KvEvent::AllBlocksCleared]))
             .unwrap();
         let invalid = batch(vec![KvEvent::BlockStored(store_event(
-            &[9],
-            Some(8),
-            &[1, 2],
+            &[9, 10],
+            None,
+            &[1],
             2,
         ))]);
         assert_eq!(
             state.ingest_live(4, &invalid),
-            Err(ExactIndexError::ParentNotFound)
+            Err(ExactIndexError::InconsistentBlockShape)
         );
+        assert!(!state.trusted());
+        assert_eq!(state.stats(), ExactIndexStats::default());
+    }
+
+    #[test]
+    fn reconnect_retry_rebuilds_only_from_a_complete_generation() {
+        let mut state = FencedExactKvInventory::new(4, ExactIndexLimits::default());
+        assert!(state.prepare_full_replay_retry(1));
+        let replay = vec![
+            (0, batch(vec![KvEvent::AllBlocksCleared])),
+            (
+                1,
+                batch(vec![KvEvent::BlockStored(store_event(
+                    &[1],
+                    None,
+                    &[1, 2],
+                    2,
+                ))]),
+            ),
+        ];
+        assert!(matches!(
+            state.ingest_replay(&replay).unwrap(),
+            ReplayBatchOutcome::Applied(_)
+        ));
+        assert!(state.trusted());
+        assert_eq!(state.stats().token_ids, 2);
+
+        assert!(!state.prepare_full_replay_retry(4));
         assert!(!state.trusted());
         assert_eq!(state.stats(), ExactIndexStats::default());
     }

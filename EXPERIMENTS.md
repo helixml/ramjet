@@ -2174,3 +2174,99 @@ becoming trusted. Serving health remained 2/2 throughout because exact state
 is shadow-only. This is a recovery-latency opportunity: a failed replay should
 be able to retry its known range after reconnect without waiting for a second
 live event, while preserving the current publisher-backpressure protections.
+
+## 2026-08-12 — replay-range retry without a second allocation
+
+The r27 recovery observation is addressed narrowly. When a replay fails after
+the consumer has learned its upper sequence, reconnect now discards the prior
+generation and re-arms only one bounded complete `0..through` replay. It never
+continues a partial nonzero range against cleared state. A range outside the
+configured replay limit remains fenced and falls back to waiting for an
+authoritative boundary; a failed retry does the same instead of looping.
+Retries retain r23's fresh libzmq DEALER identity,
+drain-through-validation, timeout floor, and exponential backoff; serving and
+approximate routing remain independent.
+
+A real in-process PUB/ROUTER regression sends exactly one live sequence, makes
+the first startup replay incomplete, then serves a valid second replay. The
+consumer reconnects, requests zero again, and becomes trusted without any
+second live message. The focused test plus incremental compile completed in
+4.84s. Node06 qualification should reproduce the final public-roll condition:
+force one malformed/invalid replay in an isolated mock only, never mutate the
+production publisher, then confirm ordinary retained replay still restores
+both real inventories.
+
+The first node06 r28 attempt was rolled back in 0.97s after B repeated
+`invalid_replay` five times and then hit the 20-second drain deadline. Serving
+remained 2/2 and both engines retained their start times and zero restart
+counts, but automatic retries were amplifying a persistent validation error.
+A read-only replay probe found the root cause: B returned 2,040 event-bearing
+batches across sequence 0..3,581 with 1,542 legitimate holes. vLLM increments
+the sequence per scheduler step but retains/publishes only steps with KV
+events. The old transport incorrectly required every integer in the interval.
+It now accepts a sparse replay only when events are strictly increasing,
+in-range, and end exactly at `through`; this preserves authoritative no-op
+steps while rejecting duplicates, regressions, early tails, and out-of-range
+messages. The retry path is also single-shot: another failure returns to the
+live-event gate rather than forming a replay storm.
+
+The corrected r28 node-local image then rolled LB-only in 1.00s. One fresh
+allocation per engine triggered first-attempt replays of 3,653 A event-bearing
+batches and 3,583 B batches; both inventories became trusted with no
+`invalid_replay`, reconnect, or retry. Neither engine restarted. A subsequent
+2-app/2-session concurrent LB smoke completed 4/4 with a 2/2 split, exact
+zero-spread response/LB/native reconciliation, zero preemptions, and 98.45%
+reuse-wave token hits in 3.69s. Both exact inventories stayed trusted, and the
+r27 scorecard reported signed net residency changes independently for each
+replica. This qualifies sparse-sequence validation on the real retained
+publisher histories; the retry branch remains a bounded fallback rather than
+the normal path.
+
+The public `rust-r28-sparse-replay-0f49a6d` image has digest
+`sha256:f7d79cff932bc514b632188b97ab8b48b8495058a05028d80ca43fb793895f74`;
+its registry promotion took 9.24s. The canonical Compose pins this tested
+digest.
+
+The first public-digest roll found B's sparse transport replay valid but its
+index replay failed at the probe's single full-size missing-parent event
+(`sequence=3542`, block size 256). Runtime was rolled back to r27 in 1.02s;
+serving stayed 2/2 and engines again remained untouched. A child whose parent
+was already removed or omitted from the retained/indexable generation cannot
+be placed in the radix index. Omitting that child is nevertheless safe: exact
+lookup under-estimates cache state and cannot manufacture a false hit. Such
+stores now increment the bounded `orphaned_parent` filter reason. True shape,
+duplicate-hash, conflicting-path, or capacity errors still fence and clear the
+entire inventory. Unit tests distinguish this safe under-estimation from a
+structurally inconsistent store.
+
+The r28.1 node-local candidate built in 22.80s and transferred in 6.08s
+(28.88s total); its LB-only swap took 0.87s. One fresh 32 KiB allocation per
+engine restored both inventories on the first retained replay. A applied its
+replay normally; B conservatively filtered two `orphaned_parent` stores and
+eight unsupported partial-block stores. Both inventories remained trusted,
+there were no invalid-replay retries or reconnects beyond the initial
+connections, and both engines retained their start times and zero restart
+counts.
+
+The post-replay routed scorecard completed 4/4 requests with a 2/2 replica
+split in 1.52s for the two-app cell. Response usage, LB counters, and native
+vLLM counters reconciled with zero spread; preemptions stayed at zero; the
+reuse wave achieved a 98.88% token hit rate. Both per-replica exact
+inventories were trusted at both snapshots. The public
+`rust-r28.1-sparse-orphan-7ffc1d0` image has digest
+`sha256:1a6c56820991f5fcdf3f6af2bdd0ec867967e9b84f7ce8f61e0985453a7a428f`;
+promotion reused all but the binary layer and took 2.84s. The canonical
+node06 Compose pins this qualified digest.
+
+The final public-digest LB-only roll took 0.99s and again left both engines'
+start times and restart counts unchanged. B restored on its first replay. A's
+first replay and the one permitted automatic retry both exceeded the
+20-second drain deadline; the consumer then stopped retrying and remained
+fail-closed as designed. One subsequent A allocation opened the live-event
+gate, and its 3,666-batch replay completed successfully, restoring both
+inventories to trusted state. A final public-image scorecard completed 4/4,
+split 2/2, reconciled with zero spread and zero preemptions, preserved trusted
+inventory boundaries, and reached 98.07% reuse-wave token hits in 1.56s. This
+qualifies both the bounded failure path and live-event recovery, while also
+leaving replay-drain throughput as a follow-up optimization rather than hiding
+it behind unbounded retries.

@@ -145,8 +145,22 @@ node06). The design rationale for each lives in DESIGN.md.
   Reconnect progress means authoritative inventory restoration, so exponential
   backoff cannot reset on a merely live-but-fenced event. Isolated and
   production starts restored both inventories in parallel at 1,293/1,684 and
-  1,332/1,724 retained batches respectively, without engine restarts. Exact
-  placement remains shadow-only while #13 collects organic gain/load evidence.
+  1,332/1,724 retained batches respectively, without engine restarts. After r27
+  exposed a quiet publisher waiting for a second allocation following an
+  invalid replay, the consumer learned to preserve only the known upper
+  boundary, clear the old generation, and retry one bounded full `0..through`
+  range immediately after reconnect. An in-process PUB/ROUTER test proves the
+  second replay becomes authoritative without a second live batch. A node06
+  probe then identified the original `invalid_replay` cause: the publisher
+  retains only scheduler steps that emitted events, so large histories have
+  legitimate sequence holes. Validation now accepts strictly increasing
+  in-range events ending at the requested boundary while still rejecting
+  duplicates, regressions, out-of-range data, and incomplete tails. Exact
+  index replay also omits a bounded `orphaned_parent` store when its ancestor
+  has already left the retained/indexable set; this can only under-estimate KV
+  availability, while structural/path/capacity errors still fence all state.
+  Exact placement remains shadow-only while #13 collects organic gain/load
+  evidence.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
   vectors rather than restarting; benchmark memory, p99 preparation latency,
