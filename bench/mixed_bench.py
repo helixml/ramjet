@@ -21,6 +21,8 @@ import threading
 import time
 import urllib.request
 
+from engine_metrics import PeakSampler, delta as metric_delta, fetch as metric_fetch
+
 
 BASE = sys.argv[1].rstrip("/")
 MODEL = sys.argv[2]
@@ -32,6 +34,8 @@ TOKEN = os.environ.get("BENCH_TOKEN") or os.environ.get("VLLM_API_KEY")
 LEAD_SECONDS = float(os.environ.get("MIXED_LEAD_MS", "50")) / 1000
 ORDER = os.environ.get("MIXED_ORDER", "prefill-first")
 SALT = os.environ.get("SALT") or str(time.time_ns())
+METRICS_URL = os.environ.get("METRICS_URL")
+METRICS_INTERVAL = float(os.environ.get("METRICS_INTERVAL", "0.02"))
 if not TOKEN:
     raise SystemExit("set BENCH_TOKEN or VLLM_API_KEY")
 if min(PREFILL_TOKENS, DECODERS, DECODE_TOKENS, RUNS) <= 0:
@@ -187,7 +191,12 @@ stream_request("warmup", "Return the number 1.", 16, warmup, "warmup")
 if not warmup.get("warmup", {}).get("ok"):
     raise SystemExit("warmup failed: " + json.dumps(warmup, sort_keys=True))
 
+metrics_before = metric_fetch(METRICS_URL) if METRICS_URL else None
+sampler = PeakSampler(METRICS_URL, METRICS_INTERVAL)
+sampler.start()
 runs = [run_mixed(run) for run in range(RUNS)]
+sampler.stop()
+metrics_after = metric_fetch(METRICS_URL) if METRICS_URL else None
 requests = [item for run in runs for item in run.values()]
 errors = [item["error"] for item in requests if not item.get("ok")]
 prefills = [run["prefill"] for run in runs if run.get("prefill", {}).get("ok")]
@@ -230,6 +239,8 @@ result = {
     "decoder_aggregate_tok_s_median": round(statistics.median(aggregate_rates), 1) if aggregate_rates else None,
     "lead_ms": round(LEAD_SECONDS * 1000, 1),
     "order": ORDER,
+    "engine_metrics_delta": metric_delta(metrics_before, metrics_after),
+    "engine_metric_peaks": sampler.peaks if METRICS_URL else None,
     "prefill_route_counts": {
         route: sum(1 for item in prefills if item.get("route") == route)
         for route in sorted({item.get("route") for item in prefills if item.get("route") is not None})

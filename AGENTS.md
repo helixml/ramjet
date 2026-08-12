@@ -195,6 +195,24 @@ c1/c8/c16, and cold/warm passes. Narrow `AGENT_PROFILES`,
 `AGENT_RUNS=3` only for a final variance-qualified candidate. Run direct-engine
 A/B cells with the two-round crossover below to use both TP4 pairs at once.
 
+### Long-prefill interference — `mixed_bench.py`
+
+For direct-engine scheduler trials, point `METRICS_URL` at the same engine.
+The runner then snapshots mean engine queue/prefill time and preemptions, while
+a 20ms sampler records peak running/waiting/KV usage:
+
+```bash
+METRICS_URL=http://127.0.0.1:8013/metrics \
+  MIXED_ORDER=prefill-first SALT=$(date +%s) \
+  python3 bench/mixed_bench.py http://127.0.0.1:8013 \
+    deepseek-v4-flash 52000 8 256 3
+```
+
+Single-home production on the other engine before interpreting metric deltas;
+otherwise unrelated traffic contaminates engine-global counters. Run both
+prefill-first and decode-first orders with fresh salts. Queue/prefill means
+come from engine histogram deltas; request TTFT p95 remains the latency gate.
+
 ### Direct engine matrix — `engine_matrix.sh BASE MODEL LABEL`
 
 For a rolling engine/image A/B, keep production single-homed on the other

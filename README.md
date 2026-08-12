@@ -217,3 +217,8 @@ removal counts while keeping all identifiers process-local.
 `bench/forced_exact_miss.py` warms a synthetic long prompt directly on one
 engine and sends it through the proxy, creating a reproducible exact-versus-
 approximate disagreement without printing the prompt or token IDs.
+For scheduler isolation trials, `bench/mixed_bench.py` accepts `METRICS_URL`
+and records engine-native queue/prefill histogram deltas, preemptions, and peak
+running/waiting/KV gauges alongside per-request TTFT and decode throughput.
+Point it at the same direct engine and keep unrelated production traffic off
+that engine while interpreting the deltas.

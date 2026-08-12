@@ -176,6 +176,15 @@ node06). The design rationale for each lives in DESIGN.md.
 
 ## Near term
 
+- 🔨 **Targeted long-prefill isolation (#11).** The exact pinned r34 CLI
+  supports `max_num_partial_prefills`, `max_long_partial_prefills`, and
+  `long_prefill_token_threshold`; production is currently 1/1/0 (threshold
+  disabled) with the global 4,096 budget unchanged. The mixed benchmark now
+  records engine queue/prefill histogram deltas, preemptions, and 20ms peak
+  running/waiting/KV gauges in addition to request TTFT and decode throughput.
+  A direct-engine smoke validated the collector with zero preemptions and no
+  waiting. Next run the rolling 1,024/2,048/4,096 threshold matrix at 2/1
+  partial-prefill concurrency, three matched runs and both arrival orders.
 - 🔨 **Production-shaped DeepSeek-V4 agent/DSML gate (#10).** The versioned
   synthetic v1 JSONL corpus and privacy-safe runner now cover stream/non-stream,
   automatic/required/parallel tool calls, split deltas and DSML leaks, every
