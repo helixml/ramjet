@@ -2209,3 +2209,15 @@ in-range, and end exactly at `through`; this preserves authoritative no-op
 steps while rejecting duplicates, regressions, early tails, and out-of-range
 messages. The retry path is also single-shot: another failure returns to the
 live-event gate rather than forming a replay storm.
+
+The corrected r28 node-local image then rolled LB-only in 1.00s. One fresh
+allocation per engine triggered first-attempt replays of 3,653 A event-bearing
+batches and 3,583 B batches; both inventories became trusted with no
+`invalid_replay`, reconnect, or retry. Neither engine restarted. A subsequent
+2-app/2-session concurrent LB smoke completed 4/4 with a 2/2 split, exact
+zero-spread response/LB/native reconciliation, zero preemptions, and 98.45%
+reuse-wave token hits in 3.69s. Both exact inventories stayed trusted, and the
+r27 scorecard reported signed net residency changes independently for each
+replica. This qualifies sparse-sequence validation on the real retained
+publisher histories; the retry branch remains a bounded fallback rather than
+the normal path.
