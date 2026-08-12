@@ -314,3 +314,12 @@ bench/node06_engine_metadata.sh /tmp/engine-b.json dspark-0731-b \
 
 The raw serving command, API keys, hostnames, prompts, and token IDs are never
 written to the output.
+
+Direct decode cells use `bench/engine_metrics.py` for one normalized
+speculation record. It distinguishes enabled, target-only, unavailable,
+incomplete, reset, no-draft, and contaminated intervals; reports the strict
+accepted/proposed denominator, proposals and accepts per speculative step,
+effective tokens per target step, and bounded per-position counts; and marks
+the interval reconciled only when native generation-token/request deltas equal
+the benchmark client's authoritative usage and success counts. Never compare
+acceptance from a contaminated interval.

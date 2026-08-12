@@ -11,12 +11,13 @@ decoding. The prompt intentionally matches the upstream RTX PRO 6000 recipe.
 import json
 import math
 import os
-import re
 import statistics
 import sys
 import threading
 import time
 import urllib.request
+
+from engine_metrics import fetch_speculative, speculative_delta
 
 
 BASE = sys.argv[1].rstrip("/")
@@ -51,11 +52,6 @@ METRICS_URLS = [
     for value in os.environ.get("METRICS_URLS", os.environ.get("METRICS_URL", "")).split(",")
     if value.strip()
 ]
-METRIC_NAMES = {
-    "drafts": "vllm:spec_decode_num_drafts_total",
-    "draft_tokens": "vllm:spec_decode_num_draft_tokens_total",
-    "accepted_tokens": "vllm:spec_decode_num_accepted_tokens_total",
-}
 
 
 def percentile(values, fraction):
@@ -114,7 +110,7 @@ def one(index, output):
                 cached_tokens = details.get("cached_tokens", cached_tokens)
         ended = time.perf_counter()
         output[index] = {
-            "ok": True,
+            "ok": bool(first and prompt_tokens > 0 and completion_tokens > 0),
             "prompt_tokens": prompt_tokens,
             "cached_tokens": cached_tokens,
             "completion_tokens": completion_tokens,
@@ -123,6 +119,8 @@ def one(index, output):
             "wall_seconds": ended - started,
             "route": route,
         }
+        if not output[index]["ok"]:
+            output[index]["error"] = "missing generated output or authoritative usage"
     except Exception as error:
         output[index] = {"ok": False, "error": f"{type(error).__name__}: {error}"}
 
@@ -142,38 +140,24 @@ def metric_snapshot():
     if not METRICS_URLS:
         return None
     try:
-        snapshot = {key: 0.0 for key in METRIC_NAMES}
+        snapshots = []
         for metrics_url in METRICS_URLS:
-            with urllib.request.urlopen(metrics_url, timeout=30) as response:
-                body = response.read().decode("utf-8", "replace")
-            for key, name in METRIC_NAMES.items():
-                matches = re.findall(
-                    r"^" + re.escape(name) + r"(?:\{[^\n]*\})?\s+([0-9.eE+-]+)$",
-                    body,
-                    re.MULTILINE,
-                )
-                if not matches:
-                    return None
-                snapshot[key] += sum(float(value) for value in matches)
-        return snapshot
+            snapshots.append(fetch_speculative(metrics_url, timeout=30))
+        if len(snapshots) == 1:
+            return snapshots[0]
+        combined = {}
+        for key in snapshots[0]:
+            if key == "accepted_per_position":
+                combined[key] = {}
+                for snapshot in snapshots:
+                    for position, value in snapshot[key].items():
+                        combined[key][position] = combined[key].get(position, 0) + value
+            else:
+                values = [snapshot[key] for snapshot in snapshots]
+                combined[key] = None if any(value is None for value in values) else sum(values)
+        return combined
     except Exception:
         return None
-
-
-def acceptance(before, after):
-    if before is None or after is None:
-        return None
-    delta = {key: after[key] - before[key] for key in before}
-    if min(delta.values()) < 0 or delta["draft_tokens"] <= 0 or delta["drafts"] <= 0:
-        return None
-    return {
-        "draft_steps": int(delta["drafts"]),
-        "draft_tokens": int(delta["draft_tokens"]),
-        "accepted_tokens": int(delta["accepted_tokens"]),
-        "draft_acceptance_pct": round(100 * delta["accepted_tokens"] / delta["draft_tokens"], 1),
-        "mean_accepted_per_draft": round(delta["accepted_tokens"] / delta["drafts"], 2),
-        "effective_tokens_per_step": round(1 + delta["accepted_tokens"] / delta["drafts"], 2),
-    }
 
 
 warmup, _ = run_batch()
@@ -217,7 +201,13 @@ result = {
         route: sum(1 for item in good if item.get("route") == route)
         for route in sorted({item.get("route") for item in good if item.get("route") is not None})
     },
-    "dspark": acceptance(metrics_before, metric_snapshot()),
+    "dspark": speculative_delta(
+        metrics_before,
+        metric_snapshot(),
+        sum(item.get("completion_tokens", 0) for item in good),
+        len(good),
+        expected_enabled=os.environ.get("BENCH_SPEC_MODE", "enabled") == "enabled",
+    ),
 }
 errors = [item["error"] for item in requests if not item.get("ok")]
 if errors:

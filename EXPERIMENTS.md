@@ -2374,3 +2374,14 @@ raw argv or credential values. Live r34 B capture succeeded and matched its
 deployed digest/revisions; a synthetic live-r4 fixture verified against the
 immutable upstream receipt. Thirty-eight Python tests pass across the full
 benchmark suite.
+
+The next local slice centralizes speculative accounting for direct decode
+cells. It reports strict accepted/proposed tokens, proposed and accepted
+tokens per speculative step, effective tokens per target step, and bounded
+per-position deltas. Target-only, absent, partial, reset, no-draft, and
+contaminated intervals remain distinct states. A cell is reconciled only when
+native generation-token and finished-request deltas equal client completion
+usage and successful request count; acceptance from production cross-traffic
+can no longer appear valid silently. Direct requests also require generated
+output and authoritative usage before counting as successful. The full Python
+suite is now 41 tests.
