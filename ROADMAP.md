@@ -25,7 +25,9 @@ node06). The design rationale for each lives in DESIGN.md.
   telemetry, and occasional Helix workflow acceptance before promotion. Go
   remains the instant LB-only rollback; neither engine is restarted. r4 matched
   Go at c16/c24, preserved locality, replayed 36/36 decisions, and established
-  the rollback baseline. r11 is live in exact-token local-shadow mode.
+  the rollback baseline. Locally built r12 is live in exact-token local-shadow
+  mode with the new KV-event consumers default-off; public r11 remains the
+  immediate LB-only rollback while GHCR Actions access is pending.
 - ✅ **Bounded remote tokenizer shadow.** The one-pass boundary selectively
   derives chat/completion `/tokenize` payloads, then submits them only after the
   user request completes. Authenticated calls use a bounded non-blocking queue,

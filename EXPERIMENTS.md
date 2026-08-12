@@ -1169,3 +1169,25 @@ engines and the live r11 LB remained at zero restarts with readiness one. All
 the retained Go tests/vet, and both format gates pass. The next gate is a
 rolling one-engine real-feed observation; neither production engine has been
 reconfigured in this experiment.
+
+The immutable node06 build
+`ghcr.io/helixml/ds4-loadbalancer:rust-r12-5a455fe` has manifest-list digest
+`sha256:fe5d5c409988ea7d703a76389d945b07ffd8015af62b18b5348b31754d93ba58`.
+The first LB-only recreate exposed that r11's `local-shadow` setting had been a
+one-off compose override: r12 correctly defaulted to off from the checked-in
+compose. It was restored within seconds, and infra commit `c5316b3` now makes
+local shadow the persistent compose default while keeping KV events off.
+
+A fresh 18,762-token request completed in 1.95s and produced exact equal local
+and remote token sums of 18,762 with one `parity_match`; the first warmed r12
+observation took 21.1ms locally and 38.0ms remotely. The 12-request same-app
+gate completed 12/12, split 6/6, at 567 tok/s. Three r12 c24/max256 samples
+were 1,504.8, 1,508.3, and 1,596.2 tok/s. Because these were below the historical
+box class, an adjacent r11 rollback control measured 1,497.2 and 1,507.3 tok/s;
+r12 then measured 1,572.0 after re-promotion. The matched control rules out an
+r12 regression and attributes the low absolute run to current shared-engine
+state/noise.
+
+r12 remains live with `LocalShadow`, `KvEventMode Off`, both probes at one,
+zero inflight/load/tokenizer queue, and zero engine or LB restarts. No engine
+configuration or process changed during this rollout.
