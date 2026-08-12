@@ -69,10 +69,15 @@ node06). The design rationale for each lives in DESIGN.md.
   one total replay deadline and bounded requested/tail batches, and rejects
   missing, duplicate, or out-of-order sequences. A CPU-only node06 probe passed
   against Python `pyzmq` using the r34 live/replay protocol without touching
-  either engine. Next construct one supervised consumer per engine, add
-  reconnect/backoff and trust-state metrics, and qualify real shadow events
-  before enabling any exact placement. Raw token IDs, block hashes, and prompts
-  remain out of logs.
+  either engine. One default-off supervised consumer per engine is now wired
+  into the binary with typed endpoint cardinality, reconnect monitoring,
+  generation fencing, bounded replay, graceful shutdown, and controlled
+  connection/trust/index metrics. A second CPU-only node06 lifecycle test
+  proved reconnect, authoritative-clear trust, and immediate disconnect
+  fencing. Next enable the real feed on one engine during a rolling A/B,
+  observe event shapes/gaps/index growth, then repeat on the other engine before
+  enabling any exact placement. Raw token IDs, block hashes, and prompts remain
+  out of logs.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
   vectors rather than restarting; benchmark memory, p99 preparation latency,

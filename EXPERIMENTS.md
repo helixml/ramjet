@@ -1139,3 +1139,33 @@ up with zero restarts and both readiness gauges at one. This transport is not
 yet constructed by the serving binary, so exact IDs still cannot affect
 routing. The next gate is a supervised per-engine shadow consumer with bounded
 reconnect backoff, trust/gap/replay metrics, and real-feed observation.
+
+## 2026-08-12 — supervised shadow consumer lifecycle
+
+The serving binary now has a default-off `off|shadow` KV-event mode. Shadow
+startup requires exactly one validated TCP live/replay endpoint pair per
+configured upstream. Each task owns an independent fenced exact inventory,
+bounded transport/replay configuration, capped initial-connect backoff,
+graceful shutdown, and `ds4proxy_kv_event_*` connection, trust, generation,
+batch-outcome, replay-size, and resident-index metrics. The inventories are not
+passed to the router, so this cannot change placement.
+
+An initial standalone node06 lifecycle run exposed that the pure-Rust SUB
+socket reconnects transparently: its message receive stays pending when TCP
+disconnects, which made a naive connection gauge remain at one. The transport
+now consumes the library's socket-monitor stream alongside messages. A repeat
+CPU-only Python-peer run proved the corrected transitions:
+
+- after reconnect, 22 startup batches remained observation-only;
+- an explicit `AllBlocksCleared` advanced generation 2 and set
+  `up=1`, `trusted=1`;
+- 21 subsequent batches applied authoritatively;
+- peer shutdown advanced generation 3, immediately set `up=0`, `trusted=0`,
+  and cleared the zero-entry synthetic inventory.
+
+The standalone binary and temporary containers were removed. Both production
+engines and the live r11 LB remained at zero restarts with readiness one. All
+**67 Rust tests**, strict all-target/all-feature Clippy, release compilation,
+the retained Go tests/vet, and both format gates pass. The next gate is a
+rolling one-engine real-feed observation; neither production engine has been
+reconfigured in this experiment.

@@ -1,6 +1,7 @@
 pub mod config;
 pub mod exact_index;
 pub mod journal;
+pub mod kv_consumer;
 pub mod kv_fence;
 pub mod kv_transport;
 pub mod kv_wire;

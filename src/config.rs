@@ -27,6 +27,13 @@ pub struct Config {
     pub tokenizer_workers: usize,
     pub tokenizer_queue_capacity: usize,
     pub tokenizer_timeout_ms: usize,
+    pub kv_event_mode: KvEventMode,
+    pub kv_event_sources: Vec<KvEventSourceConfig>,
+    pub kv_event_replay_limit: usize,
+    pub kv_event_replay_tail_limit: usize,
+    pub kv_event_timeout_ms: usize,
+    pub kv_event_reconnect_min_ms: usize,
+    pub kv_event_reconnect_max_ms: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,6 +54,19 @@ pub enum TokenizerProfile {
     DeepSeekV4R34,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KvEventMode {
+    Off,
+    Shadow,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KvEventSourceConfig {
+    pub live_endpoint: String,
+    pub replay_endpoint: String,
+    pub topic: String,
+}
+
 struct TokenizerSettings {
     mode: TokenizerMode,
     path: Option<String>,
@@ -54,6 +74,16 @@ struct TokenizerSettings {
     profile: TokenizerProfile,
     min_bytes: usize,
     max_bytes: usize,
+}
+
+struct KvEventSettings {
+    mode: KvEventMode,
+    sources: Vec<KvEventSourceConfig>,
+    replay_limit: usize,
+    replay_tail_limit: usize,
+    timeout_ms: usize,
+    reconnect_min_ms: usize,
+    reconnect_max_ms: usize,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -130,6 +160,7 @@ impl Config {
             value => return Err(invalid("DS4_AFFINITY", value.to_owned(), "prefix or load")),
         };
         let tokenizer = tokenizer_settings(&mut get)?;
+        let kv_events = kv_event_settings(&mut get, upstreams.len())?;
 
         Ok(Self {
             upstreams,
@@ -159,8 +190,126 @@ impl Config {
             tokenizer_workers: positive(&mut get, "DS4_TOKENIZER_WORKERS", 1)?,
             tokenizer_queue_capacity: positive(&mut get, "DS4_TOKENIZER_QUEUE_CAPACITY", 8)?,
             tokenizer_timeout_ms: positive(&mut get, "DS4_TOKENIZER_TIMEOUT_MS", 2_000)?,
+            kv_event_mode: kv_events.mode,
+            kv_event_sources: kv_events.sources,
+            kv_event_replay_limit: kv_events.replay_limit,
+            kv_event_replay_tail_limit: kv_events.replay_tail_limit,
+            kv_event_timeout_ms: kv_events.timeout_ms,
+            kv_event_reconnect_min_ms: kv_events.reconnect_min_ms,
+            kv_event_reconnect_max_ms: kv_events.reconnect_max_ms,
         })
     }
+}
+
+fn kv_event_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    upstream_count: usize,
+) -> Result<KvEventSettings, ConfigError> {
+    let mode = match get("DS4_KV_EVENT_MODE").as_deref().unwrap_or("off") {
+        "off" => KvEventMode::Off,
+        "shadow" => KvEventMode::Shadow,
+        value => {
+            return Err(invalid(
+                "DS4_KV_EVENT_MODE",
+                value.to_owned(),
+                "off or shadow",
+            ));
+        }
+    };
+    let sources = kv_event_sources(get, mode, upstream_count)?;
+    let reconnect_min_ms = positive(get, "DS4_KV_EVENT_RECONNECT_MIN_MS", 250)?;
+    let reconnect_max_ms = positive(get, "DS4_KV_EVENT_RECONNECT_MAX_MS", 10_000)?;
+    if reconnect_min_ms > reconnect_max_ms {
+        return Err(invalid(
+            "DS4_KV_EVENT_RECONNECT_MIN_MS",
+            reconnect_min_ms.to_string(),
+            "no greater than DS4_KV_EVENT_RECONNECT_MAX_MS",
+        ));
+    }
+    Ok(KvEventSettings {
+        mode,
+        sources,
+        replay_limit: positive(get, "DS4_KV_EVENT_REPLAY_LIMIT", 1_024)?,
+        replay_tail_limit: positive(get, "DS4_KV_EVENT_REPLAY_TAIL_LIMIT", 64)?,
+        timeout_ms: positive(get, "DS4_KV_EVENT_TIMEOUT_MS", 5_000)?,
+        reconnect_min_ms,
+        reconnect_max_ms,
+    })
+}
+
+fn kv_event_sources(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    mode: KvEventMode,
+    upstream_count: usize,
+) -> Result<Vec<KvEventSourceConfig>, ConfigError> {
+    if mode == KvEventMode::Off {
+        return Ok(Vec::new());
+    }
+    let live = endpoint_list(get, "DS4_KV_EVENT_LIVE_ENDPOINTS")?;
+    let replay = endpoint_list(get, "DS4_KV_EVENT_REPLAY_ENDPOINTS")?;
+    if live.len() != upstream_count || replay.len() != upstream_count {
+        return Err(invalid(
+            "DS4_KV_EVENT_LIVE_ENDPOINTS",
+            format!(
+                "{} live, {} replay, {upstream_count} upstreams",
+                live.len(),
+                replay.len()
+            ),
+            "one live and replay endpoint per upstream",
+        ));
+    }
+    let topic = get("DS4_KV_EVENT_TOPIC").unwrap_or_default();
+    if topic.len() > 256 {
+        return Err(invalid(
+            "DS4_KV_EVENT_TOPIC",
+            "<oversized>".to_owned(),
+            "at most 256 bytes",
+        ));
+    }
+    Ok(live
+        .into_iter()
+        .zip(replay)
+        .map(|(live_endpoint, replay_endpoint)| KvEventSourceConfig {
+            live_endpoint,
+            replay_endpoint,
+            topic: topic.clone(),
+        })
+        .collect())
+}
+
+fn endpoint_list(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    key: &'static str,
+) -> Result<Vec<String>, ConfigError> {
+    get(key)
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|value| {
+            let value = value.trim();
+            (!value.is_empty()).then_some(value)
+        })
+        .map(|value| {
+            let parsed = Url::parse(value).ok();
+            if parsed.as_ref().is_some_and(|url| {
+                url.scheme() == "tcp"
+                    && url.has_host()
+                    && url.port().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && matches!(url.path(), "" | "/")
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+            }) {
+                Ok(value.to_owned())
+            } else {
+                Err(invalid(
+                    key,
+                    value.to_owned(),
+                    "a comma-separated list of tcp://host:port endpoints",
+                ))
+            }
+        })
+        .collect()
 }
 
 fn tokenizer_settings(
@@ -299,6 +448,13 @@ mod tests {
         assert_eq!(config.tokenizer_workers, 1);
         assert_eq!(config.tokenizer_queue_capacity, 8);
         assert_eq!(config.tokenizer_timeout_ms, 2_000);
+        assert_eq!(config.kv_event_mode, KvEventMode::Off);
+        assert!(config.kv_event_sources.is_empty());
+        assert_eq!(config.kv_event_replay_limit, 1_024);
+        assert_eq!(config.kv_event_replay_tail_limit, 64);
+        assert_eq!(config.kv_event_timeout_ms, 5_000);
+        assert_eq!(config.kv_event_reconnect_min_ms, 250);
+        assert_eq!(config.kv_event_reconnect_max_ms, 10_000);
     }
 
     #[test]
@@ -363,6 +519,68 @@ mod tests {
             error,
             ConfigError::InvalidValue {
                 key: "DS4_TOKENIZER_SHA256",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn shadow_kv_events_require_one_endpoint_pair_per_upstream() {
+        let values = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1,http://b:2"),
+            ("DS4_KV_EVENT_MODE", "shadow"),
+            ("DS4_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557"),
+            ("DS4_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558,tcp://b:5558"),
+        ]);
+        let error =
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "DS4_KV_EVENT_LIVE_ENDPOINTS",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_typed_kv_event_shadow_sources() {
+        let values = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1,http://b:2"),
+            ("DS4_KV_EVENT_MODE", "shadow"),
+            ("DS4_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557, tcp://b:5557"),
+            ("DS4_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558,tcp://b:5558"),
+            ("DS4_KV_EVENT_TOPIC", "kv"),
+            ("DS4_KV_EVENT_RECONNECT_MIN_MS", "100"),
+            ("DS4_KV_EVENT_RECONNECT_MAX_MS", "200"),
+        ]);
+        let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(config.kv_event_mode, KvEventMode::Shadow);
+        assert_eq!(config.kv_event_sources.len(), 2);
+        assert_eq!(config.kv_event_sources[1].live_endpoint, "tcp://b:5557");
+        assert_eq!(config.kv_event_sources[1].replay_endpoint, "tcp://b:5558");
+        assert_eq!(config.kv_event_sources[1].topic, "kv");
+    }
+
+    #[test]
+    fn rejects_non_tcp_kv_event_endpoints_and_inverted_backoff() {
+        let bad_endpoint = HashMap::from([
+            ("DS4_KV_EVENT_MODE", "shadow"),
+            ("DS4_KV_EVENT_LIVE_ENDPOINTS", "ipc:///tmp/events"),
+            ("DS4_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558"),
+        ]);
+        assert!(Config::from_lookup(|key| bad_endpoint.get(key).map(ToString::to_string)).is_err());
+
+        let bad_backoff = HashMap::from([
+            ("DS4_KV_EVENT_RECONNECT_MIN_MS", "200"),
+            ("DS4_KV_EVENT_RECONNECT_MAX_MS", "100"),
+        ]);
+        let error =
+            Config::from_lookup(|key| bad_backoff.get(key).map(ToString::to_string)).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "DS4_KV_EVENT_RECONNECT_MIN_MS",
                 ..
             }
         ));

@@ -10,6 +10,7 @@ use axum::{
 };
 use mini_dynamo::{
     config::Config,
+    kv_consumer::KvEventConsumers,
     metrics::Metrics,
     proxy::Proxy,
     router::{Router as LocalityRouter, RouterConfig},
@@ -45,8 +46,10 @@ async fn main() -> anyhow::Result<()> {
         .tcp_keepalive(Duration::from_secs(30))
         .build()
         .context("build upstream client")?;
-    let proxy = Proxy::new(config.clone(), client, metrics, routing)
+    let proxy = Proxy::new(config.clone(), client, metrics.clone(), routing)
         .context("initialize mini-dynamo proxy")?;
+    let (shutdown_tx, _) = broadcast::channel::<()>(1);
+    let kv_consumers = KvEventConsumers::start(&config, &metrics, &shutdown_tx);
 
     let api = Router::new()
         .fallback(any(Proxy::handle))
@@ -65,26 +68,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("bind metrics listener")?;
 
-    tracing::info!(
-        upstreams = ?config.upstreams,
-        affinity = ?config.affinity,
-        alpha = config.route_alpha,
-        max_prefix_bytes = config.route_max_prefix_bytes,
-        max_overlap_blocks = config.route_max_overlap_blocks,
-        load_unit_bytes = config.route_load_unit_bytes,
-        max_load_units = config.route_max_load_units,
-        journal = config.route_journal,
-        tokenizer_mode = ?config.tokenizer_mode,
-        tokenizer_profile = ?config.tokenizer_profile,
-        tokenizer_min_bytes = config.tokenizer_min_bytes,
-        tokenizer_max_bytes = config.tokenizer_max_bytes,
-        tokenizer_workers = config.tokenizer_workers,
-        tokenizer_queue_capacity = config.tokenizer_queue_capacity,
-        "mini-dynamo up: API :8000, metrics :9090"
-    );
+    log_startup(&config);
 
     let probe = tokio::spawn(proxy.probe_loop());
-    let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let mut api_shutdown = shutdown_tx.subscribe();
     let mut metrics_shutdown = shutdown_tx.subscribe();
     let api_server = axum::serve(api_listener, api).with_graceful_shutdown(async move {
@@ -119,7 +105,31 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     probe.abort();
+    kv_consumers.shutdown().await;
     Ok(())
+}
+
+fn log_startup(config: &Config) {
+    tracing::info!(
+        upstreams = ?config.upstreams,
+        affinity = ?config.affinity,
+        alpha = config.route_alpha,
+        max_prefix_bytes = config.route_max_prefix_bytes,
+        max_overlap_blocks = config.route_max_overlap_blocks,
+        load_unit_bytes = config.route_load_unit_bytes,
+        max_load_units = config.route_max_load_units,
+        journal = config.route_journal,
+        tokenizer_mode = ?config.tokenizer_mode,
+        tokenizer_profile = ?config.tokenizer_profile,
+        tokenizer_min_bytes = config.tokenizer_min_bytes,
+        tokenizer_max_bytes = config.tokenizer_max_bytes,
+        tokenizer_workers = config.tokenizer_workers,
+        tokenizer_queue_capacity = config.tokenizer_queue_capacity,
+        kv_event_mode = ?config.kv_event_mode,
+        kv_event_sources = config.kv_event_sources.len(),
+        kv_event_replay_limit = config.kv_event_replay_limit,
+        "mini-dynamo up: API :8000, metrics :9090"
+    );
 }
 
 enum Exit {

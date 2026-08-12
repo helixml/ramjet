@@ -1492,6 +1492,7 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-renderer",
  "fastokens",
+ "futures",
  "futures-util",
  "lru",
  "minijinja",

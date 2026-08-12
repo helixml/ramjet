@@ -32,9 +32,14 @@ DS4_TOKENIZER_MODE (off|remote-shadow|local-shadow),
 DS4_TOKENIZER_PATH, DS4_TOKENIZER_SHA256 (both required by local-shadow),
 DS4_TOKENIZER_PROFILE (deepseek-v4-r34), DS4_TOKENIZER_MIN_BYTES (32768),
 DS4_TOKENIZER_MAX_BYTES (2097152), DS4_TOKENIZER_WORKERS (1),
-DS4_TOKENIZER_QUEUE_CAPACITY (8), DS4_TOKENIZER_TIMEOUT_MS (2000). `load` is an explicit baseline or an
-escape hatch for engines without reusable prefix state; hybrid KDA models such
-as Kimi K3 still benefit from their engine's recurrent-state prefix cache.
+DS4_TOKENIZER_QUEUE_CAPACITY (8), DS4_TOKENIZER_TIMEOUT_MS (2000),
+DS4_KV_EVENT_MODE (off|shadow), DS4_KV_EVENT_LIVE_ENDPOINTS,
+DS4_KV_EVENT_REPLAY_ENDPOINTS, DS4_KV_EVENT_TOPIC (empty),
+DS4_KV_EVENT_REPLAY_LIMIT (1024), DS4_KV_EVENT_REPLAY_TAIL_LIMIT (64), and
+DS4_KV_EVENT_TIMEOUT_MS (5000). Shadow mode requires one internal TCP live and
+replay endpoint per upstream. `load` is an explicit baseline or an escape hatch
+for engines without reusable prefix state; hybrid KDA models such as Kimi K3
+still benefit from their engine's recurrent-state prefix cache.
 
 `remote-shadow` derives a vLLM-compatible `/tokenize` payload from the same
 parsed and sanitized request, but does not use its token IDs for routing. After
@@ -53,6 +58,14 @@ mismatch, unsupported tool-history or reasoning variant, worker failure, or
 missing remote authority cannot affect the approximate routing decision. The
 configured profile and expected SHA-256 must match the mounted tokenizer at
 startup, preventing silent artifact drift from inheriting old golden results.
+
+`DS4_KV_EVENT_MODE=shadow` constructs one supervised, fenced exact inventory
+per upstream. It observes bounded vLLM live/replay events and exports only
+controlled connection, trust, generation, batch-outcome, and resident-size
+metrics. Startup and every disconnect are untrusted; only an authoritative
+clear boundary can establish trust. These inventories are deliberately not
+connected to route selection yet, and raw token IDs and hashes never enter
+logs, journals, or metrics.
 
 Set `DS4_ROUTE_JOURNAL=true` to emit privacy-bounded versioned `start`/`finish`
 records to the process log. Records contain only process-local sequence IDs,

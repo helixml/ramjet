@@ -7,9 +7,12 @@
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::{StreamExt, channel::mpsc};
 use thiserror::Error;
 use tokio::time::{Instant, timeout_at};
-use zeromq::{DealerSocket, Socket, SocketOptions, SocketRecv, SocketSend, SubSocket, ZmqMessage};
+use zeromq::{
+    DealerSocket, Socket, SocketEvent, SocketOptions, SocketRecv, SocketSend, SubSocket, ZmqMessage,
+};
 
 use crate::kv_wire::{DecodeError, KvEventBatch, KvWireLimits, decode_batch};
 
@@ -31,6 +34,13 @@ pub struct KvTransportConfig {
 pub struct SequencedBatch {
     pub sequence: u64,
     pub batch: KvEventBatch,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum LiveActivity {
+    Connected,
+    Disconnected,
+    Batch(SequencedBatch),
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -63,6 +73,7 @@ impl From<DecodeError> for KvTransportError {
 
 pub struct ZmqKvEventSource {
     live: SubSocket,
+    live_monitor: mpsc::Receiver<SocketEvent>,
     replay: Option<DealerSocket>,
     topic: Bytes,
     replay_timeout: Duration,
@@ -83,6 +94,7 @@ impl ZmqKvEventSource {
         socket_options.connect_timeout(config.connect_timeout);
 
         let mut live = SubSocket::with_options(socket_options);
+        let live_monitor = live.monitor();
         live.connect(&config.live_endpoint)
             .await
             .map_err(|_| KvTransportError::Socket)?;
@@ -105,6 +117,7 @@ impl ZmqKvEventSource {
 
         Ok(Self {
             live,
+            live_monitor,
             replay,
             topic: Bytes::from(config.topic),
             replay_timeout: config.replay_timeout,
@@ -127,6 +140,32 @@ impl ZmqKvEventSource {
             .await
             .map_err(|_| KvTransportError::Socket)?;
         parse_live_message(&message, &self.topic, self.wire_limits)
+    }
+
+    /// Receive either a decoded live batch or a transport connection-state
+    /// transition. Monitoring is required because SUB sockets reconnect in the
+    /// background and a blocked message receive does not surface disconnects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KvTransportError`] for socket, monitor, framing, or bounded
+    /// payload-decode failures.
+    pub async fn recv_live_activity(&mut self) -> Result<LiveActivity, KvTransportError> {
+        loop {
+            tokio::select! {
+                message = self.live.recv() => {
+                    let message = message.map_err(|_| KvTransportError::Socket)?;
+                    return parse_live_message(&message, &self.topic, self.wire_limits)
+                        .map(LiveActivity::Batch);
+                }
+                event = self.live_monitor.next() => match event {
+                    Some(SocketEvent::Connected(_, _)) => return Ok(LiveActivity::Connected),
+                    Some(SocketEvent::Disconnected(_)) => return Ok(LiveActivity::Disconnected),
+                    Some(_) => {}
+                    None => return Err(KvTransportError::Socket),
+                },
+            }
+        }
     }
 
     /// Request and validate an inclusive replay sequence range.
@@ -364,6 +403,11 @@ mod tests {
         .await
         .unwrap();
 
+        assert!(matches!(
+            source.recv_live_activity().await.unwrap(),
+            LiveActivity::Connected
+        ));
+
         publisher
             .send(message(vec![
                 Bytes::from_static(b"kv"),
@@ -372,7 +416,10 @@ mod tests {
             ]))
             .await
             .unwrap();
-        assert_eq!(source.recv_live().await.unwrap().sequence, 4);
+        let LiveActivity::Batch(live) = source.recv_live_activity().await.unwrap() else {
+            panic!("expected a live batch");
+        };
+        assert_eq!(live.sequence, 4);
 
         let server = tokio::spawn(async move {
             let request = replay_server.recv().await.unwrap();
@@ -412,6 +459,14 @@ mod tests {
             vec![5, 6]
         );
         server.await.unwrap();
+        drop(publisher);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), source.recv_live_activity())
+                .await
+                .unwrap()
+                .unwrap(),
+            LiveActivity::Disconnected
+        ));
     }
 
     #[tokio::test]

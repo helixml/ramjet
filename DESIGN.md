@@ -177,8 +177,15 @@ is the reference for the failure semantics below:
   responses to one request. Exact frame/topic/sequence validation, a single
   replay deadline, requested-range and newer-tail bounds, and privacy-safe
   errors make malformed or partial recovery fail closed. The wire shape has
-  been cross-checked on node06 against Python `pyzmq`; supervised per-engine
-  consumers and operational metrics are still required before shadow rollout.
+  been cross-checked on node06 against Python `pyzmq`.
+- `src/kv_consumer.rs` constructs one default-off shadow task and fenced
+  inventory per upstream. Typed configuration requires exact live/replay
+  endpoint cardinality and TCP endpoints. Socket monitor events immediately
+  clear trust on disconnect despite the ZMQ library's transparent reconnect;
+  a later stream remains observation-only until an authoritative clear. The
+  task exposes controlled connection, generation, trust, batch-outcome, replay,
+  and resident-size metrics and shuts down with the proxy. The inventories are
+  retained behind a future lookup seam but are not connected to routing.
 - Exact request lookup requires the rendered token sequence. Calling r34's
   `/tokenize` for every request costs 3.7ms at 299 tokens, 8.4ms at 4.3K,
   41ms at 21K, and 203ms at 83.7K, while returning up to 419KB of token IDs.

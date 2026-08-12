@@ -34,6 +34,13 @@ pub struct Metrics {
     pub tokenizer_duration: HistogramVec,
     pub tokenizer_tokens: HistogramVec,
     pub tokenizer_queue_depth: Gauge,
+    pub kv_event_up: GaugeVec,
+    pub kv_event_trusted: GaugeVec,
+    pub kv_event_generation: GaugeVec,
+    pub kv_event_index_entries: GaugeVec,
+    pub kv_event_batches: CounterVec,
+    pub kv_event_reconnects: CounterVec,
+    pub kv_event_replay_batches: HistogramVec,
 }
 
 impl Metrics {
@@ -256,6 +263,44 @@ impl Metrics {
                 "ds4proxy_tokenizer_queue_depth",
                 "Background tokenizer jobs waiting for a bounded worker",
             ))?,
+            kv_event_up: gauge(
+                "ds4proxy_kv_event_up",
+                "Whether the per-upstream KV-event shadow consumer is connected",
+                &["upstream"],
+            )?,
+            kv_event_trusted: gauge(
+                "ds4proxy_kv_event_trusted",
+                "Whether the per-upstream exact KV inventory has an authoritative generation",
+                &["upstream"],
+            )?,
+            kv_event_generation: gauge(
+                "ds4proxy_kv_event_generation",
+                "Current fenced KV-event generation per upstream",
+                &["upstream"],
+            )?,
+            kv_event_index_entries: gauge(
+                "ds4proxy_kv_event_index_entries",
+                "Resident exact KV index entries by bounded kind",
+                &["upstream", "kind"],
+            )?,
+            kv_event_batches: counter(
+                "ds4proxy_kv_event_batches_total",
+                "KV-event batches by source and bounded processing outcome",
+                &["upstream", "source", "outcome"],
+            )?,
+            kv_event_reconnects: counter(
+                "ds4proxy_kv_event_reconnects_total",
+                "KV-event consumer reconnect attempts by bounded reason",
+                &["upstream", "reason"],
+            )?,
+            kv_event_replay_batches: histogram(
+                "ds4proxy_kv_event_replay_batches",
+                "Number of batches in a bounded KV-event replay response",
+                vec![
+                    1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
+                ],
+                &["upstream"],
+            )?,
         };
         for collector in metrics.collectors() {
             registry.register(collector)?;
@@ -296,6 +341,13 @@ impl Metrics {
             Box::new(self.tokenizer_duration.clone()),
             Box::new(self.tokenizer_tokens.clone()),
             Box::new(self.tokenizer_queue_depth.clone()),
+            Box::new(self.kv_event_up.clone()),
+            Box::new(self.kv_event_trusted.clone()),
+            Box::new(self.kv_event_generation.clone()),
+            Box::new(self.kv_event_index_entries.clone()),
+            Box::new(self.kv_event_batches.clone()),
+            Box::new(self.kv_event_reconnects.clone()),
+            Box::new(self.kv_event_replay_batches.clone()),
         ]
     }
 }
