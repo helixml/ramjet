@@ -16,8 +16,18 @@ for path in "$model_root/tokenizer.json" "$model_root/config.json"; do
 done
 
 first_engine=$1
-engine_image=$(docker inspect --format '{{.Config.Image}}@{{.Image}}' "$@" | sort -u | paste -sd, -)
-router_version=${BENCH_ROUTER_VERSION:-$(docker inspect ds4-loadbalancer --format '{{.Config.Image}}@{{.Image}}')}
+image_identity() {
+  local container=$1 configured image_id
+  configured=$(docker inspect --format '{{.Config.Image}}' "$container")
+  image_id=$(docker inspect --format '{{.Image}}' "$container")
+  if [[ $configured == *@sha256:* ]]; then
+    printf '%s\n' "$configured"
+  else
+    printf '%s@%s\n' "$configured" "$image_id"
+  fi
+}
+engine_image=$(for container in "$@"; do image_identity "$container"; done | sort -u | paste -sd, -)
+router_version=${BENCH_ROUTER_VERSION:-$(image_identity ds4-loadbalancer)}
 tokenizer_sha256=$(sha256sum "$model_root/tokenizer.json" | cut -d' ' -f1)
 config_sha256=$(
   find "$model_root" -maxdepth 2 -type f \

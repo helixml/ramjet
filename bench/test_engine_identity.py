@@ -30,7 +30,9 @@ class EngineIdentityTest(unittest.TestCase):
         }
         self.live = {
             "configured_image": "example/engine:r4@sha256:digest",
-            "image_id": "sha256:image",
+            "image_id": "sha256:digest",
+            "image_descriptor_digest": "sha256:digest",
+            "image_config_digest": "sha256:image",
             "repo_digests": [],
             "model_revision": "model-rev",
             "tokenizer_revision": "tokenizer-rev",
@@ -57,6 +59,20 @@ class EngineIdentityTest(unittest.TestCase):
         self.assertEqual(
             verify_receipt(self.live, self.receipt),
             ["model_revision", "runtime_packages.torch"],
+        )
+
+    def test_old_docker_image_id_capture_remains_compatible(self):
+        self.live.pop("image_config_digest")
+        self.live["image_id"] = "sha256:image"
+        self.assertEqual(verify_receipt(self.live, self.receipt), [])
+
+    def test_manifest_and_config_digests_are_verified_independently(self):
+        self.live["image_config_digest"] = "sha256:wrong-config"
+        self.live["image_descriptor_digest"] = "sha256:wrong-manifest"
+        self.live["configured_image"] = "example/engine:r4"
+        self.assertEqual(
+            verify_receipt(self.live, self.receipt),
+            ["image_id", "registry_digest"],
         )
 
     def test_output_compacts_receipt_and_omits_raw_command(self):

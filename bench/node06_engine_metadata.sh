@@ -9,7 +9,7 @@ receipt=${3:-}
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 model_root=${BENCH_MODEL_ROOT:-/prod/models/sglang/DeepSeek-V4-Flash-0731}
 
-for command in docker jq sha256sum nvidia-smi python3; do
+for command in docker jq sha256sum nvidia-smi python3 timeout; do
   command -v "$command" >/dev/null || { echo "missing command: $command" >&2; exit 1; }
 done
 for path in "$model_root/tokenizer.json" "$model_root/config.json"; do
@@ -22,7 +22,20 @@ trap 'rm -f "$temporary"' EXIT
 
 configured_image=$(docker inspect --format '{{.Config.Image}}' "$container")
 image_id=$(docker inspect --format '{{.Image}}' "$container")
+image_descriptor_digest=$(
+  docker image inspect "$image_id" --format '{{if .Descriptor}}{{.Descriptor.Digest}}{{end}}'
+)
 repo_digests=$(docker image inspect "$image_id" --format '{{json .RepoDigests}}')
+image_config_digest=""
+if command -v docker >/dev/null && docker buildx version >/dev/null 2>&1; then
+  manifest_json=$(
+    timeout 30s docker buildx imagetools inspect --raw "$configured_image" \
+      2>/dev/null || true
+  )
+  if [[ -n $manifest_json ]]; then
+    image_config_digest=$(jq -r '.config.digest // empty' <<<"$manifest_json")
+  fi
+fi
 command_line=$(docker exec "$container" pgrep -af 'vllm serve' | head -1)
 [[ -n $command_line ]] || { echo "vllm serve process not found: $container" >&2; exit 1; }
 
@@ -89,6 +102,8 @@ jq -n \
   --arg container "$container" \
   --arg configured_image "$configured_image" \
   --arg image_id "$image_id" \
+  --arg image_descriptor_digest "$image_descriptor_digest" \
+  --arg image_config_digest "$image_config_digest" \
   --argjson repo_digests "${repo_digests:-[]}" \
   --arg model_revision "$model_revision" \
   --arg tokenizer_revision "$tokenizer_revision" \
@@ -103,7 +118,9 @@ jq -n \
   --arg command "$command_line" \
   --argjson runtime_packages "$runtime_packages" \
   '{captured_utc:$captured_utc,container:$container,configured_image:$configured_image,
-    image_id:$image_id,repo_digests:$repo_digests,model_revision:$model_revision,
+    image_id:$image_id,image_descriptor_digest:$image_descriptor_digest,
+    image_config_digest:$image_config_digest,repo_digests:$repo_digests,
+    model_revision:$model_revision,
     tokenizer_revision:$tokenizer_revision,tokenizer_sha256:$tokenizer_sha256,
     config_sha256:$config_sha256,driver:$driver,topology_sha256:$topology_sha256,
     started_at:$started_at,restart_count:$restart_count,cpuset_cpus:$cpuset_cpus,

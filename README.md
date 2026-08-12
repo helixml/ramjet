@@ -313,7 +313,9 @@ bench/node06_engine_metadata.sh /tmp/engine-b.json dspark-0731-b \
 ```
 
 The raw serving command, API keys, hostnames, prompts, and token IDs are never
-written to the output.
+written to the output. On Docker's containerd image store, the local image ID
+can be the manifest descriptor while an upstream receipt calls the manifest
+config digest its image ID; the capture records and verifies both explicitly.
 
 Direct decode cells use `bench/engine_metrics.py` for one normalized
 speculation record. It distinguishes enabled, target-only, unavailable,

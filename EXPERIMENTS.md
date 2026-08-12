@@ -2414,3 +2414,59 @@ tokens per speculative step, accepted 4.077, and delivered 5.077 effective
 tokens per target step at 81.54% strict accepted/proposed tokens. Per-position
 accepted deltas were 11/11/11/11/9. This is an accounting gate, not a new
 performance result; it proves a clean interval is accepted before the r4 A/B.
+
+## 2026-08-13 — Infernal Invocation r4 live canary rejected
+
+The exact r4 registry manifest was pulled in 313.95s. Its manifest digest is
+`sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6`;
+the manifest config digest is the receipt's historical Docker image ID,
+`sha256:b0cac4ef4037ed8880809df87c14ddc592ef234d59499864e1468448eb928cbf`.
+Docker 29's containerd image store reports the manifest descriptor as `.Id`,
+so identity capture now records and verifies descriptor and config digests
+separately. The live process verified against the immutable upstream receipt,
+including model/tokenizer revision and observed runtime packages.
+
+The pull exposed a disk-safety boundary: root fell from 57GB free to 14GB
+(97% used). Three exact, unused historical inference images were removed
+(`vllm-openai:latest`, `ds4-flash:upstream-84cc882-sm120`, and the June DS4 v7
+image), recovering 44GB and returning root to 58-59GB free / 85% used. Live
+r34, r4, the Helix runner, and all load-balancer rollback images were retained.
+
+Production was single-homed on r34 A before B changed. A first LB recreate
+failed closed because one upstream was paired with two KV live/replay
+endpoints; it was corrected in under a minute with matching A-only endpoint
+lists. The reusable canary overlay now documents this cardinality requirement.
+The exact image passed a one-GPU CUDA 13.3 / Torch 2.13 FP16 matmul on driver
+595.84. The real B startup completed in 12m51s with NCCL 2.31.2/PyNCCL, A16,
+fixed probabilistic K5, standard rejection, graph96, 393216 context, MBT4096,
+GMU0.975, and no offload. It exposed 4,198,887 GPU KV tokens, 9.3% above
+r34's approximately 3.843M.
+
+The first smoke and first six-cell matrix were rejected because the inference
+JIT monitor found ten late Triton/CuTeDSL compilations. With the persistent
+75MB r4 cache populated, the repeated matrix had zero JIT, CUDA, NCCL, OOM,
+Xid, or traceback markers. Every measured request and native engine interval
+reconciled exactly:
+
+| workload | c | r34 tok/s | r4 tok/s | delta | r34 TTFT ms | r4 TTFT ms |
+|---|---:|---:|---:|---:|---:|---:|
+| code | 1 | 236.4 | 232.4 | -1.7% | 342.4 | 345.0 |
+| code | 8 | 736.4 | 641.1 | -12.9% | 851.7 | 759.0 |
+| code | 16 | 1110.0 | 902.0 | -18.7% | 1031.8 | 820.0 |
+| prose | 1 | 165.6 | 141.0 | -14.9% | 334.2 | 344.5 |
+| prose | 8 | 547.1 | 471.9 | -13.7% | 858.3 | 754.2 |
+| prose | 16 | 758.7 | 716.4 | -5.6% | 1055.1 | 814.0 |
+
+The high-concurrency TTFT reduction and larger KV pool are useful, but matched
+throughput regressed. More importantly, the production-shaped agent corpus
+rejected r4 independently of performance. Its deterministic parallel-required
+tool case emitted the requested two calls but leaked a DSML marker into
+response content (4/5 valid). Its seeded temperature-1 profile also failed the
+same case with three malformed/non-unique calls (4/5 valid). The adjacent r34
+deterministic control passed 5/5 cold and 5/5 warm with the same model revision
+and corpus. No response content or tool arguments were retained.
+
+Verdict: reject r4 for node06 and do not spend another engine roll on MBT8192
+or MTP0 until the deterministic DSML leak is fixed upstream. B was recreated
+from the exact r34 control; production remained on A during its warm start.
+The r4 image and versioned JIT cache remain available for a fixed successor.

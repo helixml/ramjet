@@ -292,14 +292,13 @@ attributable. Run matched direct cells on A and B concurrently only after both
 are warm; keep cache/LB capacity cells serial because cross-traffic
 contaminates their residency result.
 
-Before an engine image A/B, capture each engine separately with
-`bench/node06_engine_metadata.sh OUTPUT CONTAINER [RECEIPT]`. A supplied receipt
-must verify before its benchmark cells are admissible. Never combine two
-engines into one provenance string: their image, lifetime, runtime packages,
-effective argv, JIT interval, and metrics must remain independently
-attributable. Run matched direct cells on A and B concurrently only after both
-are warm; keep cache/LB capacity cells serial because cross-traffic
-contaminates their residency result.
+When single-homing the LB, reduce `DS4_KV_EVENT_LIVE_ENDPOINTS` and
+`DS4_KV_EVENT_REPLAY_ENDPOINTS` to the same cardinality as `DS4_UPSTREAM` in
+the same recreate. Render candidate engine argv with `DRY_RUN=1` before a GPU
+roll, persist a runtime-versioned JIT cache, and discard every performance
+interval containing an inference-time JIT marker. Correctness gates precede
+parameter sweeps: a deterministic agent-protocol failure ends that image's
+experiment before paying another engine warm-start cost.
 
 ### A/B protocol
 

@@ -86,13 +86,19 @@ def verify_receipt(live, receipt):
     configured = (live.get("configured_image") or "").split("@", 1)[0]
     if configured != receipt.get("image"):
         errors.append("image")
-    if live.get("image_id") != receipt.get("image_id"):
+    # Docker's containerd image store identifies an image by its manifest
+    # descriptor, while qualification receipts use the manifest config digest
+    # as the traditional Docker image ID. Compare like with like and retain a
+    # fallback for captures made by older Docker engines.
+    config_digest = live.get("image_config_digest") or live.get("image_id")
+    if config_digest != receipt.get("image_id"):
         errors.append("image_id")
     digest = receipt.get("registry_digest")
     repo_digests = live.get("repo_digests") or []
     configured_digest = (live.get("configured_image") or "").partition("@")[2]
     if not digest or not (
         configured_digest == digest
+        or live.get("image_descriptor_digest") == digest
         or any(value.endswith("@" + digest) for value in repo_digests)
     ):
         errors.append("registry_digest")
