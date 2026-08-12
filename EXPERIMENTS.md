@@ -2238,3 +2238,22 @@ stores now increment the bounded `orphaned_parent` filter reason. True shape,
 duplicate-hash, conflicting-path, or capacity errors still fence and clear the
 entire inventory. Unit tests distinguish this safe under-estimation from a
 structurally inconsistent store.
+
+The r28.1 node-local candidate built in 22.80s and transferred in 6.08s
+(28.88s total); its LB-only swap took 0.87s. One fresh 32 KiB allocation per
+engine restored both inventories on the first retained replay. A applied its
+replay normally; B conservatively filtered two `orphaned_parent` stores and
+eight unsupported partial-block stores. Both inventories remained trusted,
+there were no invalid-replay retries or reconnects beyond the initial
+connections, and both engines retained their start times and zero restart
+counts.
+
+The post-replay routed scorecard completed 4/4 requests with a 2/2 replica
+split in 1.52s for the two-app cell. Response usage, LB counters, and native
+vLLM counters reconciled with zero spread; preemptions stayed at zero; the
+reuse wave achieved a 98.88% token hit rate. Both per-replica exact
+inventories were trusted at both snapshots. The public
+`rust-r28.1-sparse-orphan-7ffc1d0` image has digest
+`sha256:1a6c56820991f5fcdf3f6af2bdd0ec867967e9b84f7ce8f61e0985453a7a428f`;
+promotion reused all but the binary layer and took 2.84s. The canonical
+node06 Compose pins this qualified digest.
