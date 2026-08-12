@@ -61,11 +61,12 @@ startup, preventing silent artifact drift from inheriting old golden results.
 
 `DS4_KV_EVENT_MODE=shadow` constructs one supervised, fenced exact inventory
 per upstream. It observes bounded vLLM live/replay events and exports only
-controlled connection, trust, generation, batch-outcome, and resident-size
-metrics. Startup and every disconnect are untrusted; only an authoritative
-clear boundary can establish trust. These inventories are deliberately not
-connected to route selection yet, and raw token IDs and hashes never enter
-logs, journals, or metrics.
+controlled connection, trust, generation, batch/filter-outcome, and
+resident-size metrics. Startup and every disconnect are untrusted; publisher
+sequence zero or a complete bounded replay from zero establishes the initially
+empty engine generation. These inventories are deliberately not connected to
+route selection yet, and raw token IDs and hashes never enter logs, journals,
+or metrics.
 
 Set `DS4_ROUTE_JOURNAL=true` to emit privacy-bounded versioned `start`/`finish`
 records to the process log. Records contain only process-local sequence IDs,
@@ -145,4 +146,6 @@ hot-path cost; `bench/tokenizer_parity.py` checks `/tokenize` counts and
 in-memory ID stability against real chat prompt usage without printing prompts
 or IDs; `bench/kv_event_probe.py` runs only inside a trusted vLLM environment
 and summarizes event continuity/volume without logging the token IDs or hashes
-carried by raw events.
+carried by raw events. `bench/kv_event_replay_probe.py` requests retained replay
+and reports only bounded sequence, geometry, parent-order, and per-group
+removal counts while keeping all identifiers process-local.

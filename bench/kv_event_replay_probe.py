@@ -35,6 +35,8 @@ seen_indexable_main = set()
 missing_main_parents = []
 main_parent_seen_any_only = 0
 missing_main_parent_details = collections.Counter()
+removed_hashes = 0
+removed_by_group = collections.Counter()
 
 while True:
     frames = socket.recv_multipart()
@@ -51,6 +53,11 @@ while True:
     for event in batch[1]:
         kind = event.get("type", "unknown")
         event_counts[kind] += 1
+        if kind == "BlockRemoved":
+            removed = len(event.get("block_hashes") or [])
+            removed_hashes += removed
+            removed_by_group[f"group={event.get('group_idx', 'unknown')}"] += removed
+            continue
         if kind != "BlockStored":
             continue
         hashes = event.get("block_hashes") or []
@@ -111,6 +118,8 @@ print(
             "main_hashes_seen": len(seen_main),
             "indexable_main_hashes_seen": len(seen_indexable_main),
             "all_hashes_seen": len(seen_any),
+            "removed_hashes": removed_hashes,
+            "removed_by_group": dict(sorted(removed_by_group.items())),
             "missing_main_parent_events": len(missing_main_parents),
             "missing_parent_seen_only_in_non_main": main_parent_seen_any_only,
             "missing_main_parent_details": dict(

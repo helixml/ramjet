@@ -1260,3 +1260,59 @@ production LB; production remains immutable r12. Next qualify the same feed on
 A, add a longer removal/eviction soak and filter-reason counters, then compare
 exact-score shadow choices with the approximate router before exact placement
 is considered.
+
+## 2026-08-12 — symmetric A feed and forced-removal qualification
+
+The matching A-engine gate kept production single-homed on healthy B through
+r12 while A was rolled with the same r34 ZMQ publisher configuration used on
+B. A and the isolated r18 consumer both started with zero restarts. The
+consumer connected before the first publisher batch, so sequence zero directly
+established trust without replay. A fresh two-turn 18.6K locality request and
+eight direct same-app requests produced 16 contiguous live batches. The exact
+inventory remained trusted with 151 main MLA blocks / 38,656 token IDs and no
+decode, replay, transport, or index error. B-only production returned HTTP 200
+throughout.
+
+r18 adds `ds4proxy_kv_event_filtered_total{upstream,source,reason}` with a fixed
+seven-value reason vocabulary. It counted 92 non-main-attention events and nine
+unreconstructable partial-block events in that first A workload, directly
+confirming the two conservative exclusions inferred during the B probe. The
+metric contains only bounded labels and counts—no prompt, token, or hash data.
+
+r34 does not expose its internal prefix-cache reset method through this API
+build; an authenticated `POST /reset_prefix_cache` returned 404 and changed no
+state. To exercise real removals, A was therefore rolled once more with its KV
+allocation temporarily constrained to 10GiB while all other engine settings
+remained fixed. It initialized a 785,171-token pool, still 2.00× the configured
+393,216-token maximum request context. A fresh 48-app × one-turn sweep then
+processed 893,232 uncached prompt tokens successfully off the production path.
+
+The retained replay was contiguous from sequence 0 through 191 and contained
+1,200 store events plus 2,442 removal events. Per-group removed hashes were
+group 0: 882, group 1: 195, group 2: 195, group 3: 130, and group 4: 1,040.
+The main MLA stream contained 3,456 stored hashes, no orphan parents, and exact
+256-token geometry. The live Rust consumer applied all 192 batches, filtered
+2,520 non-main events, stayed trusted, and retained exactly 2,574 main blocks /
+658,944 IDs: `3,456 stores − 882 group-0 removals = 2,574`. There was one
+successful connection after bounded boot retries and no post-connect reconnect,
+decode, replay, index, or generation error. This qualifies real eviction and
+reverse-hash removal behavior, not only store/replay startup.
+
+The canary was stopped and A was restored to automatic KV sizing, event mode
+off, and 3,838,897 KV tokens with zero restart count. r12 was then restored to
+both engines with local tokenizer shadow on and KV events off. Post-restore
+gates completed as follows:
+
+- locality: 8/8, 74.2% cache hit, exactly two cold prefills for two fresh apps;
+- same-app c12/max128: 12/12, exact 6/6 split, 199 tok/s during shared-box noise;
+- aggregate c16/max512: 16/16, 1,213.6 generated tok/s;
+- both upstream gauges one, no residual inflight/load, and zero unexpected
+  container restart counts after the intentional recreates.
+
+All **72 Rust tests**, strict all-target/all-feature Clippy, Rust release build,
+the retained Go tests/vet/build, both format gates, Python probe syntax, and
+`git diff --check` pass locally. The r18 canary remains shadow-only and is not
+the production LB. With both engines, sequence-zero/replay startup, hybrid
+filtering, and real eviction now qualified, the next gate is exact-score shadow
+telemetry against approximate production choices before request-side exact IDs
+can influence placement.

@@ -280,18 +280,21 @@ fn ingest_live(
 ) -> Result<Option<(u64, u64)>, ()> {
     let outcome = inventory.write().ingest_live(live.sequence, &live.batch);
     let failed = outcome.is_err();
-    let (label, replay) = match outcome {
-        Ok(LiveBatchOutcome::Applied(_)) => ("applied", None),
-        Ok(LiveBatchOutcome::ObserveOnly) => ("observe_only", None),
-        Ok(LiveBatchOutcome::Duplicate) => ("duplicate", None),
-        Ok(LiveBatchOutcome::Replay { from, through }) => ("replay", Some((from, through))),
-        Ok(LiveBatchOutcome::Fenced) => ("fenced", None),
-        Err(error) => (error.reason(), None),
+    let (label, replay, summary) = match outcome {
+        Ok(LiveBatchOutcome::Applied(summary)) => ("applied", None, Some(summary)),
+        Ok(LiveBatchOutcome::ObserveOnly) => ("observe_only", None, None),
+        Ok(LiveBatchOutcome::Duplicate) => ("duplicate", None, None),
+        Ok(LiveBatchOutcome::Replay { from, through }) => ("replay", Some((from, through)), None),
+        Ok(LiveBatchOutcome::Fenced) => ("fenced", None, None),
+        Err(error) => (error.reason(), None, None),
     };
     metrics
         .kv_event_batches
         .with_label_values(&[upstream, "live", label])
         .inc();
+    if let Some(summary) = summary {
+        record_filtered(metrics, upstream, "live", summary);
+    }
     update_state_metrics(inventory, metrics, upstream);
     if failed { Err(()) } else { Ok(replay) }
 }
@@ -307,17 +310,34 @@ fn ingest_replay(
         .map(|batch| (batch.sequence, batch.batch))
         .collect::<Vec<_>>();
     let outcome = inventory.write().ingest_replay(&batches);
-    let label = match outcome {
-        Ok(ReplayBatchOutcome::Applied(_)) => "applied",
-        Ok(ReplayBatchOutcome::ObserveOnly) => "observe_only",
-        Ok(ReplayBatchOutcome::Invalid) => "invalid",
-        Err(error) => error.reason(),
+    let (label, summary) = match outcome {
+        Ok(ReplayBatchOutcome::Applied(summary)) => ("applied", Some(summary)),
+        Ok(ReplayBatchOutcome::ObserveOnly) => ("observe_only", None),
+        Ok(ReplayBatchOutcome::Invalid) => ("invalid", None),
+        Err(error) => (error.reason(), None),
     };
     metrics
         .kv_event_batches
         .with_label_values(&[upstream, "replay", label])
         .inc();
+    if let Some(summary) = summary {
+        record_filtered(metrics, upstream, "replay", summary);
+    }
     update_state_metrics(inventory, metrics, upstream);
+}
+
+fn record_filtered(
+    metrics: &Metrics,
+    upstream: &str,
+    source: &'static str,
+    summary: crate::exact_index::BatchApplySummary,
+) {
+    for (reason, count) in summary.filtered_by_reason().filter(|(_, count)| *count > 0) {
+        metrics
+            .kv_event_filtered
+            .with_label_values(&[upstream, source, reason.label()])
+            .inc_by(metric_usize(count));
+    }
 }
 
 fn update_state_metrics(inventory: &SharedFencedInventory, metrics: &Metrics, upstream: &str) {
@@ -367,7 +387,7 @@ mod tests {
     use prometheus::Registry;
 
     use super::*;
-    use crate::kv_wire::{KvEvent, KvEventBatch};
+    use crate::kv_wire::{BlockStored, KvEvent, KvEventBatch};
 
     #[test]
     fn live_shadow_requests_startup_replay_and_clear_establishes_generation() {
@@ -424,6 +444,52 @@ mod tests {
         assert_eq!(
             next_backoff(Duration::from_millis(800), Duration::from_secs(1)),
             Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn filtered_event_metrics_use_bounded_reason_labels() {
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry).unwrap();
+        let inventory = Arc::new(RwLock::new(FencedExactKvInventory::new(
+            8,
+            ExactIndexLimits::default(),
+        )));
+        let filtered = SequencedBatch {
+            sequence: 0,
+            batch: KvEventBatch {
+                timestamp: 1.0,
+                events: vec![KvEvent::BlockStored(BlockStored {
+                    block_hashes: Vec::new(),
+                    parent_block_hash: None,
+                    token_ids: vec![1, 2, 3],
+                    block_size: 2,
+                    group_idx: Some(1),
+                    kv_cache_spec_kind: Some("sliding_window_mla".to_owned()),
+                    kv_cache_spec_sliding_window: Some(256),
+                    medium: Some("GPU".to_owned()),
+                    locality: Some("LOCAL".to_owned()),
+                    lora_name: None,
+                    cache_namespace: None,
+                    has_extra_keys: false,
+                })],
+                data_parallel_rank: Some(0),
+            },
+        };
+
+        assert_eq!(
+            ingest_live(&inventory, &metrics, "engine", &filtered),
+            Ok(None)
+        );
+        assert!(inventory.read().trusted());
+        assert!(
+            (metrics
+                .kv_event_filtered
+                .with_label_values(&["engine", "live", "non_main_attention"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
         );
     }
 }

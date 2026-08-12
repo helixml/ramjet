@@ -136,9 +136,10 @@ the cache state caused by earlier counterfactual choices.
 
 r34's vLLM exposes a ZMQ `KVEventBatch` feed with monotonically increasing
 sequence numbers, `BlockStored`/`BlockRemoved`/clear events, and a bounded
-replay socket. A one-engine probe received 49 consecutive batches without a
-gap. This can correct the request-derived index after cache replication and
-eviction, but it is not a drop-in replacement. NVIDIA Dynamo's
+replay socket. Both node06 engines have passed live shadow qualification; a
+constrained-cache A trial consumed 192 contiguous batches and 2,442 real
+removals without losing trust. This can correct the request-derived index after
+cache replication and eviction, but it is not a drop-in replacement. NVIDIA Dynamo's
 [replay/recovery comparison](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/kv-event-replay-comparison.md)
 is the reference for the failure semantics below:
 
@@ -146,17 +147,21 @@ is the reference for the failure semantics below:
   compose network, raw events must never enter logs/journals, and the in-memory
   retention/privacy boundary needs explicit review.
 - The observed DSpark feed contains several cache-group block geometries, not
-  only the configured 256-token physical block. A consumer must honor group and
-  cache-spec metadata rather than merging every emitted hash into one index.
+  only the configured 256-token physical block. Sliding-window groups can omit
+  masked hashes while retaining their token slice, and fine-grained partial MLA
+  entries can reference internal parent hashes that vLLM never emits. A
+  consumer must honor group/cache-spec metadata, and conservatively exclude
+  unreconstructable partials, rather than merging every hash into one index.
 - vLLM replay covers only its retained event window and has no full current-
   state snapshot. Sequence gaps must trigger bounded replay; an unrecoverable
   gap clears/fences that engine's exact index and falls back to the current
   approximate router. Dynamo's worker-side radix-tree dump is the stronger
   recovery model to copy if this limitation matters operationally.
-- `src/kv_fence.rs` encodes this independently of ZMQ and the index: subscriber
-  startup is observation-only, a full clear/snapshot begins a trusted
-  generation, gaps request an inclusive bounded replay, and invalid or
-  oversized recovery increments the generation and disables exact placement.
+- `src/kv_fence.rs` encodes this independently of ZMQ and the index: sequence
+  zero begins the initially empty publisher generation, a late subscriber
+  requests replay from zero when it fits the bound, later gaps request an
+  inclusive bounded replay, and invalid or oversized recovery increments the
+  generation and disables exact placement.
 - `src/kv_wire.rs` decodes only the MessagePack payload frame behind explicit
   byte/event/hash/token/block bounds. Its fixture was emitted by the exact r34
   `msgspec` classes on node06 and covers bytes/integer hashes, cache-group/spec
@@ -182,10 +187,11 @@ is the reference for the failure semantics below:
   inventory per upstream. Typed configuration requires exact live/replay
   endpoint cardinality and TCP endpoints. Socket monitor events immediately
   clear trust on disconnect despite the ZMQ library's transparent reconnect;
-  a later stream remains observation-only until an authoritative clear. The
-  task exposes controlled connection, generation, trust, batch-outcome, replay,
-  and resident-size metrics and shuts down with the proxy. The inventories are
-  retained behind a future lookup seam but are not connected to routing.
+  the next live sequence requests a bounded replay from zero before trust can
+  return. The task exposes controlled connection, generation, trust,
+  batch-outcome, bounded filter-reason, replay, and resident-size metrics and
+  shuts down with the proxy. The inventories are retained behind a future
+  lookup seam but are not connected to routing.
 - Exact request lookup requires the rendered token sequence. Calling r34's
   `/tokenize` for every request costs 3.7ms at 299 tokens, 8.4ms at 4.3K,
   41ms at 21K, and 203ms at 83.7K, while returning up to 419KB of token IDs.

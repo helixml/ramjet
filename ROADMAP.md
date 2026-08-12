@@ -88,9 +88,14 @@ node06). The design rationale for each lives in DESIGN.md.
   r17 consumer replayed sequences 0–37, became trusted, indexed 650 blocks /
   166,400 token IDs, and then applied 14 live batches under c8 load with no
   reconnect or index error. Exact inventories remain disconnected from the
-  router. Next repeat the rolling publisher qualification on A, add per-filter
-  reason metrics and a longer eviction/removal soak, then run exact-score
-  shadow comparisons against approximate choices before enabling placement.
+  router. A matching A-only trial has now passed from sequence zero, and bounded
+  per-filter metrics directly count non-main and unsupported-partial exclusions.
+  A temporary 785K-token A cache then forced 2,442 real removals over 192
+  contiguous batches: 882 group-0 removals reduced the exact MLA index from
+  3,456 stored blocks to 2,574 resident blocks exactly, while trust remained
+  one and no reconnect/index error occurred. Both engines and eviction are now
+  qualified. Next run exact-score shadow comparisons against approximate
+  choices, then add selective request-side exact IDs before enabling placement.
   Raw token IDs, block hashes, and prompts remain out of logs.
 - ⬜ **Session-cached incremental preparation.** Bounded session state with
   deterministic invalidation so returning 80K conversations extend prior token
@@ -264,10 +269,11 @@ node06). The design rationale for each lives in DESIGN.md.
   IDs carried by `BlockStored`. The isolated publisher gate is complete: 49
   consecutive batches had zero gaps, and same-engine publisher-on/off results
   were within -1.4% to +2.0%. The Rust shadow consumer has now passed a complete
-  real replay plus live-update qualification on B. Repeat on A, soak removals
-  and evictions, and compare exact versus approximate decisions in telemetry
-  before the router may consume this state; Dynamo's additional tree-dump
-  recovery remains the scale-out reference.
+  real replay plus live-update qualification on B. A then passed live startup
+  and a forced-eviction soak whose exact group-0 store/removal arithmetic
+  matched the resident index. Compare exact versus approximate decisions in
+  telemetry before the router may consume this state; Dynamo's additional
+  tree-dump recovery remains the scale-out reference.
 - ✅ **True TTFT instrumentation.** rc6's journal and Prometheus histogram
   time the first SSE response byte, which may be a role-only chunk. Journal v3
   code now records both first byte and first generated token/tool-call delta;

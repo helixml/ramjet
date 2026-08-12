@@ -39,6 +39,7 @@ pub struct Metrics {
     pub kv_event_generation: GaugeVec,
     pub kv_event_index_entries: GaugeVec,
     pub kv_event_batches: CounterVec,
+    pub kv_event_filtered: CounterVec,
     pub kv_event_reconnects: CounterVec,
     pub kv_event_replay_batches: HistogramVec,
 }
@@ -288,6 +289,11 @@ impl Metrics {
                 "KV-event batches by source and bounded processing outcome",
                 &["upstream", "source", "outcome"],
             )?,
+            kv_event_filtered: counter(
+                "ds4proxy_kv_event_filtered_total",
+                "KV events conservatively excluded from the exact index by bounded reason",
+                &["upstream", "source", "reason"],
+            )?,
             kv_event_reconnects: counter(
                 "ds4proxy_kv_event_reconnects_total",
                 "KV-event consumer reconnect attempts by bounded reason",
@@ -346,6 +352,7 @@ impl Metrics {
             Box::new(self.kv_event_generation.clone()),
             Box::new(self.kv_event_index_entries.clone()),
             Box::new(self.kv_event_batches.clone()),
+            Box::new(self.kv_event_filtered.clone()),
             Box::new(self.kv_event_reconnects.clone()),
             Box::new(self.kv_event_replay_batches.clone()),
         ]

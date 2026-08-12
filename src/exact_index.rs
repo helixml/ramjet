@@ -57,6 +57,7 @@ pub struct BatchApplySummary {
     pub removed_blocks: usize,
     pub filtered_events: usize,
     pub clear_events: usize,
+    filtered_reasons: FilterCounts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,6 +85,68 @@ pub enum FilterReason {
     UnknownAttentionKind,
     UnlearnedAttentionGroup,
     UnsupportedPartialBlock,
+}
+
+impl FilterReason {
+    pub const ALL: [Self; 7] = [
+        Self::NonLocal,
+        Self::UnsupportedMedium,
+        Self::Namespaced,
+        Self::NonMainAttention,
+        Self::UnknownAttentionKind,
+        Self::UnlearnedAttentionGroup,
+        Self::UnsupportedPartialBlock,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NonLocal => "non_local",
+            Self::UnsupportedMedium => "unsupported_medium",
+            Self::Namespaced => "namespaced",
+            Self::NonMainAttention => "non_main_attention",
+            Self::UnknownAttentionKind => "unknown_attention_kind",
+            Self::UnlearnedAttentionGroup => "unlearned_attention_group",
+            Self::UnsupportedPartialBlock => "unsupported_partial_block",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::NonLocal => 0,
+            Self::UnsupportedMedium => 1,
+            Self::Namespaced => 2,
+            Self::NonMainAttention => 3,
+            Self::UnknownAttentionKind => 4,
+            Self::UnlearnedAttentionGroup => 5,
+            Self::UnsupportedPartialBlock => 6,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FilterCounts([usize; FilterReason::ALL.len()]);
+
+impl FilterCounts {
+    fn increment(&mut self, reason: FilterReason) {
+        self.0[reason.index()] = self.0[reason.index()].saturating_add(1);
+    }
+
+    fn merge(&mut self, other: Self) {
+        for (total, additional) in self.0.iter_mut().zip(other.0) {
+            *total = total.saturating_add(additional);
+        }
+    }
+
+    fn iter(self) -> impl Iterator<Item = (FilterReason, usize)> {
+        FilterReason::ALL.into_iter().zip(self.0)
+    }
+}
+
+impl BatchApplySummary {
+    pub fn filtered_by_reason(self) -> impl Iterator<Item = (FilterReason, usize)> {
+        self.filtered_reasons.iter()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -525,7 +588,10 @@ impl ExactKvInventory {
                 ApplyOutcome::Stored { blocks } => summary.stored_blocks += blocks,
                 ApplyOutcome::Removed { blocks } => summary.removed_blocks += blocks,
                 ApplyOutcome::Cleared => summary.clear_events += 1,
-                ApplyOutcome::Filtered(_) => summary.filtered_events += 1,
+                ApplyOutcome::Filtered(reason) => {
+                    summary.filtered_events += 1;
+                    summary.filtered_reasons.increment(reason);
+                }
             }
         }
         Ok(summary)
@@ -742,6 +808,7 @@ fn merge_summary(total: &mut BatchApplySummary, next: BatchApplySummary) {
     total.removed_blocks += next.removed_blocks;
     total.filtered_events += next.filtered_events;
     total.clear_events += next.clear_events;
+    total.filtered_reasons.merge(next.filtered_reasons);
 }
 
 fn filter_store(

@@ -22,7 +22,7 @@ placement. Current measured landmarks:
 | KV capacity | **3,838,897 tokens/engine** |
 | 209K cold prefill | **~7.7–8.1K effective tok/s** |
 | 209K warm cached tokens | **208,896** |
-| r34 KV shadow replay | **0–37 contiguous; 650 blocks / 166,400 IDs; trusted** |
+| r34 KV shadow qualification | **both engines; replay + 2,442-removal eviction soak; trusted** |
 
 Two r34 candidates were explicitly rejected after rolling B-only trials:
 manual KV bytes gained just 1.16% capacity while bypassing runtime profiling;
@@ -35,7 +35,11 @@ qualified end to end. A B-only rolling canary replayed the publisher from
 sequence zero, filtered the engine's non-main masked geometries and two
 unreconstructable 4-token partial entries conservatively, then applied 14 live
 batches under c8 load without reconnecting or losing trust. No exact state was
-used for placement, and B was returned to the event-off production recipe.
+used for placement, and B was returned to the event-off production recipe. A
+then passed the symmetric live gate. With its KV allocation temporarily reduced
+to 785,171 tokens, a 893K-token cold sweep produced 882 main-group removals;
+the exact inventory contracted from 3,456 stored blocks to exactly 2,574
+resident blocks while remaining trusted.
 
 ## Cache locality — TIE (no regression, no win at this scale)
 
