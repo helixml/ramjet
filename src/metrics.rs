@@ -9,6 +9,8 @@ pub struct Metrics {
     pub ttft: HistogramVec,
     pub prompt_tokens: CounterVec,
     pub cached_tokens: CounterVec,
+    pub cache_requests: CounterVec,
+    pub cache_ttft: HistogramVec,
     pub completion_tokens: CounterVec,
     pub context_size: HistogramVec,
     pub output_size: HistogramVec,
@@ -97,7 +99,7 @@ impl Metrics {
             ttft: histogram(
                 "ds4proxy_ttft_seconds",
                 "Time to first generated token or tool-call delta (streaming only)",
-                latency,
+                latency.clone(),
                 &["endpoint"],
             )?,
             prompt_tokens: counter(
@@ -109,6 +111,17 @@ impl Metrics {
                 "ds4proxy_cached_prompt_tokens_total",
                 "Prompt tokens served from KV prefix cache",
                 &["endpoint"],
+            )?,
+            cache_requests: counter(
+                "ds4proxy_cache_requests_total",
+                "Completed responses by exact upstream-reported prompt-cache outcome",
+                &["endpoint", "outcome"],
+            )?,
+            cache_ttft: histogram(
+                "ds4proxy_cache_ttft_seconds",
+                "TTFT by exact upstream-reported prompt-cache outcome (streaming responses only)",
+                latency,
+                &["endpoint", "outcome"],
             )?,
             completion_tokens: counter(
                 "ds4proxy_completion_tokens_total",
@@ -382,6 +395,8 @@ impl Metrics {
             Box::new(self.ttft.clone()),
             Box::new(self.prompt_tokens.clone()),
             Box::new(self.cached_tokens.clone()),
+            Box::new(self.cache_requests.clone()),
+            Box::new(self.cache_ttft.clone()),
             Box::new(self.completion_tokens.clone()),
             Box::new(self.context_size.clone()),
             Box::new(self.output_size.clone()),
@@ -445,6 +460,14 @@ mod tests {
             .set(1.0);
         metrics.prompt_tokens.with_label_values(&["chat"]).inc();
         metrics.cached_tokens.with_label_values(&["chat"]).inc();
+        metrics
+            .cache_requests
+            .with_label_values(&["chat", "partial"])
+            .inc();
+        metrics
+            .cache_ttft
+            .with_label_values(&["chat", "partial"])
+            .observe(0.5);
         metrics.completion_tokens.with_label_values(&["chat"]).inc();
         metrics
             .tokenizer_shadow
@@ -476,6 +499,8 @@ mod tests {
             "ds4proxy_upstream_up",
             "ds4proxy_prompt_tokens_total",
             "ds4proxy_cached_prompt_tokens_total",
+            "ds4proxy_cache_requests_total",
+            "ds4proxy_cache_ttft_seconds",
             "ds4proxy_completion_tokens_total",
             "ds4proxy_tokenizer_shadow_total",
             "ds4proxy_exact_route_preroute_total",

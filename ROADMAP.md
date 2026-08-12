@@ -196,6 +196,13 @@ node06). The design rationale for each lives in DESIGN.md.
   tokens while multiplying hash work; larger values are strictly coarser.
   Retain the default and treat the group layout/unit as compatibility identity
   to re-audit after engine upgrades.
+- 🔨 **Cache-efficiency SLO and working-set scorecard (#16).** The first Rust
+  slice adds bounded `cold`/`partial`/`full`/`unknown` request counters and
+  cache-outcome TTFT histograms from authoritative response usage, alongside
+  the existing token-weighted prompt/cache counters. Unit tests cover outcome
+  boundaries and metric registration/recording. Next reconcile these with
+  native engine counters, add eviction/preemption reporting, then run a
+  fresh-salt working-set/reuse-distance sweep before defining any 95%+ SLO.
 - 🔨 **Production-shaped DeepSeek-V4 agent/DSML gate (#10).** The versioned
   synthetic v1 JSONL corpus and privacy-safe runner now cover stream/non-stream,
   automatic/required/parallel tool calls, split deltas and DSML leaks, every
