@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import shutil
 import tempfile
 import unittest
 
@@ -17,6 +18,7 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(validator)
 
 
+@unittest.skipUnless(shutil.which("docker"), "Docker Compose is validated in the deployment lane")
 class SnapshotProductionComposeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
