@@ -322,8 +322,11 @@ node06). The design rationale for each lives in DESIGN.md.
   is keyed by the complete SHA-256 of the pinned toolchain, Cargo manifests,
   lockfile, and dependency Dockerfile; both release builds inherit it explicitly
   and compile offline instead of trusting Docker 20.10 inline-cache import.
-  Dependency inputs rebuild that image first, while CI/docs/deploy-only changes
-  run no publisher. The Rust cutover is complete and the obsolete Go lane and
+  Dependency inputs rebuild that image first. Because Drone 2.12 discards
+  unsupported path conditions, all three main-push steps use an exact-range,
+  fail-closed repository guard before Docker startup or registry login.
+  CI/docs/bench/deploy-only changes execute only those cheap guards and perform
+  zero image work. The Rust cutover is complete and the obsolete Go lane and
   packages are removed. Preserve the measured ~58–59s PR quality budget and
   investigate cache or scheduling regressions rather than adding duplicate CI
   systems.
