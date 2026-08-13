@@ -25,6 +25,7 @@ use url::Url;
 use crate::{
     compat::{CompatibilityManifest, RuntimeOutcome, sha256_hex, token_ids_sha256},
     config::{Config, ExactRouteMode, TokenizerMode, TokenizerProfile},
+    exact_route_inventory::ExactRouteInventory,
     exact_shadow::{
         ExactPlacementMode, ExactPlacementPolicy, ExactRouteShadow, ExactRouteSnapshot,
     },
@@ -213,13 +214,38 @@ impl TokenizerObserver {
     /// Returns an error when explicit local-shadow mode cannot load its
     /// tokenizer or DeepSeek-V4 formatter. Off and remote-shadow cannot fail.
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(
         config: &Config,
         client: reqwest::Client,
         metrics: Arc<Metrics>,
         inventories: Arc<[SharedFencedInventory]>,
     ) -> anyhow::Result<Self> {
-        let exact_shadow = ExactRouteShadow::new(
+        Self::with_exact_inventories(
+            config,
+            client,
+            metrics,
+            inventories
+                .iter()
+                .cloned()
+                .map(ExactRouteInventory::direct)
+                .collect(),
+        )
+    }
+
+    /// Creates the observer over representation-independent exact inventories.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same initialization failures as [`Self::new`].
+    #[allow(clippy::too_many_lines)]
+    pub fn with_exact_inventories(
+        config: &Config,
+        client: reqwest::Client,
+        metrics: Arc<Metrics>,
+        inventories: Arc<[ExactRouteInventory]>,
+    ) -> anyhow::Result<Self> {
+        let exact_shadow = ExactRouteShadow::with_inventories(
             inventories,
             Arc::clone(&metrics),
             config.route_alpha,

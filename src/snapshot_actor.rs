@@ -81,6 +81,13 @@ pub struct BootstrapSessionStatus {
     pub fence_reason: Option<SnapshotTailFenceReason>,
 }
 
+/// Revision-stable identity of the currently authoritative publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SnapshotPublicationMarker {
+    pub epoch: SessionEpoch,
+    pub revision: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StartSessionResult {
     pub epoch: SessionEpoch,
@@ -184,6 +191,19 @@ impl<I> SnapshotBootstrapActor<I> {
         self.published
             .as_ref()
             .map(|published| published.owner_epoch)
+    }
+
+    /// Return a marker that changes whenever the published digest index can
+    /// change. The actor lock must remain held while using the corresponding
+    /// published index when an atomic marker-and-lookup view is required.
+    #[must_use]
+    pub fn published_marker(&self) -> Option<SnapshotPublicationMarker> {
+        let epoch = self.published_epoch()?;
+        let session = self.sessions.get(&epoch)?;
+        (session.state == BootstrapSessionState::Published).then(|| SnapshotPublicationMarker {
+            epoch,
+            revision: session.fence.status().revision,
+        })
     }
 
     #[must_use]
@@ -704,9 +724,13 @@ mod tests {
         let mut actor = SnapshotBootstrapActor::new(SnapshotActorLimits::default()).unwrap();
         let old = begin_build(&mut actor, &identity, 100);
         finish_publish(&mut actor, &identity, old, 100, vec![1]);
+        let old_marker = actor.published_marker().unwrap();
+        assert_eq!(old_marker.epoch, old);
 
         let new = begin_build(&mut actor, &identity, 200);
+        assert_eq!(actor.published_marker(), Some(old_marker));
         assert_eq!(actor.published_index(), Some(&vec![1]));
+        assert_eq!(actor.published_marker(), Some(old_marker));
         assert_eq!(
             actor.install_prepared_snapshot(new, prepared(&identity, 200, vec![2]), no_apply),
             Ok(ActorAction::SnapshotInstalled)
@@ -721,6 +745,8 @@ mod tests {
             ActorAction::Published { epoch: new }
         );
         assert_eq!(actor.published_index(), Some(&vec![2]));
+        assert_ne!(actor.published_marker(), Some(old_marker));
+        assert_eq!(actor.published_marker().unwrap().epoch, new);
         assert_eq!(actor.session_count(), 1);
     }
 

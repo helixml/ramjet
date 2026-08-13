@@ -14,12 +14,14 @@ use mini_dynamo::{
     metrics::Metrics,
     proxy::Proxy,
     router::{Router as LocalityRouter, RouterConfig},
+    snapshot_route::SnapshotRouteConsumers,
 };
 use prometheus::{Encoder, Registry, TextEncoder};
 use tokio::{net::TcpListener, sync::broadcast};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
@@ -47,13 +49,27 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .context("build upstream client")?;
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
+    let snapshot_consumers =
+        SnapshotRouteConsumers::start(&config).context("initialize snapshot route consumers")?;
     let kv_consumers = KvEventConsumers::start(&config, &metrics, &shutdown_tx);
-    let proxy = Proxy::new(
+    let exact_inventories =
+        if config.snapshot_route_mode == mini_dynamo::config::SnapshotRouteMode::Shadow {
+            snapshot_consumers.inventories()
+        } else {
+            kv_consumers
+                .inventories()
+                .iter()
+                .cloned()
+                .map(mini_dynamo::exact_route_inventory::ExactRouteInventory::direct)
+                .collect()
+        };
+    let proxy = Proxy::new_with_exact_inventories(
         config.clone(),
         client,
         metrics.clone(),
         routing,
         kv_consumers.inventories(),
+        exact_inventories,
     )
     .context("initialize mini-dynamo proxy")?;
 
@@ -95,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
         () = shutdown_signal() => Exit::Signal,
     };
     let _ = shutdown_tx.send(());
+    snapshot_consumers.request_shutdown();
     match exit {
         Exit::Api(result) => {
             result.context("join API server")?.context("API server")?;
@@ -113,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
     }
     probe.abort();
     kv_consumers.shutdown().await;
+    snapshot_consumers.shutdown().await;
     Ok(())
 }
 
@@ -142,6 +160,8 @@ fn log_startup(config: &Config) {
         kv_event_mode = ?config.kv_event_mode,
         kv_event_sources = config.kv_event_sources.len(),
         kv_event_replay_limit = config.kv_event_replay_limit,
+        snapshot_route_mode = ?config.snapshot_route_mode,
+        snapshot_route_sources = config.snapshot_route_sources.len(),
         "mini-dynamo up: API :8000, metrics :9090"
     );
 }

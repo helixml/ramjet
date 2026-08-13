@@ -8,6 +8,7 @@
 use std::{sync::Arc, time::Instant};
 
 use crate::{
+    exact_route_inventory::{ExactInventoryLookupError, ExactInventoryMarker, ExactRouteInventory},
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
     router::{CandidateState, Decision, Outcome},
@@ -16,7 +17,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct ExactRouteShadow {
-    inventories: Arc<[SharedFencedInventory]>,
+    inventories: Arc<[ExactRouteInventory]>,
     metrics: Arc<Metrics>,
     alpha: f64,
     max_overlap_units: usize,
@@ -25,7 +26,7 @@ pub struct ExactRouteShadow {
 #[derive(Clone, Debug)]
 pub struct ExactRouteSnapshot {
     decision: Decision,
-    markers: Vec<Option<InventoryMarker>>,
+    markers: Vec<Option<ExactInventoryMarker>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,12 +116,6 @@ impl PlacementOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct InventoryMarker {
-    generation: u64,
-    revision: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShadowOutcome {
     Agree,
     WouldMove,
@@ -166,8 +161,28 @@ struct ShadowResult {
 
 impl ExactRouteShadow {
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(
         inventories: Arc<[SharedFencedInventory]>,
+        metrics: Arc<Metrics>,
+        alpha: f64,
+        max_overlap_units: usize,
+    ) -> Self {
+        Self::with_inventories(
+            inventories
+                .iter()
+                .cloned()
+                .map(ExactRouteInventory::direct)
+                .collect(),
+            metrics,
+            alpha,
+            max_overlap_units,
+        )
+    }
+
+    #[must_use]
+    pub fn with_inventories(
+        inventories: Arc<[ExactRouteInventory]>,
         metrics: Arc<Metrics>,
         alpha: f64,
         max_overlap_units: usize,
@@ -183,11 +198,7 @@ impl ExactRouteShadow {
     /// Whether every configured inventory is currently authoritative.
     #[must_use]
     pub fn ready(&self) -> bool {
-        !self.inventories.is_empty()
-            && self
-                .inventories
-                .iter()
-                .all(|inventory| inventory.read().trusted())
+        !self.inventories.is_empty() && self.inventories.iter().all(ExactRouteInventory::ready)
     }
 
     /// Captures the exact inventory generation visible at approximate routing
@@ -197,13 +208,7 @@ impl ExactRouteShadow {
         let markers = self
             .inventories
             .iter()
-            .map(|inventory| {
-                let inventory = inventory.read();
-                inventory.trusted().then(|| InventoryMarker {
-                    generation: inventory.generation(),
-                    revision: inventory.revision(),
-                })
-            })
+            .map(ExactRouteInventory::marker)
             .collect();
         ExactRouteSnapshot {
             decision: decision.clone(),
@@ -319,13 +324,7 @@ impl ExactRouteShadow {
         let markers = self
             .inventories
             .iter()
-            .map(|inventory| {
-                let inventory = inventory.read();
-                inventory.trusted().then(|| InventoryMarker {
-                    generation: inventory.generation(),
-                    revision: inventory.revision(),
-                })
-            })
+            .map(ExactRouteInventory::marker)
             .collect::<Vec<_>>();
         let mut seen = vec![false; self.inventories.len()];
         let mut overlaps = vec![None; self.inventories.len()];
@@ -341,23 +340,20 @@ impl ExactRouteShadow {
             let Some(marker) = markers[candidate.index] else {
                 return PreRouteResult::failure(ShadowOutcome::InventoryUntrusted);
             };
-            let inventory = self.inventories[candidate.index].read();
-            if !inventory.trusted() {
-                return PreRouteResult::failure(ShadowOutcome::InventoryUntrusted);
-            }
-            if inventory.generation() != marker.generation
-                || inventory.revision() != marker.revision
-            {
+            let lookup = match self.inventories[candidate.index].lookup(token_ids) {
+                Ok(lookup) => lookup,
+                Err(ExactInventoryLookupError::Untrusted) => {
+                    return PreRouteResult::failure(ShadowOutcome::InventoryUntrusted);
+                }
+                Err(ExactInventoryLookupError::Lookup) => {
+                    return PreRouteResult::failure(ShadowOutcome::LookupError);
+                }
+            };
+            if lookup.marker != marker {
                 return PreRouteResult::failure(ShadowOutcome::InventoryChanged);
             }
-            let Ok(exact_match) = inventory.find_longest(token_ids) else {
-                return PreRouteResult::failure(ShadowOutcome::LookupError);
-            };
-            let Some(exact_match) = exact_match else {
-                return PreRouteResult::failure(ShadowOutcome::InventoryUntrusted);
-            };
-            overlaps[candidate.index] = Some(exact_match.token_ids);
-            resident_tokens[candidate.index] = Some(inventory.stats().token_ids);
+            overlaps[candidate.index] = Some(lookup.overlap_tokens);
+            resident_tokens[candidate.index] = Some(lookup.resident_tokens);
         }
         if seen.iter().any(|seen| !seen) {
             return PreRouteResult::failure(ShadowOutcome::CandidateMismatch);
@@ -370,13 +366,7 @@ impl ExactRouteShadow {
             let Some(marker) = markers[candidate.index] else {
                 return PreRouteResult::failure(ShadowOutcome::InventoryUntrusted);
             };
-            let inventory = self.inventories[candidate.index].read();
-            if !inventory.trusted() {
-                return PreRouteResult::failure(ShadowOutcome::InventoryUntrusted);
-            }
-            if inventory.generation() != marker.generation
-                || inventory.revision() != marker.revision
-            {
+            if !self.inventories[candidate.index].unchanged(marker) {
                 return PreRouteResult::failure(ShadowOutcome::InventoryChanged);
             }
         }
@@ -454,22 +444,19 @@ impl ExactRouteShadow {
                 overlaps[candidate.index] = Some(selected_tokens);
                 continue;
             }
-            let inventory = self.inventories[candidate.index].read();
-            if !inventory.trusted() {
-                return failure(ShadowOutcome::InventoryUntrusted);
-            }
-            if inventory.generation() != marker.generation
-                || inventory.revision() != marker.revision
-            {
+            let lookup = match self.inventories[candidate.index].lookup(token_ids) {
+                Ok(lookup) => lookup,
+                Err(ExactInventoryLookupError::Untrusted) => {
+                    return failure(ShadowOutcome::InventoryUntrusted);
+                }
+                Err(ExactInventoryLookupError::Lookup) => {
+                    return failure(ShadowOutcome::LookupError);
+                }
+            };
+            if lookup.marker != marker {
                 return failure(ShadowOutcome::InventoryChanged);
             }
-            let Ok(exact_match) = inventory.find_longest(token_ids) else {
-                return failure(ShadowOutcome::LookupError);
-            };
-            let Some(exact_match) = exact_match else {
-                return failure(ShadowOutcome::InventoryUntrusted);
-            };
-            overlaps[candidate.index] = Some(exact_match.token_ids);
+            overlaps[candidate.index] = Some(lookup.overlap_tokens);
         }
         if seen.iter().any(|seen| !seen) {
             return failure(ShadowOutcome::CandidateMismatch);
