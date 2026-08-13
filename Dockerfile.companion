@@ -10,5 +10,4 @@ RUN --mount=type=cache,id=mini-dynamo-cargo-registry,target=/usr/local/cargo/reg
 FROM gcr.io/distroless/cc-debian12
 LABEL org.opencontainers.image.source="https://github.com/helixml/mini-dynamo"
 COPY --from=build /mini-dynamo-snapshot-companion /mini-dynamo-snapshot-companion
-EXPOSE 9091
 ENTRYPOINT ["/mini-dynamo-snapshot-companion"]
