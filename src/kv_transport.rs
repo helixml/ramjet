@@ -47,6 +47,26 @@ pub enum LiveActivity {
     Batch(SequencedBatch),
 }
 
+/// Content-free timing and volume diagnostics for the most recent replay.
+///
+/// The profile deliberately contains no event payloads, token IDs, hashes, or
+/// endpoint identities. Consumers can safely expose it through bounded metric
+/// labels even when a replay fails before its end marker arrives.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReplayProfile {
+    pub elapsed: Duration,
+    pub time_to_first_frame: Option<Duration>,
+    pub receive_wait: Duration,
+    pub decode: Duration,
+    pub fold: Duration,
+    pub max_receive_gap: Duration,
+    pub wire_bytes: usize,
+    pub payload_bytes: usize,
+    pub messages: usize,
+    pub requested_batches: usize,
+    pub tail_batches: usize,
+}
+
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum KvTransportError {
     #[error("KV-event socket operation failed")]
@@ -105,6 +125,7 @@ pub struct ZmqKvEventSource {
     max_replay_batches: usize,
     max_replay_tail_batches: usize,
     wire_limits: KvWireLimits,
+    last_replay_profile: Option<ReplayProfile>,
 }
 
 impl ZmqKvEventSource {
@@ -137,7 +158,17 @@ impl ZmqKvEventSource {
             max_replay_batches: config.max_replay_batches,
             max_replay_tail_batches: config.max_replay_tail_batches,
             wire_limits: config.wire_limits,
+            last_replay_profile: None,
         })
+    }
+
+    /// Take diagnostics recorded by the last completed replay exchange.
+    ///
+    /// A profile is available for both success and transport/validation
+    /// failure after the blocking worker returns. Preflight rejections that do
+    /// not open a replay socket have no profile.
+    pub fn take_replay_profile(&mut self) -> Option<ReplayProfile> {
+        self.last_replay_profile.take()
     }
 
     /// Receive and decode one live event batch.
@@ -229,6 +260,7 @@ impl ZmqKvEventSource {
         T: Send + 'static,
         F: FnMut(&mut T, SequencedBatch) + Send + 'static,
     {
+        self.last_replay_profile = None;
         let expected_count = through
             .checked_sub(from)
             .and_then(|distance| distance.checked_add(1))
@@ -254,7 +286,7 @@ impl ZmqKvEventSource {
         // shutdown/client cancellation becomes visible to libzmq promptly.
         let replay_alive = Arc::new(());
         let worker_alive = Arc::downgrade(&replay_alive);
-        let result = tokio::task::spawn_blocking(move || {
+        let (result, profile) = tokio::task::spawn_blocking(move || {
             blocking_replay_exchange(
                 &endpoint,
                 from,
@@ -272,11 +304,12 @@ impl ZmqKvEventSource {
         .await
         .map_err(|_| KvTransportError::Socket)?;
         drop(replay_alive);
+        self.last_replay_profile = Some(profile);
         result
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn blocking_replay_exchange<T, F>(
     endpoint: &str,
     from: u64,
@@ -289,109 +322,155 @@ fn blocking_replay_exchange<T, F>(
     mut accumulator: T,
     mut fold: F,
     replay_alive: &Weak<()>,
-) -> Result<T, KvTransportError>
+) -> (Result<T, KvTransportError>, ReplayProfile)
 where
     F: FnMut(&mut T, SequencedBatch),
 {
-    let context = zmq::Context::new();
-    let replay = context
-        .socket(zmq::DEALER)
-        .map_err(|_| KvTransportError::Socket)?;
-    replay.set_linger(0).map_err(|_| KvTransportError::Socket)?;
-    replay
-        .set_immediate(true)
-        .map_err(|_| KvTransportError::Socket)?;
-    replay
-        .set_connect_timeout(timeout_millis(connect_timeout))
-        .map_err(|_| KvTransportError::Socket)?;
-    replay
-        .set_sndtimeo(timeout_millis(connect_timeout))
-        .map_err(|_| KvTransportError::Socket)?;
-    replay
-        .set_rcvhwm(i32::try_from(max_messages.max(1_024)).unwrap_or(i32::MAX))
-        .map_err(|_| KvTransportError::Socket)?;
-    replay
-        .connect(endpoint)
-        .map_err(|_| KvTransportError::Socket)?;
-    replay
-        .send_multipart([&[][..], &from.to_be_bytes()], 0)
-        .map_err(|_| KvTransportError::Socket)?;
-
-    let deadline = Instant::now() + replay_timeout;
-    let mut last_requested = None;
-    let mut completed_requested_range = false;
-    let mut messages = 0_usize;
-    let mut validation_error = None;
-    loop {
-        if replay_alive.strong_count() == 0 {
-            return Err(KvTransportError::ReplayCancelled);
-        }
-        let remaining = deadline
+    let started = Instant::now();
+    let deadline = started + replay_timeout;
+    let mut profile = ReplayProfile::default();
+    let result = (|| {
+        let context = zmq::Context::new();
+        let replay = context
+            .socket(zmq::DEALER)
+            .map_err(|_| KvTransportError::Socket)?;
+        replay.set_linger(0).map_err(|_| KvTransportError::Socket)?;
+        replay
+            .set_immediate(true)
+            .map_err(|_| KvTransportError::Socket)?;
+        replay
+            .set_connect_timeout(timeout_millis(connect_timeout.min(replay_timeout)))
+            .map_err(|_| KvTransportError::Socket)?;
+        replay
+            .set_rcvhwm(i32::try_from(max_messages.max(1_024)).unwrap_or(i32::MAX))
+            .map_err(|_| KvTransportError::Socket)?;
+        replay
+            .connect(endpoint)
+            .map_err(|_| KvTransportError::Socket)?;
+        let send_timeout = deadline
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
             .ok_or(KvTransportError::ReplayTimeoutUndrained)?;
-        let poll_timeout = remaining.min(REPLAY_CANCEL_POLL);
         replay
-            .set_rcvtimeo(timeout_millis(poll_timeout))
+            .set_sndtimeo(timeout_millis(send_timeout))
             .map_err(|_| KvTransportError::Socket)?;
-        let frames = match replay.recv_multipart(0) {
-            Ok(frames) => frames,
-            Err(zmq::Error::EAGAIN) => {
-                if replay_alive.strong_count() == 0 {
-                    return Err(KvTransportError::ReplayCancelled);
+        replay
+            .send_multipart([&[][..], &from.to_be_bytes()], 0)
+            .map_err(|_| KvTransportError::Socket)?;
+
+        if Instant::now() >= deadline {
+            return Err(KvTransportError::ReplayTimeoutUndrained);
+        }
+        let mut last_requested = None;
+        let mut completed_requested_range = false;
+        let mut messages = 0_usize;
+        let mut validation_error = None;
+        let mut current_receive_gap = Duration::ZERO;
+        loop {
+            if replay_alive.strong_count() == 0 {
+                return Err(KvTransportError::ReplayCancelled);
+            }
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or(KvTransportError::ReplayTimeoutUndrained)?;
+            let poll_timeout = remaining.min(REPLAY_CANCEL_POLL);
+            replay
+                .set_rcvtimeo(timeout_millis(poll_timeout))
+                .map_err(|_| KvTransportError::Socket)?;
+            let receive_started = Instant::now();
+            let frames = match replay.recv_multipart(0) {
+                Ok(frames) => frames,
+                Err(zmq::Error::EAGAIN) => {
+                    let waited = receive_started.elapsed();
+                    profile.receive_wait = profile.receive_wait.saturating_add(waited);
+                    current_receive_gap = current_receive_gap.saturating_add(waited);
+                    if replay_alive.strong_count() == 0 {
+                        profile.max_receive_gap = profile.max_receive_gap.max(current_receive_gap);
+                        return Err(KvTransportError::ReplayCancelled);
+                    }
+                    if Instant::now() >= deadline {
+                        profile.max_receive_gap = profile.max_receive_gap.max(current_receive_gap);
+                        return Err(KvTransportError::ReplayTimeoutUndrained);
+                    }
+                    continue;
                 }
-                if Instant::now() >= deadline {
-                    return Err(KvTransportError::ReplayTimeoutUndrained);
-                }
+                Err(_) => return Err(KvTransportError::Socket),
+            };
+            let waited = receive_started.elapsed();
+            profile.receive_wait = profile.receive_wait.saturating_add(waited);
+            current_receive_gap = current_receive_gap.saturating_add(waited);
+            profile.max_receive_gap = profile.max_receive_gap.max(current_receive_gap);
+            current_receive_gap = Duration::ZERO;
+            profile
+                .time_to_first_frame
+                .get_or_insert_with(|| started.elapsed());
+            profile.wire_bytes = profile.wire_bytes.saturating_add(
+                frames
+                    .iter()
+                    .map(Vec::len)
+                    .fold(0_usize, usize::saturating_add),
+            );
+            profile.payload_bytes = profile
+                .payload_bytes
+                .saturating_add(frames.get(3).map_or(0, Vec::len));
+            let decode_started = Instant::now();
+            let Ok(message) =
+                ZmqMessage::try_from(frames.into_iter().map(Bytes::from).collect::<Vec<_>>())
+            else {
+                profile.decode = profile.decode.saturating_add(decode_started.elapsed());
+                validation_error.get_or_insert(KvTransportError::InvalidFrameCount);
                 continue;
-            }
-            Err(_) => return Err(KvTransportError::Socket),
-        };
-        let Ok(message) =
-            ZmqMessage::try_from(frames.into_iter().map(Bytes::from).collect::<Vec<_>>())
-        else {
-            validation_error.get_or_insert(KvTransportError::InvalidFrameCount);
-            continue;
-        };
-        let parsed = match parse_replay_message(&message, topic, limits) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                validation_error.get_or_insert(error);
-                continue;
-            }
-        };
-        match parsed {
-            None => {
-                return match validation_error {
-                    Some(error) => Err(error),
-                    None if completed_requested_range => Ok(accumulator),
-                    None => Err(KvTransportError::InvalidReplay),
-                };
-            }
-            Some(batch) => {
-                messages = messages.saturating_add(1);
-                if messages >= max_messages {
-                    validation_error.get_or_insert(KvTransportError::ReplayTooLarge);
-                }
-                if validation_error.is_some() {
+            };
+            let parsed = match parse_replay_message(&message, topic, limits) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    profile.decode = profile.decode.saturating_add(decode_started.elapsed());
+                    validation_error.get_or_insert(error);
                     continue;
                 }
-                if batch.sequence > through && completed_requested_range {
-                    continue;
+            };
+            profile.decode = profile.decode.saturating_add(decode_started.elapsed());
+            match parsed {
+                None => {
+                    return match validation_error {
+                        Some(error) => Err(error),
+                        None if completed_requested_range => Ok(accumulator),
+                        None => Err(KvTransportError::InvalidReplay),
+                    };
                 }
-                if batch.sequence < from
-                    || batch.sequence > through
-                    || last_requested.is_some_and(|last| batch.sequence <= last)
-                {
-                    validation_error.get_or_insert(KvTransportError::InvalidReplay);
-                    continue;
+                Some(batch) => {
+                    messages = messages.saturating_add(1);
+                    profile.messages = messages;
+                    if messages >= max_messages {
+                        validation_error.get_or_insert(KvTransportError::ReplayTooLarge);
+                    }
+                    if validation_error.is_some() {
+                        continue;
+                    }
+                    if batch.sequence > through && completed_requested_range {
+                        profile.tail_batches = profile.tail_batches.saturating_add(1);
+                        continue;
+                    }
+                    if batch.sequence < from
+                        || batch.sequence > through
+                        || last_requested.is_some_and(|last| batch.sequence <= last)
+                    {
+                        validation_error.get_or_insert(KvTransportError::InvalidReplay);
+                        continue;
+                    }
+                    last_requested = Some(batch.sequence);
+                    completed_requested_range = batch.sequence == through;
+                    profile.requested_batches = profile.requested_batches.saturating_add(1);
+                    let fold_started = Instant::now();
+                    fold(&mut accumulator, batch);
+                    profile.fold = profile.fold.saturating_add(fold_started.elapsed());
                 }
-                last_requested = Some(batch.sequence);
-                completed_requested_range = batch.sequence == through;
-                fold(&mut accumulator, batch);
             }
         }
-    }
+    })();
+    profile.elapsed = started.elapsed();
+    (result, profile)
 }
 
 fn timeout_millis(timeout: Duration) -> i32 {
@@ -585,6 +664,7 @@ mod tests {
             assert!(request.get(1).unwrap().is_empty());
             assert_eq!(request.get(2).unwrap().as_ref(), 5_u64.to_be_bytes());
             let identity = request.get(0).unwrap().clone();
+            tokio::time::sleep(Duration::from_millis(25)).await;
             // Sequence 5 emitted no KV event and is legitimately absent from
             // the retained publisher stream; sequence 7 is a live tail.
             for sequence in [6_u64, 7] {
@@ -615,6 +695,7 @@ mod tests {
         });
         let replay = source
             .replay_fold(5, 6, Vec::new(), |sequences, batch| {
+                std::thread::sleep(Duration::from_millis(10));
                 sequences.push(batch.sequence);
             })
             .await
@@ -622,6 +703,20 @@ mod tests {
         replay_drained_tx.send(()).unwrap();
         assert_eq!(replay, vec![6]);
         server.await.unwrap();
+        let profile = source.take_replay_profile().unwrap();
+        assert_eq!(profile.messages, 2);
+        assert_eq!(profile.requested_batches, 1);
+        assert_eq!(profile.tail_batches, 1);
+        assert_eq!(profile.payload_bytes, EMPTY_BATCH.len() * 2);
+        assert!(profile.wire_bytes > profile.payload_bytes);
+        assert!(profile.time_to_first_frame.unwrap() >= Duration::from_millis(20));
+        assert!(profile.fold >= Duration::from_millis(5));
+
+        assert_eq!(
+            source.replay(7, 6).await,
+            Err(KvTransportError::InvalidReplay)
+        );
+        assert_eq!(source.take_replay_profile(), None);
         drop(publisher);
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(2), source.recv_live_activity())
@@ -704,7 +799,18 @@ mod tests {
         .unwrap();
 
         let server = tokio::spawn(async move {
-            let _request = replay_server.recv().await.unwrap();
+            let request = replay_server.recv().await.unwrap();
+            let identity = request.get(0).unwrap().clone();
+            replay_server
+                .send(message(vec![
+                    identity,
+                    Bytes::new(),
+                    Bytes::from_static(b"kv"),
+                    Bytes::copy_from_slice(&0_u64.to_be_bytes()),
+                    Bytes::from_static(EMPTY_BATCH),
+                ]))
+                .await
+                .unwrap();
             tokio::time::sleep(Duration::from_millis(300)).await;
         });
 
@@ -715,6 +821,13 @@ mod tests {
         );
         assert!(started.elapsed() >= Duration::from_millis(150));
         assert!(started.elapsed() < Duration::from_secs(1));
+        let profile = source.take_replay_profile().unwrap();
+        assert_eq!(profile.messages, 1);
+        assert_eq!(profile.requested_batches, 1);
+        assert_eq!(profile.payload_bytes, EMPTY_BATCH.len());
+        assert!(profile.time_to_first_frame.is_some());
+        assert!(profile.receive_wait >= Duration::from_millis(150));
+        assert!(profile.max_receive_gap >= Duration::from_millis(150));
         server.await.unwrap();
     }
 

@@ -56,6 +56,9 @@ pub struct Metrics {
     pub kv_event_filtered: CounterVec,
     pub kv_event_reconnects: CounterVec,
     pub kv_event_replay_batches: HistogramVec,
+    pub kv_event_replay_duration: HistogramVec,
+    pub kv_event_replay_bytes: HistogramVec,
+    pub kv_event_replay_progress: HistogramVec,
 }
 
 impl Metrics {
@@ -124,7 +127,7 @@ impl Metrics {
             cache_ttft: histogram(
                 "ds4proxy_cache_ttft_seconds",
                 "TTFT by exact upstream-reported prompt-cache outcome (streaming responses only)",
-                latency,
+                latency.clone(),
                 &["endpoint", "outcome"],
             )?,
             completion_tokens: counter(
@@ -416,6 +419,37 @@ impl Metrics {
                 ],
                 &["upstream"],
             )?,
+            kv_event_replay_duration: histogram(
+                "ds4proxy_kv_event_replay_duration_seconds",
+                "Content-free KV-event replay wall time by bounded phase and terminal outcome",
+                latency.clone(),
+                &["upstream", "phase", "outcome"],
+            )?,
+            kv_event_replay_bytes: histogram(
+                "ds4proxy_kv_event_replay_bytes",
+                "KV-event replay wire or payload bytes by terminal outcome",
+                vec![
+                    1_024.0,
+                    16_384.0,
+                    262_144.0,
+                    1_048_576.0,
+                    16_777_216.0,
+                    67_108_864.0,
+                    268_435_456.0,
+                    536_870_912.0,
+                    1_073_741_824.0,
+                ],
+                &["upstream", "kind", "outcome"],
+            )?,
+            kv_event_replay_progress: histogram(
+                "ds4proxy_kv_event_replay_progress_batches",
+                "KV-event replay message progress by kind and terminal outcome",
+                vec![
+                    1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 4096.0,
+                    8192.0, 16384.0,
+                ],
+                &["upstream", "kind", "outcome"],
+            )?,
         };
         for endpoint in ["chat", "messages", "responses", "completions", "other"] {
             metrics.prompt_tokens.with_label_values(&[endpoint]);
@@ -488,6 +522,9 @@ impl Metrics {
             Box::new(self.kv_event_filtered.clone()),
             Box::new(self.kv_event_reconnects.clone()),
             Box::new(self.kv_event_replay_batches.clone()),
+            Box::new(self.kv_event_replay_duration.clone()),
+            Box::new(self.kv_event_replay_bytes.clone()),
+            Box::new(self.kv_event_replay_progress.clone()),
         ]
     }
 }

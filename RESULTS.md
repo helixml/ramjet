@@ -31,6 +31,7 @@ placement. Current measured landmarks:
 | r22 production client cancellation | **2.000s disconnect; LB load + vLLM running zero by 2.019s** |
 | r23 publisher-safe KV replay | **1,332/1,724 batches trusted first attempt; c16/max512 1,462.9 tok/s** |
 | r24 cache-counter reconciliation | **52/52; zero spread across response/LB/native views; 1/4/8 apps** |
+| r33 retained-replay attribution | **98.7% receive wait; 177.52s max publisher gap; decode 2.12s / fold 0.16s** |
 
 Two r34 candidates were explicitly rejected after rolling B-only trials:
 manual KV bytes gained just 1.16% capacity while bypassing runtime profiling;

@@ -442,8 +442,32 @@ node06). The design rationale for each lives in DESIGN.md.
   recovered once inside a 60-second fail-closed window, but subsequent rolls
   needed roughly three minutes. Node06 temporarily uses 180 seconds while
   exact placement remains disabled by default; timeout stretching is not the
-  durable solution. Add
-  Dynamo-style snapshot/tree-dump recovery for histories older than that.
+  durable solution. A read-only r32 audit attributed the wall time to vLLM's
+  single synchronous Python replay publisher: the LB received about 483MB and
+  rebuilt 9,506 batches while consuming only 6.45 CPU-seconds, with no CPU
+  throttling, memory pressure, stale-client overlap, or socket backlog. r33
+  adds content-free success/failure profiling for request-to-first-frame,
+  receive wait, maximum receive gap, decode, fold, commit, wire/payload bytes,
+  and partial batch progress. Its LB-only roll received 5,500 A batches /
+  254.5MB, spent 2.12s decoding and 0.16s folding, then exposed one 177.52s
+  receive gap before the 180.04s fail-closed timeout. B's 69-batch / 3.79MB
+  replay completed in 137ms with 34ms decode and less than 1ms fold. This
+  closes attribution: do not extend the timeout or run another full-history
+  probe against the production publisher.
+
+  Bare vLLM exposes no authoritative snapshot: its replay request is only an
+  inclusive starting sequence followed by buffered events and an end marker.
+  Dynamo's `LocalKvIndexer` instead serves `TreeDump` plus a real-event
+  watermark when the requested event is absent. Its dump is keyed by block
+  hashes, however, while mini-dynamo's current radix tree requires exact token
+  slices. Implement the smallest compatible no-engine-restart seam as a
+  long-lived per-engine snapshot companion: subscribe live first, continuously
+  maintain bounded exact state, serve one atomic digest-index dump plus engine
+  incarnation/watermark, drain the buffered live tail, validate continuity,
+  and atomically swap. Keep dumps memory-only and fail closed on every schema,
+  generation, gap, capacity, checksum, or compatibility mismatch. First prove
+  a captured 36,612-block / 9.37M-token shape in under three seconds locally,
+  then deploy shadow-only and compare decisions against the raw-token index.
   Compare exact versus approximate decisions in telemetry before the router
   may consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.

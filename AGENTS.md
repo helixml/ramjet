@@ -185,6 +185,11 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   KV caches and the interruption is about four seconds. Trigger one small
   allocation on each engine after the roll so late-subscriber replay starts;
   wait for both exact inventories to become trusted before an exact test.
+- Do not trigger another full-history replay on long-lived A merely to profile
+  the receiver. r33 already measured a 177.52s publisher gap while Rust spent
+  only 2.12s decoding and 0.16s folding 5,500 batches. Use the exported replay
+  phase/progress metrics, mock captured-shape tests, or the snapshot companion;
+  a production no-op-fold replay adds publisher pressure without new evidence.
 - For an engine candidate, stop at the first failed gate: source/fixture checks,
   five-case correctness smoke, c8 scout, then the full matrix. A cached valid
   candidate should reach the first decision in roughly 15-18 minutes, dominated
