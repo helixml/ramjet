@@ -70,6 +70,9 @@ state. Exact tokenization, KV-event indexes, authenticated snapshot companions,
 and placement canaries are available for fail-closed shadow research and stay
 off unless explicitly configured.
 
+Version 0.1.0 is the first public Rust release. Its image is pinned above by
+immutable digest so the documented deployment remains reproducible.
+
 ## Operate with an agent
 
 Repo-scoped agent skills capture the safe workflows:
@@ -88,6 +91,12 @@ cargo fmt --check
 cargo test --locked
 cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
+
+For privacy-safe production-shape validation, `bench/agent_trace.py` accepts
+only numeric/enumerated trace shapes and synthesizes all request content. A
+bounded `/tokenize` preflight adjusts for the active chat-template overhead;
+authoritative response usage still enforces the token-density gate. See the
+[sovereign trace replay contract](bench/agent_cases/README.md#sovereign-trace-shape-replay).
 
 Read [DESIGN.md](DESIGN.md) for internals, [ROADMAP.md](ROADMAP.md) for current
 work, and [AGENTS.md](AGENTS.md) for the full development and node06 benchmark

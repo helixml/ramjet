@@ -9,6 +9,7 @@ to structural validation, usage/timing counters, and bounded categories.
 
 import argparse
 import concurrent.futures
+import copy
 import dataclasses
 import hashlib
 import json
@@ -19,6 +20,8 @@ import stat
 import statistics
 import sys
 import time
+import urllib.error
+import urllib.request
 
 from agentbench import (
     bounded_route_counts,
@@ -35,6 +38,7 @@ MAX_OUTPUT_TOKENS = 4096
 MAX_TOTAL_PROMPT_TOKENS = 16_000_000
 MAX_TOTAL_OUTPUT_TOKENS = 1_000_000
 MAX_ARRIVAL_OFFSET_MS = 600_000
+MAX_CALIBRATION_RESPONSE_BYTES = 1 << 20
 ARRIVAL_BUCKET_MS = 100
 PROTOCOLS = ("text", "required_tool", "auto_tool", "parallel_tool")
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "max", "xhigh")
@@ -327,7 +331,7 @@ def _tools(count):
     ]
 
 
-def build_case(shape, ordinal, salt):
+def build_case(shape, ordinal, salt, tail_adjustment=0):
     messages = [
         {
             "role": "system",
@@ -379,7 +383,7 @@ def build_case(shape, ordinal, salt):
             )
 
     fixed_estimate = shape.shared_prefix_tokens + 16 + 24 * shape.history_turns
-    tail_tokens = max(0, shape.prompt_tokens - fixed_estimate)
+    tail_tokens = max(0, shape.prompt_tokens - fixed_estimate + tail_adjustment)
     if shape.protocol == "text":
         instruction = "Reply with exactly: trace replay complete"
     else:
@@ -427,6 +431,101 @@ def build_case(shape, ordinal, salt):
         "id": f"shape-{ordinal:04d}",
         "request": request,
         "expected": expected,
+    }
+
+
+def _structural_key(shape):
+    return (
+        shape.history_turns,
+        shape.history_tool_rounds,
+        shape.history_parallel_calls,
+        shape.protocol,
+        shape.stream,
+        shape.expected_tool_calls,
+        shape.sampling.reasoning_effort,
+    )
+
+
+def _calibration_probe(shape):
+    fixed_estimate = 16 + 24 * shape.history_turns
+    return dataclasses.replace(
+        shape,
+        prefix_group=0,
+        shared_prefix_tokens=0,
+        prompt_tokens=max(1, fixed_estimate),
+    )
+
+
+def tokenize_count(base, model, token, case, timeout):
+    payload = copy.deepcopy(case["request"])
+    payload.pop("stream", None)
+    payload.pop("max_tokens", None)
+    effort = payload.get("reasoning_effort")
+    template_kwargs = dict(payload.get("chat_template_kwargs") or {})
+    if effort is not None:
+        template_kwargs["reasoning_effort"] = effort
+        template_kwargs.setdefault("enable_thinking", effort != "none")
+    if template_kwargs:
+        payload["chat_template_kwargs"] = template_kwargs
+    payload.update(
+        {"model": model, "add_generation_prompt": True, "return_token_strs": False}
+    )
+    request = urllib.request.Request(
+        base.rstrip("/") + "/tokenize",
+        data=json.dumps(payload, separators=(",", ":")).encode(),
+        headers={
+            "Authorization": "Bearer " + token,
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read(MAX_CALIBRATION_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as error:
+        error.read(4096)
+        raise TraceShapeError("tokenization calibration returned HTTP error") from None
+    except Exception as error:
+        raise TraceShapeError("tokenization calibration failed") from error
+    if len(body) > MAX_CALIBRATION_RESPONSE_BYTES:
+        raise TraceShapeError("tokenization calibration response is too large")
+    try:
+        result = json.loads(body)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise TraceShapeError("tokenization calibration response is invalid") from error
+    count = result.get("count") if isinstance(result, dict) else None
+    if type(count) is not int or not 1 <= count <= MAX_PROMPT_TOKENS:
+        raise TraceShapeError("tokenization calibration count is invalid")
+    return count
+
+
+def calibrate_cases(args, shapes):
+    adjustments = {}
+    maximum_delta = 0
+    for shape in shapes:
+        key = _structural_key(shape)
+        if key in adjustments:
+            continue
+        probe = _calibration_probe(shape)
+        probe_case = build_case(probe, 0, args.salt)
+        actual = tokenize_count(
+            args.base,
+            args.model,
+            args.token,
+            probe_case,
+            args.tokenize_timeout,
+        )
+        delta = actual - probe.prompt_tokens
+        if not 0 <= delta <= 4096:
+            raise TraceShapeError("tokenization calibration delta is out of range")
+        adjustments[key] = -delta
+        maximum_delta = max(maximum_delta, delta)
+    cases = [
+        build_case(shape, ordinal, args.salt, adjustments[_structural_key(shape)])
+        for ordinal, shape in enumerate(shapes)
+    ]
+    return cases, {
+        "calibration_profiles": len(adjustments),
+        "calibration_max_overhead_tokens": maximum_delta,
     }
 
 
@@ -522,7 +621,7 @@ def command_run(args):
     args.token = token
     shapes = load_trace_shapes(args.trace)
     metadata = load_metadata(args.metadata_json)
-    cases = [build_case(shape, ordinal, args.salt) for ordinal, shape in enumerate(shapes)]
+    cases, calibration = calibrate_cases(args, shapes)
     started = time.perf_counter()
     futures = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
@@ -559,6 +658,7 @@ def command_run(args):
         "metadata": metadata,
         "label": args.label,
         **summarize_shapes(shapes),
+        **calibration,
         "concurrency": args.concurrency,
         "requests": len(records),
         "protocol_valid": len(protocol_good),
@@ -598,6 +698,7 @@ def parser():
     run.add_argument("--label", default="agent-trace")
     run.add_argument("--concurrency", type=int, default=32)
     run.add_argument("--timeout", type=int, default=900)
+    run.add_argument("--tokenize-timeout", type=int, default=30)
     run.add_argument("--prompt-token-tolerance-pct", type=float, default=5.0)
     run.add_argument("--prompt-token-tolerance-min", type=int, default=256)
     run.set_defaults(handler=command_run)
@@ -612,6 +713,8 @@ def main(argv=None):
         raise SystemExit("prompt-token-tolerance-pct must be between 0 and 25")
     if not 0 <= getattr(args, "prompt_token_tolerance_min", 0) <= 4096:
         raise SystemExit("prompt-token-tolerance-min must be between 0 and 4096")
+    if not 1 <= getattr(args, "tokenize_timeout", 1) <= 120:
+        raise SystemExit("tokenize-timeout must be between 1 and 120")
     return args.handler(args)
 
 

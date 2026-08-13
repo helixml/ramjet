@@ -12,11 +12,13 @@ from agent_trace import (
     TraceShapeError,
     _execute_shape,
     build_case,
+    calibrate_cases,
     command_run,
     load_trace_shapes,
     parse_shape,
     summarize_shapes,
     synthetic_prefix,
+    tokenize_count,
 )
 
 
@@ -205,6 +207,49 @@ class AgentTraceTest(unittest.TestCase):
         self.assertEqual(len(case["request"]["tools"]), 2)
         self.assertEqual(case["expected"]["min_tool_calls"], 2)
 
+    @mock.patch("agent_trace.tokenize_count")
+    def test_calibration_is_once_per_structure_and_removes_template_overhead(self, tokenize):
+        first = parse_shape(shape(), 1)
+        second = parse_shape(
+            shape(prefix_group=1, shared_prefix_tokens=2048, prompt_tokens=4096), 2
+        )
+        probe_tokens = 16 + 24 * first.history_turns
+        tokenize.return_value = probe_tokens + 100
+        args = types.SimpleNamespace(
+            base="http://invalid",
+            model="model",
+            token="token",
+            salt="fresh",
+            tokenize_timeout=1,
+        )
+        cases, summary = calibrate_cases(args, [first, second])
+        self.assertEqual(tokenize.call_count, 1)
+        self.assertEqual(summary["calibration_profiles"], 1)
+        self.assertEqual(summary["calibration_max_overhead_tokens"], 100)
+        uncalibrated = build_case(first, 0, "fresh")
+        calibrated_tail = cases[0]["request"]["messages"][-1]["content"].count(" y")
+        original_tail = uncalibrated["request"]["messages"][-1]["content"].count(" y")
+        self.assertEqual(original_tail - calibrated_tail, 100)
+
+    @mock.patch("agent_trace.urllib.request.urlopen")
+    def test_tokenization_calibration_validates_bounded_count(self, urlopen):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"count":123,"tokens":[]}'
+        urlopen.return_value = response
+        parsed = parse_shape(shape(), 1)
+        self.assertEqual(
+            tokenize_count(
+                "http://invalid", "model", "token", build_case(parsed, 0, "salt"), 1
+            ),
+            123,
+        )
+
+        response.__enter__.return_value.read.return_value = b'{"count":"bad"}'
+        with self.assertRaisesRegex(TraceShapeError, "count"):
+            tokenize_count(
+                "http://invalid", "model", "token", build_case(parsed, 0, "salt"), 1
+            )
+
     def test_text_case_with_tool_history_forces_no_new_call(self):
         parsed = parse_shape(shape(protocol="text", expected_tool_calls=0), 1)
         case = build_case(parsed, 0, "fresh")
@@ -262,8 +307,11 @@ class AgentTraceTest(unittest.TestCase):
 
     @mock.patch("agent_trace.time.sleep")
     @mock.patch("agent_trace.load_metadata")
+    @mock.patch("agent_trace.tokenize_count")
     @mock.patch("agent_trace.execute_case")
-    def test_run_emits_only_structural_records_and_summary(self, execute, metadata, _sleep):
+    def test_run_emits_only_structural_records_and_summary(
+        self, execute, tokenize, metadata, _sleep
+    ):
         records = [
             shape(protocol="text", expected_tool_calls=0),
             shape(
@@ -283,6 +331,7 @@ class AgentTraceTest(unittest.TestCase):
             "ttft_ms": 10.0,
             "mean_itl_ms": 2.0,
         }
+        tokenize.return_value = 64
         metadata.return_value = {"gpu_count": 8, "engine_image": "safe"}
         args = types.SimpleNamespace(
             base="http://invalid",
@@ -293,6 +342,7 @@ class AgentTraceTest(unittest.TestCase):
             label="shape-test",
             concurrency=2,
             timeout=1,
+            tokenize_timeout=1,
             prompt_token_tolerance_min=10,
             prompt_token_tolerance_pct=1,
         )
