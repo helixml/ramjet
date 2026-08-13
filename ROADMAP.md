@@ -686,9 +686,10 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   now consumes a fresh protected schema-v1 engine metadata capture, derives a
   canonical immutable identity, rejects rollback/conflict, and atomically
   publishes the companion envelope without Docker access or identity/secret
-  argv. Next add production-shaped Compose/service-manager and metrics-only
-  Caddy wiring, then run at least 100,000 revision-stable shadow comparisons
-  before placement can consume it.
+  argv. Production-shaped Compose, host-authority setup, semantic validation,
+  and metrics-only Caddy wiring now exist. The current immutable companions are
+  deployed with routing still off; run at least 100,000 revision-stable shadow
+  comparisons before placement can consume their state.
 
   The off-by-default library runtime now composes typed config, hardened secret
   loading, bind-last safe socket publication, the bounded supervisor, producer,
@@ -705,8 +706,11 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   HMAC-authenticated engine-incarnation watch; any invalid refresh fences
   authority immediately. The completed one-shot host provisioner now generates
   that manifest from current protected engine metadata without exposing either
-  digest key or identity. Deployment remains blocked on independently managed
-  per-engine capture invocation and production Compose/service-manager wiring.
+  digest key or identity. Both node06 domains now pass the production host and
+  Compose validators and run as separate attested services. Because they joined
+  already-long-lived engine generations after the bounded replay window, both
+  sources remain fenced until an authoritative clear or incarnation change;
+  do not restart a healthy engine merely to manufacture readiness.
 
   A true offline public-stack harness now proves initial publication, live
   store/remove, rolling handoff, LB owner restart, companion shutdown/socket
