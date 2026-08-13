@@ -453,7 +453,9 @@ node06). The design rationale for each lives in DESIGN.md.
   receive gap before the 180.04s fail-closed timeout. B's 69-batch / 3.79MB
   replay completed in 137ms with 34ms decode and less than 1ms fold. This
   closes attribution: do not extend the timeout or run another full-history
-  probe against the production publisher.
+  probe against the production publisher. Restore node06's advertised replay
+  limit to 8,192: once a live sequence is newer than that, A must observe only
+  instead of initiating a request that the publisher cannot reliably finish.
 
   Bare vLLM exposes no authoritative snapshot: its replay request is only an
   inclusive starting sequence followed by buffered events and an end marker.

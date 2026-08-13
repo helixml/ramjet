@@ -78,7 +78,7 @@ services:
       # The publisher retains 10K scheduler steps. Full recovery streams into
       # a scratch inventory and swaps only after end/cursor validation, so an
       # LB-only roll can safely consume the complete retained generation.
-      DS4_KV_EVENT_REPLAY_LIMIT: ${DS4_KV_EVENT_REPLAY_LIMIT:-10000}
+      DS4_KV_EVENT_REPLAY_LIMIT: ${DS4_KV_EVENT_REPLAY_LIMIT:-8192}
       DS4_KV_EVENT_REPLAY_TAIL_LIMIT: ${DS4_KV_EVENT_REPLAY_TAIL_LIMIT:-64}
       # Near-retention A replays vary from seconds to roughly three minutes.
       # This stays fail-closed; snapshot/tree-dump recovery is the real fix.
