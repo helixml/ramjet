@@ -2729,3 +2729,53 @@ its short replay and became trusted at 926 blocks / 237,056 token IDs. Both
 engine restart counts remained zero. This is the final full-replay transport
 experiment; further recovery work proceeds through issue #41's snapshot
 companion and captured-shape mock gates.
+
+## 2026-08-13 — issue #41 compact snapshot foundation
+
+The first snapshot slice stays entirely GPU-free. A versioned named-MessagePack
+contract carries an exact engine incarnation, real event watermark, reset
+scope, digest algorithm/key identity, indexed and filtered group geometry, BFS
+block records, redundant capacity declaration, and an opaque-body SHA-256
+corruption check. Decode bounds the frame/payload, verifies the checksum before
+the body, validates the expected incarnation/reset/digest before records, and
+returns only a fully validated private body. Every error and reason label is
+static and content-free. Cancellation is checked between phases and per record;
+schema, checksum, capacity, group, parent order, cross-group, incarnation, and
+contract failures never return partial state. SHA-256 is deliberately only a
+corruption guard in this prototype. Production UDS sessions require an
+authenticated, permission-restricted handshake and HMAC before accepting a
+snapshot as authoritative.
+
+The companion and LB use per-block commitments, not cumulative prefix hashes:
+parent ordinals provide path scope and the LB hashes each request block once.
+A separate arena-backed digest-index prototype retains no raw token vector,
+uses a 256-bit SHA-256 commitment split into primary/guard halves, preserves
+opaque engine hashes only for parent/removal identity, and poisons a compact
+edge on any detected commitment/identity conflict. Seven tests cover exact
+prefixes, branches, variable geometries, removal/reinsert, lookup budgets, and
+forced primary/full collisions. This is computational exactness under a
+cryptographic commitment; it is not information-theoretic equality after raw
+tokens are discarded, so production remains shadow-only until golden parity
+with the current raw-token index passes.
+
+The captured node06 shape uses 36,612 resident blocks / 9,372,672 logical
+source token IDs. Its snapshot is 5,710,914 bytes, encodes in 10.34ms, decodes
+and fully validates in 10.79ms, averages 8.29ms across ten repeated decodes,
+and peaks at 27,672KiB standalone RSS. This clears the issue's three-second
+gate by roughly two orders of magnitude before index construction. The digest
+prototype stores 65,536 commitment bytes instead of 2,097,152 raw token bytes
+for a 2,048-block/524,288-token chain (32x smaller); build is 1.96ms and a full
+path lookup averages 1.36ms across 100 runs, with 7,468KiB peak RSS.
+
+Lifecycle decision: keep lookups LB-local. A companion UDS is lifecycle-only:
+subscribe live, transfer snapshot plus watermark, stream strictly-newer deltas,
+emit a caught-up fence, then let the LB atomically swap local digest state.
+This adds no IPC/queueing failure mode to TTFT. One independently pinned
+long-lived companion owns both per-engine states; missing companion state
+fences exact routing while approximate serving continues. It binds engine
+incarnation with the existing compatibility attestation plus engine
+`process_start_time_seconds`, never mounts Docker's socket, and never retries
+an unrecoverable same-incarnation bootstrap storm. Next: production digest
+module/interface parity, snapshot-to-index benchmark, authenticated UDS
+handshake, actor bootstrap, then a shadow-only node06 rollout with no engine
+restart.

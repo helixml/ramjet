@@ -5,6 +5,7 @@ pub mod exact_shadow;
 pub mod journal;
 pub mod kv_consumer;
 pub mod kv_fence;
+pub mod kv_snapshot;
 pub mod kv_transport;
 pub mod kv_wire;
 pub mod metrics;

@@ -190,6 +190,18 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   only 2.12s decoding and 0.16s folding 5,500 batches. Use the exported replay
   phase/progress metrics, mock captured-shape tests, or the snapshot companion;
   a production no-op-fold replay adds publisher pressure without new evidence.
+- Run the issue #41 captured-shape gate locally; it is GPU-free and should take
+  well under a second once the release example is built:
+
+  ```bash
+  cargo run --release --locked --example snapshot_shape_bench
+  cargo run --release --locked --example digest_index_prototype
+  ```
+
+  Keep compiler RSS out of runtime measurements by timing the built binaries
+  directly under `target/release/examples/`. The 2026-08-13 foundation measured
+  10.8ms validated snapshot decode and 27MiB standalone peak RSS at 36,612
+  records; a large regression should fail before any node06 rollout.
 - For an engine candidate, stop at the first failed gate: source/fixture checks,
   five-case correctness smoke, c8 scout, then the full matrix. A cached valid
   candidate should reach the first decision in roughly 15-18 minutes, dominated
