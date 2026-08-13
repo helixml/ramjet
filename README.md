@@ -99,6 +99,19 @@ separate `placement` mode is explicitly enabled.
 contain counts only. Raw token IDs and hashes never enter logs, journals, or
 metrics.
 
+The alternative `DS4_SNAPSHOT_ROUTE_MODE=shadow` path consumes authenticated
+compact indexes from one local companion per upstream. Its LB-side telemetry
+uses ordinal-only `engine-N` labels:
+`ds4proxy_snapshot_route_enabled`, `ds4proxy_snapshot_route_ready`,
+`ds4proxy_snapshot_route_attempts_active`,
+`ds4proxy_snapshot_route_connections_active`,
+`ds4proxy_snapshot_route_attempts_total`, and
+`ds4proxy_snapshot_route_attempt_results_total`. Readiness means the actor has
+published an authoritative inventory, not merely that its Unix socket is
+connected. Every attempt kind and result series exists at zero before the
+owner starts, and paths, endpoints, identities, secrets, and free-form errors
+are excluded from labels.
+
 Full replay is folded batch-by-batch into a private scratch inventory. The live
 inventory remains fenced and unchanged until the requested end/cursor is
 validated, then the completed generation is swapped in atomically. Invalid,

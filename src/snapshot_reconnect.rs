@@ -35,6 +35,84 @@ pub const MAX_CHALLENGE_LEDGER_CAPACITY: usize = 65_536;
 const REPLACEMENT_CHANNEL_CAPACITY: usize = 1;
 const PUBLICATION_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotReconnectAttemptKind {
+    Initial,
+    Retry,
+    Replacement,
+}
+
+impl SnapshotReconnectAttemptKind {
+    pub const ALL: [Self; 3] = [Self::Initial, Self::Retry, Self::Replacement];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Initial => "initial",
+            Self::Retry => "retry",
+            Self::Replacement => "replacement",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotReconnectAttemptResult {
+    ConnectFailure,
+    SessionFailure,
+    Timeout,
+    RandomFailure,
+    Cancelled,
+    UnexpectedEnd,
+}
+
+impl SnapshotReconnectAttemptResult {
+    pub const ALL: [Self; 6] = [
+        Self::ConnectFailure,
+        Self::SessionFailure,
+        Self::Timeout,
+        Self::RandomFailure,
+        Self::Cancelled,
+        Self::UnexpectedEnd,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ConnectFailure => "connect_failure",
+            Self::SessionFailure => "session_failure",
+            Self::Timeout => "timeout",
+            Self::RandomFailure => "random_failure",
+            Self::Cancelled => "cancelled",
+            Self::UnexpectedEnd => "unexpected_end",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotReconnectEvent {
+    AttemptStarted(SnapshotReconnectAttemptKind),
+    AttemptSetupFailed(SnapshotReconnectAttemptResult),
+    ConnectionOpened,
+    ConnectionClosed,
+    AttemptFinished(SnapshotReconnectAttemptResult),
+    Readiness(bool),
+}
+
+/// Typed, content-free observation boundary for one reconnect owner.
+///
+/// Implementations must keep work synchronous and bounded. Event variants and
+/// their labels are closed enums: paths, peer identities, hosts, secrets, and
+/// protocol error strings never cross this boundary.
+pub trait SnapshotReconnectObserver: Send + Sync {
+    fn observe(&self, event: SnapshotReconnectEvent);
+}
+
+struct NoopReconnectObserver;
+
+impl SnapshotReconnectObserver for NoopReconnectObserver {
+    fn observe(&self, _event: SnapshotReconnectEvent) {}
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SnapshotReconnectConfig {
     socket_path: PathBuf,
@@ -165,6 +243,7 @@ pub struct SnapshotReconnectOwner {
     random: Box<dyn RandomSource>,
     challenges: ChallengeLedger,
     replacements: mpsc::Receiver<()>,
+    observer: Arc<dyn SnapshotReconnectObserver>,
 }
 
 impl SnapshotReconnectOwner {
@@ -177,13 +256,27 @@ impl SnapshotReconnectOwner {
         config: SnapshotReconnectConfig,
         consumer: Arc<SnapshotConsumer>,
     ) -> Result<(Self, SnapshotReconnectHandle), SnapshotReconnectError> {
-        Self::with_random(config, consumer, Box::new(OsRandomSource))
+        Self::with_observer(config, consumer, Arc::new(NoopReconnectObserver))
+    }
+
+    /// Construct the production owner with a typed, content-free observer.
+    ///
+    /// # Errors
+    ///
+    /// Revalidates the configured socket path before retaining it.
+    pub fn with_observer(
+        config: SnapshotReconnectConfig,
+        consumer: Arc<SnapshotConsumer>,
+        observer: Arc<dyn SnapshotReconnectObserver>,
+    ) -> Result<(Self, SnapshotReconnectHandle), SnapshotReconnectError> {
+        Self::with_random(config, consumer, Box::new(OsRandomSource), observer)
     }
 
     fn with_random(
         config: SnapshotReconnectConfig,
         consumer: Arc<SnapshotConsumer>,
         random: Box<dyn RandomSource>,
+        observer: Arc<dyn SnapshotReconnectObserver>,
     ) -> Result<(Self, SnapshotReconnectHandle), SnapshotReconnectError> {
         validate_socket_client_path(&config.socket_path, config.socket_policy)
             .map_err(SnapshotReconnectError::SocketPath)?;
@@ -196,6 +289,7 @@ impl SnapshotReconnectOwner {
                 random,
                 challenges,
                 replacements,
+                observer,
             },
             SnapshotReconnectHandle { replacement },
         ))
@@ -207,7 +301,9 @@ impl SnapshotReconnectOwner {
         let mut report = SnapshotReconnectReport::default();
         let mut backoff = self.config.reconnect_min;
         let mut delay_before_attempt = false;
+        let mut first_attempt = true;
         let mut replacements_open = true;
+        self.observe_readiness();
 
         loop {
             if delay_before_attempt {
@@ -225,7 +321,13 @@ impl SnapshotReconnectOwner {
             }
             delay_before_attempt = true;
 
-            let Some(mut active) = self.start_attempt(&mut report) else {
+            let kind = if first_attempt {
+                first_attempt = false;
+                SnapshotReconnectAttemptKind::Initial
+            } else {
+                SnapshotReconnectAttemptKind::Retry
+            };
+            let Some(mut active) = self.start_attempt(&mut report, kind) else {
                 continue;
             };
             let mut published = self.consumer.publication().lock().published_epoch();
@@ -236,6 +338,7 @@ impl SnapshotReconnectOwner {
                     biased;
                     () = wait_for_shutdown(&mut shutdown) => {
                         drop(active);
+                        self.observe_readiness();
                         report.shutdown_cancellations =
                             report.shutdown_cancellations.saturating_add(1);
                         return report;
@@ -246,7 +349,10 @@ impl SnapshotReconnectOwner {
                             continue;
                         };
                         report.replacement_requests = report.replacement_requests.saturating_add(1);
-                        let Some(replacement) = self.start_attempt(&mut report) else {
+                        let Some(replacement) = self.start_attempt(
+                            &mut report,
+                            SnapshotReconnectAttemptKind::Replacement,
+                        ) else {
                             report.replacement_failures =
                                 report.replacement_failures.saturating_add(1);
                             continue;
@@ -262,19 +368,25 @@ impl SnapshotReconnectOwner {
                             RollOutcome::Active(next) => {
                                 active = next;
                                 published = self.consumer.publication().lock().published_epoch();
+                                self.observe_readiness();
                             }
                             RollOutcome::Shutdown => return report,
                         }
                     }
                     outcome = &mut active => {
                         record_attempt_end(&mut report, &outcome);
+                        self.observe_readiness();
                         break;
                     }
                     _ = publication_tick.tick() => {
                         let current = self.consumer.publication().lock().published_epoch();
-                        if current.is_some() && current != published {
+                        if current != published {
                             published = current;
-                            backoff = self.config.reconnect_min;
+                            if current.is_some() {
+                                backoff = self.config.reconnect_min;
+                            }
+                            self.observer
+                                .observe(SnapshotReconnectEvent::Readiness(current.is_some()));
                         }
                     }
                 }
@@ -282,34 +394,62 @@ impl SnapshotReconnectOwner {
         }
     }
 
-    fn start_attempt(&mut self, report: &mut SnapshotReconnectReport) -> Option<AttemptFuture> {
+    fn start_attempt(
+        &mut self,
+        report: &mut SnapshotReconnectReport,
+        kind: SnapshotReconnectAttemptKind,
+    ) -> Option<AttemptFuture> {
         let Some(deadline) = Instant::now().checked_add(self.config.attempt_timeout) else {
             report.session_failures = report.session_failures.saturating_add(1);
+            self.observer
+                .observe(SnapshotReconnectEvent::AttemptSetupFailed(
+                    SnapshotReconnectAttemptResult::SessionFailure,
+                ));
             return None;
         };
         let Ok(challenge) = self.challenges.generate(self.random.as_mut()) else {
             report.random_failures = report.random_failures.saturating_add(1);
+            self.observer
+                .observe(SnapshotReconnectEvent::AttemptSetupFailed(
+                    SnapshotReconnectAttemptResult::RandomFailure,
+                ));
             return None;
         };
         report.attempts_started = report.attempts_started.saturating_add(1);
         let path = self.config.socket_path.clone();
         let policy = self.config.socket_policy;
         let consumer = Arc::clone(&self.consumer);
+        let observer = Arc::clone(&self.observer);
         Some(Box::pin(async move {
+            let mut observation = AttemptObservation::new(observer, kind);
             let attempt = async {
                 validate_socket_client_path(&path, policy).map_err(AttemptEnd::SocketPath)?;
                 let stream = UnixStream::connect(&path)
                     .await
                     .map_err(|_| AttemptEnd::Connect)?;
+                observation.connected();
                 consumer
                     .consume(stream, challenge, deadline)
                     .await
                     .map_err(AttemptEnd::Consumer)
             };
-            timeout_at(deadline, attempt)
+            let outcome = timeout_at(deadline, attempt)
                 .await
-                .unwrap_or(Err(AttemptEnd::Deadline))
+                .unwrap_or(Err(AttemptEnd::Deadline));
+            observation.finish(attempt_result(&outcome));
+            outcome
         }))
+    }
+
+    fn observe_readiness(&self) {
+        let ready = self
+            .consumer
+            .publication()
+            .lock()
+            .published_epoch()
+            .is_some();
+        self.observer
+            .observe(SnapshotReconnectEvent::Readiness(ready));
     }
 
     async fn wait_before_retry(
@@ -350,6 +490,7 @@ impl SnapshotReconnectOwner {
                 () = wait_for_shutdown(shutdown) => {
                     drop(replacement);
                     drop(old);
+                    self.observe_readiness();
                     report.shutdown_cancellations =
                         report.shutdown_cancellations.saturating_add(2);
                     return RollOutcome::Shutdown;
@@ -375,6 +516,7 @@ impl SnapshotReconnectOwner {
                     let current = self.consumer.publication().lock().published_epoch();
                     if current.is_some() && current != old_publication {
                         drop(old);
+                        self.observe_readiness();
                         report.replacement_promotions =
                             report.replacement_promotions.saturating_add(1);
                         return RollOutcome::Active(replacement);
@@ -387,6 +529,56 @@ impl SnapshotReconnectOwner {
 
 type AttemptFuture = Pin<Box<dyn Future<Output = Result<(), AttemptEnd>> + Send>>;
 
+struct AttemptObservation {
+    observer: Arc<dyn SnapshotReconnectObserver>,
+    connected: bool,
+    finished: bool,
+}
+
+impl AttemptObservation {
+    fn new(
+        observer: Arc<dyn SnapshotReconnectObserver>,
+        kind: SnapshotReconnectAttemptKind,
+    ) -> Self {
+        observer.observe(SnapshotReconnectEvent::AttemptStarted(kind));
+        Self {
+            observer,
+            connected: false,
+            finished: false,
+        }
+    }
+
+    fn connected(&mut self) {
+        debug_assert!(!self.connected);
+        self.connected = true;
+        self.observer
+            .observe(SnapshotReconnectEvent::ConnectionOpened);
+    }
+
+    fn finish(&mut self, result: SnapshotReconnectAttemptResult) {
+        self.close(result);
+    }
+
+    fn close(&mut self, result: SnapshotReconnectAttemptResult) {
+        if self.finished {
+            return;
+        }
+        if self.connected {
+            self.observer
+                .observe(SnapshotReconnectEvent::ConnectionClosed);
+        }
+        self.observer
+            .observe(SnapshotReconnectEvent::AttemptFinished(result));
+        self.finished = true;
+    }
+}
+
+impl Drop for AttemptObservation {
+    fn drop(&mut self) {
+        self.close(SnapshotReconnectAttemptResult::Cancelled);
+    }
+}
+
 enum RollOutcome {
     Active(AttemptFuture),
     Shutdown,
@@ -398,6 +590,20 @@ enum AttemptEnd {
     Connect,
     Consumer(SnapshotConsumerError),
     Deadline,
+}
+
+const fn attempt_result(outcome: &Result<(), AttemptEnd>) -> SnapshotReconnectAttemptResult {
+    match outcome {
+        Err(AttemptEnd::SocketPath(_) | AttemptEnd::Connect) => {
+            SnapshotReconnectAttemptResult::ConnectFailure
+        }
+        Err(AttemptEnd::Deadline) => SnapshotReconnectAttemptResult::Timeout,
+        Err(AttemptEnd::Consumer(SnapshotConsumerError::Timeout)) => {
+            SnapshotReconnectAttemptResult::Timeout
+        }
+        Err(AttemptEnd::Consumer(_)) => SnapshotReconnectAttemptResult::SessionFailure,
+        Ok(()) => SnapshotReconnectAttemptResult::UnexpectedEnd,
+    }
 }
 
 fn record_attempt_end(report: &mut SnapshotReconnectReport, outcome: &Result<(), AttemptEnd>) {
@@ -489,7 +695,10 @@ mod tests {
         collections::VecDeque,
         fs,
         os::unix::fs::{MetadataExt, PermissionsExt},
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Mutex as StdMutex,
+            atomic::{AtomicU64, Ordering},
+        },
     };
 
     use tokio::{
@@ -558,6 +767,21 @@ mod tests {
     }
 
     struct CounterRandom(u8);
+
+    #[derive(Default)]
+    struct RecordingObserver(StdMutex<Vec<SnapshotReconnectEvent>>);
+
+    impl RecordingObserver {
+        fn events(&self) -> Vec<SnapshotReconnectEvent> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl SnapshotReconnectObserver for RecordingObserver {
+        fn observe(&self, event: SnapshotReconnectEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
 
     impl RandomSource for CounterRandom {
         fn fill(&mut self, destination: &mut [u8]) -> Result<(), ()> {
@@ -632,7 +856,13 @@ mod tests {
         config: SnapshotReconnectConfig,
         consumer: Arc<SnapshotConsumer>,
     ) -> (SnapshotReconnectOwner, SnapshotReconnectHandle) {
-        SnapshotReconnectOwner::with_random(config, consumer, Box::new(CounterRandom(0))).unwrap()
+        SnapshotReconnectOwner::with_random(
+            config,
+            consumer,
+            Box::new(CounterRandom(0)),
+            Arc::new(NoopReconnectObserver),
+        )
+        .unwrap()
     }
 
     fn tokio_listener(directory: &TestDirectory) -> (UnixListener, PublishedSocketPath) {
@@ -819,6 +1049,104 @@ mod tests {
         drop(stream);
         assert!(report.attempts_timed_out >= 1);
         assert!(report.attempts_started >= 1);
+    }
+
+    #[tokio::test]
+    async fn observer_balances_connected_timeout_and_keeps_labels_typed() {
+        let directory = TestDirectory::new();
+        let (listener, _guard) = tokio_listener(&directory);
+        let consumer = consumer(directory.policy().owner_uid);
+        let observer = Arc::new(RecordingObserver::default());
+        let (owner, _) = SnapshotReconnectOwner::with_random(
+            config(&directory, Duration::from_millis(20)),
+            consumer,
+            Box::new(CounterRandom(0)),
+            observer.clone(),
+        )
+        .unwrap();
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let owner_task = tokio::spawn(owner.run(shutdown));
+        let (stream, _) = listener.accept().await.unwrap();
+        sleep(Duration::from_millis(35)).await;
+        shutdown_sender.send(true).unwrap();
+        owner_task.await.unwrap();
+        drop(stream);
+
+        let events = observer.events();
+        assert!(events.contains(&SnapshotReconnectEvent::AttemptStarted(
+            SnapshotReconnectAttemptKind::Initial
+        )));
+        assert!(events.contains(&SnapshotReconnectEvent::ConnectionOpened));
+        assert!(events.contains(&SnapshotReconnectEvent::ConnectionClosed));
+        assert!(events.contains(&SnapshotReconnectEvent::AttemptFinished(
+            SnapshotReconnectAttemptResult::Timeout
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, SnapshotReconnectEvent::ConnectionOpened))
+                .count(),
+            events
+                .iter()
+                .filter(|event| matches!(event, SnapshotReconnectEvent::ConnectionClosed))
+                .count()
+        );
+        assert_eq!(
+            events.last(),
+            Some(&SnapshotReconnectEvent::Readiness(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn observer_readiness_tracks_publication_not_connection() {
+        let directory = TestDirectory::new();
+        let (listener, _guard) = tokio_listener(&directory);
+        let consumer = consumer(directory.policy().owner_uid);
+        let publication = Arc::clone(consumer.publication());
+        let observer = Arc::new(RecordingObserver::default());
+        let (owner, _) = SnapshotReconnectOwner::with_random(
+            config(&directory, Duration::from_secs(1)),
+            consumer,
+            Box::new(CounterRandom(0)),
+            observer.clone(),
+        )
+        .unwrap();
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let owner_task = tokio::spawn(owner.run(shutdown));
+
+        let (stream, _) = accept_and_publish(&listener, 100).await;
+        wait_for_epoch(&publication, None).await;
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if observer
+                    .events()
+                    .contains(&SnapshotReconnectEvent::Readiness(true))
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown_sender.send(true).unwrap();
+        owner_task.await.unwrap();
+        drop(stream);
+
+        let events = observer.events();
+        let ready_position = events
+            .iter()
+            .position(|event| *event == SnapshotReconnectEvent::Readiness(true))
+            .unwrap();
+        let connected_position = events
+            .iter()
+            .position(|event| *event == SnapshotReconnectEvent::ConnectionOpened)
+            .unwrap();
+        assert!(connected_position < ready_position);
+        assert_eq!(
+            events.last(),
+            Some(&SnapshotReconnectEvent::Readiness(false))
+        );
     }
 
     #[tokio::test]

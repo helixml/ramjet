@@ -49,8 +49,8 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .context("build upstream client")?;
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
-    let snapshot_consumers =
-        SnapshotRouteConsumers::start(&config).context("initialize snapshot route consumers")?;
+    let snapshot_consumers = SnapshotRouteConsumers::start(&config, &metrics)
+        .context("initialize snapshot route consumers")?;
     let kv_consumers = KvEventConsumers::start(&config, &metrics, &shutdown_tx);
     let exact_inventories =
         if config.snapshot_route_mode == mini_dynamo::config::SnapshotRouteMode::Shadow {

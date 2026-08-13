@@ -20,6 +20,7 @@ use crate::{
     exact_route_inventory::ExactRouteInventory,
     kv_snapshot::SnapshotLimits,
     kv_wire::KvWireLimits,
+    metrics::Metrics,
     snapshot_actor::SnapshotActorLimits,
     snapshot_consumer::{SnapshotConsumer, SnapshotConsumerConfig},
     snapshot_reconnect::{
@@ -75,7 +76,11 @@ impl SnapshotRouteConsumers {
     ///
     /// Fails closed before spawning any owner when any protected file, socket
     /// parent, actor limit, or reconnect policy is invalid.
-    pub fn start(config: &Config) -> Result<Self, SnapshotRouteStartError> {
+    pub fn start(config: &Config, metrics: &Arc<Metrics>) -> Result<Self, SnapshotRouteStartError> {
+        metrics.initialize_snapshot_route(
+            config.upstreams.len(),
+            config.snapshot_route_mode != SnapshotRouteMode::Off,
+        );
         if config.snapshot_route_mode == SnapshotRouteMode::Off {
             return Ok(Self {
                 inventories: Arc::from([]),
@@ -89,7 +94,7 @@ impl SnapshotRouteConsumers {
         };
         let mut prepared = Vec::with_capacity(config.snapshot_route_sources.len());
         let mut inventories = Vec::with_capacity(config.snapshot_route_sources.len());
-        for source in &config.snapshot_route_sources {
+        for (index, source) in config.snapshot_route_sources.iter().enumerate() {
             let session_secret = load_snapshot_session_secret(&source.session_secret_path, policy)?;
             let digest_secret = load_companion_digest_secret(&source.digest_secret_path, policy)?;
             let incarnation = load_authenticated_engine_incarnation(
@@ -131,7 +136,9 @@ impl SnapshotRouteConsumers {
                 CHALLENGE_LEDGER_CAPACITY,
             )?;
             let publication = Arc::clone(consumer.publication());
-            let (owner, _replacement) = SnapshotReconnectOwner::new(reconnect, consumer)?;
+            let observer = metrics.snapshot_route_observer(index);
+            let (owner, _replacement) =
+                SnapshotReconnectOwner::with_observer(reconnect, consumer, observer)?;
             inventories.push(ExactRouteInventory::snapshot(publication));
             prepared.push(owner);
         }
@@ -188,7 +195,9 @@ mod tests {
             encode_authenticated_engine_incarnation, load_companion_digest_secret,
         },
         kv_snapshot::EngineIncarnation,
+        metrics::Metrics,
     };
+    use prometheus::Registry;
 
     use super::*;
 
@@ -322,16 +331,24 @@ mod tests {
     #[test]
     fn off_mode_does_not_touch_files_or_spawn_tasks() {
         let config = Config::from_lookup(|_| None).unwrap();
-        let consumers = SnapshotRouteConsumers::start(&config).unwrap();
+        let registry = Registry::new();
+        let metrics = Arc::new(Metrics::new(&registry).unwrap());
+        let consumers = SnapshotRouteConsumers::start(&config, &metrics).unwrap();
         assert!(consumers.inventories().is_empty());
         assert!(consumers.tasks.is_empty());
         assert!(consumers.shutdown.is_none());
+        let text = prometheus::TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        assert!(text.contains("ds4proxy_snapshot_route_enabled 0"));
+        assert!(text.contains(r#"ds4proxy_snapshot_route_ready{engine="engine-0"} 0"#));
     }
 
     #[tokio::test]
     async fn valid_authority_starts_one_bounded_unpublished_owner() {
         let authority = TestAuthority::new();
-        let consumers = SnapshotRouteConsumers::start(&authority.config()).unwrap();
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        let consumers = SnapshotRouteConsumers::start(&authority.config(), &metrics).unwrap();
         assert_eq!(consumers.inventories().len(), 1);
         assert!(!consumers.inventories()[0].ready());
         assert_eq!(consumers.tasks.len(), 1);
@@ -341,8 +358,9 @@ mod tests {
     #[tokio::test]
     async fn invalid_authority_fails_before_any_owner_is_returned() {
         let authority = TestAuthority::new();
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
         fs::set_permissions(&authority.attestation, fs::Permissions::from_mode(0o666)).unwrap();
-        let error = SnapshotRouteConsumers::start(&authority.config())
+        let error = SnapshotRouteConsumers::start(&authority.config(), &metrics)
             .err()
             .unwrap();
         assert_eq!(error.reason(), "unsafe_permissions");

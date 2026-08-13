@@ -1,5 +1,12 @@
+use std::sync::Arc;
+
 use prometheus::{
     CounterVec, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, Opts, Registry,
+};
+
+use crate::snapshot_reconnect::{
+    SnapshotReconnectAttemptKind, SnapshotReconnectAttemptResult, SnapshotReconnectEvent,
+    SnapshotReconnectObserver,
 };
 
 pub struct Metrics {
@@ -59,6 +66,12 @@ pub struct Metrics {
     pub kv_event_replay_duration: HistogramVec,
     pub kv_event_replay_bytes: HistogramVec,
     pub kv_event_replay_progress: HistogramVec,
+    pub snapshot_route_enabled: Gauge,
+    pub snapshot_route_ready: GaugeVec,
+    pub snapshot_route_attempts_active: GaugeVec,
+    pub snapshot_route_connections_active: GaugeVec,
+    pub snapshot_route_attempts: CounterVec,
+    pub snapshot_route_attempt_results: CounterVec,
 }
 
 impl Metrics {
@@ -450,6 +463,35 @@ impl Metrics {
                 ],
                 &["upstream", "kind", "outcome"],
             )?,
+            snapshot_route_enabled: Gauge::with_opts(Opts::new(
+                "ds4proxy_snapshot_route_enabled",
+                "Whether LB snapshot companion consumption is configured",
+            ))?,
+            snapshot_route_ready: gauge(
+                "ds4proxy_snapshot_route_ready",
+                "Whether the LB has an authoritative published companion inventory",
+                &["engine"],
+            )?,
+            snapshot_route_attempts_active: gauge(
+                "ds4proxy_snapshot_route_attempts_active",
+                "Reconnect attempts currently owned by the LB",
+                &["engine"],
+            )?,
+            snapshot_route_connections_active: gauge(
+                "ds4proxy_snapshot_route_connections_active",
+                "Connected companion sessions currently owned by the LB",
+                &["engine"],
+            )?,
+            snapshot_route_attempts: counter(
+                "ds4proxy_snapshot_route_attempts_total",
+                "LB snapshot companion attempts by bounded kind",
+                &["engine", "kind"],
+            )?,
+            snapshot_route_attempt_results: counter(
+                "ds4proxy_snapshot_route_attempt_results_total",
+                "LB snapshot companion attempt results by bounded outcome",
+                &["engine", "outcome"],
+            )?,
         };
         for endpoint in ["chat", "messages", "responses", "completions", "other"] {
             metrics.prompt_tokens.with_label_values(&[endpoint]);
@@ -465,6 +507,33 @@ impl Metrics {
             registry.register(collector)?;
         }
         Ok(metrics)
+    }
+
+    /// Create one fixed-label observer for a configured snapshot source.
+    ///
+    /// The label is derived only from the configuration index. Endpoint URLs,
+    /// socket paths, identities, and protocol errors never become labels. All
+    /// bounded series are instantiated before the owner task starts.
+    #[must_use]
+    pub fn snapshot_route_observer(&self, index: usize) -> Arc<dyn SnapshotReconnectObserver> {
+        let observer = SnapshotRouteMetricsObserver {
+            engine: format!("engine-{index}"),
+            ready: self.snapshot_route_ready.clone(),
+            attempts_active: self.snapshot_route_attempts_active.clone(),
+            connections_active: self.snapshot_route_connections_active.clone(),
+            attempts: self.snapshot_route_attempts.clone(),
+            results: self.snapshot_route_attempt_results.clone(),
+        };
+        observer.initialize_series();
+        Arc::new(observer)
+    }
+
+    /// Pre-initialize every configured engine slot before an owner can start.
+    pub fn initialize_snapshot_route(&self, source_count: usize, enabled: bool) {
+        self.snapshot_route_enabled.set(f64::from(enabled));
+        for index in 0..source_count {
+            drop(self.snapshot_route_observer(index));
+        }
     }
 
     fn collectors(&self) -> Vec<Box<dyn prometheus::core::Collector>> {
@@ -525,7 +594,81 @@ impl Metrics {
             Box::new(self.kv_event_replay_duration.clone()),
             Box::new(self.kv_event_replay_bytes.clone()),
             Box::new(self.kv_event_replay_progress.clone()),
+            Box::new(self.snapshot_route_enabled.clone()),
+            Box::new(self.snapshot_route_ready.clone()),
+            Box::new(self.snapshot_route_attempts_active.clone()),
+            Box::new(self.snapshot_route_connections_active.clone()),
+            Box::new(self.snapshot_route_attempts.clone()),
+            Box::new(self.snapshot_route_attempt_results.clone()),
         ]
+    }
+}
+
+struct SnapshotRouteMetricsObserver {
+    engine: String,
+    ready: GaugeVec,
+    attempts_active: GaugeVec,
+    connections_active: GaugeVec,
+    attempts: CounterVec,
+    results: CounterVec,
+}
+
+impl SnapshotRouteMetricsObserver {
+    fn initialize_series(&self) {
+        self.ready.with_label_values(&[&self.engine]);
+        self.attempts_active.with_label_values(&[&self.engine]);
+        self.connections_active.with_label_values(&[&self.engine]);
+        for kind in SnapshotReconnectAttemptKind::ALL {
+            self.attempts
+                .with_label_values(&[&self.engine, kind.label()]);
+        }
+        for result in SnapshotReconnectAttemptResult::ALL {
+            self.results
+                .with_label_values(&[&self.engine, result.label()]);
+        }
+    }
+}
+
+impl SnapshotReconnectObserver for SnapshotRouteMetricsObserver {
+    fn observe(&self, event: SnapshotReconnectEvent) {
+        match event {
+            SnapshotReconnectEvent::AttemptStarted(kind) => {
+                self.attempts_active
+                    .with_label_values(&[&self.engine])
+                    .inc();
+                self.attempts
+                    .with_label_values(&[&self.engine, kind.label()])
+                    .inc();
+            }
+            SnapshotReconnectEvent::AttemptSetupFailed(result) => {
+                self.results
+                    .with_label_values(&[&self.engine, result.label()])
+                    .inc();
+            }
+            SnapshotReconnectEvent::ConnectionOpened => {
+                self.connections_active
+                    .with_label_values(&[&self.engine])
+                    .inc();
+            }
+            SnapshotReconnectEvent::ConnectionClosed => {
+                self.connections_active
+                    .with_label_values(&[&self.engine])
+                    .dec();
+            }
+            SnapshotReconnectEvent::AttemptFinished(result) => {
+                self.attempts_active
+                    .with_label_values(&[&self.engine])
+                    .dec();
+                self.results
+                    .with_label_values(&[&self.engine, result.label()])
+                    .inc();
+            }
+            SnapshotReconnectEvent::Readiness(ready) => {
+                self.ready
+                    .with_label_values(&[&self.engine])
+                    .set(f64::from(ready));
+            }
+        }
     }
 }
 
@@ -629,5 +772,53 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing zero series: {expected}");
         }
+    }
+
+    #[test]
+    fn snapshot_route_metrics_are_fixed_cardinality_and_balance_lifecycle() {
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry).unwrap();
+        metrics.initialize_snapshot_route(2, true);
+        let first = metrics.snapshot_route_observer(0);
+
+        first.observe(SnapshotReconnectEvent::AttemptStarted(
+            SnapshotReconnectAttemptKind::Initial,
+        ));
+        first.observe(SnapshotReconnectEvent::ConnectionOpened);
+        first.observe(SnapshotReconnectEvent::Readiness(true));
+        first.observe(SnapshotReconnectEvent::ConnectionClosed);
+        first.observe(SnapshotReconnectEvent::AttemptFinished(
+            SnapshotReconnectAttemptResult::Timeout,
+        ));
+        first.observe(SnapshotReconnectEvent::Readiness(false));
+
+        let text = prometheus::TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        for expected in [
+            "ds4proxy_snapshot_route_enabled 1",
+            r#"ds4proxy_snapshot_route_ready{engine="engine-0"} 0"#,
+            r#"ds4proxy_snapshot_route_attempts_active{engine="engine-0"} 0"#,
+            r#"ds4proxy_snapshot_route_connections_active{engine="engine-0"} 0"#,
+            r#"ds4proxy_snapshot_route_attempts_total{engine="engine-0",kind="initial"} 1"#,
+            r#"ds4proxy_snapshot_route_attempt_results_total{engine="engine-0",outcome="timeout"} 1"#,
+            r#"ds4proxy_snapshot_route_attempt_results_total{engine="engine-1",outcome="random_failure"} 0"#,
+        ] {
+            assert!(text.contains(expected), "missing series: {expected}");
+        }
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("ds4proxy_snapshot_route_attempts_total{"))
+                .count(),
+            2 * SnapshotReconnectAttemptKind::ALL.len()
+        );
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("ds4proxy_snapshot_route_attempt_results_total{"))
+                .count(),
+            2 * SnapshotReconnectAttemptResult::ALL.len()
+        );
+        assert!(!text.contains("http://"));
+        assert!(!text.contains(".sock"));
     }
 }
