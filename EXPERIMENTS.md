@@ -2612,11 +2612,30 @@ path without admitting ordinary traffic.
 
 Repeated LB canaries also exposed a new replay-scale boundary. Long-lived A
 had reached sequence 9,485; its 9,426 event-bearing batch replay timed out
-undrained at 20 seconds, then recovered authoritatively inside a 60-second
+undrained at 20 seconds, then recovered authoritatively once inside a 60-second
 window at 20,335 resident blocks / 5,205,760 token IDs. B recovered to 871
 blocks / 222,976 token IDs. The timeout remains fail-closed and affects only
-shadow inventory restoration, so node06 now uses 60 seconds near the
-publisher's 10,000-step retention edge. Both engines remained healthy with
+shadow inventory restoration. Later promotion rolls below show that this was
+not a stable bound near the publisher's 10,000-step retention edge. Both
+engines remained healthy with
 restart count zero throughout. Production was returned to the public r31
 image in shadow mode, 2/2 healthy and 2/2 exact trusted; the next LB promotion
 can use r32 after its public package is available.
+
+The byte-identical qualified image was published manually after the repository
+`GITHUB_TOKEN` again received GHCR `write_package` denial despite an otherwise
+green main quality job. The public artifact is
+`ghcr.io/helixml/mini-dynamo:rust-r32-exact-canary-4c63eed` at
+`sha256:77f287741188277825abddb9fa684e39fe54e91ca4bdbe86b17b8fb9e02ed0df`.
+The Compose default is promoted to that immutable digest in shadow mode; the
+percentage remains zero and no canary key is stored in either repository.
+
+The public-image promotion reproduced an important limit: A's full replay
+timed out undrained twice at 60 seconds before a final capped 180-second
+attempt restored both inventories near the end of its window. A finished at
+19,517 blocks / 4,996,352 token IDs and B at 909 / 232,704; health remained
+2/2 and engine restart counts stayed zero. The default is temporarily 180
+seconds because exact state remains fail-closed shadow telemetry, but this is
+not considered a scalable fix. The next recovery work must use a publisher
+snapshot/tree dump or another compact authoritative transfer rather than
+replaying roughly 9,500 scheduler steps through the live ROUTER protocol.
