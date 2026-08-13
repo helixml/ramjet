@@ -333,6 +333,11 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   pull-request containers never receive those secrets. GitHub Actions is not a
   second CI system for this repository. Drone's PR quality budget is currently
   about 58s; inspect and record regressions instead of adding duplicate gates.
+  The release Dockerfile keeps dependency compilation in an ordinary layer and
+  publishes inline BuildKit metadata in `rust-edge`; each fresh DinD imports
+  that private image with `cache_from`. Do not replace this with `purge: false`
+  (the daemon is ephemeral) or a new privileged plugin without proving the
+  runner permits it. Build #212 is the 113s cold seed control.
   Node06 deploys should keep using the warm local `bench/build_transfer.sh`
   path because it reuses the development BuildKit cache.
 - Build the LB locally and stream it to node06 when the local amd64 Docker
