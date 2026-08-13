@@ -1083,6 +1083,31 @@ mod tests {
         }
     }
 
+    fn orphan_partial_batch(sequence: u64) -> SequencedBatch {
+        SequencedBatch {
+            sequence,
+            payload: Bytes::from_static(b"bounded-orphan-partial"),
+            batch: KvEventBatch {
+                timestamp: 1.0,
+                events: vec![KvEvent::BlockStored(BlockStored {
+                    block_hashes: vec![ExternalBlockHash::Unsigned(20)],
+                    parent_block_hash: Some(ExternalBlockHash::Unsigned(999)),
+                    token_ids: vec![20, 21, 22, 23],
+                    block_size: 4,
+                    group_idx: Some(0),
+                    kv_cache_spec_kind: Some("mla_attention".to_owned()),
+                    kv_cache_spec_sliding_window: None,
+                    medium: Some("GPU".to_owned()),
+                    locality: Some("LOCAL".to_owned()),
+                    lora_name: None,
+                    cache_namespace: None,
+                    has_extra_keys: false,
+                })],
+                data_parallel_rank: Some(0),
+            },
+        }
+    }
+
     enum ReplayPlan {
         Complete(Vec<SequencedBatch>),
         Pending(Arc<AtomicBool>),
@@ -1226,6 +1251,22 @@ mod tests {
         source.apply_replay(&batch(0, Some(20))).unwrap();
         source.finish_replay(0).unwrap();
         assert_eq!(source.status().indexed_blocks, 1);
+    }
+
+    #[test]
+    fn full_replay_remains_publishable_after_r34_orphan_partial() {
+        let source = source();
+        let mut replay = CompanionFullReplay::new(Arc::clone(&source), 1);
+
+        replay.apply(&batch(0, Some(10)));
+        replay.apply(&orphan_partial_batch(1));
+
+        assert_eq!(replay.apply_error, None);
+        source.finish_replay(1).unwrap();
+        let status = source.status();
+        assert!(status.ready);
+        assert_eq!(status.watermark, Some(1));
+        assert_eq!(status.indexed_blocks, 1);
     }
 
     #[test]
