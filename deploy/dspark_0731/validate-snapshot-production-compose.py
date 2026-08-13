@@ -20,8 +20,8 @@ ATTESTATION_PROFILE = "snapshot-attestation"
 SESSION_GID = "12000"
 LB_UID = "12002"
 EXPECTED_LB_IMAGE = (
-    "ghcr.io/helixml/mini-dynamo:rust-123dd9d@"
-    "sha256:9ffc514d574f0b67fe089cfd9d1f368831331846fb94baad079f3a506d1f105c"
+    "ghcr.io/helixml/mini-dynamo:rust-81f648c@"
+    "sha256:531f341b86506427e6fc2bd28fd1e689cb4f38767a15661e919ec726ab4526be"
 )
 EXPECTED_COMPANION_IMAGE = (
     "ghcr.io/helixml/mini-dynamo:companion-rust-979ff7b@"
