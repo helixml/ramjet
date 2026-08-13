@@ -1,0 +1,8 @@
+# Build/qualification overlay only. The canonical production Compose remains
+# unchanged until an immutable built digest clears every candidate gate.
+services:
+  dspark-0731-b:
+    image: ${INFERNAL_R5_IMAGE:?set an immutable locally built candidate image}
+    volumes:
+      - /prod/sglang-cache/infernal-invocation-cu133-r5-v4-correctness:/cache
+      - /prod/sglang-cache/infernal-invocation-cu133-r5-v4-correctness/tmp:/container-tmp

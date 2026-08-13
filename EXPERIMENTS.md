@@ -3437,3 +3437,36 @@ an intentionally aliased runtime directory failed closed before metadata
 validation. The disposable files and directories were removed afterward. This
 changes no production Compose, executable, image, or node06 state; reserved
 `.invalid` images keep the harness non-startable by default.
+
+## 2026-08-13 — source-locked Infernal r5 correctness overlay
+
+A build-only successor overlay was prepared from the exact rejected r4 image
+digest and source tree without building an image, contacting node06, or changing
+the canonical Compose deployment. The full-index patch changes exactly six
+allowlisted Python files: the DeepSeek V4 sparse-MLA metadata builder, its V4
+parser, and four shared parser-engine/helper files required by the V4-only port.
+It contains the semantic r4 adaptation of vLLM #51318, the V4 runtime subset of
+#49117, and the conservative inline/LF malformed-wrapper extension for #51914;
+it does not contain the V3.2 parser delta.
+
+The resulting vLLM tree is
+`0eb3d442a49b78d194903d37fbff6dd86140e420`, the overlay patch SHA256 is
+`603673eb721df372cd5807097deea7d1605d100ee3fa88c87a52c45c002cf553`,
+and the complete parser-source identity is
+`sha256:29c4307be05c78bfde1fbc043cc9189de66b85817a19e33b17eb76104319bbef`.
+The image recipe rejects any base whose staged source is not the exact r4 tree,
+checks the patch and resulting tree, proves imports resolve from that staged
+checkout, and moves every inherited JIT/autotune cache to revision-specific
+fingerprint
+`cu133-torch213-vllm0eb3d442a4-b12x1584743fd9-lmcacheccccdfc37f`.
+
+The end-to-end source gate took 1.15s and passed the baseline and candidate
+C128A invariants, all seven parser cases, and syntax compilation of all six
+changed sources. The normal wrapped-parallel fixture has identical r4 and
+complete-profile expectations. Six focused overlay tests took 0.032s; the
+canonical+overlay Compose render also passed and retained the base mounts while
+replacing only the candidate image and revision-specific cache targets.
+Verdict: the immutable source/build input is ready for an explicitly authorized
+local image build. It remains unqualified for node06 until a built digest passes
+the existing runtime source, corruption smoke, deterministic agent, and c8 scout
+boundaries.
