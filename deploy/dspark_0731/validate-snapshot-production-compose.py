@@ -24,8 +24,8 @@ EXPECTED_LB_IMAGE = (
     "sha256:9ffc514d574f0b67fe089cfd9d1f368831331846fb94baad079f3a506d1f105c"
 )
 EXPECTED_COMPANION_IMAGE = (
-    "ghcr.io/helixml/mini-dynamo:companion-rust-123dd9d@"
-    "sha256:386c88b99d9a11883451f599e10ccf036e16280f8f5daa14cb7d42685f57cfa3"
+    "ghcr.io/helixml/mini-dynamo:companion-rust-979ff7b@"
+    "sha256:5cc99e33308d4cd707c0fa77629b830870ec27d05b7381320a3d948132f476f2"
 )
 
 DOMAINS: dict[str, dict[str, str]] = {
