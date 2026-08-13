@@ -3952,9 +3952,16 @@ seed in 132.19s, then built the LB fully offline in 49.57s and the companion in
 the seed in 90.00s and pushed it to a disposable local registry in 27.52s. A
 second fresh Docker 20.10.24 daemon pulled it in 15.34s and built the LB offline
 in 50.18s: 65.52s pull-plus-build versus #233's 135s publisher, a local 51.5%
-reduction. GHCR transfer and final push remain to be measured on the first main
-acceptance build; these local-registry timings are not substituted for that
-result.
+reduction. These local-registry timings are kept separate from the following
+real GHCR acceptance result.
+
+Main Drone #241 then passed the real GHCR acceptance. The one-time dependency
+seed took 140s; after it completed, the LB and companion publishers ran in
+parallel and finished in 90s and 85s respectively. That reduces the LB
+publisher from #233's 135s by 33.3% and the companion from 129s by 34.1% on the
+actual runner. The whole dependency-changing build took 294s because it paid
+both seed and application publication; ordinary source-only changes skip the
+seed, while deployment/CI-only changes now skip every publisher.
 
 The dependency tag is content-derived and normal CI never overwrites an old
 key, but GHCR tags remain mutable registry objects rather than cryptographic
