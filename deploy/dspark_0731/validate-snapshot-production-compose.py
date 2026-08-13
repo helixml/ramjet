@@ -20,12 +20,12 @@ ATTESTATION_PROFILE = "snapshot-attestation"
 SESSION_GID = "12000"
 LB_UID = "12002"
 EXPECTED_LB_IMAGE = (
-    "ghcr.io/helixml/mini-dynamo:rust-53359d5@"
-    "sha256:ce108ce45cfdffc2ccb2869b3f526e714e010208c4fed196292911a7d836bd69"
+    "ghcr.io/helixml/mini-dynamo:rust-b0e0700@"
+    "sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1"
 )
 EXPECTED_COMPANION_IMAGE = (
-    "ghcr.io/helixml/mini-dynamo:companion-rust-53359d5@"
-    "sha256:0b031b592acf4c9eea788da8ae20920354f414774e83d08b28c922f1fdadcc03"
+    "ghcr.io/helixml/mini-dynamo:companion-rust-b0e0700@"
+    "sha256:4af08be5c011ac56d1bde2463e525c1d57d9ddd21391a3565ec55183566d9f95"
 )
 
 DOMAINS: dict[str, dict[str, str]] = {
@@ -182,7 +182,7 @@ def validate_lb(service: dict[str, Any], route_mode: str) -> None:
         fail("LB does not use the authenticated snapshot client identity")
     image = str(service.get("image", ""))
     if image != EXPECTED_LB_IMAGE:
-        fail("LB image is not the immutable snapshot-shadow build")
+        fail("LB image is not the qualified immutable release build")
     environment = service.get("environment", {})
     expected = {
         "DS4_KV_EVENT_MODE": "off",
