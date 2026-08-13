@@ -262,13 +262,17 @@ impl CompanionIndexSource {
         state.watermark = Some(batch.sequence);
         let identity = state.identity.clone();
         state.subscribers.retain(|_, publisher| {
-            publisher
+            let delivered = publisher
                 .try_send(ProducerTailEvent::Batch {
                     identity: identity.clone(),
                     event_watermark: batch.sequence,
-                    payload: batch.payload.to_vec(),
+                    payload: batch.payload.clone(),
                 })
-                .is_ok()
+                .is_ok();
+            if !delivered {
+                publisher.revoke();
+            }
+            delivered
         });
         Ok(summary)
     }
@@ -371,6 +375,7 @@ impl SnapshotProducerSource for CompanionIndexSource {
                 identity: identity.clone(),
                 event_watermark: caught_up,
             }) {
+                publisher.revoke();
                 current.subscribers.remove(&session_id);
                 return Err(error);
             }
@@ -403,6 +408,7 @@ fn fence_locked(
         let identity = state.identity.clone();
         for publisher in state.subscribers.values() {
             let _ = publisher.try_send(ProducerTailEvent::Disconnect(identity.clone()));
+            publisher.revoke();
         }
         state.subscribers.clear();
         return Err(CompanionIndexSourceError::GenerationExhausted);
@@ -417,6 +423,7 @@ fn fence_locked(
     let identity = state.identity.clone();
     for publisher in state.subscribers.values() {
         let _ = publisher.try_send(ProducerTailEvent::IdentityChanged(identity.clone()));
+        publisher.revoke();
     }
     state.subscribers.clear();
     state.replay = Some(ReplayState {
@@ -591,15 +598,15 @@ mod tests {
         assert_eq!(body.records.len(), 1);
 
         assert!(matches!(
-            receiver.recv().await.unwrap(),
+            receiver.recv().await.unwrap().event,
             ProducerTailEvent::Batch {
                 event_watermark: 11,
                 payload,
                 ..
-            } if payload == vec![11]
+            } if payload.as_ref() == [11]
         ));
         assert!(matches!(
-            receiver.recv().await.unwrap(),
+            receiver.recv().await.unwrap().event,
             ProducerTailEvent::CaughtUp {
                 event_watermark: 11,
                 ..
@@ -667,12 +674,12 @@ mod tests {
         source.apply_live(&store_batch(11, 71, &[1, 2])).unwrap();
         for receiver in [&mut receiver_a, &mut receiver_b] {
             assert!(matches!(
-                receiver.recv().await.unwrap(),
+                receiver.recv().await.unwrap().event,
                 ProducerTailEvent::Batch {
                     event_watermark: 11,
                     ref payload,
                     ..
-                } if payload == &[11]
+                } if payload.as_ref() == [11]
             ));
         }
         assert_eq!(source.status().active_sessions, 2);
@@ -688,7 +695,7 @@ mod tests {
         let _build = source.start(publisher, cancellation).unwrap();
         source.apply_live(&store_batch(12, 72, &[3, 4])).unwrap();
         assert!(matches!(
-            receiver.recv().await.unwrap(),
+            receiver.recv().await.unwrap().event,
             ProducerTailEvent::Batch {
                 event_watermark: 12,
                 ..
@@ -698,7 +705,7 @@ mod tests {
 
         source.begin_rebuild(None).unwrap();
         assert!(matches!(
-            receiver.recv().await.unwrap(),
+            receiver.recv().await.unwrap().event,
             ProducerTailEvent::IdentityChanged(ProducerIdentity {
                 companion_generation: 2,
                 ..
@@ -728,7 +735,7 @@ mod tests {
         let _build = source.start(publisher, cancellation).unwrap();
         source.begin_rebuild(Some(incarnation("engine-b"))).unwrap();
         assert!(matches!(
-            receiver.recv().await.unwrap(),
+            receiver.recv().await.unwrap().event,
             ProducerTailEvent::IdentityChanged(ProducerIdentity {
                 engine_incarnation: EngineIncarnation { ref engine_id, .. },
                 companion_generation: 2,
@@ -757,7 +764,7 @@ mod tests {
             Err(CompanionIndexSourceError::GenerationExhausted)
         );
         assert!(matches!(
-            receiver.recv().await.unwrap(),
+            receiver.recv().await.unwrap().event,
             ProducerTailEvent::Disconnect(ProducerIdentity {
                 companion_generation: u64::MAX,
                 ..

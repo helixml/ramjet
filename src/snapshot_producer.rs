@@ -18,6 +18,7 @@ use std::{
     },
 };
 
+use bytes::Bytes;
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -25,7 +26,7 @@ use tokio::{
         UnixStream,
         unix::{OwnedReadHalf, OwnedWriteHalf},
     },
-    sync::{mpsc, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
     time::{Instant, timeout_at},
 };
 
@@ -56,6 +57,7 @@ pub struct SnapshotProducerConfig {
     pub session_limits: SnapshotSessionLimits,
     pub tail_limits: TailWireLimits,
     pub tail_queue_capacity: usize,
+    pub tail_queue_max_bytes: usize,
 }
 
 /// Exact identity bound into both the snapshot response and every tail frame.
@@ -98,7 +100,7 @@ pub enum ProducerTailEvent {
     Batch {
         identity: ProducerIdentity,
         event_watermark: u64,
-        payload: Vec<u8>,
+        payload: Bytes,
     },
     CaughtUp {
         identity: ProducerIdentity,
@@ -113,6 +115,7 @@ pub enum ProducerTailEvent {
 pub struct SnapshotProducerCancellation {
     cancelled: Arc<AtomicBool>,
     changed: watch::Receiver<bool>,
+    signal: watch::Sender<bool>,
 }
 
 impl SnapshotProducerCancellation {
@@ -128,18 +131,39 @@ impl SnapshotProducerCancellation {
             }
         }
     }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        let _ = self.signal.send(true);
+    }
 }
 
 /// Bounded producer-side tail sink. `send` applies backpressure and is woken by
 /// client disconnect, deadline cancellation, or supervisor shutdown.
 #[derive(Clone)]
 pub struct SnapshotTailPublisher {
-    sender: mpsc::Sender<ProducerTailEvent>,
+    sender: mpsc::Sender<QueuedTailEvent>,
     cancellation: SnapshotProducerCancellation,
     max_payload_bytes: usize,
+    byte_budget: Arc<Semaphore>,
+}
+
+pub(crate) struct QueuedTailEvent {
+    pub(crate) event: ProducerTailEvent,
+    _bytes: Option<OwnedSemaphorePermit>,
 }
 
 impl SnapshotTailPublisher {
+    /// Revoke this source session immediately.
+    ///
+    /// The producer observes revocation ahead of already queued tail frames,
+    /// so a source-side fence or overflow cannot drain stale events before the
+    /// authenticated connection closes. This does not stop the long-lived
+    /// source or affect other subscribers.
+    pub fn revoke(&self) {
+        self.cancellation.cancel();
+    }
+
     /// Send one event while respecting bounded capacity and session cancellation.
     ///
     /// # Errors
@@ -147,12 +171,17 @@ impl SnapshotTailPublisher {
     /// Returns a content-free source error when the session is cancelled or
     /// the handler has closed its receiver.
     pub async fn send(&self, event: ProducerTailEvent) -> Result<(), SnapshotProducerSourceError> {
-        self.validate(&event)?;
+        let bytes = self.validate(&event)?;
         let mut cancellation = self.cancellation.clone();
+        let permit = self.reserve(bytes, &mut cancellation).await?;
+        let queued = QueuedTailEvent {
+            event,
+            _bytes: permit,
+        };
         tokio::select! {
             biased;
             () = cancellation.cancelled() => Err(SnapshotProducerSourceError::Cancelled),
-            result = self.sender.send(event) => {
+            result = self.sender.send(queued) => {
                 result.map_err(|_| SnapshotProducerSourceError::Cancelled)
             }
         }
@@ -164,24 +193,63 @@ impl SnapshotTailPublisher {
     ///
     /// Returns `QueueFull` on backpressure and `Cancelled` after session close.
     pub fn try_send(&self, event: ProducerTailEvent) -> Result<(), SnapshotProducerSourceError> {
-        self.validate(&event)?;
+        let bytes = self.validate(&event)?;
         if self.cancellation.is_cancelled() {
             return Err(SnapshotProducerSourceError::Cancelled);
         }
-        self.sender.try_send(event).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => SnapshotProducerSourceError::QueueFull,
-            mpsc::error::TrySendError::Closed(_) => SnapshotProducerSourceError::Cancelled,
-        })
+        let permit = self.try_reserve(bytes)?;
+        self.sender
+            .try_send(QueuedTailEvent {
+                event,
+                _bytes: permit,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => SnapshotProducerSourceError::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => SnapshotProducerSourceError::Cancelled,
+            })
     }
 
-    fn validate(&self, event: &ProducerTailEvent) -> Result<(), SnapshotProducerSourceError> {
-        if matches!(
-            event,
-            ProducerTailEvent::Batch { payload, .. } if payload.len() > self.max_payload_bytes
-        ) {
+    fn validate(&self, event: &ProducerTailEvent) -> Result<usize, SnapshotProducerSourceError> {
+        let bytes = match event {
+            ProducerTailEvent::Batch { payload, .. } => payload.len(),
+            _ => 0,
+        };
+        if bytes > self.max_payload_bytes {
             return Err(SnapshotProducerSourceError::PayloadTooLarge);
         }
-        Ok(())
+        Ok(bytes)
+    }
+
+    async fn reserve(
+        &self,
+        bytes: usize,
+        cancellation: &mut SnapshotProducerCancellation,
+    ) -> Result<Option<OwnedSemaphorePermit>, SnapshotProducerSourceError> {
+        let permits = u32::try_from(bytes).map_err(|_| SnapshotProducerSourceError::QueueFull)?;
+        if permits == 0 {
+            return Ok(None);
+        }
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(SnapshotProducerSourceError::Cancelled),
+            permit = Arc::clone(&self.byte_budget).acquire_many_owned(permits) => {
+                permit.map(Some).map_err(|_| SnapshotProducerSourceError::Cancelled)
+            }
+        }
+    }
+
+    fn try_reserve(
+        &self,
+        bytes: usize,
+    ) -> Result<Option<OwnedSemaphorePermit>, SnapshotProducerSourceError> {
+        let permits = u32::try_from(bytes).map_err(|_| SnapshotProducerSourceError::QueueFull)?;
+        if permits == 0 {
+            return Ok(None);
+        }
+        Arc::clone(&self.byte_budget)
+            .try_acquire_many_owned(permits)
+            .map(Some)
+            .map_err(|_| SnapshotProducerSourceError::QueueFull)
     }
 }
 
@@ -192,7 +260,7 @@ pub(crate) fn test_tail_channel(
 ) -> (
     SnapshotTailPublisher,
     SnapshotProducerCancellation,
-    mpsc::Receiver<ProducerTailEvent>,
+    mpsc::Receiver<QueuedTailEvent>,
     watch::Sender<bool>,
     Arc<AtomicBool>,
 ) {
@@ -202,12 +270,14 @@ pub(crate) fn test_tail_channel(
     let cancellation = SnapshotProducerCancellation {
         cancelled: Arc::clone(&cancelled),
         changed,
+        signal: changed_sender.clone(),
     };
     (
         SnapshotTailPublisher {
             sender,
             cancellation: cancellation.clone(),
             max_payload_bytes,
+            byte_budget: Arc::new(Semaphore::new(capacity.saturating_mul(max_payload_bytes))),
         },
         cancellation,
         receiver,
@@ -327,6 +397,9 @@ impl SnapshotProducer {
     ) -> Result<Self, SnapshotProducerError> {
         if config.tail_queue_capacity == 0
             || config.tail_queue_capacity > MAX_TAIL_QUEUE_CAPACITY
+            || config.tail_queue_max_bytes == 0
+            || config.tail_queue_max_bytes > u32::MAX as usize
+            || config.tail_queue_max_bytes < config.tail_limits.max_payload_bytes
             || config.tail_limits.max_frame_bytes == 0
             || config.tail_limits.max_payload_bytes >= config.tail_limits.max_frame_bytes
         {
@@ -368,23 +441,32 @@ impl SnapshotProducer {
         let cancellation = SnapshotProducerCancellation {
             cancelled: Arc::new(AtomicBool::new(false)),
             changed: cancel_receiver,
+            signal: cancel_sender.clone(),
         };
         let _cancel_guard = CancellationGuard {
-            sender: cancel_sender,
-            flag: Arc::clone(&cancellation.cancelled),
+            cancellation: cancellation.clone(),
         };
         let (tail_sender, tail_receiver) = mpsc::channel(self.config.tail_queue_capacity);
         let publisher = SnapshotTailPublisher {
             sender: tail_sender,
             cancellation: cancellation.clone(),
             max_payload_bytes: self.config.tail_limits.max_payload_bytes,
+            byte_budget: Arc::new(Semaphore::new(self.config.tail_queue_max_bytes)),
         };
+        let mut source_revocation = cancellation.clone();
         let build = self
             .source
             .start(publisher, cancellation)
             .map_err(SnapshotProducerError::Source)?;
-        self.produce(reader, writer, challenge, build, tail_receiver)
-            .await
+        self.produce(
+            reader,
+            writer,
+            challenge,
+            build,
+            tail_receiver,
+            &mut source_revocation,
+        )
+        .await
     }
 
     async fn produce(
@@ -393,10 +475,14 @@ impl SnapshotProducer {
         mut writer: OwnedWriteHalf,
         challenge: SnapshotSessionChallenge,
         mut build: SnapshotBuildFuture,
-        mut tail: mpsc::Receiver<ProducerTailEvent>,
+        mut tail: mpsc::Receiver<QueuedTailEvent>,
+        source_revocation: &mut SnapshotProducerCancellation,
     ) -> Result<(), SnapshotProducerError> {
         let snapshot = tokio::select! {
             biased;
+            () = source_revocation.cancelled() => {
+                return Err(SnapshotProducerError::Source(SnapshotProducerSourceError::Cancelled));
+            }
             read = read_client_signal(&mut reader) => return Err(read),
             result = &mut build => result.map_err(SnapshotProducerError::Source)?,
         };
@@ -413,7 +499,7 @@ impl SnapshotProducer {
             self.config.session_limits,
         )
         .map_err(SnapshotProducerError::Session)?;
-        write_frame(&mut writer, &response).await?;
+        write_frame_or_revoked(&mut writer, &response, source_revocation).await?;
 
         let tail_key = TailSessionKey::derive(
             &self.session_secret,
@@ -431,11 +517,16 @@ impl SnapshotProducer {
         loop {
             let event = tokio::select! {
                 biased;
+                () = source_revocation.cancelled() => {
+                    return Err(SnapshotProducerError::Source(
+                        SnapshotProducerSourceError::Cancelled,
+                    ));
+                }
                 read = read_client_signal(&mut reader) => return Err(read),
-                event = tail.recv() => event.ok_or(SnapshotProducerError::TailClosed)?,
+                event = tail.recv() => event.ok_or(SnapshotProducerError::TailClosed)?.event,
             };
             let terminal = state.encode(event, &tail_key, self.config.tail_limits)?;
-            write_frame(&mut writer, &terminal.frame).await?;
+            write_frame_or_revoked(&mut writer, &terminal.frame, source_revocation).await?;
             if let Some(outcome) = terminal.outcome {
                 return outcome;
             }
@@ -443,15 +534,27 @@ impl SnapshotProducer {
     }
 }
 
+async fn write_frame_or_revoked(
+    writer: &mut OwnedWriteHalf,
+    frame: &[u8],
+    source_revocation: &mut SnapshotProducerCancellation,
+) -> Result<(), SnapshotProducerError> {
+    tokio::select! {
+        biased;
+        () = source_revocation.cancelled() => Err(SnapshotProducerError::Source(
+            SnapshotProducerSourceError::Cancelled,
+        )),
+        result = write_frame(writer, frame) => result,
+    }
+}
+
 struct CancellationGuard {
-    sender: watch::Sender<bool>,
-    flag: Arc<AtomicBool>,
+    cancellation: SnapshotProducerCancellation,
 }
 
 impl Drop for CancellationGuard {
     fn drop(&mut self) {
-        self.flag.store(true, Ordering::Release);
-        let _ = self.sender.send(true);
+        self.cancellation.cancel();
     }
 }
 
@@ -513,7 +616,7 @@ impl TailWriteState {
                     identity,
                     self.delivery_sequence,
                     event_watermark,
-                    Vec::new(),
+                    Bytes::new(),
                     None,
                 )
             }
@@ -522,7 +625,7 @@ impl TailWriteState {
                 identity,
                 0,
                 0,
-                Vec::new(),
+                Bytes::new(),
                 Some(Err(SnapshotProducerError::IdentityChanged)),
             ),
             ProducerTailEvent::Disconnect(identity) => {
@@ -532,7 +635,7 @@ impl TailWriteState {
                     identity,
                     0,
                     0,
-                    Vec::new(),
+                    Bytes::new(),
                     Some(Ok(())),
                 )
             }
@@ -703,6 +806,7 @@ mod tests {
             session_limits: SnapshotSessionLimits::default(),
             tail_limits: TailWireLimits::default(),
             tail_queue_capacity: 2,
+            tail_queue_max_bytes: 16 * 1024 * 1024,
         }
     }
 
@@ -781,7 +885,7 @@ mod tests {
             ProducerTailEvent::Batch {
                 identity: id.clone(),
                 event_watermark: 100,
-                payload: b"event-a".to_vec(),
+                payload: Bytes::from_static(b"event-a"),
             },
             ProducerTailEvent::CaughtUp {
                 identity: id.clone(),
@@ -790,7 +894,7 @@ mod tests {
             ProducerTailEvent::Batch {
                 identity: id.clone(),
                 event_watermark: 10_000,
-                payload: b"event-b".to_vec(),
+                payload: Bytes::from_static(b"event-b"),
             },
             ProducerTailEvent::Disconnect(id.clone()),
         ];
@@ -982,8 +1086,10 @@ mod tests {
             cancellation: SnapshotProducerCancellation {
                 cancelled: Arc::new(AtomicBool::new(false)),
                 changed: cancel_receiver,
+                signal: cancel_sender.clone(),
             },
             max_payload_bytes: 8,
+            byte_budget: Arc::new(Semaphore::new(8)),
         };
         let id = identity("engine", 1);
         publisher
@@ -1000,12 +1106,49 @@ mod tests {
                 .try_send(ProducerTailEvent::Batch {
                     identity: identity("engine", 1),
                     event_watermark: 1,
-                    payload: vec![0; 9],
+                    payload: Bytes::from(vec![0; 9]),
                 })
                 .unwrap_err(),
             SnapshotProducerSourceError::PayloadTooLarge
         );
         drop(cancel_sender);
+    }
+
+    #[tokio::test]
+    async fn queued_byte_budget_releases_when_event_is_consumed() {
+        let (sender, mut receiver) = mpsc::channel(2);
+        let (cancel_sender, cancel_receiver) = watch::channel(false);
+        let publisher = SnapshotTailPublisher {
+            sender,
+            cancellation: SnapshotProducerCancellation {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                changed: cancel_receiver,
+                signal: cancel_sender,
+            },
+            max_payload_bytes: 8,
+            byte_budget: Arc::new(Semaphore::new(8)),
+        };
+        let event = |watermark| ProducerTailEvent::Batch {
+            identity: identity("engine", 1),
+            event_watermark: watermark,
+            payload: Bytes::from_static(b"12345"),
+        };
+
+        publisher.try_send(event(1)).unwrap();
+        assert_eq!(
+            publisher.try_send(event(2)).unwrap_err(),
+            SnapshotProducerSourceError::QueueFull
+        );
+        let consumed = receiver.recv().await.unwrap();
+        assert!(matches!(
+            &consumed.event,
+            ProducerTailEvent::Batch {
+                event_watermark: 1,
+                ..
+            }
+        ));
+        drop(consumed);
+        publisher.try_send(event(2)).unwrap();
     }
 
     #[tokio::test]
@@ -1017,7 +1160,7 @@ mod tests {
             .map(|sequence| ProducerTailEvent::Batch {
                 identity: id.clone(),
                 event_watermark: sequence * 100,
-                payload: vec![0x5a; 1024 * 1024],
+                payload: Bytes::from(vec![0x5a; 1024 * 1024]),
             })
             .collect();
         let source = source(snapshot(id, 0), events);

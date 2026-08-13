@@ -148,7 +148,7 @@ impl CapturedSource {
             let event = ProducerTailEvent::Batch {
                 identity: state.identity.clone(),
                 event_watermark: state.watermark,
-                payload: store_payload(LIVE_HASH, &LIVE_TOKENS),
+                payload: store_payload(LIVE_HASH, &LIVE_TOKENS).into(),
             };
             (event, state.sessions.clone())
         };
@@ -165,7 +165,7 @@ impl CapturedSource {
             let event = ProducerTailEvent::Batch {
                 identity: state.identity.clone(),
                 event_watermark: state.watermark,
-                payload: remove_payload(LIVE_HASH),
+                payload: remove_payload(LIVE_HASH).into(),
             };
             (event, state.sessions.clone())
         };
@@ -273,6 +273,7 @@ fn start_companion(directory: &TestDirectory, source: Arc<CapturedSource>) -> Co
                 session_limits: SnapshotSessionLimits::default(),
                 tail_limits: TailWireLimits::default(),
                 tail_queue_capacity: 16,
+                tail_queue_max_bytes: 16 * 1024 * 1024,
             },
             Arc::new(SnapshotSessionSecret::new(SESSION_SECRET)),
             source,

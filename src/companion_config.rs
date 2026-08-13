@@ -14,6 +14,7 @@ use url::Url;
 const MAX_CLIENTS: usize = 2;
 const MAX_SOURCES: usize = 2;
 const MAX_QUEUE_CAPACITY: usize = 65_536;
+const MAX_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DEADLINE_MS: u64 = 15 * 60 * 1_000;
 const MAX_TOPIC_BYTES: usize = 256;
 const MAX_SOCKET_PATH_BYTES: usize = 64;
@@ -57,6 +58,7 @@ pub struct SnapshotCompanionConfig {
     pub secret_owner_uid: u32,
     pub max_clients: usize,
     pub tail_queue_capacity: usize,
+    pub tail_queue_max_bytes: usize,
     pub snapshot_deadline: Duration,
     pub tail_idle_deadline: Duration,
     pub shutdown_deadline: Duration,
@@ -86,6 +88,7 @@ impl fmt::Debug for SnapshotCompanionConfig {
             .field("secret_owner_uid", &"[REDACTED]")
             .field("max_clients", &self.max_clients)
             .field("tail_queue_capacity", &self.tail_queue_capacity)
+            .field("tail_queue_max_bytes", &self.tail_queue_max_bytes)
             .field("snapshot_deadline", &self.snapshot_deadline)
             .field("tail_idle_deadline", &self.tail_idle_deadline)
             .field("shutdown_deadline", &self.shutdown_deadline)
@@ -138,6 +141,13 @@ impl SnapshotCompanionConfig {
             1,
             MAX_QUEUE_CAPACITY,
         )?;
+        let tail_queue_max_bytes = bounded_usize(
+            &mut get,
+            "DS4_SNAPSHOT_TAIL_QUEUE_MAX_BYTES",
+            16 * 1024 * 1024,
+            1,
+            MAX_QUEUE_BYTES,
+        )?;
         let snapshot_deadline = duration_ms(&mut get, "DS4_SNAPSHOT_DEADLINE_MS", 3_000)?;
         let tail_idle_deadline =
             duration_ms(&mut get, "DS4_SNAPSHOT_TAIL_IDLE_DEADLINE_MS", 30_000)?;
@@ -176,6 +186,12 @@ impl SnapshotCompanionConfig {
                 "a positive byte bound smaller than the tail frame bound",
             ));
         }
+        if tail_queue_max_bytes < max_batch_payload_bytes {
+            return Err(invalid(
+                "DS4_SNAPSHOT_TAIL_QUEUE_MAX_BYTES",
+                "a byte bound at least as large as one batch payload",
+            ));
+        }
         let secret_owner_uid =
             parse_u32(&mut get, "DS4_SNAPSHOT_SECRET_OWNER_UID", Some(0))?.unwrap_or(0);
 
@@ -189,6 +205,7 @@ impl SnapshotCompanionConfig {
                 secret_owner_uid,
                 max_clients,
                 tail_queue_capacity,
+                tail_queue_max_bytes,
                 snapshot_deadline,
                 tail_idle_deadline,
                 shutdown_deadline,
@@ -250,6 +267,7 @@ impl SnapshotCompanionConfig {
             secret_owner_uid,
             max_clients,
             tail_queue_capacity,
+            tail_queue_max_bytes,
             snapshot_deadline,
             tail_idle_deadline,
             shutdown_deadline,
@@ -466,6 +484,7 @@ mod tests {
         assert!(config.sources.is_empty());
         assert_eq!(config.max_clients, 2);
         assert_eq!(config.tail_queue_capacity, 1_024);
+        assert_eq!(config.tail_queue_max_bytes, 16 * 1024 * 1024);
         assert_eq!(config.snapshot_deadline, Duration::from_secs(3));
         assert_eq!(config.tail_idle_deadline, Duration::from_secs(30));
         assert_eq!(config.shutdown_deadline, Duration::from_secs(5));
@@ -551,6 +570,7 @@ mod tests {
             ("DS4_SNAPSHOT_MAX_CLIENTS", "3"),
             ("DS4_SNAPSHOT_TAIL_QUEUE_CAPACITY", "0"),
             ("DS4_SNAPSHOT_TAIL_QUEUE_CAPACITY", "65537"),
+            ("DS4_SNAPSHOT_TAIL_QUEUE_MAX_BYTES", "67108865"),
             ("DS4_SNAPSHOT_DEADLINE_MS", "0"),
             ("DS4_SNAPSHOT_TAIL_IDLE_DEADLINE_MS", "900001"),
             ("DS4_SNAPSHOT_SHUTDOWN_DEADLINE_MS", "invalid"),
@@ -573,6 +593,19 @@ mod tests {
             load(&values),
             Err(SnapshotCompanionConfigError::Invalid {
                 key: "DS4_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn one_max_batch_must_fit_inside_tail_queue_byte_budget() {
+        let mut values = configured();
+        values.insert("DS4_SNAPSHOT_TAIL_QUEUE_MAX_BYTES", "4194304");
+        assert!(matches!(
+            load(&values),
+            Err(SnapshotCompanionConfigError::Invalid {
+                key: "DS4_SNAPSHOT_TAIL_QUEUE_MAX_BYTES",
                 ..
             })
         ));
