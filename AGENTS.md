@@ -129,6 +129,7 @@ cargo test --locked snapshot_socket_path
 cargo test --locked snapshot_actor
 cargo test --locked snapshot_supervisor
 cargo test --locked snapshot_digest_delta
+cargo test --locked snapshot_consumer
 cargo test --locked --test snapshot_digest_lifecycle
 ```
 
@@ -144,6 +145,13 @@ opaque: the actor must not accept a separately asserted reset scope, watermark,
 identity, lifecycle, or caller-built index. A same-identity replacement stays
 private until authenticated caught-up and preserves the current publication;
 an identity/key/generation change or owner-session failure revokes immediately.
+
+Keep the two Unix roles separate. `snapshot_supervisor` is companion/server
+admission for accepted streams. `snapshot_consumer` is the LB/client protocol
+over an already-connected stream; a future outbound reconnect owner supplies a
+fresh non-reused challenge and the single absolute deadline. Dropping that
+consumer future must synchronously fence its actor epoch and signal any bounded
+blocking snapshot build to cancel.
 
 ## node06 — the test/production box
 
