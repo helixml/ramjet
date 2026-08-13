@@ -139,6 +139,83 @@ capture/provision step after every engine process replacement; a companion's
 existing watcher will fence authority until the new authenticated identity is
 available.
 
-This slice remains offline. Do not enable either companion yet: production
-per-engine service-manager/Compose wiring and the dual-domain validation gate
-remain separate rollout requirements.
+## Production-shaped snapshot overlay
+
+`docker-compose.snapshot-companion.yaml` now joins the two standalone
+companions, one-shot attestation provisioners, and LB snapshot clients to the
+canonical stack without granting Docker, GPU, host IPC, privileged, or host
+network access. It is not part of an ordinary `docker-compose.yaml` deploy.
+The two companions require the explicit `snapshot-companion` profile, and the
+short-lived root provisioners require the separate `snapshot-attestation`
+profile. Snapshot routing defaults to `off` even with the overlay; only an
+explicit `DS4_SNAPSHOT_ROUTE_MODE=shadow` enables both the exact-router gate
+and snapshot authority in lockstep so the inventories can be consumed, and the
+pinned LB also enforces that compact inventories cannot select placement.
+
+Render the complete contract without starting it:
+
+```bash
+python3 deploy/dspark_0731/validate-snapshot-production-compose.py
+docker compose -f deploy/dspark_0731/docker-compose.yaml \
+  -f deploy/dspark_0731/docker-compose.snapshot-companion.yaml \
+  --profile snapshot-companion --profile snapshot-attestation config --quiet
+```
+
+The validator checks immutable images, numeric SO_PEERCRED identities, exact
+per-engine endpoints and authority mounts, raw-event/snapshot mutual
+exclusion, read-only roots, dropped capabilities, no devices or published
+ports, isolated session/digest/attestation domains, and dedicated metrics-only
+groups. It also validates `Caddyfile.snapshot-companion`: Caddy can reach only
+`/metrics/snapshot/0|1` over the two metrics UDS paths and must never join
+session GID `12000`.
+
+Before provisioning, create every host authority on `/run`, capture both engine
+metadata files, and run the same command below with a trailing
+`pre-provision`. That mode validates the attestation output directories but
+does not require their not-yet-created `engine.json` files. Run the two
+`snapshot-attestation` services, then rerun without an argument for the full
+gate before starting either companion:
+
+```bash
+SNAPSHOT_RUNTIME_DIR_A=/run/mini-dynamo-snapshot-a \
+SNAPSHOT_RUNTIME_DIR_B=/run/mini-dynamo-snapshot-b \
+SNAPSHOT_METRICS_DIR_A=/run/mini-dynamo-snapshot-metrics-a \
+SNAPSHOT_METRICS_DIR_B=/run/mini-dynamo-snapshot-metrics-b \
+SNAPSHOT_SESSION_SECRET_FILE_A=/run/secrets/mini-dynamo-snapshot-session-a \
+SNAPSHOT_SESSION_SECRET_FILE_B=/run/secrets/mini-dynamo-snapshot-session-b \
+SNAPSHOT_DIGEST_SECRET_FILE_A=/run/secrets/mini-dynamo-snapshot-digest-a \
+SNAPSHOT_DIGEST_SECRET_FILE_B=/run/secrets/mini-dynamo-snapshot-digest-b \
+SNAPSHOT_ATTESTATION_DIR_A=/run/mini-dynamo-snapshot-attestation-a \
+SNAPSHOT_ATTESTATION_DIR_B=/run/mini-dynamo-snapshot-attestation-b \
+SNAPSHOT_ENGINE_METADATA_FILE_A=/run/mini-dynamo-engine-metadata-a.json \
+SNAPSHOT_ENGINE_METADATA_FILE_B=/run/mini-dynamo-engine-metadata-b.json \
+  deploy/dspark_0731/validate-snapshot-production-host.sh
+```
+
+With the same exported paths, the bounded order is:
+
+```bash
+deploy/dspark_0731/validate-snapshot-production-host.sh pre-provision
+docker compose -f deploy/dspark_0731/docker-compose.yaml \
+  -f deploy/dspark_0731/docker-compose.snapshot-companion.yaml \
+  --profile snapshot-attestation run --rm snapshot-attestation-a
+docker compose -f deploy/dspark_0731/docker-compose.yaml \
+  -f deploy/dspark_0731/docker-compose.snapshot-companion.yaml \
+  --profile snapshot-attestation run --rm snapshot-attestation-b
+deploy/dspark_0731/validate-snapshot-production-host.sh full
+```
+
+Snapshot parents must be companion-owned `2750` directories in session GID
+`12000`; metrics parents must be companion-owned `2750` directories in GIDs
+`12004` and `12005`; secrets are distinct root-owned 32-byte `0440` files;
+metadata is root-owned `0600`; provisioned attestations are root/session-group
+`0440`. All directories are distinct, symlink-free tmpfs paths and every
+authority inode is unique.
+
+The overlay is an admission artifact, not a production enablement. Do not copy
+the Caddy snippet or start either profile until LB-side hot attestation refresh
+is merged, the current images are repinned, and the host validator passes on
+node06. The first rollout
+must keep `DS4_SNAPSHOT_ROUTE_MODE=off` (which also forces the exact-router
+gate off); enable `shadow` only after both
+companions are ready, then preserve ordinary approximate serving throughout.

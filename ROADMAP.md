@@ -679,9 +679,13 @@ node06). The design rationale for each lives in DESIGN.md.
   handoff and one in-flight cached snapshot per client. Approximate serving and
   `/health` remain independent of companion/session readiness. Rollback first
   disables snapshot placement and verifies approximate fallback, then removes
-  the companion and socket. Extend this validator with one distinct per-engine
-  metrics directory and a metrics-only scraper group before enabling the new
-  UDS in production; Caddy must never receive GID 12000.
+  the companion and socket. A separate production-shaped overlay and semantic
+  validator now add one companion and one explicitly profiled provisioner per
+  engine, immutable images, exact authority mounts, distinct setgid metrics
+  directories/GIDs 12004/12005, and Caddy UDS-only scrape routes. The host
+  validator checks tmpfs ownership/modes and unique inodes before any start;
+  Caddy is explicitly forbidden from session GID 12000. This is an admission
+  artifact only and has not changed node06.
   The LB can now select one snapshot consumer per upstream behind the typed
   `DS4_SNAPSHOT_ROUTE_MODE=shadow` gate. Startup validates every protected
   authority and exact upstream cardinality before spawning reconnect owners;
@@ -699,8 +703,10 @@ node06). The design rationale for each lives in DESIGN.md.
   authority revision prevents watch coalescing from hiding an invalid interval:
   loss, rotation, channel closure, or a skipped revision revokes the old actor
   epoch before reconnect, while an unchanged identity causes no churn. Valid
-  atomic engine rotation therefore no longer requires an LB restart. Next add
-  production-shaped Compose/Caddy wiring.
+  atomic engine rotation therefore no longer requires an LB restart. The
+  production-shaped dual-engine Compose/Caddy contract and host/semantic
+  validators are also complete. Next repin current images, then pass the host
+  preflight before an off-mode node06 start.
   Compare at least 100,000 exact versus approximate decisions before placement
   can consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.
