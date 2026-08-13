@@ -185,7 +185,10 @@ class InfernalCandidateOverlayTest(unittest.TestCase):
             self.assertEqual(report["candidate_vllm_tree"], candidate_tree)
             self.assertEqual(c128a.call_count, 2)
             self.assertEqual(parser.call_count, 2)
-            self.assertEqual(report["preflights"]["python_sources"], 1)
+        self.assertEqual(report["preflights"]["python_sources"], 1)
+        self.assertEqual(
+            report["preflights"]["parser_cases"], overlay.PARSER_CASE_COUNT
+        )
 
     def test_wrapped_r4_behavior_is_identical_in_complete_profile(self):
         cases = parser_probe.load_cases(parser_probe.DEFAULT_CASES)
@@ -193,7 +196,15 @@ class InfernalCandidateOverlayTest(unittest.TestCase):
         self.assertEqual(wrapped["expected"]["r4"], wrapped["expected"]["complete"])
         self.assertEqual(
             wrapped["expected"]["r4"],
-            {"tool_calls": 2, "dsml_content": False, "content": ""},
+            {
+                "tool_call_starts": 2,
+                "tool_call_ends": 2,
+                "open_at_eof": False,
+                "args_json_valid": True,
+                "duplicate_canonical_args": False,
+                "dsml_content": False,
+                "content": "",
+            },
         )
 
     def test_patch_digest_mismatch_fails_before_preflights(self):
