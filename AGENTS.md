@@ -239,6 +239,18 @@ snapshot/session authority group. The executable is not ready for node06 until
 the host-side attestation provisioner and production Compose/Caddy wiring exist
 and pass the extended dual-domain validator.
 
+`mini-dynamo-attestation-provisioner` is a host-side, one-shot control-plane
+binary. It accepts no arguments and obtains only protected file paths, numeric
+ownership, and a freshness bound from the environment. Its identity source is
+schema-v1 output from `bench/node06_engine_metadata.sh`; never derive identity
+inside the provisioner by granting it Docker access. Keep that input owner-only
+mode `0600` and fresh (30s default), and keep the digest secret out of argv and
+logs. Publication must remain a same-directory fsynced temporary file, exact
+owner/group/mode `0440`, atomic rename, and directory fsync under the parent
+lock. A corrupt existing output, older process start, or changed evidence for
+the same process must fail closed without replacement. Do not turn transient
+capture metadata such as capture time into incarnation identity.
+
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
 Validate the trusted socket parent on every connect, use a fresh OS-random

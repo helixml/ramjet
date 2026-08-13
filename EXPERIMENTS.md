@@ -3683,8 +3683,45 @@ all-test rerun took 7.23s and the source-change thin-LTO relink took 34.63s in
 that isolated cache. No Compose, Caddy, node06 process, container, engine, or
 production route changed. The next deployment gate is to extend the offline
 dual-domain fixture and validator with
-per-engine metrics-only groups and scraper paths, alongside the still-missing
-host attestation provisioner.
+per-engine metrics-only groups and scraper paths.
+
+## 2026-08-13 — r52 offline host engine-attestation provisioner
+
+Issue #41's remaining host writer is now implemented as the separate one-shot
+`mini-dynamo-attestation-provisioner`. It accepts no arguments and receives only
+three protected paths, numeric output ownership, and a bounded capture age from
+the environment. Docker inspection stays in the independently privileged
+`node06_engine_metadata.sh` capture step; the helper now records the actual
+vLLM process start from `/proc/<pid>/stat` and host boot time rather than using
+the earlier, weaker container start as the authoritative process epoch. The
+provisioner has no Docker or network capability and rejects schema changes,
+unknown identity fields, missing verification state, stale/future/pre-process
+captures, malformed digests, and unqualified supplied receipts.
+
+The derived incarnation hashes a canonical allow-listed immutable evidence set
+while intentionally omitting capture time and normalizing repository-digest
+order. Publication holds an exclusive lock on the trusted output parent, checks
+the preexisting inode, writes a random `create_new` file in the same directory,
+fsyncs content, assigns exact owner/group/mode `0440`, fsyncs again, atomically
+renames, fsyncs the directory, and performs an authenticated read-back. An
+authenticated same identity is a no-write success; an older process, different
+evidence for the same process, corrupt existing envelope, unsafe output inode,
+or competing publisher fails closed without replacement. CLI errors contain
+only bounded reason labels; success emits nothing.
+
+Focused tests covered create/idempotence, stable capture refresh, valid process
+replacement, rollback, same-process conflict, stale/future/pre-start inputs,
+receipt authority, unsafe metadata permissions, symlink output, corrupt output,
+unknown fields, parent-lock contention, redacted config, no-argument CLI, and a
+real subprocess round trip. Final local gates passed 309 Rust unit tests plus 38
+integration/E2E tests (347 total), strict all-target/all-feature Clippy,
+formatting, release build, Go parity/vet/format, 101 Python tests and agent
+validation, shell syntax, and the offline dual-domain Compose validator. Warm
+timings were 0.28s format, 3.70s Clippy, 7.45s Rust tests, 34.49s all-bin release,
+0.89s Go, 0.50s Python, and 0.18s Compose; the first isolated provisioner release
+build was 69.75s and produced a 561,736-byte binary. No node06, Compose, CI,
+container, image, secret, or production state changed. Per-engine service
+manager/Compose capture wiring remains the next deployment boundary.
 
 ## 2026-08-13 — Drone-only quality and release-cache iteration gate
 

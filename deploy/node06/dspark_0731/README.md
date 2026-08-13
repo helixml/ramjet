@@ -86,3 +86,59 @@ publishes mode `0660` without replacing an existing pathname, and cleans only
 the inode it published. Add those mounts, the scraper route, and validator
 assertions together; a code-capable UDS alone is not permission to alter
 node06.
+
+## Offline engine-incarnation provisioning
+
+`mini-dynamo-attestation-provisioner` closes the host attestation-writing
+boundary without receiving Docker access. It is a one-shot binary: first an
+independently privileged capture step writes the existing schema-v1
+`node06_engine_metadata.sh` result, then the provisioner reads only that
+explicit protected file and the digest secret. It accepts no command-line
+arguments and is silent on success; failures print only a bounded reason.
+
+Build it on the development host. Do not compile it on node06 while the engines
+are resident:
+
+```bash
+cargo build --release --locked --bin mini-dynamo-attestation-provisioner
+```
+
+The future per-engine service-manager unit should run the equivalent of the
+following after a fresh metadata capture. These paths are examples of the
+required isolated authority domains, not production Compose wiring:
+
+```bash
+# Privileged capture owner; output is mode 0600 and is never mounted in the LB.
+bench/node06_engine_metadata.sh \
+  /run/mini-dynamo-snapshot-a/engine-metadata.json dspark-0731
+
+DS4_SNAPSHOT_ENGINE_METADATA_PATH=/run/mini-dynamo-snapshot-a/engine-metadata.json \
+DS4_SNAPSHOT_DIGEST_SECRET_PATH=/run/secrets/mini-dynamo-snapshot-digest-a \
+DS4_SNAPSHOT_ATTESTATION_PATH=/run/secrets/mini-dynamo-snapshot-attestation-a \
+DS4_SNAPSHOT_SECRET_OWNER_UID=0 \
+DS4_SNAPSHOT_SECRET_GROUP_GID=12000 \
+  /usr/local/libexec/mini-dynamo-attestation-provisioner
+```
+
+The default capture freshness limit is 30 seconds and can be reduced or raised
+to at most five minutes with `DS4_SNAPSHOT_ATTESTATION_MAX_AGE_MS`. The metadata
+must be an owner-only, singly linked, regular mode-`0600` file below trusted
+ancestors. If it carries a qualification receipt, the receipt must be verified
+and have `qualified` status. The provisioner canonicalizes an allow-listed
+immutable identity, including the vLLM process start derived from `/proc` by the
+capture helper. It intentionally excludes capture time and binds the result to
+the digest secret using the companion's existing envelope format.
+
+The output parent is locked during publication. A same-directory random
+temporary file is written and fsynced, assigned the requested owner/group and
+exact mode `0440`, atomically renamed, followed by a directory fsync and an
+authenticated read-back. Existing outputs are never silently repaired: an
+invalid envelope, unsafe inode, older process start, or different evidence for
+the same process fails closed and preserves the current file. Run a fresh
+capture/provision step after every engine process replacement; a companion's
+existing watcher will fence authority until the new authenticated identity is
+available.
+
+This slice remains offline. Do not enable either companion yet: production
+per-engine service-manager/Compose wiring and the dual-domain validation gate
+remain separate rollout requirements.

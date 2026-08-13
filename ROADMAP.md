@@ -611,11 +611,14 @@ node06). The design rationale for each lives in DESIGN.md.
   companion-owned setgid parent, a dedicated non-root group different from the
   snapshot/session parent group, setgid isolation on both authority parents,
   verified group inheritance, atomic no-replace publication, and inode-checked
-  cleanup. It is built separately from the LB so
-  ordinary router edits do not relink both binaries. Next add the host-side
-  authenticated-attestation provisioner and production-shaped Compose/Caddy
-  wiring for that metrics-only group, then run at least 100,000 revision-stable
-  shadow comparisons before placement can consume it.
+  cleanup. It is built separately from the LB so ordinary router edits do not
+  relink both binaries. A host-side authenticated-attestation provisioner
+  now consumes a fresh protected schema-v1 engine metadata capture, derives a
+  canonical immutable identity, rejects rollback/conflict, and atomically
+  publishes the companion envelope without Docker access or identity/secret
+  argv. Next add production-shaped Compose/service-manager and metrics-only
+  Caddy wiring, then run at least 100,000 revision-stable shadow comparisons
+  before placement can consume it.
 
   The off-by-default library runtime now composes typed config, hardened secret
   loading, bind-last safe socket publication, the bounded supervisor, producer,
@@ -630,8 +633,10 @@ node06). The design rationale for each lives in DESIGN.md.
   cancellation without imposing a total lifetime on healthy progress. The
   standalone process now injects the completed owner and a refreshable,
   HMAC-authenticated engine-incarnation watch; any invalid refresh fences
-  authority immediately. Deployment remains blocked on generating that manifest
-  from current engine metadata without exposing either digest key or identity.
+  authority immediately. The completed one-shot host provisioner now generates
+  that manifest from current protected engine metadata without exposing either
+  digest key or identity. Deployment remains blocked on independently managed
+  per-engine capture invocation and production Compose/service-manager wiring.
 
   A true offline public-stack harness now proves initial publication, live
   store/remove, rolling handoff, LB owner restart, companion shutdown/socket

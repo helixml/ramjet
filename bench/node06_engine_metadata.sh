@@ -38,6 +38,38 @@ if command -v docker >/dev/null && docker buildx version >/dev/null 2>&1; then
 fi
 command_line=$(docker exec "$container" pgrep -af 'vllm serve' | head -1)
 [[ -n $command_line ]] || { echo "vllm serve process not found: $container" >&2; exit 1; }
+engine_pid=${command_line%% *}
+[[ $engine_pid =~ ^[1-9][0-9]*$ ]] || {
+  echo "invalid vllm serve process identity: $container" >&2
+  exit 1
+}
+process_started_unix_ns=$(
+  docker exec -i "$container" python3 - "$engine_pid" <<'PY'
+import os
+import pathlib
+import sys
+
+pid = sys.argv[1]
+stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+right_parenthesis = stat.rfind(")")
+if right_parenthesis < 0:
+    raise SystemExit("invalid process stat")
+# Fields following comm begin at proc field 3; starttime is field 22.
+fields = stat[right_parenthesis + 2 :].split()
+start_ticks = int(fields[19])
+boot_seconds = next(
+    int(line.split()[1])
+    for line in pathlib.Path("/proc/stat").read_text().splitlines()
+    if line.startswith("btime ")
+)
+ticks_per_second = os.sysconf("SC_CLK_TCK")
+print(boot_seconds * 1_000_000_000 + start_ticks * 1_000_000_000 // ticks_per_second)
+PY
+)
+[[ $process_started_unix_ns =~ ^[1-9][0-9]*$ ]] || {
+  echo "invalid vllm serve process start: $container" >&2
+  exit 1
+}
 
 read_flag() {
   local wanted=$1
@@ -112,6 +144,7 @@ jq -n \
   --arg driver "$driver" \
   --arg topology_sha256 "$topology_sha256" \
   --arg started_at "$(docker inspect --format '{{.State.StartedAt}}' "$container")" \
+  --argjson process_started_unix_ns "$process_started_unix_ns" \
   --argjson restart_count "$(docker inspect --format '{{.RestartCount}}' "$container")" \
   --arg cpuset_cpus "$(docker inspect --format '{{.HostConfig.CpusetCpus}}' "$container")" \
   --arg cpuset_mems "$(docker inspect --format '{{.HostConfig.CpusetMems}}' "$container")" \
@@ -123,7 +156,8 @@ jq -n \
     model_revision:$model_revision,
     tokenizer_revision:$tokenizer_revision,tokenizer_sha256:$tokenizer_sha256,
     config_sha256:$config_sha256,driver:$driver,topology_sha256:$topology_sha256,
-    started_at:$started_at,restart_count:$restart_count,cpuset_cpus:$cpuset_cpus,
+    started_at:$started_at,process_started_unix_ns:$process_started_unix_ns,
+    restart_count:$restart_count,cpuset_cpus:$cpuset_cpus,
     cpuset_mems:$cpuset_mems,runtime_packages:$runtime_packages,command:$command}' \
   >"$temporary"
 
