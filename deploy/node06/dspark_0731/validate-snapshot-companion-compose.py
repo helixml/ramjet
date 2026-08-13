@@ -14,6 +14,8 @@ HERE = pathlib.Path(__file__).resolve().parent
 OVERLAY = HERE / "docker-compose.snapshot-companion-offline.yaml"
 SERVICE = "snapshot-companion-offline"
 CLIENT = "snapshot-lb-offline"
+RESERVED_COMPANION_IMAGE = "snapshot-companion.invalid/mini-dynamo:not-built"
+RESERVED_CLIENT_IMAGE = "snapshot-lb.invalid/mini-dynamo:not-built"
 
 
 def fail(message: str) -> None:
@@ -29,6 +31,10 @@ def render() -> dict:
             "SNAPSHOT_FIXTURE_DIR": "/var/lib/mini-dynamo/snapshot-fixtures",
         }
     )
+    # Validate the Compose defaults even if the invoking shell happens to carry
+    # image overrides from another task.
+    environment.pop("SNAPSHOT_COMPANION_IMAGE", None)
+    environment.pop("SNAPSHOT_LB_IMAGE", None)
     command = [
         "docker",
         "compose",
@@ -114,6 +120,16 @@ def main() -> int:
         fail("PID limit changed")
     if int(companion.get("mem_limit", 0)) != 512 * 1024 * 1024:
         fail("memory limit changed")
+    if companion.get("image") != RESERVED_COMPANION_IMAGE:
+        fail("default companion image is not reserved under .invalid")
+    if load_balancer.get("image") != RESERVED_CLIENT_IMAGE:
+        fail("default LB fixture image is not reserved under .invalid")
+    if companion.get("environment") or load_balancer.get("environment"):
+        fail("fixture harness must not claim the production runtime environment contract")
+    if companion.get("command", [None])[0] != "snapshot-companion-fixture":
+        fail("companion command is not explicitly fixture-only")
+    if load_balancer.get("command", [None])[0] != "snapshot-client-fixture":
+        fail("LB command is not explicitly fixture-only")
 
     runtime = volume_by_target(companion, "/run/mini-dynamo-snapshot")
     secret = volume_by_target(companion, "/run/secrets/snapshot-session")

@@ -4,8 +4,14 @@
 # Both services additionally require the explicit `snapshot-companion-offline`
 # profile and have no network namespace or published ports.
 # The default image uses the reserved `.invalid` TLD because the repository does
-# not yet build `/mini-dynamo-snapshot-companion`; an operator must provide an
-# independently pinned SNAPSHOT_COMPANION_IMAGE before this can start.
+# not yet build either fixture-harness executable; an operator must provide
+# independently pinned fixture images before this can start. The commands below
+# are deliberately not the production DS4 runtime/config contract.
+#
+# SNAPSHOT_RUNTIME_DIR is a bind source that must already reside on host tmpfs
+# (normally `/run`). It is not a Compose `tmpfs` mount because the Unix socket
+# must be shared across the two isolated containers. Per-container `/tmp` below
+# is a separate private Compose tmpfs.
 #
 # Before use, validate the host-side tmpfs directory and exact 32-byte secret:
 #   SNAPSHOT_RUNTIME_DIR=/run/mini-dynamo-snapshot-offline \
@@ -23,7 +29,14 @@ services:
     profiles: [snapshot-companion-offline]
     image: ${SNAPSHOT_LB_IMAGE:-snapshot-lb.invalid/mini-dynamo:not-built}
     container_name: snapshot-lb-offline
-    command: ["snapshot-client-fixture"]
+    command:
+      [
+        "snapshot-client-fixture",
+        "--socket=/run/mini-dynamo-snapshot/companion.sock",
+        "--secret=/run/secrets/snapshot-session",
+        "--fixtures=/fixtures",
+        "--expected-peer-uid=12001",
+      ]
     restart: "no"
     init: true
     user: "12002:12000"
@@ -66,11 +79,6 @@ services:
         read_only: true
         bind:
           create_host_path: false
-    environment:
-      DS4_SNAPSHOT_SOCKET_PATH: /run/mini-dynamo-snapshot/companion.sock
-      DS4_SNAPSHOT_SESSION_SECRET_PATH: /run/secrets/snapshot-session
-      DS4_SNAPSHOT_EXPECTED_PEER_UID: "12001"
-      DS4_SNAPSHOT_FIXTURE_DIR: /fixtures
     healthcheck:
       test:
         [
@@ -90,7 +98,19 @@ services:
     profiles: [snapshot-companion-offline]
     image: ${SNAPSHOT_COMPANION_IMAGE:-snapshot-companion.invalid/mini-dynamo:not-built}
     container_name: snapshot-companion-offline
-    command: ["serve"]
+    command:
+      [
+        "snapshot-companion-fixture",
+        "--socket=/run/mini-dynamo-snapshot/companion.sock",
+        "--secret=/run/secrets/snapshot-session",
+        "--fixtures=/fixtures",
+        "--expected-client-uid=12002",
+        "--max-clients=2",
+        "--tail-queue-capacity=1024",
+        "--snapshot-deadline-ms=3000",
+        "--tail-idle-deadline-ms=30000",
+        "--shutdown-deadline-ms=5000",
+      ]
     restart: "no"
     init: true
     user: "12001:12000"
@@ -113,8 +133,8 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700
     volumes:
-      # `/run` is host tmpfs on the qualified node. The host validator requires
-      # this directory to be UID 12001, GID 12000, mode 0750, and symlink-free.
+      # This bind source must be hosted on `/run` tmpfs. The host validator
+      # requires UID 12001, GID 12000, mode 0750, and a symlink-free path.
       - type: bind
         source: ${SNAPSHOT_RUNTIME_DIR:-/run/mini-dynamo-snapshot-offline}
         target: /run/mini-dynamo-snapshot
@@ -136,19 +156,6 @@ services:
         read_only: true
         bind:
           create_host_path: false
-    environment:
-      DS4_SNAPSHOT_COMPANION_MODE: offline-fixture
-      DS4_SNAPSHOT_SOCKET_PATH: /run/mini-dynamo-snapshot/companion.sock
-      DS4_SNAPSHOT_SESSION_SECRET_PATH: /run/secrets/snapshot-session
-      DS4_SNAPSHOT_COMPANION_UID: "12001"
-      DS4_SNAPSHOT_CLIENT_UID: "12002"
-      DS4_SNAPSHOT_SHARED_GID: "12000"
-      DS4_SNAPSHOT_MAX_CLIENTS: "2"
-      DS4_SNAPSHOT_TAIL_QUEUE_CAPACITY: "1024"
-      DS4_SNAPSHOT_DEADLINE_MS: "3000"
-      DS4_SNAPSHOT_TAIL_IDLE_DEADLINE_MS: "30000"
-      DS4_SNAPSHOT_SHUTDOWN_DEADLINE_MS: "5000"
-      DS4_SNAPSHOT_FIXTURE_DIR: /fixtures
     healthcheck:
       test:
         [
