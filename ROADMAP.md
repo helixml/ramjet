@@ -793,15 +793,19 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   pin the qualified v0.1.0 LB and companion manifests by SHA tag and digest.
   The node06 host setup, fresh per-engine attestations, full preflight, and
   restricted-identity off-mode LB start now pass without an engine restart.
-  The `123dd9d` diagnostic companions are now deployed and healthy with one
-  stable connection each. A remains correctly fenced because its vLLM
-  publisher aged past a reconstructable sequence-zero generation. A naturally
-  justified B rollback supplied a fresh attested generation; its one bounded
-  replay reached the compact index but failed closed at `apply`, published zero
-  blocks, and then stayed observe-only without reconnect churn. Diagnose that
-  concrete replay/index incompatibility before the next B engine candidate;
-  do not restart either healthy engine merely to repeat identical history. A
-  repository-owned
+  The `123dd9d` diagnostic companions are deployed and healthy. A remains
+  correctly fenced because its vLLM publisher aged past a reconstructable
+  sequence-zero generation. A naturally justified B rollback supplied a fresh
+  attested generation and exposed a concrete compact-index incompatibility:
+  r34 may publish a short partial MLA block whose internal parent is absent
+  from the public event stream. The raw exact index already filters every
+  absent-parent store without overclaiming, while the compact adapter had
+  treated `ParentNotFound` as fatal. r97 gives both paths the same conservative
+  contract. A B-only candidate replay became authoritative within two seconds
+  of a complete-block allocation, published 19 blocks, then applied a later
+  live batch and grew to 28 with zero invalid events. Publish and pin that
+  companion before restoring the dual-engine topology; do not restart A merely
+  to manufacture a fresh generation. A repository-owned
   qualification gate now turns the next natural generation into one bounded
   command: read-only validation refuses fenced sources without mutation, while
   explicit apply mode holds the common lock across five LB-only shadow
