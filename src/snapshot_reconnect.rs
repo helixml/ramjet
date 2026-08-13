@@ -23,6 +23,8 @@ use tokio::{
 };
 
 use crate::{
+    companion_attestation::EngineIncarnationAuthority,
+    kv_snapshot::EngineIncarnation,
     snapshot_consumer::{SnapshotConsumer, SnapshotConsumerError},
     snapshot_session::SnapshotSessionChallenge,
     snapshot_socket_path::{
@@ -176,6 +178,11 @@ pub struct SnapshotReconnectReport {
     pub replacement_promotions: u64,
     pub replacement_failures: u64,
     pub shutdown_cancellations: u64,
+    pub authority_unchanged: u64,
+    pub authority_losses: u64,
+    pub authority_rotations: u64,
+    pub authority_recoveries: u64,
+    pub authority_cancellations: u64,
 }
 
 #[derive(Debug, Error)]
@@ -244,6 +251,9 @@ pub struct SnapshotReconnectOwner {
     challenges: ChallengeLedger,
     replacements: mpsc::Receiver<()>,
     observer: Arc<dyn SnapshotReconnectObserver>,
+    expected_incarnation: Option<EngineIncarnation>,
+    authority_revision: Option<u64>,
+    authority: Option<watch::Receiver<EngineIncarnationAuthority>>,
 }
 
 impl SnapshotReconnectOwner {
@@ -272,11 +282,76 @@ impl SnapshotReconnectOwner {
         Self::with_random(config, consumer, Box::new(OsRandomSource), observer)
     }
 
+    /// Construct an owner whose exact authority may be revoked or rotated at
+    /// runtime. `None` suppresses connection attempts until authenticated
+    /// authority is restored; a changed `Some` value revokes the old session
+    /// before a fresh attempt is started.
+    ///
+    /// # Errors
+    ///
+    /// Revalidates the configured socket path before retaining it.
+    pub fn new_with_authority(
+        config: SnapshotReconnectConfig,
+        consumer: Arc<SnapshotConsumer>,
+        authority: watch::Receiver<EngineIncarnationAuthority>,
+    ) -> Result<(Self, SnapshotReconnectHandle), SnapshotReconnectError> {
+        Self::with_observer_and_authority(
+            config,
+            consumer,
+            Arc::new(NoopReconnectObserver),
+            authority,
+        )
+    }
+
+    /// Construct a hot-authority owner with typed, content-free observation.
+    ///
+    /// # Errors
+    ///
+    /// Revalidates the configured socket path before retaining it.
+    pub fn with_observer_and_authority(
+        config: SnapshotReconnectConfig,
+        consumer: Arc<SnapshotConsumer>,
+        observer: Arc<dyn SnapshotReconnectObserver>,
+        mut authority: watch::Receiver<EngineIncarnationAuthority>,
+    ) -> Result<(Self, SnapshotReconnectHandle), SnapshotReconnectError> {
+        let initial = authority.borrow_and_update().clone();
+        Self::with_random_and_authority(
+            config,
+            consumer,
+            Box::new(OsRandomSource),
+            observer,
+            initial.incarnation().cloned(),
+            Some(initial.revision()),
+            Some(authority),
+        )
+    }
+
     fn with_random(
         config: SnapshotReconnectConfig,
         consumer: Arc<SnapshotConsumer>,
         random: Box<dyn RandomSource>,
         observer: Arc<dyn SnapshotReconnectObserver>,
+    ) -> Result<(Self, SnapshotReconnectHandle), SnapshotReconnectError> {
+        let expected_incarnation = Some(consumer.expected_engine_incarnation().clone());
+        Self::with_random_and_authority(
+            config,
+            consumer,
+            random,
+            observer,
+            expected_incarnation,
+            None,
+            None,
+        )
+    }
+
+    fn with_random_and_authority(
+        config: SnapshotReconnectConfig,
+        consumer: Arc<SnapshotConsumer>,
+        random: Box<dyn RandomSource>,
+        observer: Arc<dyn SnapshotReconnectObserver>,
+        expected_incarnation: Option<EngineIncarnation>,
+        authority_revision: Option<u64>,
+        authority: Option<watch::Receiver<EngineIncarnationAuthority>>,
     ) -> Result<(Self, SnapshotReconnectHandle), SnapshotReconnectError> {
         validate_socket_client_path(&config.socket_path, config.socket_policy)
             .map_err(SnapshotReconnectError::SocketPath)?;
@@ -290,6 +365,9 @@ impl SnapshotReconnectOwner {
                 challenges,
                 replacements,
                 observer,
+                expected_incarnation,
+                authority_revision,
+                authority,
             },
             SnapshotReconnectHandle { replacement },
         ))
@@ -297,6 +375,7 @@ impl SnapshotReconnectOwner {
 
     /// Reconnect until shutdown. Failures affect only exact publication state;
     /// approximate serving is not owned or mutated here.
+    #[allow(clippy::too_many_lines)]
     pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) -> SnapshotReconnectReport {
         let mut report = SnapshotReconnectReport::default();
         let mut backoff = self.config.reconnect_min;
@@ -305,18 +384,45 @@ impl SnapshotReconnectOwner {
         let mut replacements_open = true;
         self.observe_readiness();
 
-        loop {
+        'owner: loop {
+            if self.expected_incarnation.is_none() {
+                tokio::select! {
+                    biased;
+                    () = wait_for_shutdown(&mut shutdown) => return report,
+                    event = next_authority(&mut self.authority) => {
+                        self.apply_authority_event(event, &mut report);
+                        delay_before_attempt = false;
+                    }
+                    replacement = self.replacements.recv(), if replacements_open => {
+                        if replacement.is_some() {
+                            report.replacement_requests =
+                                report.replacement_requests.saturating_add(1);
+                            report.replacement_failures =
+                                report.replacement_failures.saturating_add(1);
+                        } else {
+                            replacements_open = false;
+                        }
+                    }
+                }
+                continue;
+            }
             if delay_before_attempt {
                 let delay = jittered_delay(backoff, self.random.as_mut()).unwrap_or_else(|()| {
                     report.random_failures = report.random_failures.saturating_add(1);
                     backoff
                 });
                 backoff = next_backoff(backoff, self.config.reconnect_max);
-                if self
+                match self
                     .wait_before_retry(delay, &mut shutdown, &mut report, &mut replacements_open)
                     .await
                 {
-                    return report;
+                    RetryWait::Ready => {}
+                    RetryWait::Shutdown => return report,
+                    RetryWait::Authority(event) => {
+                        self.apply_authority_event(event, &mut report);
+                        delay_before_attempt = false;
+                        continue;
+                    }
                 }
             }
             delay_before_attempt = true;
@@ -327,7 +433,11 @@ impl SnapshotReconnectOwner {
             } else {
                 SnapshotReconnectAttemptKind::Retry
             };
-            let Some(mut active) = self.start_attempt(&mut report, kind) else {
+            let Some(expected) = self.expected_incarnation.clone() else {
+                delay_before_attempt = false;
+                continue;
+            };
+            let Some(mut active) = self.start_attempt(expected, &mut report, kind) else {
                 continue;
             };
             let mut published = self.consumer.publication().lock().published_epoch();
@@ -343,13 +453,28 @@ impl SnapshotReconnectOwner {
                             report.shutdown_cancellations.saturating_add(1);
                         return report;
                     }
+                    event = next_authority(&mut self.authority) => {
+                        if self.apply_authority_event(event, &mut report) {
+                            drop(active);
+                            report.authority_cancellations =
+                                report.authority_cancellations.saturating_add(1);
+                            delay_before_attempt = false;
+                            continue 'owner;
+                        }
+                    }
                     replacement = self.replacements.recv(), if replacements_open => {
                         let Some(()) = replacement else {
                             replacements_open = false;
                             continue;
                         };
                         report.replacement_requests = report.replacement_requests.saturating_add(1);
+                        let Some(expected) = self.expected_incarnation.clone() else {
+                            report.replacement_failures =
+                                report.replacement_failures.saturating_add(1);
+                            continue;
+                        };
                         let Some(replacement) = self.start_attempt(
+                            expected,
                             &mut report,
                             SnapshotReconnectAttemptKind::Replacement,
                         ) else {
@@ -371,6 +496,12 @@ impl SnapshotReconnectOwner {
                                 self.observe_readiness();
                             }
                             RollOutcome::Shutdown => return report,
+                            RollOutcome::AuthorityChanged => {
+                                report.authority_cancellations =
+                                    report.authority_cancellations.saturating_add(2);
+                                delay_before_attempt = false;
+                                continue 'owner;
+                            }
                         }
                     }
                     outcome = &mut active => {
@@ -396,6 +527,7 @@ impl SnapshotReconnectOwner {
 
     fn start_attempt(
         &mut self,
+        expected_incarnation: EngineIncarnation,
         report: &mut SnapshotReconnectReport,
         kind: SnapshotReconnectAttemptKind,
     ) -> Option<AttemptFuture> {
@@ -429,7 +561,12 @@ impl SnapshotReconnectOwner {
                     .map_err(|_| AttemptEnd::Connect)?;
                 observation.connected();
                 consumer
-                    .consume(stream, challenge, deadline)
+                    .consume_with_expected_incarnation(
+                        stream,
+                        challenge,
+                        deadline,
+                        expected_incarnation,
+                    )
                     .await
                     .map_err(AttemptEnd::Consumer)
             };
@@ -458,19 +595,20 @@ impl SnapshotReconnectOwner {
         shutdown: &mut watch::Receiver<bool>,
         report: &mut SnapshotReconnectReport,
         replacements_open: &mut bool,
-    ) -> bool {
+    ) -> RetryWait {
         tokio::select! {
             biased;
-            () = wait_for_shutdown(shutdown) => true,
+            () = wait_for_shutdown(shutdown) => RetryWait::Shutdown,
+            event = next_authority(&mut self.authority) => RetryWait::Authority(event),
             replacement = self.replacements.recv(), if *replacements_open => {
                 if replacement.is_some() {
                     report.replacement_requests = report.replacement_requests.saturating_add(1);
                 } else {
                     *replacements_open = false;
                 }
-                false
+                RetryWait::Ready
             }
-            () = sleep(delay) => false,
+            () = sleep(delay) => RetryWait::Ready,
         }
     }
 
@@ -494,6 +632,13 @@ impl SnapshotReconnectOwner {
                     report.shutdown_cancellations =
                         report.shutdown_cancellations.saturating_add(2);
                     return RollOutcome::Shutdown;
+                }
+                event = next_authority(&mut self.authority) => {
+                    if self.apply_authority_event(event, report) {
+                        drop(replacement);
+                        drop(old);
+                        return RollOutcome::AuthorityChanged;
+                    }
                 }
                 outcome = &mut replacement => {
                     record_attempt_end(report, &outcome);
@@ -524,6 +669,57 @@ impl SnapshotReconnectOwner {
                 }
             }
         }
+    }
+
+    fn apply_authority_event(
+        &mut self,
+        event: AuthorityEvent,
+        report: &mut SnapshotReconnectReport,
+    ) -> bool {
+        let next = match event {
+            AuthorityEvent::Updated(next) => {
+                if self.authority_revision == Some(next.revision()) {
+                    report.authority_unchanged = report.authority_unchanged.saturating_add(1);
+                    return false;
+                }
+                self.authority_revision = Some(next.revision());
+                next.incarnation().cloned()
+            }
+            AuthorityEvent::Closed => {
+                self.authority = None;
+                self.authority_revision = None;
+                None
+            }
+        };
+        if self.authority.is_none() && self.expected_incarnation == next {
+            report.authority_unchanged = report.authority_unchanged.saturating_add(1);
+            return false;
+        }
+        match (&self.expected_incarnation, &next) {
+            (Some(_), Some(_)) => {
+                report.authority_rotations = report.authority_rotations.saturating_add(1);
+            }
+            (Some(_), None) => {
+                report.authority_losses = report.authority_losses.saturating_add(1);
+            }
+            (None, Some(_)) => {
+                report.authority_recoveries = report.authority_recoveries.saturating_add(1);
+            }
+            // A watch receiver can observe only the final value of a rapid
+            // `unavailable -> valid -> unavailable` sequence. The revision
+            // still advances, but there is no active authority or session to
+            // revoke and reconnect. Remain fail closed and wait for a later
+            // valid authority instead of terminating the reconnect owner.
+            (None, None) => {
+                report.authority_unchanged = report.authority_unchanged.saturating_add(1);
+                return false;
+            }
+        }
+        self.consumer.publication().lock().revoke_authority();
+        self.observer
+            .observe(SnapshotReconnectEvent::Readiness(false));
+        self.expected_incarnation = next;
+        true
     }
 }
 
@@ -582,6 +778,31 @@ impl Drop for AttemptObservation {
 enum RollOutcome {
     Active(AttemptFuture),
     Shutdown,
+    AuthorityChanged,
+}
+
+enum RetryWait {
+    Ready,
+    Shutdown,
+    Authority(AuthorityEvent),
+}
+
+enum AuthorityEvent {
+    Updated(EngineIncarnationAuthority),
+    Closed,
+}
+
+async fn next_authority(
+    authority: &mut Option<watch::Receiver<EngineIncarnationAuthority>>,
+) -> AuthorityEvent {
+    let Some(authority) = authority else {
+        return std::future::pending().await;
+    };
+    if authority.changed().await.is_err() {
+        AuthorityEvent::Closed
+    } else {
+        AuthorityEvent::Updated(authority.borrow_and_update().clone())
+    }
 }
 
 #[derive(Debug)]
@@ -865,6 +1086,33 @@ mod tests {
         .unwrap()
     }
 
+    fn owner_with_authority(
+        config: SnapshotReconnectConfig,
+        consumer: Arc<SnapshotConsumer>,
+        authority: watch::Receiver<EngineIncarnationAuthority>,
+    ) -> (SnapshotReconnectOwner, SnapshotReconnectHandle) {
+        owner_with_authority_observer(config, consumer, authority, Arc::new(NoopReconnectObserver))
+    }
+
+    fn owner_with_authority_observer(
+        config: SnapshotReconnectConfig,
+        consumer: Arc<SnapshotConsumer>,
+        mut authority: watch::Receiver<EngineIncarnationAuthority>,
+        observer: Arc<dyn SnapshotReconnectObserver>,
+    ) -> (SnapshotReconnectOwner, SnapshotReconnectHandle) {
+        let initial = authority.borrow_and_update().clone();
+        SnapshotReconnectOwner::with_random_and_authority(
+            config,
+            consumer,
+            Box::new(CounterRandom(0)),
+            observer,
+            initial.incarnation().cloned(),
+            Some(initial.revision()),
+            Some(authority),
+        )
+        .unwrap()
+    }
+
     fn tokio_listener(directory: &TestDirectory) -> (UnixListener, PublishedSocketPath) {
         let published = bind_and_publish(&directory.socket(), directory.policy()).unwrap();
         let (listener, guard) = published.into_parts();
@@ -872,10 +1120,14 @@ mod tests {
         (UnixListener::from_std(listener).unwrap(), guard)
     }
 
-    fn snapshot_response(challenge: SnapshotSessionChallenge, watermark: u64) -> Vec<u8> {
+    fn snapshot_response_for(
+        challenge: SnapshotSessionChallenge,
+        watermark: u64,
+        engine_incarnation: &EngineIncarnation,
+    ) -> Vec<u8> {
         let digester = BlockDigester::new(DIGEST_SECRET);
         let mut body = SnapshotBody {
-            engine_incarnation: incarnation(),
+            engine_incarnation: engine_incarnation.clone(),
             watermark,
             reset_scope: ResetScope::full_engine(),
             digest: DigestSpec {
@@ -914,6 +1166,14 @@ mod tests {
         listener: &UnixListener,
         watermark: u64,
     ) -> (UnixStream, SnapshotSessionChallenge) {
+        accept_and_publish_for(listener, watermark, &incarnation()).await
+    }
+
+    async fn accept_and_publish_for(
+        listener: &UnixListener,
+        watermark: u64,
+        engine_incarnation: &EngineIncarnation,
+    ) -> (UnixStream, SnapshotSessionChallenge) {
         let (mut stream, _) = listener.accept().await.unwrap();
         let secret = SnapshotSessionSecret::new(SESSION_SECRET);
         let hello_len = encode_client_hello(
@@ -928,7 +1188,11 @@ mod tests {
         let challenge =
             decode_client_hello(&hello, &secret, SnapshotSessionLimits::default()).unwrap();
         stream
-            .write_all(&snapshot_response(challenge, watermark))
+            .write_all(&snapshot_response_for(
+                challenge,
+                watermark,
+                engine_incarnation,
+            ))
             .await
             .unwrap();
         let key = TailSessionKey::derive(
@@ -947,7 +1211,7 @@ mod tests {
                 message_sequence: 1,
                 delivery_sequence: 0,
                 event_watermark: watermark,
-                engine_incarnation: &incarnation(),
+                engine_incarnation,
                 digest_key_id: digester.key_id().as_bytes(),
                 companion_generation: GENERATION,
             },
@@ -975,6 +1239,28 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    async fn wait_for_readiness_count(
+        observer: &RecordingObserver,
+        expected: bool,
+        minimum: usize,
+    ) {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let count = observer
+                    .events()
+                    .into_iter()
+                    .filter(|event| *event == SnapshotReconnectEvent::Readiness(expected))
+                    .count();
+                if count >= minimum {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -1220,5 +1506,263 @@ mod tests {
         drop(replacement_stream);
         assert_eq!(report.replacement_promotions, 1);
         assert!(publication.lock().published_index().is_none());
+    }
+
+    #[tokio::test]
+    async fn identical_authority_refresh_does_not_churn_active_session() {
+        let directory = TestDirectory::new();
+        let (listener, _guard) = tokio_listener(&directory);
+        let consumer = consumer(directory.policy().owner_uid);
+        let publication = Arc::clone(consumer.publication());
+        let current = incarnation();
+        let initial = EngineIncarnationAuthority::new(1, Some(current.clone()));
+        let (authority_tx, authority_rx) = watch::channel(initial.clone());
+        let (owner, _) = owner_with_authority(
+            config(&directory, Duration::from_secs(1)),
+            consumer,
+            authority_rx,
+        );
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let owner_task = tokio::spawn(owner.run(shutdown));
+
+        let (active_stream, _) = accept_and_publish_for(&listener, 100, &current).await;
+        let epoch = wait_for_epoch(&publication, None).await;
+        authority_tx.send(initial).unwrap();
+        sleep(Duration::from_millis(20)).await;
+        assert_eq!(publication.lock().published_epoch(), Some(epoch));
+        assert!(
+            timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
+
+        shutdown_sender.send(true).unwrap();
+        let report = owner_task.await.unwrap();
+        drop(active_stream);
+        assert_eq!(report.attempts_started, 1);
+        assert_eq!(report.authority_unchanged, 1);
+        assert_eq!(report.authority_rotations, 0);
+        assert_eq!(report.authority_cancellations, 0);
+    }
+
+    #[tokio::test]
+    async fn authority_rotation_fences_stale_session_and_republishes_fresh_identity() {
+        let directory = TestDirectory::new();
+        let (listener, _guard) = tokio_listener(&directory);
+        let consumer = consumer(directory.policy().owner_uid);
+        let publication = Arc::clone(consumer.publication());
+        let old = incarnation();
+        let mut rotated = old.clone();
+        rotated.process_started_unix_ns += 1;
+        let (authority_tx, authority_rx) =
+            watch::channel(EngineIncarnationAuthority::new(1, Some(old.clone())));
+        let observer = Arc::new(RecordingObserver::default());
+        let (owner, _) = owner_with_authority_observer(
+            config(&directory, Duration::from_secs(1)),
+            consumer,
+            authority_rx,
+            observer.clone(),
+        );
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let owner_task = tokio::spawn(owner.run(shutdown));
+
+        let (mut stale_stream, stale_challenge) =
+            accept_and_publish_for(&listener, 100, &old).await;
+        let stale_epoch = wait_for_epoch(&publication, None).await;
+        wait_for_readiness_count(&observer, true, 1).await;
+        authority_tx
+            .send(EngineIncarnationAuthority::new(2, Some(rotated.clone())))
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while publication.lock().published_epoch().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        wait_for_readiness_count(&observer, false, 2).await;
+        let mut eof = [0_u8; 1];
+        assert_eq!(
+            timeout(Duration::from_secs(1), stale_stream.read(&mut eof))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+
+        let (fresh_stream, fresh_challenge) =
+            accept_and_publish_for(&listener, 200, &rotated).await;
+        let fresh_epoch = wait_for_epoch(&publication, None).await;
+        wait_for_readiness_count(&observer, true, 2).await;
+        assert_ne!(stale_epoch, fresh_epoch);
+        assert_ne!(stale_challenge, fresh_challenge);
+
+        shutdown_sender.send(true).unwrap();
+        let report = owner_task.await.unwrap();
+        drop(fresh_stream);
+        assert_eq!(report.authority_rotations, 1);
+        assert_eq!(report.authority_cancellations, 1);
+        assert_eq!(report.attempts_started, 2);
+        let readiness: Vec<_> = observer
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                SnapshotReconnectEvent::Readiness(ready) => Some(ready),
+                _ => None,
+            })
+            .collect();
+        let first_ready = readiness.iter().position(|ready| *ready).unwrap();
+        let fenced = readiness[first_ready + 1..]
+            .iter()
+            .position(|ready| !*ready)
+            .map(|index| first_ready + 1 + index)
+            .unwrap();
+        assert!(readiness[fenced + 1..].iter().any(|ready| *ready));
+    }
+
+    #[tokio::test]
+    async fn coalesced_authority_gap_reconnects_even_when_identity_matches() {
+        let directory = TestDirectory::new();
+        let (listener, _guard) = tokio_listener(&directory);
+        let consumer = consumer(directory.policy().owner_uid);
+        let publication = Arc::clone(consumer.publication());
+        let current = incarnation();
+        let (authority_tx, authority_rx) =
+            watch::channel(EngineIncarnationAuthority::new(1, Some(current.clone())));
+        let (owner, _) = owner_with_authority(
+            config(&directory, Duration::from_secs(1)),
+            consumer,
+            authority_rx,
+        );
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let owner_task = tokio::spawn(owner.run(shutdown));
+
+        let (mut stale_stream, stale_challenge) =
+            accept_and_publish_for(&listener, 100, &current).await;
+        wait_for_epoch(&publication, None).await;
+        // Revision three represents a coalesced loss/recovery pair. The value
+        // alone matches, but the old session crossed an untrusted interval.
+        authority_tx
+            .send(EngineIncarnationAuthority::new(3, Some(current.clone())))
+            .unwrap();
+        let mut eof = [0_u8; 1];
+        assert_eq!(
+            timeout(Duration::from_secs(1), stale_stream.read(&mut eof))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert!(publication.lock().published_index().is_none());
+
+        let (fresh_stream, fresh_challenge) =
+            accept_and_publish_for(&listener, 200, &current).await;
+        wait_for_epoch(&publication, None).await;
+        assert_ne!(stale_challenge, fresh_challenge);
+
+        shutdown_sender.send(true).unwrap();
+        let report = owner_task.await.unwrap();
+        drop(fresh_stream);
+        assert_eq!(report.authority_rotations, 1);
+        assert_eq!(report.authority_cancellations, 1);
+        assert_eq!(report.attempts_started, 2);
+    }
+
+    #[tokio::test]
+    async fn authority_loss_stops_attempts_until_valid_recovery() {
+        let directory = TestDirectory::new();
+        let (listener, _guard) = tokio_listener(&directory);
+        let consumer = consumer(directory.policy().owner_uid);
+        let publication = Arc::clone(consumer.publication());
+        let current = incarnation();
+        let mut recovered = current.clone();
+        recovered.process_started_unix_ns += 1;
+        let (authority_tx, authority_rx) =
+            watch::channel(EngineIncarnationAuthority::new(1, Some(current.clone())));
+        let (owner, _) = owner_with_authority(
+            config(&directory, Duration::from_secs(1)),
+            consumer,
+            authority_rx,
+        );
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let owner_task = tokio::spawn(owner.run(shutdown));
+
+        let (mut stale_stream, _) = accept_and_publish_for(&listener, 100, &current).await;
+        wait_for_epoch(&publication, None).await;
+        authority_tx
+            .send(EngineIncarnationAuthority::new(2, None))
+            .unwrap();
+        let mut eof = [0_u8; 1];
+        assert_eq!(
+            timeout(Duration::from_secs(1), stale_stream.read(&mut eof))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert!(publication.lock().published_index().is_none());
+        assert!(
+            timeout(Duration::from_millis(25), listener.accept())
+                .await
+                .is_err()
+        );
+
+        authority_tx
+            .send(EngineIncarnationAuthority::new(3, Some(recovered.clone())))
+            .unwrap();
+        let (fresh_stream, _) = accept_and_publish_for(&listener, 200, &recovered).await;
+        wait_for_epoch(&publication, None).await;
+
+        shutdown_sender.send(true).unwrap();
+        let report = owner_task.await.unwrap();
+        drop(fresh_stream);
+        assert_eq!(report.authority_losses, 1);
+        assert_eq!(report.authority_recoveries, 1);
+        assert_eq!(report.authority_cancellations, 1);
+        assert_eq!(report.attempts_started, 2);
+    }
+
+    #[tokio::test]
+    async fn coalesced_recovery_gap_while_unavailable_remains_recoverable() {
+        let directory = TestDirectory::new();
+        let (listener, _guard) = tokio_listener(&directory);
+        let consumer = consumer(directory.policy().owner_uid);
+        let publication = Arc::clone(consumer.publication());
+        let recovered = incarnation();
+        let (authority_tx, authority_rx) = watch::channel(EngineIncarnationAuthority::new(1, None));
+        let (owner, _) = owner_with_authority(
+            config(&directory, Duration::from_secs(1)),
+            consumer,
+            authority_rx,
+        );
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let owner_task = tokio::spawn(owner.run(shutdown));
+
+        // Revision three represents a coalesced `unavailable -> valid ->
+        // unavailable` sequence. There is no stale session to cancel, but the
+        // owner must stay alive so a later valid authority can recover.
+        authority_tx
+            .send(EngineIncarnationAuthority::new(3, None))
+            .unwrap();
+        sleep(Duration::from_millis(20)).await;
+        assert!(
+            timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
+
+        authority_tx
+            .send(EngineIncarnationAuthority::new(4, Some(recovered.clone())))
+            .unwrap();
+        let (fresh_stream, _) = accept_and_publish_for(&listener, 200, &recovered).await;
+        wait_for_epoch(&publication, None).await;
+
+        shutdown_sender.send(true).unwrap();
+        let report = owner_task.await.unwrap();
+        drop(fresh_stream);
+        assert_eq!(report.authority_unchanged, 1);
+        assert_eq!(report.authority_recoveries, 1);
+        assert_eq!(report.authority_cancellations, 0);
+        assert_eq!(report.attempts_started, 1);
     }
 }

@@ -251,7 +251,11 @@ are serial; only an explicit bounded replacement may overlap a second session.
 Validate the trusted socket parent on every connect, use a fresh OS-random
 challenge under the bounded reuse ledger, and carry one absolute attempt
 deadline through connect and consumption. Shutdown drops the consumer future
-immediately; approximate serving is never owned by this path.
+immediately; approximate serving is never owned by this path. Its hot
+attestation channel carries a monotonic authority revision in addition to the
+optional incarnation. Any unavailable, changed, closed, or skipped authority
+revision must revoke actor state before dropping the active session; do not
+replace it with a value-only watch that can coalesce an invalid interval.
 
 LB consumption is separately gated by `DS4_SNAPSHOT_ROUTE_MODE=shadow`. Keep
 its per-upstream socket, companion UID, session secret, digest secret,
@@ -260,9 +264,11 @@ authorities before spawning any reconnect task. Direct `DS4_KV_EVENT_MODE`
 authority and snapshot authority must remain mutually exclusive. Snapshot
 inventory is shadow-only until the recorded comparison gate is met: never let
 this mode select placement, affect upstream health, or make `/health` fail.
-Attestation is currently pinned at LB startup, so restart the stateless LB
-after a qualified engine incarnation change; do not silently accept a new
-incarnation through a stale session.
+The initial attestation is still preflighted before any task starts. Once
+running, `DS4_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS` reloads it through the
+same hardened file/MAC policy. Same identity is a no-op; invalid authority
+suppresses reconnects, and a valid atomic rotation reconnects with the fresh
+expected identity without restarting the stateless LB.
 
 Keep the true public-stack harness green: it composes safe socket publication,
 supervisor, producer, reconnect owner, consumer, actor, and digest index. Use

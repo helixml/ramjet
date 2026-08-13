@@ -12,8 +12,9 @@ use tokio::{sync::watch, task::JoinHandle};
 
 use crate::{
     companion_attestation::{
-        CompanionAttestationError, load_authenticated_engine_incarnation,
-        load_companion_digest_secret,
+        CompanionAttestationError, EngineIncarnationAuthority,
+        load_authenticated_engine_incarnation, load_companion_digest_secret,
+        watch_authenticated_engine_incarnation_authority,
     },
     config::{Config, SnapshotRouteMode},
     digest_index::{DigestIndexLimits, SnapshotGroupKey},
@@ -42,6 +43,15 @@ pub struct SnapshotRouteConsumers {
     inventories: Arc<[ExactRouteInventory]>,
     shutdown: Option<watch::Sender<bool>>,
     tasks: Vec<JoinHandle<SnapshotReconnectReport>>,
+    attestation_tasks: Vec<JoinHandle<()>>,
+}
+
+struct PreparedRouteConsumer {
+    owner: SnapshotReconnectOwner,
+    authority: watch::Sender<EngineIncarnationAuthority>,
+    attestation_path: std::path::PathBuf,
+    policy: SnapshotSecretFilePolicy,
+    digest_secret: crate::companion_attestation::CompanionDigestSecret,
 }
 
 #[derive(Debug, Error)]
@@ -82,11 +92,7 @@ impl SnapshotRouteConsumers {
             config.snapshot_route_mode != SnapshotRouteMode::Off,
         );
         if config.snapshot_route_mode == SnapshotRouteMode::Off {
-            return Ok(Self {
-                inventories: Arc::from([]),
-                shutdown: None,
-                tasks: Vec::new(),
-            });
+            return Ok(Self::off());
         }
 
         let policy = SnapshotSecretFilePolicy {
@@ -102,11 +108,12 @@ impl SnapshotRouteConsumers {
                 policy,
                 &digest_secret,
             )?;
+            let digest_secret_bytes = *digest_secret.as_bytes();
             let consumer = Arc::new(
                 SnapshotConsumer::new(
                     SnapshotConsumerConfig {
                         expected_peer_uid: source.companion_uid,
-                        expected_engine_incarnation: incarnation,
+                        expected_engine_incarnation: incarnation.clone(),
                         minimum_snapshot_watermark: 0,
                         minimum_companion_generation: 1,
                         group: SnapshotGroupKey {
@@ -120,7 +127,7 @@ impl SnapshotRouteConsumers {
                         event_limits: KvWireLimits::default(),
                     },
                     session_secret,
-                    *digest_secret.as_bytes(),
+                    digest_secret_bytes,
                     SnapshotActorLimits::default(),
                 )
                 .map_err(|_| SnapshotRouteStartError::Consumer)?,
@@ -137,27 +144,63 @@ impl SnapshotRouteConsumers {
             )?;
             let publication = Arc::clone(consumer.publication());
             let observer = metrics.snapshot_route_observer(index);
-            let (owner, _replacement) =
-                SnapshotReconnectOwner::with_observer(reconnect, consumer, observer)?;
+            let (authority, authority_rx) =
+                watch::channel(EngineIncarnationAuthority::new(1, Some(incarnation)));
+            let (owner, _replacement) = SnapshotReconnectOwner::with_observer_and_authority(
+                reconnect,
+                consumer,
+                observer,
+                authority_rx,
+            )?;
             inventories.push(ExactRouteInventory::snapshot(publication));
-            prepared.push(owner);
+            prepared.push(PreparedRouteConsumer {
+                owner,
+                authority,
+                attestation_path: source.attestation_path.clone(),
+                policy,
+                digest_secret,
+            });
         }
 
         let (shutdown, receiver) = watch::channel(false);
-        let tasks = prepared
-            .into_iter()
-            .map(|owner| tokio::spawn(owner.run(receiver.clone())))
-            .collect();
+        let refresh = Duration::from_millis(config.snapshot_route_attestation_refresh_ms as u64);
+        let mut tasks = Vec::with_capacity(prepared.len());
+        let mut attestation_tasks = Vec::with_capacity(prepared.len());
+        for prepared in prepared {
+            tasks.push(tokio::spawn(prepared.owner.run(receiver.clone())));
+            let watcher_shutdown = receiver.clone();
+            attestation_tasks.push(tokio::spawn(async move {
+                watch_authenticated_engine_incarnation_authority(
+                    &prepared.attestation_path,
+                    prepared.policy,
+                    prepared.digest_secret,
+                    refresh,
+                    &prepared.authority,
+                    watcher_shutdown,
+                )
+                .await;
+            }));
+        }
         Ok(Self {
             inventories: inventories.into(),
             shutdown: Some(shutdown),
             tasks,
+            attestation_tasks,
         })
     }
 
     #[must_use]
     pub fn inventories(&self) -> Arc<[ExactRouteInventory]> {
         Arc::clone(&self.inventories)
+    }
+
+    fn off() -> Self {
+        Self {
+            inventories: Arc::from([]),
+            shutdown: None,
+            tasks: Vec::new(),
+            attestation_tasks: Vec::new(),
+        }
     }
 
     /// Signal every owner immediately; joining remains separately bounded.
@@ -171,6 +214,14 @@ impl SnapshotRouteConsumers {
         self.request_shutdown();
         self.shutdown.take();
         for mut task in self.tasks {
+            if tokio::time::timeout(SHUTDOWN_DEADLINE, &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+            }
+        }
+        for mut task in self.attestation_tasks {
             if tokio::time::timeout(SHUTDOWN_DEADLINE, &mut task)
                 .await
                 .is_err()
@@ -336,6 +387,7 @@ mod tests {
         let consumers = SnapshotRouteConsumers::start(&config, &metrics).unwrap();
         assert!(consumers.inventories().is_empty());
         assert!(consumers.tasks.is_empty());
+        assert!(consumers.attestation_tasks.is_empty());
         assert!(consumers.shutdown.is_none());
         let text = prometheus::TextEncoder::new()
             .encode_to_string(&registry.gather())
@@ -352,6 +404,7 @@ mod tests {
         assert_eq!(consumers.inventories().len(), 1);
         assert!(!consumers.inventories()[0].ready());
         assert_eq!(consumers.tasks.len(), 1);
+        assert_eq!(consumers.attestation_tasks.len(), 1);
         consumers.shutdown().await;
     }
 
