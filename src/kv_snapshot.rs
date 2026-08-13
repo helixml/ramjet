@@ -12,7 +12,7 @@ use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-pub const SNAPSHOT_SCHEMA_VERSION: u16 = 1;
+pub const SNAPSHOT_SCHEMA_VERSION: u16 = 2;
 const SHA256_BYTES: usize = 32;
 
 #[allow(clippy::struct_field_names)]
@@ -160,6 +160,11 @@ pub struct DigestRecord {
     pub block_digest: Vec<u8>,
     pub block_token_ids: u32,
     pub prefix_token_ids: u64,
+    /// Whether the engine still advertises this block as resident. Removed
+    /// ancestors remain in snapshots while they have live descendants so a
+    /// later reinsert can restore the complete prefix without losing parity
+    /// with the live exact index.
+    pub present: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -497,6 +502,7 @@ fn validate_collections(
 
     let mut external_hashes = HashSet::with_capacity(body.records.len());
     let mut depths = Vec::with_capacity(body.records.len());
+    let mut child_counts = vec![0usize; body.records.len()];
     let mut previous_depths = vec![0u32; body.groups.len()];
     for (index, record) in body.records.iter().enumerate() {
         check_cancelled(cancelled)?;
@@ -525,6 +531,7 @@ fn validate_collections(
             if body.records[parent].group_slot != record.group_slot {
                 return Err(SnapshotError::InvalidRecord);
             }
+            child_counts[parent] = child_counts[parent].saturating_add(1);
             (
                 depths[parent] + 1,
                 body.records[parent]
@@ -540,6 +547,17 @@ fn validate_collections(
         }
         depths.push(depth);
         previous_depths[group_slot] = depth;
+    }
+
+    if body
+        .records
+        .iter()
+        .zip(child_counts)
+        .any(|(record, children)| !record.present && children == 0)
+    {
+        // The live exact index prunes absent leaves. Rejecting them keeps the
+        // snapshot canonical and prevents dead records consuming capacity.
+        return Err(SnapshotError::InvalidRecord);
     }
 
     let measured = measured_capacity(&body.groups, &body.records)?;

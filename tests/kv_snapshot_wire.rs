@@ -52,6 +52,7 @@ fn body() -> SnapshotBody {
                 block_digest: vec![0x31; 32],
                 block_token_ids: 4,
                 prefix_token_ids: 4,
+                present: true,
             },
             DigestRecord {
                 group_slot: 0,
@@ -60,6 +61,7 @@ fn body() -> SnapshotBody {
                 block_digest: vec![0x32; 32],
                 block_token_ids: 3,
                 prefix_token_ids: 7,
+                present: true,
             },
         ],
     };
@@ -138,7 +140,7 @@ fn rejects_schema_and_checksum_algorithm_mismatches() {
     let payload = rmp_serde::to_vec_named(&source).unwrap();
     assert_eq!(
         decode_snapshot(
-            &envelope(2, "sha256", payload.clone()),
+            &envelope(SNAPSHOT_SCHEMA_VERSION + 1, "sha256", payload.clone(),),
             SnapshotLimits::default(),
             expected(&source)
         ),
@@ -304,6 +306,7 @@ fn validates_bfs_depth_independently_per_indexed_group() {
         block_digest: vec![0x51; 32],
         block_token_ids: 4,
         prefix_token_ids: 4,
+        present: true,
     });
     source.refresh_capacity().unwrap();
 
@@ -311,6 +314,31 @@ fn validates_bfs_depth_independently_per_indexed_group() {
     assert_eq!(
         decode_snapshot(&frame, SnapshotLimits::default(), expected(&source)).unwrap(),
         source
+    );
+}
+
+#[test]
+fn preserves_absent_ancestors_with_live_descendants() {
+    let mut source = body();
+    source.records[0].present = false;
+    source.refresh_capacity().unwrap();
+
+    let frame = encode_snapshot(&source, SnapshotLimits::default()).unwrap();
+    assert_eq!(
+        decode_snapshot(&frame, SnapshotLimits::default(), expected(&source)).unwrap(),
+        source
+    );
+}
+
+#[test]
+fn rejects_absent_leaf_records() {
+    let mut source = body();
+    source.records[1].present = false;
+    source.refresh_capacity().unwrap();
+
+    assert_eq!(
+        encode_snapshot(&source, SnapshotLimits::default()),
+        Err(SnapshotError::InvalidRecord)
     );
 }
 

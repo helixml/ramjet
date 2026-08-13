@@ -1,5 +1,8 @@
+pub mod block_digest;
+
 pub mod compat;
 pub mod config;
+pub mod digest_index;
 pub mod exact_index;
 pub mod exact_shadow;
 pub mod journal;

@@ -2779,3 +2779,48 @@ an unrecoverable same-incarnation bootstrap storm. Next: production digest
 module/interface parity, snapshot-to-index benchmark, authenticated UDS
 handshake, actor bootstrap, then a shadow-only node06 rollout with no engine
 restart.
+
+## 2026-08-13 — issue #41 production digest index and differential gate
+
+The prototype is now a bounded production module, still disconnected from the
+serving path. Its canonical commitment is HMAC-SHA256 over a versioned domain,
+little-endian `u32` token count, and little-endian `u32` token IDs. The owned
+32-byte secret is neither cloneable nor serializable, debug output is redacted,
+and snapshots carry only its domain-separated key identity. RFC 4231 and fixed
+wire goldens pin the implementation. Primary/guard halves preserve compact
+radix lookup while every detected commitment or external-identity collision
+poisons the edge until the whole generation is discarded.
+
+Snapshot schema v2 adds `present` so a removed parent with live descendants
+round-trips without losing the exact index's reinsert behavior. Import accepts
+only a full-engine snapshot with exactly one indexed group until multi-group
+overlap semantics are defined. It preserves the prior index on key, scope,
+shape, capacity, cancellation, or record failure, bounds retained tombstone
+hash memory, and preserves bytes/signed/unsigned external-hash identity.
+Snapshot SHA-256 remains only corruption detection: authenticated UDS session
+binding plus incarnation and monotonic-watermark freshness are still hard
+preconditions for authority.
+
+The public differential oracle ran 32 deterministic seeds x 1,000 mutations,
+with two or more queries after every mutation, plus explicit variable-geometry,
+opaque-hash, parent tombstone, and reinsert cases. Raw `ExactKvIndex` and
+`DigestKvIndex` matches and normalized resident statistics were identical;
+there were zero digest overclaims.
+
+Matched release measurements on the development host:
+
+- 316 blocks / 80,896 tokens: raw lookup 50.534us, digest lookup 235.350us
+  (4.66x); raw build 0.254ms, digest build 0.331ms.
+- 2,048 blocks / 524,288 tokens: digest lookup 1.529ms.
+- 36,612-block / 9,372,672-token captured-shape snapshot: digest-index import
+  13.063ms and 1,171,584 commitment bytes.
+- Separate fresh-process 15,168-block / 3,883,008-token builds: raw exact RSS
+  delta 21,548KiB, digest RSS delta 8,124KiB (37.7% of raw); build 13.022ms
+  versus 17.066ms.
+
+All CPU gates passed: 80K <=250us and <=5x raw, 524K <=2ms, snapshot import
+<=100ms, and digest RSS <=60% of raw. This confirms the intended trade: much
+smaller recoverable state with modest additional lookup CPU, not faster HTTP
+or prefix lookup. No node06 process, container, or engine was changed. Next is
+the authenticated companion session/tail lifecycle and a shadow-only gate of
+at least 100,000 revision-stable comparisons before any placement use.

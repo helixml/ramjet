@@ -64,6 +64,7 @@ fn captured_shape() -> SnapshotBody {
             prefix_token_ids: u64::try_from(index + 1)
                 .expect("record index fits u64")
                 .saturating_mul(u64::from(BLOCK_SIZE)),
+            present: true,
         })
         .collect();
     SnapshotBody {

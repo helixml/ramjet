@@ -33,6 +33,7 @@ placement. Current measured landmarks:
 | r24 cache-counter reconciliation | **52/52; zero spread across response/LB/native views; 1/4/8 apps** |
 | r33 retained-replay attribution | **98.7% receive wait; 177.52s max publisher gap; decode 2.12s / fold 0.16s** |
 | #41 compact snapshot prototype | **36,612 blocks / 5.71MB; 10.3ms encode, 10.8ms validated decode, 27MiB RSS** |
+| #41 production digest index | **36,612-block import 13.1ms; 80K lookup 235us; 524K lookup 1.53ms; 37.7% of raw-index RSS** |
 
 Two r34 candidates were explicitly rejected after rolling B-only trials:
 manual KV bytes gained just 1.16% capacity while bypassing runtime profiling;

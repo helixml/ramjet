@@ -92,6 +92,25 @@ Rust tests and Go-generated fingerprint goldens; `pkg/router/router_test.go`
 is the cutover oracle. Add a Rust test for every routing change and retain a
 cross-language golden wherever Go/Rust parity matters.
 
+For compact-index work, keep the fast GPU-free correctness/performance loop
+separate from node06:
+
+```bash
+cargo test --locked --test digest_exact_parity
+cargo test --locked digest_index
+cargo run --release --locked --example digest_index_bench
+BENCH_MODE=exact-rss target/release/examples/digest_index_bench
+BENCH_MODE=digest-rss target/release/examples/digest_index_bench
+```
+
+The digest index is a memory/recovery optimization, not a faster lookup path.
+Its pre-shadow gates are: no overclaims in differential tests, matched 80K
+lookup at most 250us and 5x raw exact, 524K at most 2ms, 36,612-record import
+at most 100ms, and steady index RSS at most 60% of raw exact. Do not deploy a
+companion merely because these local gates pass: authenticated UDS session,
+incarnation/watermark freshness, gap fencing, and atomic tail catch-up remain
+mandatory.
+
 ## node06 — the test/production box
 
 node06 is a Tailscale host running two vLLM+DSpark TP4 instances behind this
