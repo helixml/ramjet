@@ -2709,3 +2709,23 @@ The canonical and infra-mirror Compose defaults are pinned to that digest.
 The already-running local candidate has the same manifest and was deliberately
 not recreated after publication: doing so would trigger another synchronous
 full-history replay against A without changing serving bytes or policy.
+
+Operational follow-up found that A's one permitted automatic retry also timed
+out after another 180.03s, with cumulative decode/fold still only 4.37s/0.32s
+and cumulative maximum receive gaps 355.03s. The consumer then stopped the
+immediate retry chain and returned to live observation, but any later live A
+event could request `0..current` again while the configured 10,000-step limit
+claimed that range was recoverable. The node06 default is therefore restored
+to 8,192. A sequence beyond that bound now stays fenced/observe-only without
+opening replay, while younger B histories remain recoverable. Exact placement
+is shadow with zero canary basis points, so this reduces publisher pressure
+without changing request routing.
+
+The public r33 image was recreated once with the 8,192 limit and reached 2/2
+serving health after the normal startup socket transition. One 256-repeat /
+one-output-token direct seed per engine proved the boundary: A stayed fenced
+and emitted no replay-duration series or replay reconnect, while B completed
+its short replay and became trusted at 926 blocks / 237,056 token IDs. Both
+engine restart counts remained zero. This is the final full-replay transport
+experiment; further recovery work proceeds through issue #41's snapshot
+companion and captured-shape mock gates.
