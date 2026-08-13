@@ -31,8 +31,8 @@ use crate::{
     companion_index_owner::{
         CompanionIndexOwner, CompanionIndexOwnerConfig, CompanionIndexOwnerError,
         CompanionIndexOwnerEvent, CompanionIndexOwnerObserver, CompanionIndexOwnerRebuildReason,
-        CompanionIndexOwnerReplayKind, CompanionIndexOwnerReplayOutcome, CompanionIndexOwnerReport,
-        ZmqCompanionKvEventConnector,
+        CompanionIndexOwnerReplayInvalidPhase, CompanionIndexOwnerReplayKind,
+        CompanionIndexOwnerReplayOutcome, CompanionIndexOwnerReport, ZmqCompanionKvEventConnector,
     },
     companion_index_source::{
         CompanionIndexSource, CompanionIndexSourceConfig, CompanionIndexSourceError,
@@ -673,6 +673,9 @@ fn owner_event_labels(event: &CompanionIndexOwnerEvent) -> (&'static str, &'stat
         CompanionIndexOwnerEvent::Replay { outcome, .. } => {
             ("replay", replay_outcome_label(*outcome))
         }
+        CompanionIndexOwnerEvent::ReplayInvalid(phase) => {
+            ("replay_invalid", replay_invalid_phase_label(*phase))
+        }
         CompanionIndexOwnerEvent::Ready => ("source", "ready"),
         CompanionIndexOwnerEvent::LiveApplied => ("live", "applied"),
         CompanionIndexOwnerEvent::LiveDuplicate => ("live", "duplicate"),
@@ -706,6 +709,15 @@ const fn replay_outcome_label(outcome: CompanionIndexOwnerReplayOutcome) -> &'st
         CompanionIndexOwnerReplayOutcome::TransportFailed => "transport_failed",
         CompanionIndexOwnerReplayOutcome::Invalid => "invalid",
         CompanionIndexOwnerReplayOutcome::Cancelled => "cancelled",
+    }
+}
+
+const fn replay_invalid_phase_label(phase: CompanionIndexOwnerReplayInvalidPhase) -> &'static str {
+    match phase {
+        CompanionIndexOwnerReplayInvalidPhase::Apply => "apply",
+        CompanionIndexOwnerReplayInvalidPhase::Boundary => "boundary",
+        CompanionIndexOwnerReplayInvalidPhase::Tail => "tail",
+        CompanionIndexOwnerReplayInvalidPhase::Commit => "commit",
     }
 }
 
@@ -1476,6 +1488,18 @@ mod tests {
                 .iter()
                 .any(|label| { label.name() == "reason" && label.value() == "replay_too_large" })
         );
+
+        for phase in [
+            CompanionIndexOwnerReplayInvalidPhase::Apply,
+            CompanionIndexOwnerReplayInvalidPhase::Boundary,
+            CompanionIndexOwnerReplayInvalidPhase::Tail,
+            CompanionIndexOwnerReplayInvalidPhase::Commit,
+        ] {
+            assert_eq!(
+                owner_event_labels(&CompanionIndexOwnerEvent::ReplayInvalid(phase)),
+                ("replay_invalid", replay_invalid_phase_label(phase))
+            );
+        }
     }
 
     #[test]

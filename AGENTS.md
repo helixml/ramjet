@@ -249,7 +249,9 @@ publish a partially validated gap. Generation-guard every blocking replay fold,
 make repeated connect failures and already-created clean stages idempotent, and
 keep observer events closed and content-free. If the current watermark or a
 live gap exceeds the replay limit, or a completed full replay is structurally
-invalid, keep the installed SUB connection in stable fenced observe-only mode.
+invalid or cannot apply/commit privately, keep the installed SUB connection in
+stable fenced observe-only mode. Preserve one closed phase reason for apply,
+boundary, tail, or commit failure so the next attempt is diagnostically final.
 Do not reconnect or repeat the same full-history request on each subsequent
 event: only an authoritative all-blocks clear or an attested incarnation change
 may restore trust without a complete valid replay from zero. A transport failure

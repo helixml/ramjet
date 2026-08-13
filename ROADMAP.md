@@ -666,9 +666,11 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   connection remains stably fenced and observe-only; ordinary subsequent events
   neither cause reconnect/generation churn nor restore authority, while a real
   all-blocks clear establishes a safe new boundary. The same rule now applies
-  after a structurally invalid completed full replay: repeating identical
-  history against the synchronous publisher cannot establish authority, while
-  transport failures remain retryable. The standalone
+  after a structurally invalid completed full replay or failed private
+  apply/commit: repeating identical history against the synchronous publisher
+  cannot establish authority, while transport failures remain retryable. A
+  bounded apply/boundary/tail/commit event makes that sole attempt diagnostic
+  without exposing sequences or content. The standalone
   offline Compose/security harness now models the current one-source runtime as
   two isolated processes and authority domains: distinct companions, UIDs,
   tmpfs directories, sockets, secrets, clients, and readiness checks per engine.
