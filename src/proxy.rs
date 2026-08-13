@@ -1523,8 +1523,7 @@ mod tests {
         task.abort();
     }
 
-    #[tokio::test]
-    async fn dropping_downstream_body_immediately_cancels_a_silent_upstream() {
+    async fn assert_dropping_downstream_body_cancels_silent_upstream(content_type: &'static str) {
         let dropped = Arc::new(AtomicBool::new(false));
         let notify = Arc::new(tokio::sync::Notify::new());
         let upstream_dropped = Arc::clone(&dropped);
@@ -1541,7 +1540,7 @@ mod tests {
                 });
                 Response::builder()
                     .status(StatusCode::OK)
-                    .header("content-type", "text/event-stream")
+                    .header("content-type", content_type)
                     .body(Body::from_stream(silent))
                     .unwrap()
             }
@@ -1588,6 +1587,84 @@ mod tests {
         );
         assert_eq!(proxy.router().state(0).unwrap().1, 0);
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn dropping_downstream_body_cancels_silent_sse_and_json_upstreams() {
+        assert_dropping_downstream_body_cancels_silent_upstream("text/event-stream").await;
+        assert_dropping_downstream_body_cancels_silent_upstream("application/json").await;
+    }
+
+    #[tokio::test]
+    async fn tcp_disconnect_before_headers_cancels_upstream_and_releases_load() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_notify = Arc::new(tokio::sync::Notify::new());
+        let upstream_entered = Arc::clone(&entered);
+        let upstream_dropped = Arc::clone(&dropped);
+        let upstream_dropped_notify = Arc::clone(&dropped_notify);
+        let upstream = AxumRouter::new().fallback(any(move || {
+            let signal = DropSignal {
+                dropped: Arc::clone(&upstream_dropped),
+                notify: Arc::clone(&upstream_dropped_notify),
+            };
+            let entered = Arc::clone(&upstream_entered);
+            async move {
+                entered.notify_one();
+                let _signal = signal;
+                std::future::pending::<Response<Body>>().await
+            }
+        }));
+        let (upstream_url, upstream_task) = start_upstream(upstream).await;
+        let proxy = proxy_for(&[upstream_url]);
+        let app = AxumRouter::new()
+            .fallback(any(Proxy::handle))
+            .with_state(proxy.clone());
+        let (proxy_url, proxy_task) = start_upstream(app).await;
+        let address = proxy_url
+            .socket_addrs(|| None)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let body = r#"{"messages":[{"role":"user","content":"disconnect TCP"}]}"#;
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(
+                format!(
+                    "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("upstream must receive the request before TCP disconnect");
+        assert_eq!(proxy.router().state(0).unwrap().0, 1);
+        assert_eq!(proxy.router().state(0).unwrap().1, 1);
+
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !dropped.load(Ordering::Acquire) {
+                dropped_notify.notified().await;
+            }
+        })
+        .await
+        .expect("TCP disconnect before headers must promptly drop the upstream request");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while proxy.router().state(0).unwrap().0 != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("TCP disconnect before headers must release route load");
+        assert_eq!(proxy.router().state(0).unwrap().1, 0);
+        proxy_task.abort();
+        upstream_task.abort();
     }
 
     #[tokio::test]

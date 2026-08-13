@@ -572,6 +572,13 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
 - Long scripts must emit bounded progress and support resume. Capture identity,
   restart count, JIT markers, and client/native token reconciliation per cell so
   a failed late gate does not invalidate earlier clean cells.
+- Treat the remote benchmark process as the client, not the local `ssh`
+  process. A lost local terminal can leave `ssh node06 '... | tee ...'` orphaned
+  with live HTTP sockets, which looks like failed proxy cancellation while it
+  continues consuming both TP4 pairs. Give every long remote cell a unique
+  salt/output path, record its PID/process group, and on interruption resolve
+  and terminate only that exact command before interpreting LB/vLLM inflight
+  gauges. Never use a broad `pkill` on the shared development box.
 
 ### Cache locality — `locality_bench.sh BASE APPS SESSIONS TURNS`
 
