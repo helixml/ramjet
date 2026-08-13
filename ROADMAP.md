@@ -701,7 +701,12 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   directories/GIDs 12004/12005, and Caddy UDS-only scrape routes. The host
   validator checks tmpfs ownership/modes and unique inodes before any start;
   Caddy is explicitly forbidden from session GID 12000. This is an admission
-  artifact only and has not changed node06.
+  artifact only and has not changed node06. A fixed, idempotent host-authority
+  helper now creates and validates the three non-login service identities,
+  six setgid tmpfs parents, and four independent secrets without overwriting or
+  repairing unsafe state. Caddy metrics membership remains a separate explicit
+  opt-in. Twelve mock/in-memory policy tests cover first-run/idempotent behavior,
+  collisions, unsafe paths and outputs, secret reuse, and Caddy isolation.
   The LB can now select one snapshot consumer per upstream behind the typed
   `DS4_SNAPSHOT_ROUTE_MODE=shadow` gate. Startup validates every protected
   authority and exact upstream cardinality before spawning reconnect owners;
@@ -720,9 +725,9 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   loss, rotation, channel closure, or a skipped revision revokes the old actor
   epoch before reconnect, while an unchanged identity causes no churn. Valid
   atomic engine rotation therefore no longer requires an LB restart. The
-  production-shaped dual-engine Compose/Caddy contract and host/semantic
-  validators are also complete. Next repin current images, then pass the host
-  preflight before an off-mode node06 start.
+  production-shaped dual-engine Compose/Caddy contract, host-authority setup,
+  and host/semantic validators are also complete. Next repin current images,
+  then pass the setup/host preflights before an off-mode node06 start.
   Compare at least 100,000 exact versus approximate decisions before placement
   can consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.

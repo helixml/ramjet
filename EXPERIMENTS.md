@@ -4265,3 +4265,28 @@ remains the rollback. The candidate is accepted and stays live: correctness,
 locality, balanced routing, isolated capacity, cancellation, health, restart,
 and real-workflow soak gates all passed. A future idle-box c24 sample may update
 the operating-range record but is not needed to manufacture a release result.
+
+## 2026-08-13 — r70 snapshot host-authority setup
+
+The remaining production-admission blocker for issue #41 was reproducible host
+authority. A fixed, idempotent helper now owns the exact service identities,
+six tmpfs authority directories, and four independent create-once secrets used
+by the dual-engine snapshot overlay. It has no production path or numeric-ID
+overrides, rejects name/number collisions and unsafe existing material before
+ordinary setup mutation, never repairs or overwrites secrets, and keeps Caddy
+membership behind a separate explicit metrics-only opt-in. Metadata and signed
+attestation outputs remain owned by their existing provisioners.
+
+Twelve in-memory policy tests passed in 0.001s, covering first apply and rerun,
+read-only completeness, identity collisions, unsafe paths/filesystems, hard
+links, invalid or reused secrets, bounded metadata, non-login accounts, and
+Caddy session-group exclusion. The existing Drone Python-discovery lane picks
+them up without a CI-pipeline change.
+
+A read-only node06 audit under the deployment lock found no conflicting names,
+UIDs, GIDs, paths, or secrets. `/run` is tmpfs and `/run/secrets` is currently
+absent, which is the expected safe first-run shape. The LB and both TP4 engines
+were running with zero restarts after the audit. No identity, group, directory,
+secret, Caddy membership, container, route, image, engine, or GPU state changed.
+The helper must land and pass Drone before an operator applies it; the first
+companion deployment remains snapshot-routing-off and engine-restart-free.

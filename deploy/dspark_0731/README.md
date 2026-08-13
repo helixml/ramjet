@@ -177,6 +177,9 @@ does not require their not-yet-created `engine.json` files. Run the two
 gate before starting either companion:
 
 ```bash
+sudo python3 deploy/dspark_0731/setup_snapshot_production_host.py
+sudo python3 deploy/dspark_0731/setup_snapshot_production_host.py --check
+
 SNAPSHOT_RUNTIME_DIR_A=/run/mini-dynamo-snapshot-a \
 SNAPSHOT_RUNTIME_DIR_B=/run/mini-dynamo-snapshot-b \
 SNAPSHOT_METRICS_DIR_A=/run/mini-dynamo-snapshot-metrics-a \
@@ -191,6 +194,40 @@ SNAPSHOT_ENGINE_METADATA_FILE_A=/run/mini-dynamo-engine-metadata-a.json \
 SNAPSHOT_ENGINE_METADATA_FILE_B=/run/mini-dynamo-engine-metadata-b.json \
   deploy/dspark_0731/validate-snapshot-production-host.sh
 ```
+
+The setup helper has no production path or numeric-identity overrides. It
+creates groups `12000`, `12004`, and `12005`; non-login service users
+`12001`, `12002`, and `12003`; the six exact setgid tmpfs directories; and four
+independent 32-byte secrets. It never overwrites a secret or repairs an unsafe
+existing identity/path. Name/ID collisions, symlinks, non-tmpfs authority,
+unexpected ownership/mode/link count, duplicate secret contents, and unsafe
+existing metadata or attestation outputs all fail before ordinary setup
+mutation. A partially completed safe first run can be rerun; `--check` is
+read-only and requires the managed identities, directories, and secrets.
+
+Metadata target files are deliberately not created: the helper validates their
+root-owned tmpfs parent and any existing target, then
+`bench/node06_engine_metadata.sh` creates the fresh mode-`0600` content. The
+attestation provisioners similarly own `engine.json` publication.
+
+Caddy membership is never changed by the default command. Only immediately
+before installing `Caddyfile.snapshot-companion`, opt in explicitly and rerun
+the read-only check:
+
+```bash
+sudo python3 deploy/dspark_0731/setup_snapshot_production_host.py \
+  --configure-caddy
+sudo python3 deploy/dspark_0731/setup_snapshot_production_host.py \
+  --check --configure-caddy
+```
+
+That grants the existing `caddy` identity only metrics GIDs `12004` and
+`12005`, preserves its other groups, and refuses to proceed if Caddy has either
+primary or supplementary membership in session GID `12000`. Use
+`--caddy-user NAME` only with `--configure-caddy` when the service account has
+a different explicit name. Restart the Caddy service after this explicit
+membership change so its long-lived process receives the new supplementary
+groups; no restart is required when running the default setup command.
 
 With the same exported paths, the bounded order is:
 
@@ -213,9 +250,9 @@ metadata is root-owned `0600`; provisioned attestations are root/session-group
 authority inode is unique.
 
 The overlay is an admission artifact, not a production enablement. Do not copy
-the Caddy snippet or start either profile until LB-side hot attestation refresh
-is merged, the current images are repinned, and the host validator passes on
-node06. The first rollout
+the Caddy snippet or start either profile until current images are repinned and
+both the setup helper's `--check` and the host validator pass on node06. The
+first rollout
 must keep `DS4_SNAPSHOT_ROUTE_MODE=off` (which also forces the exact-router
 gate off); enable `shadow` only after both
 companions are ready, then preserve ordinary approximate serving throughout.
