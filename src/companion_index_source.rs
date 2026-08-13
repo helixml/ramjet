@@ -501,7 +501,7 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::UnixStream,
         task::JoinHandle,
-        time::{Instant, timeout},
+        time::timeout,
     };
 
     use super::*;
@@ -659,6 +659,8 @@ mod tests {
         let producer = SnapshotProducer::new(
             SnapshotProducerConfig {
                 expected_peer_uid: uid,
+                snapshot_timeout: Duration::from_secs(2),
+                tail_idle_timeout: Duration::from_secs(2),
                 session_limits: SnapshotSessionLimits::default(),
                 tail_limits: TailWireLimits::default(),
                 tail_queue_capacity: 4,
@@ -668,11 +670,7 @@ mod tests {
             source,
         )
         .unwrap();
-        let task = tokio::spawn(async move {
-            producer
-                .handle(server, Instant::now() + Duration::from_secs(2))
-                .await
-        });
+        let task = tokio::spawn(async move { producer.handle(server).await });
         let hello = encode_client_hello(
             CHALLENGE,
             &SnapshotSessionSecret::new(SESSION_SECRET),

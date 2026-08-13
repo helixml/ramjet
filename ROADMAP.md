@@ -505,9 +505,10 @@ node06). The design rationale for each lives in DESIGN.md.
   identity change, and atomically publishes only a verifier-constructed opaque
   generation after caught-up. Epochs make stale disconnects harmless. The
   accept-loop supervisor and KV delta adapter are now complete: exactly two
-  client tasks run independently under one absolute deadline, excess clients
-  are closed immediately, shutdown drops stalled streams, and every exit frees
-  its slot. Authenticated payloads decode under existing vLLM bounds, filter to
+  client tasks run independently under either a configured absolute supervisor
+  deadline or handler-owned phase deadlines, excess clients are closed
+  immediately, shutdown drops stalled streams, and every exit frees its slot.
+  Authenticated payloads decode under existing vLLM bounds, filter to
   the selected local-GPU main-attention group, and apply store/remove/clear to
   actor-owned digest state; any late batch error clears the private generation
   before the actor fences it. Typed companion configuration now defaults off,
@@ -527,11 +528,15 @@ node06). The design rationale for each lives in DESIGN.md.
   existing two-client supervisor: it authenticates the hello before source
   work, subscribes live before snapshot construction, writes a bounded length-
   framed snapshot without EOF, then signs dense-sequenced tail events while
-  preserving sparse real watermarks. Bounded queues apply backpressure; client
-  EOF, slow-write deadline, shutdown, source failure, or identity rollover
-  cancels source work and ends the session without holding engine locks across
-  serialization or I/O. The LB reconnect owner now revalidates the trusted
-  socket parent on every connection, generates OS-random 256-bit challenges
+  preserving sparse real watermarks. One absolute snapshot budget covers hello,
+  source construction, authentication, and the snapshot write; after that,
+  received and successfully written tail frames reset bounded idle/write
+  budgets, so healthy progress is not killed by the bootstrap deadline. Bounded
+  queues apply backpressure; client EOF, tail idle/slow-write timeout, shutdown,
+  source failure, or identity rollover cancels source work and ends the session
+  without holding engine locks across serialization or I/O. The LB reconnect
+  owner now revalidates the trusted socket parent on every connection,
+  generates OS-random 256-bit challenges
   under a bounded nonreuse ledger, applies bounded half-to-full jittered
   exponential backoff, and carries one absolute deadline through connect and
   consumption. Normal attempts are serial; only an explicit capacity-one
@@ -555,10 +560,12 @@ node06). The design rationale for each lives in DESIGN.md.
   shutdown drain, cleanup, readiness, and closed-label aggregate metrics. It
   refuses missing sources and multi-source mode before filesystem mutation:
   the current authenticated hello does not identify an engine, so a two-engine
-  executable would be ambiguous. The coordinator uses the stricter snapshot or
-  tail-idle duration as its one absolute session deadline until phase-specific
-  deadlines exist. Next add authenticated engine selection or one socket per
-  engine, then inject the concrete source through a process-level driver that
+  executable would be ambiguous. The coordinator delegates one absolute
+  snapshot-phase timeout and a resettable tail-idle/write timeout to the
+  producer; the supervisor retains the two-client cap and immediate shutdown
+  cancellation without imposing a total lifetime on healthy progress. Next add
+  authenticated engine selection or one socket per engine, then inject the
+  concrete source through a process-level driver that
   owns `ZmqKvEventSource`, subscribe-before-replay, reconnects, complete sparse
   replay, and authenticated engine-incarnation refresh.
 

@@ -1,12 +1,13 @@
 //! Companion-side authenticated snapshot and live-tail session production.
 //!
-//! [`SnapshotSupervisor`](crate::snapshot_supervisor) owns admission and gives
-//! this handler an accepted stream plus one absolute deadline. This module
-//! verifies the peer before reading protocol bytes, authenticates the client
-//! hello, starts a bounded live-tail subscription before snapshot construction,
-//! and writes a length-framed snapshot followed by authenticated tail frames.
-//! Source callbacks return owned data; no source or engine lock is retained
-//! across serialization or socket I/O.
+//! [`SnapshotSupervisor`](crate::snapshot_supervisor) owns admission and
+//! shutdown cancellation. This handler owns one absolute snapshot-phase budget
+//! and a resettable tail-idle budget. It verifies the peer before reading
+//! protocol bytes, authenticates the client hello, starts a bounded live-tail
+//! subscription before snapshot construction, and writes a length-framed
+//! snapshot followed by authenticated tail frames. Source callbacks return
+//! owned data; no source or engine lock is retained across serialization or
+//! socket I/O.
 
 use std::{
     future::Future,
@@ -54,6 +55,8 @@ pub type SnapshotBuildFuture = Pin<
 #[derive(Clone, Debug)]
 pub struct SnapshotProducerConfig {
     pub expected_peer_uid: u32,
+    pub snapshot_timeout: std::time::Duration,
+    pub tail_idle_timeout: std::time::Duration,
     pub session_limits: SnapshotSessionLimits,
     pub tail_limits: TailWireLimits,
     pub tail_queue_capacity: usize,
@@ -353,8 +356,10 @@ pub enum SnapshotProducerSourceError {
 pub enum SnapshotProducerError {
     #[error("snapshot producer configuration is invalid")]
     InvalidConfig,
-    #[error("snapshot producer timed out")]
-    Timeout,
+    #[error("snapshot producer snapshot phase timed out")]
+    SnapshotTimeout,
+    #[error("snapshot producer tail became idle")]
+    TailIdleTimeout,
     #[error("snapshot producer I/O failed")]
     Io,
     #[error("snapshot producer peer credential lookup failed")]
@@ -388,7 +393,8 @@ impl SnapshotProducerError {
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::InvalidConfig => "invalid_config",
-            Self::Timeout => "timeout",
+            Self::SnapshotTimeout => "snapshot_timeout",
+            Self::TailIdleTimeout => "tail_idle_timeout",
             Self::Io => "io_failed",
             Self::PeerCredentialFailed => "peer_credential_failed",
             Self::PeerUidMismatch => "peer_uid_mismatch",
@@ -436,6 +442,8 @@ impl SnapshotProducer {
             || config.tail_queue_max_bytes < config.tail_limits.max_payload_bytes
             || config.tail_limits.max_frame_bytes == 0
             || config.tail_limits.max_payload_bytes >= config.tail_limits.max_frame_bytes
+            || config.snapshot_timeout.is_zero()
+            || config.tail_idle_timeout.is_zero()
         {
             return Err(SnapshotProducerError::InvalidConfig);
         }
@@ -446,30 +454,41 @@ impl SnapshotProducer {
         })
     }
 
-    /// Handle one supervisor-admitted stream under its supplied absolute deadline.
+    /// Handle one supervisor-admitted stream under phase-specific deadlines.
+    ///
+    /// The snapshot timeout is one absolute budget covering hello, source
+    /// build, authentication, and response write. After that response is sent,
+    /// each received-and-written tail frame resets the tail-idle budget. A
+    /// single blocked tail write is therefore also bounded by the idle budget;
+    /// regular progress may keep a healthy session alive indefinitely.
     ///
     /// # Errors
     ///
     /// Returns a content-free peer, protocol, source, framing, I/O, identity,
     /// cancellation, or deadline error.
-    pub async fn handle(
-        &self,
-        stream: UnixStream,
-        deadline: Instant,
-    ) -> Result<(), SnapshotProducerError> {
-        timeout_at(deadline, self.handle_until(stream))
-            .await
-            .map_err(|_| SnapshotProducerError::Timeout)?
+    pub async fn handle(&self, stream: UnixStream) -> Result<(), SnapshotProducerError> {
+        let deadline = Instant::now()
+            .checked_add(self.config.snapshot_timeout)
+            .ok_or(SnapshotProducerError::SnapshotTimeout)?;
+        self.handle_until(stream, deadline).await
     }
 
-    async fn handle_until(&self, mut stream: UnixStream) -> Result<(), SnapshotProducerError> {
+    async fn handle_until(
+        &self,
+        mut stream: UnixStream,
+        snapshot_deadline: Instant,
+    ) -> Result<(), SnapshotProducerError> {
         verify_peer(&stream, self.config.expected_peer_uid)?;
-        let challenge = read_authenticated_hello(
-            &mut stream,
-            &self.session_secret,
-            self.config.session_limits,
+        let challenge = timeout_at(
+            snapshot_deadline,
+            read_authenticated_hello(
+                &mut stream,
+                &self.session_secret,
+                self.config.session_limits,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| SnapshotProducerError::SnapshotTimeout)??;
         let (reader, writer) = stream.into_split();
         let (cancel_sender, cancel_receiver) = watch::channel(false);
         let cancellation = SnapshotProducerCancellation {
@@ -492,25 +511,28 @@ impl SnapshotProducer {
             .source
             .start(publisher, cancellation)
             .map_err(SnapshotProducerError::Source)?;
-        self.produce(
+        self.produce_snapshot(
             reader,
             writer,
             challenge,
             build,
             tail_receiver,
             &mut source_revocation,
+            snapshot_deadline,
         )
         .await
     }
 
-    async fn produce(
+    #[allow(clippy::too_many_arguments)]
+    async fn produce_snapshot(
         &self,
         mut reader: OwnedReadHalf,
         mut writer: OwnedWriteHalf,
         challenge: SnapshotSessionChallenge,
         mut build: SnapshotBuildFuture,
-        mut tail: mpsc::Receiver<QueuedTailEvent>,
+        tail: mpsc::Receiver<QueuedTailEvent>,
         source_revocation: &mut SnapshotProducerCancellation,
+        snapshot_deadline: Instant,
     ) -> Result<(), SnapshotProducerError> {
         let snapshot = tokio::select! {
             biased;
@@ -518,6 +540,9 @@ impl SnapshotProducer {
                 return Err(SnapshotProducerError::Source(SnapshotProducerSourceError::Cancelled));
             }
             read = read_client_signal(&mut reader) => return Err(read),
+            () = tokio::time::sleep_until(snapshot_deadline) => {
+                return Err(SnapshotProducerError::SnapshotTimeout);
+            }
             result = &mut build => result.map_err(SnapshotProducerError::Source)?,
         };
         let response = encode_authenticated_snapshot(
@@ -533,7 +558,14 @@ impl SnapshotProducer {
             self.config.session_limits,
         )
         .map_err(SnapshotProducerError::Session)?;
-        write_frame_or_revoked(&mut writer, &response, source_revocation).await?;
+        write_snapshot_frame(
+            &mut reader,
+            &mut writer,
+            &response,
+            source_revocation,
+            snapshot_deadline,
+        )
+        .await?;
 
         let tail_key = TailSessionKey::derive(
             &self.session_secret,
@@ -541,14 +573,30 @@ impl SnapshotProducer {
             snapshot.identity.companion_generation,
             TailDirection::CompanionToRouter,
         );
-        let mut state = TailWriteState {
+        let state = TailWriteState {
             identity: snapshot.identity,
             challenge,
             message_sequence: 1,
             delivery_sequence: 0,
             event_watermark: snapshot.watermark,
         };
+        self.produce_tail(reader, writer, tail, source_revocation, tail_key, state)
+            .await
+    }
+
+    async fn produce_tail(
+        &self,
+        mut reader: OwnedReadHalf,
+        mut writer: OwnedWriteHalf,
+        mut tail: mpsc::Receiver<QueuedTailEvent>,
+        source_revocation: &mut SnapshotProducerCancellation,
+        tail_key: TailSessionKey,
+        mut state: TailWriteState,
+    ) -> Result<(), SnapshotProducerError> {
         loop {
+            let idle_deadline = Instant::now()
+                .checked_add(self.config.tail_idle_timeout)
+                .ok_or(SnapshotProducerError::TailIdleTimeout)?;
             let event = tokio::select! {
                 biased;
                 () = source_revocation.cancelled() => {
@@ -557,10 +605,23 @@ impl SnapshotProducer {
                     ));
                 }
                 read = read_client_signal(&mut reader) => return Err(read),
+                () = tokio::time::sleep_until(idle_deadline) => {
+                    return Err(SnapshotProducerError::TailIdleTimeout);
+                }
                 event = tail.recv() => event.ok_or(SnapshotProducerError::TailClosed)?.event,
             };
             let terminal = state.encode(event, &tail_key, self.config.tail_limits)?;
-            write_frame_or_revoked(&mut writer, &terminal.frame, source_revocation).await?;
+            let write_deadline = Instant::now()
+                .checked_add(self.config.tail_idle_timeout)
+                .ok_or(SnapshotProducerError::TailIdleTimeout)?;
+            write_tail_frame(
+                &mut reader,
+                &mut writer,
+                &terminal.frame,
+                source_revocation,
+                write_deadline,
+            )
+            .await?;
             if let Some(outcome) = terminal.outcome {
                 return outcome;
             }
@@ -568,16 +629,38 @@ impl SnapshotProducer {
     }
 }
 
-async fn write_frame_or_revoked(
+async fn write_snapshot_frame(
+    reader: &mut OwnedReadHalf,
     writer: &mut OwnedWriteHalf,
     frame: &[u8],
     source_revocation: &mut SnapshotProducerCancellation,
+    deadline: Instant,
 ) -> Result<(), SnapshotProducerError> {
     tokio::select! {
         biased;
         () = source_revocation.cancelled() => Err(SnapshotProducerError::Source(
             SnapshotProducerSourceError::Cancelled,
         )),
+        read = read_client_signal(reader) => Err(read),
+        () = tokio::time::sleep_until(deadline) => Err(SnapshotProducerError::SnapshotTimeout),
+        result = write_frame(writer, frame) => result,
+    }
+}
+
+async fn write_tail_frame(
+    reader: &mut OwnedReadHalf,
+    writer: &mut OwnedWriteHalf,
+    frame: &[u8],
+    source_revocation: &mut SnapshotProducerCancellation,
+    deadline: Instant,
+) -> Result<(), SnapshotProducerError> {
+    tokio::select! {
+        biased;
+        () = source_revocation.cancelled() => Err(SnapshotProducerError::Source(
+            SnapshotProducerSourceError::Cancelled,
+        )),
+        read = read_client_signal(reader) => Err(read),
+        () = tokio::time::sleep_until(deadline) => Err(SnapshotProducerError::TailIdleTimeout),
         result = write_frame(writer, frame) => result,
     }
 }
@@ -825,6 +908,36 @@ mod tests {
         }
     }
 
+    struct ControlledSource {
+        snapshot: Mutex<Option<ProducerSnapshot>>,
+        publisher: Mutex<Option<SnapshotTailPublisher>>,
+    }
+
+    impl ControlledSource {
+        fn new(snapshot: ProducerSnapshot) -> Arc<Self> {
+            Arc::new(Self {
+                snapshot: Mutex::new(Some(snapshot)),
+                publisher: Mutex::new(None),
+            })
+        }
+
+        fn publisher(&self) -> SnapshotTailPublisher {
+            self.publisher.lock().unwrap().as_ref().unwrap().clone()
+        }
+    }
+
+    impl SnapshotProducerSource for ControlledSource {
+        fn start(
+            &self,
+            publisher: SnapshotTailPublisher,
+            _cancellation: SnapshotProducerCancellation,
+        ) -> Result<SnapshotBuildFuture, SnapshotProducerSourceError> {
+            *self.publisher.lock().unwrap() = Some(publisher);
+            let snapshot = self.snapshot.lock().unwrap().take().unwrap();
+            Ok(Box::pin(async move { Ok(snapshot) }))
+        }
+    }
+
     fn source(snapshot: ProducerSnapshot, events: Vec<ProducerTailEvent>) -> Arc<ScriptedSource> {
         Arc::new(ScriptedSource {
             snapshot: Mutex::new(Some(snapshot)),
@@ -837,6 +950,8 @@ mod tests {
     fn config(uid: u32) -> SnapshotProducerConfig {
         SnapshotProducerConfig {
             expected_peer_uid: uid,
+            snapshot_timeout: std::time::Duration::from_secs(2),
+            tail_idle_timeout: std::time::Duration::from_secs(2),
             session_limits: SnapshotSessionLimits::default(),
             tail_limits: TailWireLimits::default(),
             tail_queue_capacity: 2,
@@ -876,6 +991,56 @@ mod tests {
         frame
     }
 
+    async fn read_exact_without_advancing_time(stream: &UnixStream, bytes: &mut [u8]) {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            match stream.try_read(&mut bytes[offset..]) {
+                Ok(0) => panic!("snapshot peer closed early"),
+                Ok(read) => offset += read,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("snapshot peer read failed: {error}"),
+            }
+        }
+    }
+
+    async fn read_snapshot_without_advancing_time(
+        stream: &UnixStream,
+        limits: SnapshotSessionLimits,
+    ) -> Vec<u8> {
+        let mut frame = vec![0; SNAPSHOT_RESPONSE_LENGTH_PREFIX_BYTES];
+        read_exact_without_advancing_time(stream, &mut frame).await;
+        let total = authenticated_snapshot_frame_length(&frame, limits).unwrap();
+        frame.resize(total, 0);
+        read_exact_without_advancing_time(
+            stream,
+            &mut frame[SNAPSHOT_RESPONSE_LENGTH_PREFIX_BYTES..],
+        )
+        .await;
+        frame
+    }
+
+    async fn read_tail_without_advancing_time(
+        stream: &UnixStream,
+        limits: TailWireLimits,
+    ) -> Vec<u8> {
+        let mut frame = vec![0; TAIL_FRAME_LENGTH_PREFIX_BYTES];
+        read_exact_without_advancing_time(stream, &mut frame).await;
+        let total = tail_frame_length(&frame, limits).unwrap();
+        frame.resize(total, 0);
+        read_exact_without_advancing_time(stream, &mut frame[TAIL_FRAME_LENGTH_PREFIX_BYTES..])
+            .await;
+        frame
+    }
+
+    fn prevent_paused_clock_auto_advance() -> tokio::task::JoinHandle<()> {
+        tokio::spawn(std::future::poll_fn(|context| {
+            context.waker().wake_by_ref();
+            std::task::Poll::<()>::Pending
+        }))
+    }
+
     async fn hello(stream: &mut UnixStream, secret: &SnapshotSessionSecret) {
         let frame =
             encode_client_hello(CHALLENGE, secret, SnapshotSessionLimits::default()).unwrap();
@@ -889,6 +1054,33 @@ mod tests {
             source,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn rejects_zero_phase_or_idle_timeout() {
+        let snapshot_source = source(snapshot(identity("engine", 1), 0), Vec::new());
+        let mut producer_config = config(0);
+        producer_config.snapshot_timeout = std::time::Duration::ZERO;
+        assert!(matches!(
+            SnapshotProducer::new(
+                producer_config,
+                Arc::new(SnapshotSessionSecret::new(SECRET)),
+                snapshot_source
+            ),
+            Err(SnapshotProducerError::InvalidConfig)
+        ));
+
+        let snapshot_source = source(snapshot(identity("engine", 1), 0), Vec::new());
+        let mut producer_config = config(0);
+        producer_config.tail_idle_timeout = std::time::Duration::ZERO;
+        assert!(matches!(
+            SnapshotProducer::new(
+                producer_config,
+                Arc::new(SnapshotSessionSecret::new(SECRET)),
+                snapshot_source
+            ),
+            Err(SnapshotProducerError::InvalidConfig)
+        ));
     }
 
     fn tail_decoder<'a>(
@@ -933,11 +1125,7 @@ mod tests {
             ProducerTailEvent::Disconnect(id.clone()),
         ];
         let producer = producer(uid, source(snapshot(id.clone(), 10), events));
-        let task = tokio::spawn(async move {
-            producer
-                .handle(server, Instant::now() + std::time::Duration::from_secs(2))
-                .await
-        });
+        let task = tokio::spawn(async move { producer.handle(server).await });
         hello(&mut client, &SnapshotSessionSecret::new(SECRET)).await;
         let response = read_snapshot(&mut client, SnapshotSessionLimits::default()).await;
         let authenticated = decode_authenticated_snapshot(
@@ -1019,11 +1207,7 @@ mod tests {
         let bad_source = source(snapshot(identity("engine", 1), 0), Vec::new());
         let untouched = Arc::clone(&bad_source);
         let bad_producer = producer(uid, bad_source);
-        let task = tokio::spawn(async move {
-            bad_producer
-                .handle(server, Instant::now() + std::time::Duration::from_secs(1))
-                .await
-        });
+        let task = tokio::spawn(async move { bad_producer.handle(server).await });
         let mut bad = encode_client_hello(
             CHALLENGE,
             &SnapshotSessionSecret::new(SECRET),
@@ -1044,7 +1228,7 @@ mod tests {
         let source = source(snapshot(identity("engine", 1), 0), Vec::new());
         let untouched = Arc::clone(&source);
         let error = producer(actual.wrapping_add(1), source)
-            .handle(server, Instant::now() + std::time::Duration::from_secs(1))
+            .handle(server)
             .await
             .unwrap_err();
         assert!(matches!(error, SnapshotProducerError::PeerUidMismatch));
@@ -1063,11 +1247,7 @@ mod tests {
         });
         let cancelled = Arc::clone(&source.cancelled);
         let producer = producer(uid, source);
-        let task = tokio::spawn(async move {
-            producer
-                .handle(server, Instant::now() + std::time::Duration::from_secs(2))
-                .await
-        });
+        let task = tokio::spawn(async move { producer.handle(server).await });
         hello(&mut client, &SnapshotSessionSecret::new(SECRET)).await;
         drop(client);
         assert!(matches!(
@@ -1083,8 +1263,8 @@ mod tests {
         .unwrap();
     }
 
-    #[tokio::test]
-    async fn one_absolute_deadline_cancels_pending_source() {
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_phase_deadline_cancels_pending_source() {
         let (server, mut client) = UnixStream::pair().unwrap();
         let uid = server.peer_cred().unwrap().uid();
         let source = Arc::new(ScriptedSource {
@@ -1094,21 +1274,116 @@ mod tests {
             pending_build: true,
         });
         let cancelled = Arc::clone(&source.cancelled);
-        let producer = producer(uid, source);
-        let task = tokio::spawn(async move {
-            producer
-                .handle(
-                    server,
-                    Instant::now() + std::time::Duration::from_millis(30),
-                )
-                .await
-        });
+        let mut producer_config = config(uid);
+        producer_config.snapshot_timeout = std::time::Duration::from_millis(30);
+        let producer = SnapshotProducer::new(
+            producer_config,
+            Arc::new(SnapshotSessionSecret::new(SECRET)),
+            Arc::clone(&source) as Arc<dyn SnapshotProducerSource>,
+        )
+        .unwrap();
+        let task = tokio::spawn(async move { producer.handle(server).await });
+        let clock_guard = prevent_paused_clock_auto_advance();
         hello(&mut client, &SnapshotSessionSecret::new(SECRET)).await;
+        while source.events.lock().unwrap().is_some() {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(std::time::Duration::from_millis(31)).await;
         assert!(matches!(
             task.await.unwrap(),
-            Err(SnapshotProducerError::Timeout)
+            Err(SnapshotProducerError::SnapshotTimeout)
         ));
+        for _ in 0..10 {
+            if cancelled.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         assert!(cancelled.load(Ordering::Acquire));
+        clock_guard.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progressing_tail_survives_past_snapshot_deadline_and_resets_idle_budget() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let uid = server.peer_cred().unwrap().uid();
+        let id = identity("engine", 1);
+        let source = ControlledSource::new(snapshot(id.clone(), 0));
+        let mut producer_config = config(uid);
+        producer_config.snapshot_timeout = std::time::Duration::from_millis(10);
+        producer_config.tail_idle_timeout = std::time::Duration::from_millis(50);
+        let producer = SnapshotProducer::new(
+            producer_config,
+            Arc::new(SnapshotSessionSecret::new(SECRET)),
+            Arc::clone(&source) as Arc<dyn SnapshotProducerSource>,
+        )
+        .unwrap();
+        let task = tokio::spawn(async move { producer.handle(server).await });
+        let clock_guard = prevent_paused_clock_auto_advance();
+
+        hello(&mut client, &SnapshotSessionSecret::new(SECRET)).await;
+        let _ =
+            read_snapshot_without_advancing_time(&client, SnapshotSessionLimits::default()).await;
+        let publisher = source.publisher();
+
+        tokio::time::advance(std::time::Duration::from_millis(20)).await;
+        publisher
+            .send(ProducerTailEvent::CaughtUp {
+                identity: id.clone(),
+                event_watermark: 0,
+            })
+            .await
+            .unwrap();
+        let _ = read_tail_without_advancing_time(&client, TailWireLimits::default()).await;
+
+        tokio::time::advance(std::time::Duration::from_millis(40)).await;
+        publisher
+            .send(ProducerTailEvent::Batch {
+                identity: id,
+                event_watermark: 1,
+                payload: Bytes::from_static(b"progress"),
+            })
+            .await
+            .unwrap();
+        let _ = read_tail_without_advancing_time(&client, TailWireLimits::default()).await;
+        assert!(!task.is_finished());
+
+        publisher.revoke();
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(SnapshotProducerError::Source(
+                SnapshotProducerSourceError::Cancelled
+            ))
+        ));
+        clock_guard.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inactive_tail_expires_at_resettable_idle_deadline() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let uid = server.peer_cred().unwrap().uid();
+        let source = ControlledSource::new(snapshot(identity("engine", 1), 0));
+        let mut producer_config = config(uid);
+        producer_config.snapshot_timeout = std::time::Duration::from_millis(10);
+        producer_config.tail_idle_timeout = std::time::Duration::from_millis(50);
+        let producer = SnapshotProducer::new(
+            producer_config,
+            Arc::new(SnapshotSessionSecret::new(SECRET)),
+            source,
+        )
+        .unwrap();
+        let task = tokio::spawn(async move { producer.handle(server).await });
+        let clock_guard = prevent_paused_clock_auto_advance();
+
+        hello(&mut client, &SnapshotSessionSecret::new(SECRET)).await;
+        let _ =
+            read_snapshot_without_advancing_time(&client, SnapshotSessionLimits::default()).await;
+        tokio::time::advance(std::time::Duration::from_millis(51)).await;
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(SnapshotProducerError::TailIdleTimeout)
+        ));
+        clock_guard.abort();
     }
 
     #[tokio::test]
@@ -1186,7 +1461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slow_reader_hits_same_deadline_and_cancels_backpressured_source() {
+    async fn slow_tail_write_hits_idle_deadline_and_cancels_backpressured_source() {
         let (server, mut client) = UnixStream::pair().unwrap();
         let uid = server.peer_cred().unwrap().uid();
         let id = identity("engine", 1);
@@ -1199,22 +1474,22 @@ mod tests {
             .collect();
         let source = source(snapshot(id, 0), events);
         let cancelled = Arc::clone(&source.cancelled);
-        let producer = producer(uid, source);
-        let task = tokio::spawn(async move {
-            producer
-                .handle(
-                    server,
-                    Instant::now() + std::time::Duration::from_millis(100),
-                )
-                .await
-        });
+        let mut producer_config = config(uid);
+        producer_config.tail_idle_timeout = std::time::Duration::from_millis(100);
+        let producer = SnapshotProducer::new(
+            producer_config,
+            Arc::new(SnapshotSessionSecret::new(SECRET)),
+            source,
+        )
+        .unwrap();
+        let task = tokio::spawn(async move { producer.handle(server).await });
         hello(&mut client, &SnapshotSessionSecret::new(SECRET)).await;
         let _ = read_snapshot(&mut client, SnapshotSessionLimits::default()).await;
         // Deliberately stop reading before the large tail. The socket write and
-        // bounded source queue must remain inside the original session budget.
+        // bounded source queue must remain inside one tail-idle budget.
         assert!(matches!(
             task.await.unwrap(),
-            Err(SnapshotProducerError::Timeout)
+            Err(SnapshotProducerError::TailIdleTimeout)
         ));
         assert!(cancelled.load(Ordering::Acquire));
     }
@@ -1232,11 +1507,7 @@ mod tests {
                 vec![ProducerTailEvent::IdentityChanged(new)],
             ),
         );
-        let task = tokio::spawn(async move {
-            producer
-                .handle(server, Instant::now() + std::time::Duration::from_secs(1))
-                .await
-        });
+        let task = tokio::spawn(async move { producer.handle(server).await });
         hello(&mut client, &SnapshotSessionSecret::new(SECRET)).await;
         let _ = read_snapshot(&mut client, SnapshotSessionLimits::default()).await;
         let frame = read_tail(&mut client, TailWireLimits::default()).await;

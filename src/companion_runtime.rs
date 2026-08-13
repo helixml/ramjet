@@ -111,9 +111,9 @@ pub async fn run_snapshot_companion(
         source,
         shutdown,
         |listener, config, shutdown, producer| async move {
-            supervise_snapshot_sessions(listener, config, shutdown, move |stream, deadline| {
+            supervise_snapshot_sessions(listener, config, shutdown, move |stream, _deadline| {
                 let producer = Arc::clone(&producer);
-                async move { producer.handle(stream, deadline).await }
+                async move { producer.handle(stream).await }
             })
             .await
         },
@@ -163,12 +163,10 @@ where
         .ok_or(SnapshotCompanionRuntimeError::InvalidConfig)?;
     let engine = metrics.engine_slot(0)?;
 
-    // The current producer accepts one absolute deadline rather than separate
-    // snapshot-phase and resettable tail-idle deadlines. Keep the foundation
-    // fail-closed by using the stricter configured bound; do not silently
-    // relax either policy by adding them together.
-    let session_timeout = config.snapshot_deadline.min(config.tail_idle_deadline);
-    let supervisor_config = SnapshotSupervisorConfig::new(session_timeout)?;
+    // The producer owns its validated snapshot-phase and resettable tail-idle
+    // budgets. The supervisor retains admission and shutdown cancellation but
+    // does not impose an absolute lifetime on a healthy progressing tail.
+    let supervisor_config = SnapshotSupervisorConfig::handler_managed();
     if config.shutdown_deadline.is_zero() {
         return Err(SnapshotCompanionRuntimeError::InvalidConfig);
     }
@@ -187,6 +185,8 @@ where
     let producer = Arc::new(SnapshotProducer::new(
         SnapshotProducerConfig {
             expected_peer_uid: client_uid,
+            snapshot_timeout: config.snapshot_deadline,
+            tail_idle_timeout: config.tail_idle_deadline,
             session_limits: SnapshotSessionLimits {
                 max_hello_frame_bytes: SnapshotSessionLimits::default().max_hello_frame_bytes,
                 max_response_frame_bytes,
@@ -577,7 +577,7 @@ mod tests {
             shutdown,
             move |listener, supervisor, _, _| async move {
                 assert!(socket_ref.exists());
-                assert_eq!(supervisor.session_timeout, Duration::from_millis(100));
+                assert_eq!(supervisor.session_timeout, None);
                 let text = metric_text(registry_ref);
                 assert!(text.contains(
                     "ds4proxy_snapshot_companion_listening{engine=\"engine-0\"} 1"
