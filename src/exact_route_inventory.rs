@@ -46,6 +46,14 @@ impl ExactRouteInventory {
         Self::Snapshot(publication)
     }
 
+    /// Whether this inventory representation is qualified to select serving
+    /// placement. Compact companion snapshots are observation-only until their
+    /// production comparison gate is complete.
+    #[must_use]
+    pub const fn supports_placement(&self) -> bool {
+        matches!(self, Self::Direct(_))
+    }
+
     #[must_use]
     pub fn ready(&self) -> bool {
         self.marker().is_some()
@@ -145,5 +153,18 @@ mod tests {
                 Err(ExactInventoryLookupError::Untrusted)
             );
         }
+    }
+
+    #[test]
+    fn snapshot_capability_is_observation_only() {
+        let direct = ExactRouteInventory::direct(Arc::new(RwLock::new(
+            FencedExactKvInventory::new(8, ExactIndexLimits::default()),
+        )));
+        let snapshot = ExactRouteInventory::snapshot(Arc::new(Mutex::new(
+            SnapshotBootstrapActor::new(SnapshotActorLimits::default()).unwrap(),
+        )));
+
+        assert!(direct.supports_placement());
+        assert!(!snapshot.supports_placement());
     }
 }

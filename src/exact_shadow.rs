@@ -18,6 +18,7 @@ use crate::{
 #[derive(Clone)]
 pub struct ExactRouteShadow {
     inventories: Arc<[ExactRouteInventory]>,
+    placement_capable: bool,
     metrics: Arc<Metrics>,
     alpha: f64,
     max_overlap_units: usize,
@@ -187,8 +188,13 @@ impl ExactRouteShadow {
         alpha: f64,
         max_overlap_units: usize,
     ) -> Self {
+        let placement_capable = !inventories.is_empty()
+            && inventories
+                .iter()
+                .all(ExactRouteInventory::supports_placement);
         Self {
             inventories,
+            placement_capable,
             metrics,
             alpha,
             max_overlap_units,
@@ -247,6 +253,14 @@ impl ExactRouteShadow {
         policy: ExactPlacementPolicy,
         mode: ExactPlacementMode,
     ) {
+        // Capability is enforced here as well as by configuration parsing so
+        // library callers and future wiring cannot make compact snapshots
+        // serving-authoritative before qualification.
+        let mode = if mode.applies() && !self.placement_capable {
+            ExactPlacementMode::Shadow
+        } else {
+            mode
+        };
         let started = Instant::now();
         let result = self.evaluate_pre_route(token_ids, decision);
         self.metrics
@@ -796,6 +810,7 @@ fn usize_to_f64(value: usize) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use parking_lot::Mutex;
     use prometheus::Registry;
 
     use super::*;
@@ -803,6 +818,7 @@ mod tests {
         exact_index::{ExactIndexLimits, FencedExactKvInventory},
         kv_wire::{BlockStored, ExternalBlockHash, KvEvent, KvEventBatch},
         router::{CandidateState, Outcome},
+        snapshot_actor::{SnapshotActorLimits, SnapshotBootstrapActor},
     };
 
     fn candidate(index: usize, rank: usize, load_units: usize) -> CandidateState {
@@ -1002,6 +1018,49 @@ mod tests {
                 .with_label_values(&["control", "chat", "would_move"])
                 .get()
                 - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn snapshot_representation_forces_shadow_at_the_routing_boundary() {
+        let inventories = (0..2)
+            .map(|_| {
+                ExactRouteInventory::snapshot(Arc::new(Mutex::new(
+                    SnapshotBootstrapActor::new(SnapshotActorLimits::default()).unwrap(),
+                )))
+            })
+            .collect();
+        let registry = Registry::new();
+        let metrics = Arc::new(Metrics::new(&registry).unwrap());
+        let shadow = ExactRouteShadow::with_inventories(inventories, Arc::clone(&metrics), 1.0, 8);
+        let mut route = decision();
+        let original = route.clone();
+
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4],
+            &mut route,
+            ExactPlacementPolicy {
+                min_gain_tokens: 0,
+                max_load_delta: usize::MAX,
+            },
+            ExactPlacementMode::Placement,
+        );
+
+        assert_eq!(route, original);
+        assert_one(
+            metrics
+                .exact_route_placement
+                .with_label_values(&["shadow", "chat", "fallback"])
+                .get(),
+        );
+        assert!(
+            metrics
+                .exact_route_placement
+                .with_label_values(&["placement", "chat", "fallback"])
+                .get()
                 .abs()
                 < f64::EPSILON
         );

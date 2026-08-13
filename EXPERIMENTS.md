@@ -3817,8 +3817,8 @@ unpublished and the scorer fails closed. Engine-incarnation rotation currently
 requires a stateless LB restart because the expected attestation is pinned at
 startup.
 
-On current main, the integrated local gate passed 318 library tests plus 38
-integration/E2E tests (356 total), formatting, and strict all-target/all-feature
+On current main, the integrated local gate passed 320 library tests plus 38
+integration/E2E tests (358 total), formatting, and strict all-target/all-feature
 Clippy. No Compose, Caddy, node06 process, container, image, secret, route, or
 GPU state changed. The next boundary is fixed-cardinality LB reconnect/readiness
 metrics and production-shaped dual-domain Compose/Caddy validation; shadow
