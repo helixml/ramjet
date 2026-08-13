@@ -4,7 +4,8 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=cache,id=mini-dynamo-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=mini-dynamo-target,target=/src/target \
-    cargo build --release --locked && cp target/release/mini-dynamo /mini-dynamo
+    cargo build --release --locked --bin mini-dynamo \
+    && cp target/release/mini-dynamo /mini-dynamo
 
 FROM gcr.io/distroless/cc-debian12
 LABEL org.opencontainers.image.source="https://github.com/helixml/mini-dynamo"

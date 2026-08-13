@@ -3606,3 +3606,33 @@ were identical before and after; mini-dynamo remained 2/2 healthy with both
 non-writable under `/tmp` on node06, but no tool container, CUDA context, LB
 recreate, or benchmark ran. The next gate remains the separately acknowledged
 1MiB/two-GPU scout during a low-traffic window.
+
+## 2026-08-13 — r46 standalone single-engine snapshot companion
+
+The previously separate owner, source, producer, supervisor, and metrics pieces
+now compose into the off-by-default `mini-dynamo-snapshot-companion` executable.
+Serve mode accepts exactly one live/replay endpoint pair and one group geometry.
+Before binding metrics, connecting ZMQ, or publishing its Unix socket, it
+hardens and loads three distinct protected files: the session secret, digest
+secret, and an HMAC-authenticated engine-incarnation envelope. The refresh
+watch removes authority immediately on any filesystem, schema, field, or MAC
+failure and restores it only after a valid changed envelope. Owner telemetry is
+closed-label and content-free, including the stable `replay_too_large`
+observe-only state required by long-lived node06 engine A.
+
+One absolute shutdown deadline covers the owner, snapshot runtime, metrics
+server, and attestation watcher; tasks that miss it are aborted. The ordinary
+LB Dockerfile now names only `--bin mini-dynamo`, while the companion has a
+dedicated `Dockerfile.companion`. With one shared BuildKit target cache, the
+measured source builds were 42.3s for the LB followed by 9.7s for the companion;
+no-op warm builds were 2.16s and 3.38s. Final images were 14.27MB and 11.50MB.
+This preserves the fast LB-only loop instead of paying the observed extra
+roughly 41-second companion relink for every router image.
+
+The rebased gate passed 298 library tests, 31 integration/E2E tests, strict
+Clippy, formatting, release builds, off-mode executable/container smoke, and
+the dual-domain offline Compose validator. No production Compose, image push,
+or node06 state changed. The executable is intentionally not deployment-ready
+yet: a bounded host provisioner must derive and atomically write the authenticated
+incarnation from current engine metadata before either per-engine service can be
+enabled.

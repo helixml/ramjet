@@ -1,10 +1,12 @@
 pub mod block_digest;
 
+pub mod companion_attestation;
 pub mod companion_config;
 pub mod companion_index_owner;
 pub mod companion_index_source;
 pub mod companion_metrics;
 pub mod companion_runtime;
+pub mod companion_service;
 pub mod compat;
 pub mod config;
 pub mod digest_index;

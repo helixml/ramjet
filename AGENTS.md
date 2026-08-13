@@ -75,10 +75,11 @@ bench/build_transfer.sh rust-rNN-description-$(git rev-parse --short HEAD) --nod
 
 The cold first build still downloads the Rust base and compiles dependencies;
 judge the workflow by its warm edit/rebuild time. A dependency change is a
-legitimate one-time cold build. GitHub Actions uses `Swatinem/rust-cache` for
-dependency artifacts (including failed runs), and Drone fans Rust, Go, and the
-GPU-free protocol suite out in parallel. If a no-dependency CI change still
-does a cold compile, inspect the cache action before accepting the delay.
+legitimate one-time cold build. Drone fetches dependencies once, then fans
+Clippy and Rust tests into isolated target directories while Go, Python, and
+Compose run beside them. Build #205 completed the full PR gate in 58s versus
+69s for the prior serial Rust lane. If a no-dependency change regresses that
+loop, inspect the step timings and cache/export path before accepting it.
 
 `Cargo.toml` deliberately limits the crate package to Rust sources, examples,
 compatibility fixtures, and Cargo manifests. This keeps edits under `bench/`
@@ -211,6 +212,19 @@ fenced observe-only mode. Do not reconnect on each subsequent event: only an
 authoritative all-blocks clear or an attested incarnation change may restore
 trust without a complete replay from zero.
 
+`mini-dynamo-snapshot-companion` is the standalone one-engine composition. It
+must remain a separate binary and `Dockerfile.companion`; build the ordinary LB
+with `--bin mini-dynamo` so companion changes do not add a second release relink
+to the serving-image loop. Serve mode must preflight the session secret, digest
+secret, and authenticated incarnation file before any TCP bind, ZMQ connect, or
+UDS publication. Invalid attestation refreshes immediately remove authority;
+logs and metrics expose only closed reason labels. The container publishes no
+metrics port: loopback inside a bridge container is not host-scrapable. Add a
+separate, permission-isolated metrics UDS and Caddy/Prometheus wiring before a
+node06 rollout; never put Caddy in the snapshot/session authority group. The
+executable is not ready for node06 until the host-side attestation provisioner
+and production Compose wiring exist and pass the dual-domain validator.
+
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
 Validate the trusted socket parent on every connect, use a fresh OS-random
@@ -314,13 +328,13 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
 - Drone intentionally runs once per PR (and once after merge on `main`), not
   again for every feature-branch push. Its Rust lane omits a redundant release
   build: the local pre-push gate builds release, and Drone's post-merge main
-  pipeline builds and publishes the release container to GHCR (the Actions
-  GITHUB_TOKEN is denied write on that package — issue #39; the `publish-image`
-  step reads `ghcr_username`/`ghcr_token` Drone secrets instead). GitHub
-  Actions keeps format, Clippy, test, and deploy-config validation only. The
-  Drone image build runs in a fresh dind daemon, so it pays a cold cargo
-  release build on every publish; node06 deploys should keep using the warm
-  local `bench/build_transfer.sh` path.
+  pipeline builds and publishes the release container to GHCR. The
+  `publish-image` step reads `ghcr_username`/`ghcr_token` only on a main push;
+  pull-request containers never receive those secrets. GitHub Actions is not a
+  second CI system for this repository. Drone's PR quality budget is currently
+  about 58s; inspect and record regressions instead of adding duplicate gates.
+  Node06 deploys should keep using the warm local `bench/build_transfer.sh`
+  path because it reuses the development BuildKit cache.
 - Build the LB locally and stream it to node06 when the local amd64 Docker
   cache is warm. A typical warm LB transfer is seconds and avoids consuming
   node06's scarce 8-9GiB available host memory:

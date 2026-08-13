@@ -603,10 +603,13 @@ node06). The design rationale for each lives in DESIGN.md.
   two isolated processes and authority domains: distinct companions, UIDs,
   tmpfs directories, sockets, secrets, clients, and readiness checks per engine.
   Its default profile renders zero services, and static fault projection proves
-  one failed pair cannot publish or substitute through its healthy peer. Next
-  wire one authenticated owner/socket per engine into an executable and run at
-  least 100,000 revision-stable shadow comparisons before placement can consume
-  it.
+  one failed pair cannot publish or substitute through its healthy peer. A
+  dedicated off-by-default executable now composes exactly one authenticated
+  incarnation watch, ZMQ owner, long-lived source, snapshot socket, and bounded
+  metrics endpoint. It is built separately from the LB so ordinary router edits
+  do not relink both binaries. Next add the host-side authenticated-attestation
+  provisioner and production-shaped Compose wiring, then run at least 100,000
+  revision-stable shadow comparisons before placement can consume it.
 
   The off-by-default library runtime now composes typed config, hardened secret
   loading, bind-last safe socket publication, the bounded supervisor, producer,
@@ -618,9 +621,11 @@ node06). The design rationale for each lives in DESIGN.md.
   The coordinator delegates one absolute
   snapshot-phase timeout and a resettable tail-idle/write timeout to the
   producer; the supervisor retains the two-client cap and immediate shutdown
-  cancellation without imposing a total lifetime on healthy progress. Next
-  inject the completed process owner and its authenticated engine-incarnation
-  watch into each isolated executable instance.
+  cancellation without imposing a total lifetime on healthy progress. The
+  standalone process now injects the completed owner and a refreshable,
+  HMAC-authenticated engine-incarnation watch; any invalid refresh fences
+  authority immediately. Deployment remains blocked on generating that manifest
+  from current engine metadata without exposing either digest key or identity.
 
   A true offline public-stack harness now proves initial publication, live
   store/remove, rolling handoff, LB owner restart, companion shutdown/socket
