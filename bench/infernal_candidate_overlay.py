@@ -19,8 +19,11 @@ import subprocess
 import sys
 import tempfile
 
+from infernal_parser_probe import DEFAULT_CASES, load_cases
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+PARSER_CASE_COUNT = len(load_cases(DEFAULT_CASES))
 DEFAULT_ROOT = (
     REPO_ROOT / "deploy/node06/dspark_0731/infernal-r5-candidate"
 )
@@ -206,7 +209,7 @@ def run_parser(source: pathlib.Path, profile: str, identity: str) -> None:
         records = [json.loads(line) for line in completed.stdout.splitlines()]
     except json.JSONDecodeError as exc:
         raise CandidateError("parser_preflight") from exc
-    if completed.returncode or len(records) != 7 or not all(
+    if completed.returncode or len(records) != PARSER_CASE_COUNT or not all(
         record.get("passed") is True for record in records
     ):
         raise CandidateError("parser_preflight")
@@ -322,7 +325,7 @@ def prepare(
         "cache_fingerprint": manifest["cache_fingerprint"],
         "preflights": {
             "c128a": True,
-            "parser_cases": 7,
+            "parser_cases": PARSER_CASE_COUNT,
             "python_sources": len(manifest["changed_files"]),
         },
     }
