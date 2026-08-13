@@ -408,7 +408,12 @@ node06). The design rationale for each lives in DESIGN.md.
   hard stop was correctness: r4 leaked a DSML marker in the deterministic
   parallel-tool case (4/5), while adjacent r34 passed 5/5 cold and warm. B was
   rolled back. Do not test MBT8192, MTP0, offload, or custom all-reduce on this
-  image. No successor is packaged yet. A fixed candidate must first pass the
+  image. A source-locked thin successor overlay is now packaged but deliberately
+  not built, pushed, or deployed. Its GPU-free source gate reconstructs the
+  exact candidate tree, compiles an exact six-file V4-only allowlist, and passes
+  both the C128A invariant and all seven retained parser fixtures. A built
+  successor must still pass the same gates from its runtime source before any
+  GPU work. A fixed candidate must first pass the
   retained malformed-wrapper/orphan-invoke fixtures. A stdlib-only source gate
   now runs seven synthetic cases against the actual composed parser in about
   0.05s, emits no response content, and pins every V4 parser file touched by
@@ -422,8 +427,8 @@ node06). The design rationale for each lives in DESIGN.md.
   identity, rejects that layout for a candidate, and accepts only the fixed
   preallocated-capacity stride. This separately reported concurrent-decode
   corruption does not explain node06's sequential parser failure. Run the
-  source gate and retained parser fixtures before retesting from a new
-  revision-specific JIT cache and immutable one-engine overlay.
+  source gate and retained parser fixtures before retesting from the committed
+  new revision-specific JIT cache and immutable one-engine Compose overlay.
 
 - 🔨 **KV-event ground truth.** Subscribe to vLLM `kv_events` (block
   stored/removed) and replace the approximate LRU index with the engine's

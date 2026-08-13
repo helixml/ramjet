@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "candidate": "infernal-r5-v4-correctness",
+  "base_image": "voipmonitor/vllm:infernal-invocation-vllm3226eb7-b12x1584743-fi1ac6942-cu133-torch213-20260812-r4@sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6",
+  "base_image_digest": "sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6",
+  "source_root": "/opt/infernal-invocation/vllm",
+  "base_vllm_tree": "3226eb7ff642702908f502a2402f9d083d16511c",
+  "base_vllm_patch_sha256": "dec8963846acbd52dd76500900286fa596da83cafbe1abbc55a8b190e16b8279",
+  "overlay_patch": "r4-v4-correctness.patch",
+  "overlay_patch_sha256": "603673eb721df372cd5807097deea7d1605d100ee3fa88c87a52c45c002cf553",
+  "candidate_vllm_tree": "0eb3d442a49b78d194903d37fbff6dd86140e420",
+  "base_parser_source_id": "sha256:149a52d9d606899a47adb55f460de22ab06eee1d00e4c1e68e5065efeab3ade3",
+  "candidate_parser_source_id": "sha256:29c4307be05c78bfde1fbc043cc9189de66b85817a19e33b17eb76104319bbef",
+  "candidate_sparse_mla_blob_sha1": "b73026cf9c19f2ef8a30be272ed7b0d941b662a7",
+  "changed_files": [
+    "vllm/models/deepseek_v4/sparse_mla.py",
+    "vllm/parser/deepseek_v4.py",
+    "vllm/parser/engine/parser_engine.py",
+    "vllm/parser/engine/parser_engine_config.py",
+    "vllm/parser/engine/streaming_parser_engine.py",
+    "vllm/tool_parsers/utils.py"
+  ],
+  "cache_fingerprint": "cu133-torch213-vllm0eb3d442a4-b12x1584743fd9-lmcacheccccdfc37f",
+  "inputs": {
+    "vllm_51318": {
+      "kind": "semantic-port",
+      "head": "b5a04d25e8e9f3b01a26b57ea6644b71ce44c414",
+      "patch_sha256": "ae80086e6de06712524c3f7b5060c958623e3fd7bbde9bbdd1d34594b5d2795a"
+    },
+    "vllm_49117": {
+      "kind": "v4-only-port",
+      "head": "7ef0ae2480799e95fb7cb801a8105c1db2585164",
+      "upstream_patch_sha256": "5a56dfd4cf8d12a237a39df2993522ad9f5f2cd65603c1a0340a0eac7d585907",
+      "files": [
+        "vllm/parser/deepseek_v4.py",
+        "vllm/parser/engine/parser_engine.py",
+        "vllm/parser/engine/parser_engine_config.py",
+        "vllm/parser/engine/streaming_parser_engine.py",
+        "vllm/tool_parsers/utils.py"
+      ]
+    },
+    "vllm_51914": {
+      "kind": "exact-prefix-extension",
+      "issue": 51914,
+      "prefixes": [
+        "inline",
+        "lf"
+      ],
+      "scope": "deepseek-v4-only"
+    }
+  }
+}

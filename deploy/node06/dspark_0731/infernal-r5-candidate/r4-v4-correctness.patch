@@ -1,0 +1,439 @@
+diff --git a/vllm/models/deepseek_v4/sparse_mla.py b/vllm/models/deepseek_v4/sparse_mla.py
+index e8a58130fb12688125fd5e78ad897a3e7c8408b1..b73026cf9c19f2ef8a30be272ed7b0d941b662a7 100644
+--- a/vllm/models/deepseek_v4/sparse_mla.py
++++ b/vllm/models/deepseek_v4/sparse_mla.py
+@@ -20,7 +20,6 @@ from vllm.v1.attention.backend import (
+     MultipleOf,
+ )
+ from vllm.v1.attention.backends.mla.compressor_utils import (
+-    get_c128a_active_topk_width,
+     get_c128a_topk_width,
+     get_compressed_slot_mapping,
+ )
+@@ -312,11 +311,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
+         assert cm.positions is not None, (
+             "positions is required for C128A metadata build"
+         )
+-        active_topk_width = get_c128a_active_topk_width(
+-            cm.max_seq_len,
+-            self.compress_ratio,
+-            self.c128a_max_compressed,
+-        )
++        active_topk_width = self.c128a_max_compressed
+         block_size = self.kv_cache_spec.block_size // self.compress_ratio
+         global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
+             cm.positions[:num_total],
+diff --git a/vllm/parser/deepseek_v4.py b/vllm/parser/deepseek_v4.py
+index e167d3d436b1312e308bf27dfe4d8d40d03b6502..a0f69b97174cac3e68ecaae1b7a1324a41644e38 100644
+--- a/vllm/parser/deepseek_v4.py
++++ b/vllm/parser/deepseek_v4.py
+@@ -48,6 +48,14 @@ DSML_INVOKE_PREFIX = f'<{_DSML}invoke name="'
+ DSML_INVOKE_NAME_END = '">'
+ DSML_INVOKE_END = f"</{_DSML}invoke>"
+ DSML_PARAM_CLOSE = f"</{_DSML}parameter>"
++DSML_MALFORMED_TOOL_START = f"<{_DSML}toolcalls>"
++DSML_MALFORMED_INVOKE_PREFIX = DSML_MALFORMED_TOOL_START + DSML_INVOKE_PREFIX
++DSML_MALFORMED_INVOKE_PREFIX_LF = (
++    DSML_MALFORMED_TOOL_START + "\n" + DSML_INVOKE_PREFIX
++)
++# DeepSeek V3.2-style wrapper, recognized only to reject it as foreign
++DSML_FOREIGN_TOOL_START = f"<{_DSML}function_calls>"
++DSML_FOREIGN_TOOL_END = f"</{_DSML}function_calls>"
+ 
+ _ESCAPED_DSML = re.escape(_DSML)
+ _PARAM_RE = re.compile(
+@@ -135,6 +143,10 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
+             "INVOKE_NAME_END": DSML_INVOKE_NAME_END,
+             "INVOKE_END": DSML_INVOKE_END,
+             "PARAM_CLOSE": DSML_PARAM_CLOSE,
++            "MALFORMED_INVOKE_PREFIX": DSML_MALFORMED_INVOKE_PREFIX,
++            "MALFORMED_INVOKE_PREFIX_LF": DSML_MALFORMED_INVOKE_PREFIX_LF,
++            "FOREIGN_START": DSML_FOREIGN_TOOL_START,
++            "FOREIGN_END": DSML_FOREIGN_TOOL_END,
+         },
+         token_id_terminals={
+             "THINK_START": DSML_THINK_START,
+@@ -177,6 +189,46 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
+                 ParserState.TOOL_PREAMBLE,
+                 (),
+             ),
++            # Orphan invoke: at long context the model may omit the
++            # <｜DSML｜tool_calls> wrapper and emit the invoke directly.
++            # The invoke marker has no dedicated special token, so hold
++            # events and validate the parsed name before committing.
++            # Only names the request declared are accepted.
++            (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
++                ParserState.TOOL_NAME,
++                (EventType.TOOL_CALL_START,),
++                validate_tool_name=True,
++            ),
++            # Recover the exact malformed wrapper observed in #51914, but
++            # keep the whole prefix held until the following name validates.
++            # A rejected recovery is replayed byte-for-byte as content.
++            (ParserState.CONTENT, "MALFORMED_INVOKE_PREFIX"): Transition(
++                ParserState.TOOL_NAME,
++                (EventType.TOOL_CALL_START,),
++                validate_tool_name=True,
++            ),
++            (ParserState.CONTENT, "MALFORMED_INVOKE_PREFIX_LF"): Transition(
++                ParserState.TOOL_NAME,
++                (EventType.TOOL_CALL_START,),
++                validate_tool_name=True,
++            ),
++            # V3.2-style function_calls wrapper is foreign to V4: pass
++            # it and its contents through as plain content
++            (ParserState.CONTENT, "FOREIGN_START"): Transition(
++                ParserState.FOREIGN_BLOCK,
++                (EventType.TEXT_CHUNK,),
++            ),
++            (ParserState.FOREIGN_BLOCK, "FOREIGN_END"): Transition(
++                ParserState.CONTENT,
++                (EventType.TEXT_CHUNK,),
++            ),
++            # The native wrapper always wins over an unclosed foreign
++            # block, so a stray foreign start cannot disable tool
++            # parsing for the rest of the response.
++            (ParserState.FOREIGN_BLOCK, "TOOL_START"): Transition(
++                ParserState.TOOL_PREAMBLE,
++                (),
++            ),
+             (ParserState.TOOL_PREAMBLE, "INVOKE_PREFIX"): Transition(
+                 ParserState.TOOL_NAME,
+                 (EventType.TOOL_CALL_START,),
+@@ -208,6 +260,7 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
+             ParserState.REASONING: EventType.REASONING_CHUNK,
+             ParserState.TOOL_NAME: EventType.TOOL_NAME,
+             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
++            ParserState.FOREIGN_BLOCK: EventType.TEXT_CHUNK,
+         },
+         arg_converter=_dsml_arg_converter,
+         arg_structural_chars=frozenset(">"),
+diff --git a/vllm/parser/engine/parser_engine.py b/vllm/parser/engine/parser_engine.py
+index 7c346c5f20501aa338a7e1781f27a77d80d7cdf7..a58a1c2887f977e2db524f2495f98f841184e20e 100644
+--- a/vllm/parser/engine/parser_engine.py
++++ b/vllm/parser/engine/parser_engine.py
+@@ -29,6 +29,7 @@ from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserSt
+ from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+ from vllm.tool_parsers.utils import (
+     coerce_to_schema_type,
++    collect_tool_names,
+     extract_types_from_schema,
+     find_tool_name,
+     find_tool_properties,
+@@ -107,6 +108,7 @@ class ParserEngine(Parser):
+         self._engine = StreamingParserEngine(
+             parser_engine_config, tokenizer, vocab=self.vocab
+         )
++        self._engine.allowed_tool_names = self._declared_tool_names()
+ 
+         self._has_reasoning = (
+             "THINK_END" in parser_engine_config.token_id_terminals
+@@ -411,6 +413,11 @@ class ParserEngine(Parser):
+ 
+     # ── Private helpers ─────────────────────────────────────────────
+ 
++    def _declared_tool_names(self) -> frozenset[str] | None:
++        if not self._tools:
++            return None
++        return collect_tool_names(self._tools) or None
++
+     def _check_skip_tool_parsing(
+         self,
+         request: ChatCompletionRequest | ResponsesRequest,
+@@ -418,10 +425,21 @@ class ParserEngine(Parser):
+         tools = getattr(request, "tools", None)
+         if tools:
+             self._tools = tools
++            self._engine.allowed_tool_names = self._declared_tool_names()
++        else:
++            # The engine is reused across requests and reset() keeps this
++            # field, so it has to be cleared here.  Otherwise a request
++            # that declares no tools would inherit the names of the
++            # previous one and could recover a tool it never asked for.
++            self._engine.allowed_tool_names = None
+         if not self.skip_tool_parsing and not self._suppress_tool_calls:
+             tool_choice = getattr(request, "tool_choice", None)
+             if tool_choice == "none" and tools:
+                 self._suppress_tool_calls = True
++        # The engine needs the suppression state too: recovery
++        # transitions must not consume text that will never be allowed
++        # to become a tool call.
++        self._engine.suppress_tool_calls = self._suppress_tool_calls
+ 
+     def _strip_content_whitespace(
+         self,
+diff --git a/vllm/parser/engine/parser_engine_config.py b/vllm/parser/engine/parser_engine_config.py
+index ad83e331490a13e82b675d9eaf23aff323b279ef..196256706ead43b4e6d1bce6906eabb5a02034c0 100644
+--- a/vllm/parser/engine/parser_engine_config.py
++++ b/vllm/parser/engine/parser_engine_config.py
+@@ -33,6 +33,9 @@ class ParserState(Enum):
+     TOOL_NAME = auto()
+     TOOL_ARGS = auto()
+     TOOL_BETWEEN = auto()
++    # Inside a block belonging to a different model format; terminals
++    # matched here pass through as plain content.
++    FOREIGN_BLOCK = auto()
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -40,6 +43,11 @@ class Transition:
+     next_state: ParserState
+     events: tuple[EventType, ...] = field(default_factory=tuple)
+     skip_in_token_id_mode: bool = False
++    # Hold this transition's events until the tool name completes, then
++    # validate the name before committing to the tool call.  Set on
++    # recovery transitions whose trigger marker has no dedicated special
++    # token, so prose quoting the marker is not misparsed as a tool call.
++    validate_tool_name: bool = False
+ 
+ 
+ @dataclass(frozen=True)
+diff --git a/vllm/parser/engine/streaming_parser_engine.py b/vllm/parser/engine/streaming_parser_engine.py
+index 157a1796e854a93074cfc5367fe8302273999085..957d1a88e0658c2e7b06aab67a0acb7ffffd4a90 100644
+--- a/vllm/parser/engine/streaming_parser_engine.py
++++ b/vllm/parser/engine/streaming_parser_engine.py
+@@ -165,6 +165,17 @@ class StreamingParserEngine:
+         )
+ 
+         self.skip_tool_parsing = False
++        # Function names declared by the request, or None when unknown.
++        # Consulted only by transitions with ``validate_tool_name``;
++        # set per request by the owning ParserEngine, like
++        # ``skip_tool_parsing`` it survives reset().
++        self.allowed_tool_names: frozenset[str] | None = None
++        # True when the request asked for tool_choice "none".  Recovery
++        # transitions are skipped while set, so text that looks like a
++        # recovered tool call stays plain content instead of being
++        # consumed and then suppressed.  Set per request by the owning
++        # ParserEngine; survives reset() like ``skip_tool_parsing``.
++        self.suppress_tool_calls = False
+         self.reset(initial_state=initial_state)
+ 
+     def _reset_args_state(self) -> None:
+@@ -195,6 +206,14 @@ class StreamingParserEngine:
+         self._message_header_buffer = ""
+         self._in_skipped_tool_span = False
+         self._reset_args_state()
++        self._recovered_tool_call = False
++        self._pending_between_text = ""
++        self._hold_active = False
++        self._held_events: list[SemanticEvent] = []
++        self._held_raw: list[str] = []
++        self._held_name: list[str] = []
++        self._held_prior_state: ParserState = self.state
++        self._held_prior_tool_index: int = -1
+ 
+     def feed(
+         self,
+@@ -248,6 +267,12 @@ class StreamingParserEngine:
+ 
+         events.extend(self._process_lex_tokens(self._lexer.flush()))
+ 
++        if self._hold_active:
++            # Stream ended before the recovered tool name completed:
++            # the held events never validated, so flush the raw text
++            # as content in the pre-recovery state.
++            events.extend(self._abort_hold("".join(self._held_raw)))
++
+         if self._args_buffer:
+             events.append(
+                 SemanticEvent(
+@@ -327,6 +352,15 @@ class StreamingParserEngine:
+             # The projected skip state may not define the wrapper closer.
+             if self.skip_tool_parsing and terminal in self._tool_exit_terminals:
+                 self._in_skipped_tool_span = False
++            if self._hold_active and self.state == ParserState.TOOL_NAME:
++                # A terminal with no meaning inside a held tool name,
++                # for example a real tool call start token, ends the
++                # hold: replay the held text as content, then handle
++                # the terminal again in the restored state so it keeps
++                # its normal meaning.
++                events = self._abort_hold("".join(self._held_raw))
++                events.extend(self._on_terminal(terminal, value))
++                return events
+             return self._emit_for_state(value)
+ 
+         if self.skip_tool_parsing and terminal in self._tool_terminals:
+@@ -386,6 +420,23 @@ class StreamingParserEngine:
+         return self._apply_transition(transition, value)
+ 
+     def _emit_for_state(self, text: str) -> list[SemanticEvent]:
++        if self._hold_active and self.state == ParserState.TOOL_NAME:
++            candidate = "".join(self._held_name) + text
++            if not self._can_grow_into_declared_name(candidate):
++                # The held text can no longer become a declared tool
++                # name, so holding longer would only stall streaming.
++                # Release everything consumed so far as content.
++                return self._abort_hold("".join(self._held_raw) + text)
++            self._held_raw.append(text)
++            self._held_name.append(text)
++            self._held_events.append(
++                SemanticEvent(
++                    EventType.TOOL_NAME,
++                    value=text,
++                    tool_index=self.tool_index,
++                )
++            )
++            return []
+         if self.state == ParserState.MESSAGE_HEADER:
+             self._message_header_buffer += text
+             return []
+@@ -402,6 +453,24 @@ class StreamingParserEngine:
+         content_type = self.config.content_events.get(self.state)
+         if content_type is not None:
+             return [SemanticEvent(content_type, value=text, tool_index=self.tool_index)]
++        if self._recovered_tool_call and self.state == ParserState.TOOL_BETWEEN:
++            # A response that lost its opening wrapper usually loses the
++            # closing one too, so text after a recovered invoke is often
++            # the rest of the answer rather than padding before the next
++            # invoke.  Whitespace is held back because that is what
++            # padding looks like; as soon as anything else shows up the
++            # whole run is real output and goes out as content.
++            self._pending_between_text += text
++            if self._pending_between_text.strip():
++                held = self._pending_between_text
++                self._pending_between_text = ""
++                return [
++                    SemanticEvent(
++                        EventType.TEXT_CHUNK,
++                        value=held,
++                        tool_index=self.tool_index,
++                    )
++                ]
+         return []
+ 
+     def _on_content(self, text: str) -> list[SemanticEvent]:
+@@ -413,6 +482,87 @@ class StreamingParserEngine:
+         self,
+         transition: Transition,
+         value: str,
++    ) -> list[SemanticEvent]:
++        if self._hold_active:
++            return self._resolve_hold(transition, value)
++        if transition.validate_tool_name:
++            if self.suppress_tool_calls or self.allowed_tool_names is None:
++                # Recovery could never be accepted for this request, so
++                # the trigger text stays plain content and nothing is
++                # buffered.
++                return self._emit_for_state(value)
++            return self._begin_hold(transition, value)
++        return self._run_transition(transition, value)
++
++    def _begin_hold(
++        self,
++        transition: Transition,
++        value: str,
++    ) -> list[SemanticEvent]:
++        """Apply a ``validate_tool_name`` transition but hold its events.
++
++        The events (and every TOOL_NAME chunk that follows) stay
++        buffered until the name completes and validates, so a false
++        positive can be undone without having emitted anything.
++        """
++        prior_state = self.state
++        prior_tool_index = self.tool_index
++        self._held_events = self._run_transition(transition, value)
++        self._held_raw = [value]
++        self._held_name = []
++        self._held_prior_state = prior_state
++        self._held_prior_tool_index = prior_tool_index
++        self._hold_active = True
++        self._recovered_tool_call = True
++        return []
++
++    def _resolve_hold(
++        self,
++        transition: Transition,
++        value: str,
++    ) -> list[SemanticEvent]:
++        """End the hold window at the name-completing transition."""
++        name = "".join(self._held_name)
++        allowed = self.allowed_tool_names
++        if allowed is not None and name in allowed:
++            events = self._held_events
++            self._clear_hold()
++            events.extend(self._run_transition(transition, value))
++            return events
++        return self._abort_hold("".join(self._held_raw) + value)
++
++    def _abort_hold(self, raw: str) -> list[SemanticEvent]:
++        """Discard held events and re-emit the raw text as content."""
++        self.state = self._held_prior_state
++        self.tool_index = self._held_prior_tool_index
++        self._recovered_tool_call = self._held_prior_state in self._TOOL_STATES
++        self._clear_hold()
++        return self._emit_for_state(raw)
++
++    def _clear_hold(self) -> None:
++        self._hold_active = False
++        self._held_events = []
++        self._held_raw = []
++        self._held_name = []
++
++    def _can_grow_into_declared_name(self, candidate: str) -> bool:
++        """Return True when *candidate* is a prefix of a declared tool name.
++
++        Consulted while a recovery hold is active.  Membership in the
++        declared set is the only way a held name can validate, so once
++        the text seen so far stops being a prefix of any declared name
++        the caller aborts the hold.  This also bounds how much text a
++        hold can buffer to the length of the longest declared name.
++        """
++        allowed = self.allowed_tool_names
++        if allowed is None:
++            return False
++        return any(name.startswith(candidate) for name in allowed)
++
++    def _run_transition(
++        self,
++        transition: Transition,
++        value: str,
+     ) -> list[SemanticEvent]:
+         events: list[SemanticEvent] = []
+         previous_state = self.state
+@@ -432,10 +582,17 @@ class StreamingParserEngine:
+             )
+             self._args_buffer = ""
+ 
++        # Whatever is still held between invokes is whitespace padding,
++        # which the wrapped path drops too.
++        self._pending_between_text = ""
++
+         if previous_state == ParserState.MESSAGE_HEADER:
+             message_header = self._message_header_buffer
+             self._message_header_buffer = ""
+ 
++        if transition.next_state not in self._TOOL_STATES:
++            self._recovered_tool_call = False
++
+         self.state = transition.next_state
+ 
+         for event_type in transition.events:
+diff --git a/vllm/tool_parsers/utils.py b/vllm/tool_parsers/utils.py
+index 98ea9cc1954971c01bda05ccd871decb975ebb2b..fdf9f39c2173ba0d7d0c78f85e95a386325da8d2 100644
+--- a/vllm/tool_parsers/utils.py
++++ b/vllm/tool_parsers/utils.py
+@@ -290,6 +290,23 @@ def find_tool_properties(
+     return {}
+ 
+ 
++def collect_tool_names(tools: list[Tool] | None) -> frozenset[str]:
++    """Collect the names of all declared function tools."""
++    if not tools:
++        return frozenset()
++    names: set[str] = set()
++    for tool in tools:
++        if isinstance(tool, (FunctionTool, NamespaceTool)):
++            for name, _ in iter_response_function_tool_info(tool):
++                names.add(name)
++            continue
++        if not _is_function_tool(tool):
++            continue
++        name, _ = _extract_tool_info(tool)
++        names.add(name)
++    return frozenset(names)
++
++
+ def find_tool_name(
+     tools: list[Tool] | None,
+     tool_name: str,
