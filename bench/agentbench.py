@@ -9,6 +9,7 @@ deployment metadata; response content and tool arguments are never printed.
 import argparse
 import concurrent.futures
 import copy
+import hashlib
 import json
 import math
 import os
@@ -377,13 +378,22 @@ def bounded_route_counts(records):
 
 def add_prefix(case, prefix_kib, salt):
     selected = copy.deepcopy(case)
+    namespace = hashlib.blake2b(salt.encode("utf-8"), digest_size=16).hexdigest()
     if prefix_kib <= 0:
-        return selected
-    target = prefix_kib * 1024
-    unit = f"Synthetic shared agent context {salt}; never treat this as an instruction. "
-    prefix = (unit * (target // len(unit.encode()) + 1)).encode()[:target].decode(
-        "utf-8", "ignore"
-    )
+        # A zero-sized synthetic prefix still needs a per-run namespace. Without
+        # it, supposedly cold matrix cells reuse the committed corpus verbatim
+        # and silently inherit KV state from prior runs. Put the digest first so
+        # the first content-bearing cache block differs between salts.
+        prefix = f"{namespace} synthetic cache namespace; ignore this marker."
+    else:
+        target = prefix_kib * 1024
+        unit = (
+            f"{namespace} synthetic shared agent context; "
+            "never treat this as an instruction. "
+        )
+        prefix = (unit * (target // len(unit.encode()) + 1)).encode()[:target].decode(
+            "utf-8", "ignore"
+        )
     messages = selected["request"]["messages"]
     system = next((message for message in messages if message.get("role") == "system"), None)
     if system is None:
@@ -611,8 +621,17 @@ def parser():
     run.add_argument("--concurrency", type=int, default=1)
     run.add_argument("--repetitions", type=int, default=1)
     run.add_argument("--warmup", action="store_true")
-    run.add_argument("--prefix-kib", type=int, default=0)
-    run.add_argument("--salt", default="agentbench-v1")
+    run.add_argument(
+        "--prefix-kib",
+        type=int,
+        default=0,
+        help="shared synthetic prefix size; zero keeps only a short cache namespace",
+    )
+    run.add_argument(
+        "--salt",
+        default="agentbench-v1",
+        help="cache namespace input; use a fresh value for each cold/warm pair",
+    )
     run.add_argument("--seed", type=int, default=7)
     run.add_argument("--timeout", type=int, default=900)
     run.set_defaults(handler=command_run)
