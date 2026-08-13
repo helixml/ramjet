@@ -429,6 +429,14 @@ node06). The design rationale for each lives in DESIGN.md.
   corruption does not explain node06's sequential parser failure. Run the
   source gate and retained parser fixtures before retesting from the committed
   new revision-specific JIT cache and immutable one-engine Compose overlay.
+  That r5 overlay built in 16.25s and reached API-ready on isolated B in 12m32s,
+  but its first deterministic five-case gate passed only 3/5: typed-required
+  emitted an extra call with invalid JSON, and parallel-required emitted a third
+  call with a duplicate `engine` argument. Late JIT also remained in the first
+  measured interval. It was rejected and rolled back before any c8 scout,
+  matrix, LB exposure, or Helix workflow. Do not retry this tree; the next
+  successor needs goldens for actual model-emitted extra/malformed calls in
+  addition to synthetic parser shapes.
 
 - 🔨 **KV-event ground truth.** Subscribe to vLLM `kv_events` (block
   stored/removed) and replace the approximate LRU index with the engine's
