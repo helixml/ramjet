@@ -493,10 +493,22 @@ impl CompanionMetrics {
     }
 
     pub fn record_session(&self, engine: CompanionEngineSlot, result: CompanionSessionResult) {
+        self.record_sessions(engine, result, 1);
+    }
+
+    /// Record an aggregate of terminal sessions without expanding a bounded
+    /// supervisor report into one increment per connection.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn record_sessions(
+        &self,
+        engine: CompanionEngineSlot,
+        result: CompanionSessionResult,
+        count: u64,
+    ) {
         let (outcome, reason) = result.labels();
         self.session_results
             .with_label_values(&[engine.label(), outcome, reason])
-            .inc();
+            .inc_by(count as f64);
     }
 
     /// Update one of the two bounded per-client queue series.
