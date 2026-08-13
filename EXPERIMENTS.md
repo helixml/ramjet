@@ -3647,6 +3647,82 @@ The executable is intentionally not deployment-ready yet: a bounded host
 provisioner must derive and atomically write the authenticated incarnation from
 current engine metadata before either per-engine service can be enabled.
 
+## 2026-08-13 — issue #41 permission-isolated companion metrics UDS
+
+The standalone companion metrics server now has an explicit endpoint type:
+loopback TCP remains available for local use, while
+`DS4_SNAPSHOT_METRICS_SOCKET_PATH` selects a Unix listener only when a dedicated
+non-root `DS4_SNAPSHOT_METRICS_GROUP_GID` is also supplied. TCP and UDS settings
+are mutually exclusive. UDS configuration rejects non-normalized/oversized
+paths and any parent shared with the snapshot socket before filesystem work.
+
+Runtime validation goes further than path inequality. Both parents must be
+symlink-free, companion-owned, and non-writable by group or other. The metrics
+parent and snapshot parent must both be setgid and group-traversable, its
+configured group must differ from the snapshot/session parent's actual group,
+and the published mode-0660 metrics socket must inherit that group. Publication
+reuses the hardened unique-private
+bind plus hard-link no-replace protocol; shutdown removes only the same device
+and inode, so a replacement pathname is never unlinked. Protected session,
+digest, and attestation inputs still validate before either metrics endpoint is
+bound. Endpoint debug and typed errors expose no path, address, or group value.
+
+Focused tests cover TCP/UDS ambiguity, group requirements, parent separation,
+live HTTP metrics over UDS, inherited mode/group, graceful cleanup, rejection of
+the snapshot authority group, and preservation of a pre-existing target. The
+first shared-target compile plus focused config test took 26.36s after the
+module changed; the immediately warm two-test UDS loop took 0.82s. Because a
+parallel branch legitimately owned the canonical cache, the widened gate used
+an isolated disk-backed target: strict Clippy was green after a 53.96s cold
+dependency build and 6.70s incremental rerun, all 336 Rust tests passed in
+61.00s, and the cold thin-LTO release build took 115.21s. In parallel, the Go
+gate took 1.12s, 101 Python tests took 0.68s, and offline Compose validation took
+0.42s. This is a concurrency tradeoff, not a new normal inner-loop baseline;
+the final warmed focused test and strict Clippy took 8.81s and 3.48s. The final
+all-test rerun took 7.23s and the source-change thin-LTO relink took 34.63s in
+that isolated cache. No Compose, Caddy, node06 process, container, engine, or
+production route changed. The next deployment gate is to extend the offline
+dual-domain fixture and validator with
+per-engine metrics-only groups and scraper paths.
+
+## 2026-08-13 — r52 offline host engine-attestation provisioner
+
+Issue #41's remaining host writer is now implemented as the separate one-shot
+`mini-dynamo-attestation-provisioner`. It accepts no arguments and receives only
+three protected paths, numeric output ownership, and a bounded capture age from
+the environment. Docker inspection stays in the independently privileged
+`node06_engine_metadata.sh` capture step; the helper now records the actual
+vLLM process start from `/proc/<pid>/stat` and host boot time rather than using
+the earlier, weaker container start as the authoritative process epoch. The
+provisioner has no Docker or network capability and rejects schema changes,
+unknown identity fields, missing verification state, stale/future/pre-process
+captures, malformed digests, and unqualified supplied receipts.
+
+The derived incarnation hashes a canonical allow-listed immutable evidence set
+while intentionally omitting capture time and normalizing repository-digest
+order. Publication holds an exclusive lock on the trusted output parent, checks
+the preexisting inode, writes a random `create_new` file in the same directory,
+fsyncs content, assigns exact owner/group/mode `0440`, fsyncs again, atomically
+renames, fsyncs the directory, and performs an authenticated read-back. An
+authenticated same identity is a no-write success; an older process, different
+evidence for the same process, corrupt existing envelope, unsafe output inode,
+or competing publisher fails closed without replacement. CLI errors contain
+only bounded reason labels; success emits nothing.
+
+Focused tests covered create/idempotence, stable capture refresh, valid process
+replacement, rollback, same-process conflict, stale/future/pre-start inputs,
+receipt authority, unsafe metadata permissions, symlink output, corrupt output,
+unknown fields, parent-lock contention, redacted config, no-argument CLI, and a
+real subprocess round trip. Final local gates passed 309 Rust unit tests plus 38
+integration/E2E tests (347 total), strict all-target/all-feature Clippy,
+formatting, release build, Go parity/vet/format, 101 Python tests and agent
+validation, shell syntax, and the offline dual-domain Compose validator. Warm
+timings were 0.28s format, 3.70s Clippy, 7.45s Rust tests, 34.49s all-bin release,
+0.89s Go, 0.50s Python, and 0.18s Compose; the first isolated provisioner release
+build was 69.75s and produced a 561,736-byte binary. No node06, Compose, CI,
+container, image, secret, or production state changed. Per-engine service
+manager/Compose capture wiring remains the next deployment boundary.
+
 ## 2026-08-13 — Drone-only quality and release-cache iteration gate
 
 All CI tests moved from GitHub Actions into one Drone pipeline. Cargo fetches
@@ -3671,3 +3747,39 @@ publisher and 171-second pipeline, that is an 86% publisher reduction and 58%
 end-to-end reduction for a non-Rust change. The measured PR quality loop remains
 58–66 seconds. Retain this design and treat a no-Rust publisher materially above
 14 seconds as a cache-regression investigation, not normal variance.
+
+## 2026-08-13 — r54 GPU-free correctness, eviction, and image iteration gates
+
+Three independent pre-deployment gates were integrated without touching
+node06. The agent response harness now has source-locked forced-choice JSON
+fallback fixtures for streaming and non-streaming output and an `n=2` case
+that proves tool-call assembly is isolated per choice. The complete Python
+suite passed 105 tests. This validates the northbound response shape and local
+assembly contract; it deliberately does not claim to execute a candidate
+vLLM parser.
+
+The captured companion eviction shape was replayed for 20 iterations: 3,840
+apply calls, 2,442 removals per shape (882 selected main-attention blocks and
+1,560 filtered non-main blocks), and the exact expected final inventory of
+2,574 blocks. Measured apply latency was 0.38us p50, 0.95us p95, 1.55us p99,
+and 45.45us maximum. This is a conservative no-subscriber upper bound on the
+source critical section and clears the 10ms optimization trigger by more than
+two orders of magnitude; immutable/COW index generations are not justified by
+the current profile.
+
+The companion image now carries both the default snapshot-companion entrypoint
+and the separately invoked attestation provisioner, so deployment does not
+need a third publisher. A cold local Docker build after adding the `chrono`
+dependency spent 58.25s on dependencies and 33.38s on the source/thin-LTO
+relink; an unchanged rebuild completed in 2.3s with every build layer cached.
+Container smoke proved default off mode exits successfully, while the
+provisioner fails closed with content-free `missing_setting` and
+`invalid_arguments` reasons. The integrated local gate passed 311 library
+tests plus 38 integration tests and strict all-target/all-feature Clippy.
+
+Drone's rolling edge tags are now path-gated to actual image inputs. Build
+#223 showed why: a docs-only publish completed quickly but replaced reusable
+intermediate metadata, so the next Rust build paid a 57s dependency rebuild.
+Markdown, benchmark, and deployment-only changes now finish after the quality
+gate and cannot rewrite either edge tag. The next source-changing main build
+is the registry-cache seed/acceptance measurement for this combined image.

@@ -238,7 +238,13 @@ node06). The design rationale for each lives in DESIGN.md.
   synthetic v1 JSONL corpus and privacy-safe runner now cover stream/non-stream,
   automatic/required/parallel tool calls, split deltas and DSML leaks, every
   JSON argument class plus `arguments`/`input`, and retained reasoning/tool
-  history. Eighteen GPU-free parser/schema tests run in Drone. The first
+  history. Eighteen GPU-free parser/schema tests run in Drone. Source-locked
+  response-shape fixtures now also cover forced-choice JSON fallback in
+  streaming and non-streaming responses plus `n=2` choice-local call IDs. The
+  harness keeps assembly state per choice, matching the OpenAI contract instead
+  of falsely treating identical IDs in different choices as duplicates. These
+  fixtures validate the northbound contract without a GPU; they do not
+  substitute for executing a candidate vLLM parser. The first
   node06 gates passed 5/5 deterministic c1 and 10/10 deterministic c8 cases; a
   five-run official-agentic auto+stream probe also passed 5/5 with no DSML leak. The matrix records image,
   model/config/tokenizer/router provenance, TTFT, mean ITL, throughput, cache,
@@ -606,10 +612,19 @@ node06). The design rationale for each lives in DESIGN.md.
   one failed pair cannot publish or substitute through its healthy peer. A
   dedicated off-by-default executable now composes exactly one authenticated
   incarnation watch, ZMQ owner, long-lived source, snapshot socket, and bounded
-  metrics endpoint. It is built separately from the LB so ordinary router edits
-  do not relink both binaries. Next add the host-side authenticated-attestation
-  provisioner and production-shaped Compose wiring, then run at least 100,000
-  revision-stable shadow comparisons before placement can consume it.
+  metrics endpoint. The endpoint may now be either loopback TCP or a mutually
+  exclusive metrics UDS. UDS startup requires a normalized path in a distinct
+  companion-owned setgid parent, a dedicated non-root group different from the
+  snapshot/session parent group, setgid isolation on both authority parents,
+  verified group inheritance, atomic no-replace publication, and inode-checked
+  cleanup. It is built separately from the LB so ordinary router edits do not
+  relink both binaries. A host-side authenticated-attestation provisioner
+  now consumes a fresh protected schema-v1 engine metadata capture, derives a
+  canonical immutable identity, rejects rollback/conflict, and atomically
+  publishes the companion envelope without Docker access or identity/secret
+  argv. Next add production-shaped Compose/service-manager and metrics-only
+  Caddy wiring, then run at least 100,000 revision-stable shadow comparisons
+  before placement can consume it.
 
   The off-by-default library runtime now composes typed config, hardened secret
   loading, bind-last safe socket publication, the bounded supervisor, producer,
@@ -624,8 +639,10 @@ node06). The design rationale for each lives in DESIGN.md.
   cancellation without imposing a total lifetime on healthy progress. The
   standalone process now injects the completed owner and a refreshable,
   HMAC-authenticated engine-incarnation watch; any invalid refresh fences
-  authority immediately. Deployment remains blocked on generating that manifest
-  from current engine metadata without exposing either digest key or identity.
+  authority immediately. The completed one-shot host provisioner now generates
+  that manifest from current protected engine metadata without exposing either
+  digest key or identity. Deployment remains blocked on independently managed
+  per-engine capture invocation and production Compose/service-manager wiring.
 
   A true offline public-stack harness now proves initial publication, live
   store/remove, rolling handoff, LB owner restart, companion shutdown/socket
@@ -639,6 +656,11 @@ node06). The design rationale for each lives in DESIGN.md.
   captured-shape starts pause the source lock for about 7.7/23.0ms; at the
   131,072-record maximum this is about 28.5/82.3ms. Instrument this before shadow
   and move to immutable/COW generations if ingestion p99 must stay below 10ms.
+  A captured-shape eviction replay has now exercised 3,840 apply calls and
+  2,442 removals per shape: apply p50/p95/p99 were 0.38/0.95/1.55us, with a
+  45.45us maximum and exact final inventory arithmetic. This clears the 10ms
+  gate by more than two orders of magnitude, so immutable/COW work remains
+  profile-triggered rather than roadmap-driven.
   Runtime telemetry now polls the source every 25ms and separately reports
   listening, exact authority, replay/building/ready/fenced phase, watermark
   presence, indexed blocks, and active sessions with fixed label cardinality.
@@ -655,7 +677,9 @@ node06). The design rationale for each lives in DESIGN.md.
   handoff and one in-flight cached snapshot per client. Approximate serving and
   `/health` remain independent of companion/session readiness. Rollback first
   disables snapshot placement and verifies approximate fallback, then removes
-  the companion and socket.
+  the companion and socket. Extend this validator with one distinct per-engine
+  metrics directory and a metrics-only scraper group before enabling the new
+  UDS in production; Caddy must never receive GID 12000.
   Compare exact versus approximate decisions in telemetry before the router
   may consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.

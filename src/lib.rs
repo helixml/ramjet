@@ -1,6 +1,7 @@
 pub mod block_digest;
 
 pub mod companion_attestation;
+pub mod companion_attestation_provisioner;
 pub mod companion_config;
 pub mod companion_index_owner;
 pub mod companion_index_source;

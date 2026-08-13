@@ -81,6 +81,13 @@ Compose run beside them. Build #205 completed the full PR gate in 58s versus
 69s for the prior serial Rust lane. If a no-dependency change regresses that
 loop, inspect the step timings and cache/export path before accepting it.
 
+Both GHCR publishers are path-gated to their real image inputs. Preserve those
+guards: a docs-only push that re-tags an image from imported inline cache can
+drop reusable intermediate dependency metadata from the rolling edge tag. That
+made the next Rust build pay a 57s dependency rebuild in Drone #223. A normal
+Markdown/bench/deploy-only merge should stop after the quality gate and must
+not rewrite either `rust-edge` tag.
+
 `Cargo.toml` deliberately limits the crate package to Rust sources, examples,
 compatibility fixtures, and Cargo manifests. This keeps edits under `bench/`
 and the operational Markdown files from invalidating the thin-LTO release
@@ -219,11 +226,30 @@ to the serving-image loop. Serve mode must preflight the session secret, digest
 secret, and authenticated incarnation file before any TCP bind, ZMQ connect, or
 UDS publication. Invalid attestation refreshes immediately remove authority;
 logs and metrics expose only closed reason labels. The container publishes no
-metrics port: loopback inside a bridge container is not host-scrapable. Add a
-separate, permission-isolated metrics UDS and Caddy/Prometheus wiring before a
-node06 rollout; never put Caddy in the snapshot/session authority group. The
-executable is not ready for node06 until the host-side attestation provisioner
-and production Compose wiring exist and pass the dual-domain validator.
+metrics port: loopback inside a bridge container is not host-scrapable. For
+production, select `DS4_SNAPSHOT_METRICS_SOCKET_PATH` and its dedicated
+non-root `DS4_SNAPSHOT_METRICS_GROUP_GID`; setting that socket together with
+`DS4_SNAPSHOT_METRICS_BIND` is an error. The metrics parent must be a distinct
+companion-owned, symlink-free, non-writable setgid directory whose group is
+different from the snapshot/session parent group. The publisher verifies that
+both authority directories are setgid and group-traversable, that the mode-0660
+metrics socket inherited the configured group, and removes only its own inode.
+Put Caddy/Prometheus in only that metrics group, never in the
+snapshot/session authority group. The executable is not ready for node06 until
+the host-side attestation provisioner and production Compose/Caddy wiring exist
+and pass the extended dual-domain validator.
+
+`mini-dynamo-attestation-provisioner` is a host-side, one-shot control-plane
+binary. It accepts no arguments and obtains only protected file paths, numeric
+ownership, and a freshness bound from the environment. Its identity source is
+schema-v1 output from `bench/node06_engine_metadata.sh`; never derive identity
+inside the provisioner by granting it Docker access. Keep that input owner-only
+mode `0600` and fresh (30s default), and keep the digest secret out of argv and
+logs. Publication must remain a same-directory fsynced temporary file, exact
+owner/group/mode `0440`, atomic rename, and directory fsync under the parent
+lock. A corrupt existing output, older process start, or changed evidence for
+the same process must fail closed without replacement. Do not turn transient
+capture metadata such as capture time into incarnation identity.
 
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
