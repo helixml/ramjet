@@ -726,8 +726,9 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   epoch before reconnect, while an unchanged identity causes no churn. Valid
   atomic engine rotation therefore no longer requires an LB restart. The
   production-shaped dual-engine Compose/Caddy contract, host-authority setup,
-  and host/semantic validators are also complete. Next repin current images,
-  then pass the setup/host preflights before an off-mode node06 start.
+  and host/semantic validators are also complete. The overlay and validator now
+  pin the qualified v0.1.0 LB and companion manifests by SHA tag and digest.
+  Next pass the setup/host preflights before an off-mode node06 start.
   Compare at least 100,000 exact versus approximate decisions before placement
   can consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.
