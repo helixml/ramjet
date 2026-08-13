@@ -680,8 +680,16 @@ node06). The design rationale for each lives in DESIGN.md.
   the companion and socket. Extend this validator with one distinct per-engine
   metrics directory and a metrics-only scraper group before enabling the new
   UDS in production; Caddy must never receive GID 12000.
-  Compare exact versus approximate decisions in telemetry before the router
-  may consume this state; Dynamo's additional tree-dump recovery remains the
+  The LB can now select one snapshot consumer per upstream behind the typed
+  `DS4_SNAPSHOT_ROUTE_MODE=shadow` gate. Startup validates every protected
+  authority and exact upstream cardinality before spawning reconnect owners;
+  direct raw-event and compact snapshot authority are mutually exclusive.
+  Snapshot inventory is injected only into the exact counterfactual scorer,
+  and configuration rejects placement mode, so approximate serving and
+  `/health` remain independent. Next add fixed-cardinality reconnect/readiness
+  metrics, hot attestation refresh, and production-shaped Compose wiring.
+  Compare at least 100,000 exact versus approximate decisions before placement
+  can consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.
 - ✅ **True TTFT instrumentation.** rc6's journal and Prometheus histogram
   time the first SSE response byte, which may be a role-only chunk. Journal v3

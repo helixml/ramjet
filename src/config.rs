@@ -1,7 +1,16 @@
-use std::{env, fmt};
+use std::{
+    collections::HashSet,
+    env, fmt,
+    path::{Component, Path, PathBuf},
+};
 
 use thiserror::Error;
 use url::Url;
+
+const MAX_SNAPSHOT_ROUTE_SOCKET_PATH_BYTES: usize = 64;
+const MAX_SNAPSHOT_ROUTE_PATH_BYTES: usize = 4_096;
+const MAX_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS: usize = 15 * 60 * 1_000;
+const MAX_SNAPSHOT_ROUTE_RECONNECT_MS: usize = 60_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -43,6 +52,12 @@ pub struct Config {
     pub kv_event_timeout_ms: usize,
     pub kv_event_reconnect_min_ms: usize,
     pub kv_event_reconnect_max_ms: usize,
+    pub snapshot_route_mode: SnapshotRouteMode,
+    pub snapshot_route_sources: Vec<SnapshotRouteSourceConfig>,
+    pub snapshot_route_secret_owner_uid: u32,
+    pub snapshot_route_attempt_timeout_ms: usize,
+    pub snapshot_route_reconnect_min_ms: usize,
+    pub snapshot_route_reconnect_max_ms: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +89,38 @@ pub enum ExactRouteMode {
 pub enum KvEventMode {
     Off,
     Shadow,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotRouteMode {
+    Off,
+    Shadow,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct SnapshotRouteSourceConfig {
+    pub socket_path: PathBuf,
+    pub companion_uid: u32,
+    pub session_secret_path: PathBuf,
+    pub digest_secret_path: PathBuf,
+    pub attestation_path: PathBuf,
+    pub data_parallel_rank: u32,
+    pub group_idx: u32,
+}
+
+impl fmt::Debug for SnapshotRouteSourceConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SnapshotRouteSourceConfig")
+            .field("socket_path", &"<redacted>")
+            .field("companion_uid", &"<redacted>")
+            .field("session_secret_path", &"<redacted>")
+            .field("digest_secret_path", &"<redacted>")
+            .field("attestation_path", &"<redacted>")
+            .field("data_parallel_rank", &self.data_parallel_rank)
+            .field("group_idx", &self.group_idx)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -112,6 +159,15 @@ struct ExactRouteSettings {
     max_load_delta: usize,
     canary_bps: usize,
     canary_key: Option<SecretString>,
+}
+
+struct SnapshotRouteSettings {
+    mode: SnapshotRouteMode,
+    sources: Vec<SnapshotRouteSourceConfig>,
+    secret_owner_uid: u32,
+    attempt_timeout_ms: usize,
+    reconnect_min_ms: usize,
+    reconnect_max_ms: usize,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -163,6 +219,7 @@ impl Config {
     /// # Errors
     ///
     /// Returns [`ConfigError`] when an upstream URL or typed setting is invalid.
+    #[allow(clippy::too_many_lines)]
     pub fn from_lookup(mut get: impl FnMut(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let raw_upstreams =
             get("DS4_UPSTREAM").unwrap_or_else(|| "http://ds4-flash:8000".to_owned());
@@ -209,7 +266,18 @@ impl Config {
         };
         let tokenizer = tokenizer_settings(&mut get)?;
         let kv_events = kv_event_settings(&mut get, upstreams.len())?;
-        let exact_route = exact_route_settings(&mut get, &tokenizer, &kv_events, affinity)?;
+        let snapshot_route = snapshot_route_settings(&mut get, upstreams.len())?;
+        let exact_route =
+            exact_route_settings(&mut get, &tokenizer, &kv_events, &snapshot_route, affinity)?;
+        if snapshot_route.mode == SnapshotRouteMode::Shadow
+            && exact_route.mode != ExactRouteMode::Shadow
+        {
+            return Err(invalid(
+                "DS4_SNAPSHOT_ROUTE_MODE",
+                "shadow".to_owned(),
+                "DS4_EXACT_ROUTE_MODE=shadow",
+            ));
+        }
 
         Ok(Self {
             upstreams,
@@ -255,6 +323,12 @@ impl Config {
             kv_event_timeout_ms: kv_events.timeout_ms,
             kv_event_reconnect_min_ms: kv_events.reconnect_min_ms,
             kv_event_reconnect_max_ms: kv_events.reconnect_max_ms,
+            snapshot_route_mode: snapshot_route.mode,
+            snapshot_route_sources: snapshot_route.sources,
+            snapshot_route_secret_owner_uid: snapshot_route.secret_owner_uid,
+            snapshot_route_attempt_timeout_ms: snapshot_route.attempt_timeout_ms,
+            snapshot_route_reconnect_min_ms: snapshot_route.reconnect_min_ms,
+            snapshot_route_reconnect_max_ms: snapshot_route.reconnect_max_ms,
         })
     }
 }
@@ -263,6 +337,7 @@ fn exact_route_settings(
     get: &mut impl FnMut(&str) -> Option<String>,
     tokenizer: &TokenizerSettings,
     kv_events: &KvEventSettings,
+    snapshot_route: &SnapshotRouteSettings,
     affinity: Affinity,
 ) -> Result<ExactRouteSettings, ConfigError> {
     let mode = match get("DS4_EXACT_ROUTE_MODE").as_deref().unwrap_or("off") {
@@ -303,11 +378,20 @@ fn exact_route_settings(
                 "exact routing requires DS4_TOKENIZER_MODE=local-shadow",
             ));
         }
-        if kv_events.mode != KvEventMode::Shadow {
+        let direct = kv_events.mode == KvEventMode::Shadow;
+        let snapshot = snapshot_route.mode == SnapshotRouteMode::Shadow;
+        if direct == snapshot {
             return Err(invalid(
                 "DS4_EXACT_ROUTE_MODE",
                 mode_label.to_owned(),
-                "exact routing requires DS4_KV_EVENT_MODE=shadow",
+                "exact routing requires exactly one of direct KV events or snapshot shadow",
+            ));
+        }
+        if snapshot && mode != ExactRouteMode::Shadow {
+            return Err(invalid(
+                "DS4_EXACT_ROUTE_MODE",
+                mode_label.to_owned(),
+                "snapshot inventory is observation-only and requires shadow mode",
             ));
         }
         if manifest_path.is_none() {
@@ -348,6 +432,171 @@ fn exact_route_settings(
         )?,
         canary_bps,
         canary_key,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn snapshot_route_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    upstream_count: usize,
+) -> Result<SnapshotRouteSettings, ConfigError> {
+    let mode = match get("DS4_SNAPSHOT_ROUTE_MODE").as_deref().unwrap_or("off") {
+        "off" => SnapshotRouteMode::Off,
+        "shadow" => SnapshotRouteMode::Shadow,
+        value => {
+            return Err(invalid(
+                "DS4_SNAPSHOT_ROUTE_MODE",
+                value.to_owned(),
+                "off or shadow",
+            ));
+        }
+    };
+    if mode == SnapshotRouteMode::Off {
+        return Ok(SnapshotRouteSettings {
+            mode,
+            sources: Vec::new(),
+            secret_owner_uid: 0,
+            attempt_timeout_ms: 30_000,
+            reconnect_min_ms: 250,
+            reconnect_max_ms: 5_000,
+        });
+    }
+    let attempt_timeout_ms = bounded_positive(
+        get,
+        "DS4_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS",
+        30_000,
+        MAX_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS,
+    )?;
+    let reconnect_min_ms = bounded_positive(
+        get,
+        "DS4_SNAPSHOT_ROUTE_RECONNECT_MIN_MS",
+        250,
+        MAX_SNAPSHOT_ROUTE_RECONNECT_MS,
+    )?;
+    let reconnect_max_ms = bounded_positive(
+        get,
+        "DS4_SNAPSHOT_ROUTE_RECONNECT_MAX_MS",
+        5_000,
+        MAX_SNAPSHOT_ROUTE_RECONNECT_MS,
+    )?;
+    if reconnect_min_ms > reconnect_max_ms {
+        return Err(invalid(
+            "DS4_SNAPSHOT_ROUTE_RECONNECT_MIN_MS",
+            reconnect_min_ms.to_string(),
+            "no greater than DS4_SNAPSHOT_ROUTE_RECONNECT_MAX_MS",
+        ));
+    }
+    let secret_owner_uid = parse(get, "DS4_SNAPSHOT_ROUTE_SECRET_OWNER_UID", 0_u32, "a UID")?;
+    let sockets = value_list(get, "DS4_SNAPSHOT_ROUTE_SOCKET_PATHS")?;
+    let companion_uids = parsed_list::<u32>(get, "DS4_SNAPSHOT_ROUTE_COMPANION_UIDS", "UIDs")?;
+    let session_secrets = value_list(get, "DS4_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS")?;
+    let digest_secrets = value_list(get, "DS4_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS")?;
+    let attestations = value_list(get, "DS4_SNAPSHOT_ROUTE_ATTESTATION_PATHS")?;
+    let groups = value_list(get, "DS4_SNAPSHOT_ROUTE_GROUPS")?;
+    let lengths = [
+        sockets.len(),
+        companion_uids.len(),
+        session_secrets.len(),
+        digest_secrets.len(),
+        attestations.len(),
+        groups.len(),
+    ];
+    if lengths.iter().any(|length| *length != upstream_count) {
+        return Err(invalid(
+            "DS4_SNAPSHOT_ROUTE_SOCKET_PATHS",
+            format!("list lengths {lengths:?}, {upstream_count} upstreams"),
+            "one socket, UID, session secret, digest secret, attestation, and group per upstream",
+        ));
+    }
+    if companion_uids.contains(&0) {
+        return Err(invalid(
+            "DS4_SNAPSHOT_ROUTE_COMPANION_UIDS",
+            "<redacted>".to_owned(),
+            "non-root UIDs",
+        ));
+    }
+    let mut sources = Vec::with_capacity(upstream_count);
+    let mut unique_paths = HashSet::with_capacity(upstream_count.saturating_mul(4));
+    for index in 0..upstream_count {
+        let socket_path =
+            normalized_absolute_path(&sockets[index], MAX_SNAPSHOT_ROUTE_SOCKET_PATH_BYTES)
+                .ok_or_else(|| {
+                    invalid(
+                        "DS4_SNAPSHOT_ROUTE_SOCKET_PATHS",
+                        "<redacted>".to_owned(),
+                        "normalized absolute paths",
+                    )
+                })?;
+        let session_secret_path =
+            normalized_absolute_path(&session_secrets[index], MAX_SNAPSHOT_ROUTE_PATH_BYTES)
+                .ok_or_else(|| {
+                    invalid(
+                        "DS4_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS",
+                        "<redacted>".to_owned(),
+                        "normalized absolute paths",
+                    )
+                })?;
+        let digest_secret_path =
+            normalized_absolute_path(&digest_secrets[index], MAX_SNAPSHOT_ROUTE_PATH_BYTES)
+                .ok_or_else(|| {
+                    invalid(
+                        "DS4_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS",
+                        "<redacted>".to_owned(),
+                        "normalized absolute paths",
+                    )
+                })?;
+        let attestation_path =
+            normalized_absolute_path(&attestations[index], MAX_SNAPSHOT_ROUTE_PATH_BYTES)
+                .ok_or_else(|| {
+                    invalid(
+                        "DS4_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
+                        "<redacted>".to_owned(),
+                        "normalized absolute paths",
+                    )
+                })?;
+        if session_secret_path == digest_secret_path
+            || session_secret_path == attestation_path
+            || digest_secret_path == attestation_path
+        {
+            return Err(invalid(
+                "DS4_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
+                "<redacted>".to_owned(),
+                "three distinct protected paths per upstream",
+            ));
+        }
+        if [
+            &socket_path,
+            &session_secret_path,
+            &digest_secret_path,
+            &attestation_path,
+        ]
+        .into_iter()
+        .any(|path| !unique_paths.insert(path.clone()))
+        {
+            return Err(invalid(
+                "DS4_SNAPSHOT_ROUTE_SOCKET_PATHS",
+                "<redacted>".to_owned(),
+                "distinct authority paths across upstreams",
+            ));
+        }
+        let (data_parallel_rank, group_idx) = parse_group(&groups[index])?;
+        sources.push(SnapshotRouteSourceConfig {
+            socket_path,
+            companion_uid: companion_uids[index],
+            session_secret_path,
+            digest_secret_path,
+            attestation_path,
+            data_parallel_rank,
+            group_idx,
+        });
+    }
+    Ok(SnapshotRouteSettings {
+        mode,
+        sources,
+        secret_owner_uid,
+        attempt_timeout_ms,
+        reconnect_min_ms,
+        reconnect_max_ms,
     })
 }
 
@@ -511,6 +760,91 @@ fn endpoint_list(
         .collect()
 }
 
+fn value_list(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    key: &'static str,
+) -> Result<Vec<String>, ConfigError> {
+    let raw = get(key).unwrap_or_default();
+    let values = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if raw.split(',').any(|value| value.trim().is_empty()) && !raw.is_empty() {
+        return Err(invalid(
+            key,
+            "<redacted>".to_owned(),
+            "a dense comma-separated list",
+        ));
+    }
+    Ok(values)
+}
+
+fn parsed_list<T: std::str::FromStr>(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    key: &'static str,
+    reason: &'static str,
+) -> Result<Vec<T>, ConfigError> {
+    value_list(get, key)?
+        .into_iter()
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| invalid(key, "<redacted>".to_owned(), reason))
+        })
+        .collect()
+}
+
+fn normalized_absolute_path(raw: &str, max_bytes: usize) -> Option<PathBuf> {
+    let path = Path::new(raw);
+    if raw.is_empty()
+        || raw.len() > max_bytes
+        || !path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::CurDir | Component::ParentDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
+fn parse_group(raw: &str) -> Result<(u32, u32), ConfigError> {
+    let Some((rank, index)) = raw.split_once(':') else {
+        return Err(invalid(
+            "DS4_SNAPSHOT_ROUTE_GROUPS",
+            raw.to_owned(),
+            "rank:index pairs",
+        ));
+    };
+    if index.contains(':') {
+        return Err(invalid(
+            "DS4_SNAPSHOT_ROUTE_GROUPS",
+            raw.to_owned(),
+            "rank:index pairs",
+        ));
+    }
+    let rank = rank.parse().map_err(|_| {
+        invalid(
+            "DS4_SNAPSHOT_ROUTE_GROUPS",
+            raw.to_owned(),
+            "rank:index pairs",
+        )
+    })?;
+    let index = index.parse().map_err(|_| {
+        invalid(
+            "DS4_SNAPSHOT_ROUTE_GROUPS",
+            raw.to_owned(),
+            "rank:index pairs",
+        )
+    })?;
+    Ok((rank, index))
+}
+
 fn tokenizer_settings(
     get: &mut impl FnMut(&str) -> Option<String>,
 ) -> Result<TokenizerSettings, ConfigError> {
@@ -620,6 +954,23 @@ fn positive(
     Ok(value)
 }
 
+fn bounded_positive(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    key: &'static str,
+    fallback: usize,
+    maximum: usize,
+) -> Result<usize, ConfigError> {
+    let value = positive(get, key, fallback)?;
+    if value > maximum {
+        return Err(invalid(
+            key,
+            value.to_string(),
+            "a bounded positive integer",
+        ));
+    }
+    Ok(value)
+}
+
 fn invalid(key: &'static str, value: String, reason: &'static str) -> ConfigError {
     ConfigError::InvalidValue { key, value, reason }
 }
@@ -667,6 +1018,12 @@ mod tests {
         assert_eq!(config.kv_event_timeout_ms, 5_000);
         assert_eq!(config.kv_event_reconnect_min_ms, 250);
         assert_eq!(config.kv_event_reconnect_max_ms, 10_000);
+        assert_eq!(config.snapshot_route_mode, SnapshotRouteMode::Off);
+        assert!(config.snapshot_route_sources.is_empty());
+        assert_eq!(config.snapshot_route_secret_owner_uid, 0);
+        assert_eq!(config.snapshot_route_attempt_timeout_ms, 30_000);
+        assert_eq!(config.snapshot_route_reconnect_min_ms, 250);
+        assert_eq!(config.snapshot_route_reconnect_max_ms, 5_000);
     }
 
     #[test]
@@ -683,6 +1040,130 @@ mod tests {
                 key: "DS4_ROUTE_ALPHA",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn snapshot_route_is_off_by_default_and_rejects_partial_cardinality() {
+        let values = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1,http://b:2"),
+            ("DS4_SNAPSHOT_ROUTE_MODE", "shadow"),
+            ("DS4_SNAPSHOT_ROUTE_SOCKET_PATHS", "/run/a.sock,/run/b.sock"),
+            ("DS4_SNAPSHOT_ROUTE_COMPANION_UIDS", "12001"),
+            (
+                "DS4_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS",
+                "/run/a-session,/run/b-session",
+            ),
+            (
+                "DS4_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS",
+                "/run/a-digest,/run/b-digest",
+            ),
+            (
+                "DS4_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
+                "/run/a-attest,/run/b-attest",
+            ),
+            ("DS4_SNAPSHOT_ROUTE_GROUPS", "0:0,0:0"),
+        ]);
+        let error =
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "DS4_SNAPSHOT_ROUTE_SOCKET_PATHS",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn snapshot_route_requires_shadow_and_distinct_protected_paths() {
+        let mut values = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1"),
+            ("DS4_SNAPSHOT_ROUTE_MODE", "shadow"),
+            ("DS4_SNAPSHOT_ROUTE_SOCKET_PATHS", "/run/a.sock"),
+            ("DS4_SNAPSHOT_ROUTE_COMPANION_UIDS", "12001"),
+            ("DS4_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS", "/run/session"),
+            ("DS4_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS", "/run/digest"),
+            ("DS4_SNAPSHOT_ROUTE_ATTESTATION_PATHS", "/run/attest"),
+            ("DS4_SNAPSHOT_ROUTE_GROUPS", "0:0"),
+        ]);
+        let error =
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "DS4_SNAPSHOT_ROUTE_MODE",
+                ..
+            }
+        ));
+
+        values.insert("DS4_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS", "/run/session");
+        let error =
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "DS4_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_snapshot_shadow_as_the_exclusive_observation_inventory() {
+        let mut values = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1,http://b:2"),
+            ("DS4_TOKENIZER_MODE", "local-shadow"),
+            ("DS4_TOKENIZER_PATH", "/models/tokenizer.json"),
+            (
+                "DS4_TOKENIZER_SHA256",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            ("DS4_EXACT_ROUTE_MODE", "shadow"),
+            ("DS4_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
+            (
+                "DS4_EXACT_ROUTE_MANIFEST_SHA256",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+            ("DS4_SNAPSHOT_ROUTE_MODE", "shadow"),
+            ("DS4_SNAPSHOT_ROUTE_SOCKET_PATHS", "/run/a.sock,/run/b.sock"),
+            ("DS4_SNAPSHOT_ROUTE_COMPANION_UIDS", "12001,12002"),
+            (
+                "DS4_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS",
+                "/run/a-session,/run/b-session",
+            ),
+            (
+                "DS4_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS",
+                "/run/a-digest,/run/b-digest",
+            ),
+            (
+                "DS4_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
+                "/run/a-attest,/run/b-attest",
+            ),
+            ("DS4_SNAPSHOT_ROUTE_GROUPS", "0:0,1:2"),
+            ("DS4_SNAPSHOT_ROUTE_SECRET_OWNER_UID", "12000"),
+        ]);
+        let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(config.snapshot_route_sources.len(), 2);
+        assert_eq!(config.snapshot_route_sources[1].companion_uid, 12002);
+        assert_eq!(config.snapshot_route_sources[1].data_parallel_rank, 1);
+        assert_eq!(config.snapshot_route_sources[1].group_idx, 2);
+        assert_eq!(config.snapshot_route_secret_owner_uid, 12000);
+        assert!(config.kv_event_sources.is_empty());
+        let debug = format!("{:?}", config.snapshot_route_sources);
+        for protected in ["a.sock", "a-session", "a-digest", "a-attest", "12001"] {
+            assert!(!debug.contains(protected));
+        }
+
+        values.insert("DS4_KV_EVENT_MODE", "shadow");
+        values.insert("DS4_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:1,tcp://b:1");
+        values.insert("DS4_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:2,tcp://b:2");
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_EXACT_ROUTE_MODE",
+                ..
+            })
         ));
     }
 

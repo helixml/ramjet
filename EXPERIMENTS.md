@@ -3783,3 +3783,43 @@ intermediate metadata, so the next Rust build paid a 57s dependency rebuild.
 Markdown, benchmark, and deployment-only changes now finish after the quality
 gate and cannot rewrite either edge tag. The next source-changing main build
 is the registry-cache seed/acceptance measurement for this combined image.
+
+Drone PR #224 passed the integrated quality gate in 59 seconds: fetch 8s,
+Clippy 32s, full Rust tests 48s, with Go, Python, and Compose running in
+parallel. Main #225 then caught a timing-test flake before either publisher:
+socket setup and executor scheduling share the replay's absolute 200ms budget,
+so receive-only telemetry cannot deterministically retain a 150ms lower bound.
+The end-to-end deadline contract was unchanged. After replacing that scheduler-
+sensitive assertion with positive, internally consistent telemetry checks, 50
+focused repetitions, the full suite, and Drone #226 passed. Main #227 passed in
+186 seconds and published `rust-e20a928` plus `companion-rust-e20a928`; quality
+remained 58 seconds and the two 125–128s one-time cache-seed publishers ran in
+parallel. The companion digest is
+`sha256:b0d403ad6fe294c071662dab42af2c32310fce8ffefa6418f3cef6997ca9a89f`.
+
+## 2026-08-13 — r56 off-by-default LB snapshot shadow join
+
+The LB now has a representation-independent exact-inventory boundary: existing
+direct consumers retain raw-token indexes, while snapshot companions publish
+compact digest indexes behind the same revision-stable lookup contract. Typed
+configuration requires one socket, companion UID, session secret, digest
+secret, authenticated incarnation, and selected KV group per upstream. Every
+protected authority and socket parent is validated before reconnect owners are
+spawned, and direct raw-event and snapshot authority cannot be enabled together.
+
+Snapshot mode is deliberately limited to `DS4_EXACT_ROUTE_MODE=shadow`.
+Configuration rejects placement, the compact inventories feed only the exact
+counterfactual scorer, and approximate routing plus `/health` remain backed by
+their existing independent state. Each owner uses a bounded absolute attempt,
+fresh challenge, retry backoff, immediate shutdown signal, and two-second join
+bound. Missing, stale, changed, or malformed authority leaves that inventory
+unpublished and the scorer fails closed. Engine-incarnation rotation currently
+requires a stateless LB restart because the expected attestation is pinned at
+startup.
+
+On current main, the integrated local gate passed 320 library tests plus 38
+integration/E2E tests (358 total), formatting, and strict all-target/all-feature
+Clippy. No Compose, Caddy, node06 process, container, image, secret, route, or
+GPU state changed. The next boundary is fixed-cardinality LB reconnect/readiness
+metrics and production-shaped dual-domain Compose/Caddy validation; shadow
+deployment remains gated behind those pieces.

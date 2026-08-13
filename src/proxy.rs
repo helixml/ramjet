@@ -17,6 +17,7 @@ use url::Url;
 
 use crate::{
     config::Config,
+    exact_route_inventory::ExactRouteInventory,
     exact_shadow::ExactRouteSnapshot,
     journal::RouteJournal,
     kv_consumer::SharedFencedInventory,
@@ -114,6 +115,7 @@ impl Proxy {
     /// # Errors
     ///
     /// Returns an error when explicit local tokenizer initialization fails.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(
         config: Config,
         client: reqwest::Client,
@@ -121,12 +123,40 @@ impl Proxy {
         router: Arc<Router>,
         inventories: Arc<[SharedFencedInventory]>,
     ) -> anyhow::Result<Self> {
+        Self::new_with_exact_inventories(
+            config,
+            client,
+            metrics,
+            router,
+            Arc::clone(&inventories),
+            inventories
+                .iter()
+                .cloned()
+                .map(ExactRouteInventory::direct)
+                .collect(),
+        )
+    }
+
+    /// Builds the proxy with an independent exact-route inventory backend.
+    /// Raw direct inventories remain available for legacy health reporting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when explicit local tokenizer initialization fails.
+    pub fn new_with_exact_inventories(
+        config: Config,
+        client: reqwest::Client,
+        metrics: Arc<Metrics>,
+        router: Arc<Router>,
+        inventories: Arc<[SharedFencedInventory]>,
+        exact_inventories: Arc<[ExactRouteInventory]>,
+    ) -> anyhow::Result<Self> {
         let journal = RouteJournal::new(config.route_journal);
-        let tokenizer = TokenizerObserver::new(
+        let tokenizer = TokenizerObserver::with_exact_inventories(
             &config,
             client.clone(),
             Arc::clone(&metrics),
-            Arc::clone(&inventories),
+            exact_inventories,
         )?;
         Ok(Self {
             inner: Arc::new(Inner {
