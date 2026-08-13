@@ -931,7 +931,7 @@ mod tests {
     use bytes::Bytes;
     use futures::future;
     use tokio::{sync::mpsc, time::timeout};
-    use zeromq::{PubSocket, RouterSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
+    use zeromq::{RouterSocket, Socket, SocketRecv, SocketSend, XPubSocket, ZmqMessage};
 
     use super::*;
     use crate::{
@@ -1580,7 +1580,7 @@ mod tests {
         const EMPTY_BATCH: &[u8] = &[
             0x93, 0xcb, 0x3f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x90, 0x00,
         ];
-        let mut publisher = PubSocket::new();
+        let mut publisher = XPubSocket::new();
         let live_endpoint = publisher.bind("tcp://127.0.0.1:0").await.unwrap();
         let mut replay_server = RouterSocket::new();
         let replay_endpoint = replay_server.bind("tcp://127.0.0.1:0").await.unwrap();
@@ -1610,8 +1610,15 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let owner_task = tokio::spawn(owner.run(authority_rx, shutdown_rx));
 
-        // Allow the SUB subscription command to cross the real TCP transport.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // XPUB exposes the real subscription command, giving the test an exact
+        // readiness boundary instead of relying on the PUB/SUB slow-joiner
+        // delay. Receiving the command also installs the filter in XPUB.
+        let subscription = timeout(Duration::from_secs(1), publisher.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(subscription.len(), 1);
+        assert_eq!(subscription.get(0).unwrap().as_ref(), b"\x01kv");
         publisher
             .send(zmq_message(vec![
                 Bytes::from_static(b"kv"),
