@@ -421,6 +421,18 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   the publisher daemons remain ephemeral.
   Node06 deploys should keep using the warm local `bench/build_transfer.sh`
   path because it reuses the development BuildKit cache.
+- Release tags use the separate `release-tags` Drone pipeline. It triggers only
+  for `refs/tags/v*`, repeats the full Rust/Python/Compose quality gate, and
+  publishes only `v<crate-version>` for the LB and
+  `companion-v<crate-version>` for the companion. It never publishes edge or
+  commit aliases. `bench/drone_release_plan.sh` requires the tag, ref, checked
+  out commit, and Cargo package version to agree before producing private
+  revision-bound markers; each publisher rechecks its marker and tag event
+  without Git. Cargo build metadata (`+...`) is rejected because it is not a
+  valid Docker tag. Merge and qualify a version bump on `main` before creating
+  its tag so the content-keyed dependency image already exists. Never create a
+  tag merely to test the pipeline; unit/static tests and Drone PR quality are
+  the non-publishing acceptance path.
 - Build the LB locally and stream it to node06 when the local amd64 Docker
   cache is warm. A typical warm LB transfer is seconds and avoids consuming
   node06's scarce 8-9GiB available host memory:

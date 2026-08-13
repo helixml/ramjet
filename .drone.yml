@@ -188,3 +188,137 @@ trigger:
 volumes:
   - name: cargo-registry
     temp: {}
+
+---
+kind: pipeline
+type: docker
+name: release-tags
+
+platform:
+  os: linux
+  arch: amd64
+
+steps:
+  - name: release-fetch
+    image: rust:1.95-bookworm
+    pull: if-not-exists
+    commands:
+      - sh bench/drone_release_plan.sh
+      - cargo fetch --locked
+    volumes:
+      - name: release-cargo-registry
+        path: /usr/local/cargo/registry
+
+  - name: release-rust-lint
+    image: rust:1.95-bookworm
+    pull: if-not-exists
+    commands:
+      - export CARGO_TARGET_DIR=/tmp/mini-dynamo-release-clippy-target
+      - rustup component add rustfmt clippy
+      - cargo fmt --check
+      - cargo clippy --locked --all-targets --all-features -- -D warnings
+    volumes:
+      - name: release-cargo-registry
+        path: /usr/local/cargo/registry
+    depends_on:
+      - release-fetch
+
+  - name: release-rust-test
+    image: rust:1.95-bookworm
+    pull: if-not-exists
+    commands:
+      - export CARGO_TARGET_DIR=/tmp/mini-dynamo-release-test-target
+      - cargo test --locked
+    volumes:
+      - name: release-cargo-registry
+        path: /usr/local/cargo/registry
+    depends_on:
+      - release-fetch
+
+  - name: release-agent-protocol
+    image: python:3.13-bookworm
+    pull: if-not-exists
+    commands:
+      - python3 bench/agentbench.py validate
+      - python3 -m unittest discover -s bench -p 'test_*.py'
+
+  - name: release-deployment-compose
+    image: docker:29-cli
+    pull: if-not-exists
+    commands:
+      - apk add --no-cache bash python3
+      - bash -n deploy/dspark_0731/sync-compose.sh
+      - bash -n deploy/dspark_0731/validate-snapshot-companion-host.sh
+      - bash -n deploy/dspark_0731/validate-snapshot-production-host.sh
+      - docker compose -f deploy/dspark_0731/docker-compose.yaml config --quiet
+      - python3 deploy/dspark_0731/validate-snapshot-companion-compose.py
+      - python3 deploy/dspark_0731/validate-snapshot-production-compose.py
+      - python3 -m unittest bench.test_snapshot_production_compose
+
+  - name: release-quality-complete
+    image: alpine:3.23
+    pull: if-not-exists
+    commands:
+      - 'true'
+    depends_on:
+      - release-rust-lint
+      - release-rust-test
+      - release-agent-protocol
+      - release-deployment-compose
+
+  - name: release-image
+    image: plugins/docker
+    pull: if-not-exists
+    environment:
+      DOCKER_BUILDKIT: "1"
+    commands:
+      - sh bench/drone_release_guard.sh lb
+      - exec /bin/drone-docker
+    settings:
+      registry: ghcr.io
+      repo: ghcr.io/helixml/mini-dynamo
+      username:
+        from_secret: ghcr_username
+      password:
+        from_secret: ghcr_token
+      tags:
+        - ${DRONE_TAG}
+    when:
+      event:
+        - tag
+    depends_on:
+      - release-quality-complete
+
+  - name: release-companion-image
+    image: plugins/docker
+    pull: if-not-exists
+    environment:
+      DOCKER_BUILDKIT: "1"
+    commands:
+      - sh bench/drone_release_guard.sh companion
+      - exec /bin/drone-docker
+    settings:
+      registry: ghcr.io
+      repo: ghcr.io/helixml/mini-dynamo
+      dockerfile: Dockerfile.companion
+      username:
+        from_secret: ghcr_username
+      password:
+        from_secret: ghcr_token
+      tags:
+        - companion-${DRONE_TAG}
+    when:
+      event:
+        - tag
+    depends_on:
+      - release-quality-complete
+
+trigger:
+  event:
+    - tag
+  ref:
+    - refs/tags/v*
+
+volumes:
+  - name: release-cargo-registry
+    temp: {}

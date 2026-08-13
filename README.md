@@ -288,6 +288,12 @@ revision-bound marker files because their command workspace may not expose
 `.git`. CI/docs/benchmark/deployment-only changes create no markers and publish
 nothing. Invalid, unfetchable, mismatched, or empty ranges fail closed.
 
+An exact Git tag matching the crate version, such as `v1.2.0-alpha.1`, runs a
+separate full-quality Drone release pipeline. It publishes only the version
+tags `v1.2.0-alpha.1` and `companion-v1.2.0-alpha.1`; it does not update either
+edge tag. Tag, ref, checkout SHA, and Cargo package version must all agree
+before either publisher can start.
+
 Measure the request-preparation hot path before and after tokenizer work:
 
     cargo run --release --locked --example preparation_bench
