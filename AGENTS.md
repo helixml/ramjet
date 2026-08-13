@@ -163,7 +163,16 @@ blocking snapshot build to cancel.
 supervisor. Its source callback must subscribe live before building a snapshot,
 return owned state, observe cancellation, and never retain engine/global locks
 across serialization or socket writes. Tail delivery is bounded and applies
-backpressure; a dropped LB client must cancel source work immediately.
+backpressure; a dropped LB client must cancel source work immediately. The
+producer owns one absolute snapshot-phase timeout covering hello, source build,
+authentication, and snapshot write. Once the snapshot is written, dequeuing a
+tail event starts a fresh bounded write budget and each successful write starts
+a fresh tail-wait budget. A progressing tail may therefore outlive the snapshot
+timeout, but an idle source or blocked writer cannot retain a session forever.
+Source revocation, disconnect, and supervisor shutdown stay higher priority
+than either timer. Do not restore a single absolute supervisor lifetime for
+handler-managed sessions: total resources remain bounded by two admitted
+clients, entry/byte queue caps, frame limits, and the phase/idle budgets.
 
 `companion_runtime` is library-only and off by default. It must validate and
 load all state before binding, bind the public socket last, clear readiness and

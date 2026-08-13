@@ -3232,3 +3232,32 @@ Sources inspected: [Dynamo v1.3.1 release](https://github.com/ai-dynamo/dynamo/r
 [Dynamo Kimi-K3 preview](https://github.com/ai-dynamo/dynamo/releases/tag/v1.4.0-kimi-k3-dev.1),
 [Kimi-K3](https://github.com/MoonshotAI/Kimi-K3), and
 [DwarfStar](https://github.com/antirez/ds4).
+
+## 2026-08-13 — r43 companion phase and tail-idle deadlines
+
+The temporary producer-wide absolute session deadline is split at the wire
+phase boundary. One absolute snapshot timeout now includes authenticated hello,
+source start/build, response authentication, and the complete snapshot write.
+After the response, every dequeued tail event receives a fresh bounded write
+budget and every successful write starts a fresh tail-wait budget. Healthy live
+progress can continue beyond the snapshot deadline; silence and a client that
+stops reading remain bounded. Client EOF, source revocation, and supervisor
+shutdown are still selected ahead of timer and data work.
+
+The companion runtime uses the supervisor's handler-managed mode. This removes
+only the accidental total lifetime: admission remains capped at two clients,
+tail queues remain bounded by entries and bytes, wire frames retain size caps,
+and both bootstrap and each idle/write interval have finite validated budgets.
+Tokio paused-time tests cover slow snapshot expiry, tail-idle expiry, and two
+progress events spanning six snapshot budgets. Real Unix tests cover immediate
+client disconnect, a blocked multi-megabyte tail write, byte-overflow
+revocation, and shutdown cancellation. This is library-only; no node06 or
+Compose state changed.
+
+The integrated local gate passed 274 library tests plus 31 integration tests and all
+doc-test targets in 25.56s, strict all-target/all-feature Clippy in 4.67s, Go
+test/vet/format parity in 1.17s, and 52 Python protocol tests plus corpus
+validation in 0.22s. The first release build took 67.03s because this isolated
+disk-backed worktree had a cold release target; after keeping Tokio's paused-
+time support dev-only, the narrower production-feature rebuild took 33.97s.
+The focused warm producer suite took 5.9s including its crate rebuild.

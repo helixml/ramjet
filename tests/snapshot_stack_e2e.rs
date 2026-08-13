@@ -270,6 +270,8 @@ fn start_companion(directory: &TestDirectory, source: Arc<CapturedSource>) -> Co
         SnapshotProducer::new(
             SnapshotProducerConfig {
                 expected_peer_uid: directory.policy.owner_uid,
+                snapshot_timeout: Duration::from_secs(3),
+                tail_idle_timeout: Duration::from_secs(30),
                 session_limits: SnapshotSessionLimits::default(),
                 tail_limits: TailWireLimits::default(),
                 tail_queue_capacity: 16,
@@ -295,9 +297,9 @@ async fn run_supervisor(
         listener,
         SnapshotSupervisorConfig::new(Duration::from_secs(30)).unwrap(),
         shutdown,
-        move |stream, deadline| {
+        move |stream, _deadline| {
             let producer = Arc::clone(&producer);
-            async move { producer.handle(stream, deadline).await }
+            async move { producer.handle(stream).await }
         },
     )
     .await;

@@ -3,8 +3,9 @@
 //! This module deliberately knows nothing about snapshot framing, peer
 //! credentials, or index construction. It owns listener admission and task
 //! lifetime only: at most two session futures run at once, every admitted
-//! connection gets one absolute deadline, excess connections are closed
-//! immediately, and shutdown drops all in-flight session futures.
+//! connection gets either one supervisor deadline or explicit handler-owned
+//! phase deadlines, excess connections are closed immediately, and shutdown
+//! drops all in-flight session futures.
 
 use std::{future::Future, sync::Arc, time::Duration};
 
@@ -20,7 +21,7 @@ pub const MAX_ACTIVE_SNAPSHOT_CLIENTS: usize = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SnapshotSupervisorConfig {
-    pub session_timeout: Duration,
+    pub session_timeout: Option<Duration>,
 }
 
 impl SnapshotSupervisorConfig {
@@ -33,7 +34,19 @@ impl SnapshotSupervisorConfig {
         if session_timeout.is_zero() {
             return Err(SnapshotSupervisorError::InvalidTimeout);
         }
-        Ok(Self { session_timeout })
+        Ok(Self {
+            session_timeout: Some(session_timeout),
+        })
+    }
+
+    /// Delegate phase and idle deadlines to the admitted session handler.
+    /// Admission, the two-session cap, and shutdown cancellation remain owned
+    /// by the supervisor.
+    #[must_use]
+    pub const fn handler_managed() -> Self {
+        Self {
+            session_timeout: None,
+        }
     }
 }
 
@@ -82,9 +95,9 @@ enum SessionOutcome {
 
 /// Run a bounded snapshot-session accept loop until shutdown.
 ///
-/// The handler receives the absolute deadline that also encloses it. Protocol
-/// layers should reuse that deadline for their own bounded sub-operations and
-/// must not create fresh relative deadlines. A handler error is intentionally
+/// The handler receives the optional absolute supervisor deadline. `None`
+/// means the handler owns validated phase/idle deadlines; it never disables
+/// admission limits or shutdown cancellation. A handler error is intentionally
 /// reduced to a content-free failure count.
 ///
 /// When both slots are occupied, a newly accepted stream is dropped in the
@@ -104,11 +117,14 @@ pub async fn supervise_snapshot_sessions<H, Fut, E>(
     handler: H,
 ) -> Result<SnapshotSupervisorReport, SnapshotSupervisorError>
 where
-    H: Fn(UnixStream, Instant) -> Fut + Send + Sync + 'static,
+    H: Fn(UnixStream, Option<Instant>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), E>> + Send + 'static,
     E: Send + 'static,
 {
-    if config.session_timeout.is_zero() {
+    if config
+        .session_timeout
+        .is_some_and(|timeout| timeout.is_zero())
+    {
         return Err(SnapshotSupervisorError::InvalidTimeout);
     }
 
@@ -140,11 +156,17 @@ where
                     drop(stream);
                     continue;
                 };
-                let Some(deadline) = Instant::now().checked_add(config.session_timeout) else {
-                    drop(permit);
-                    drop(stream);
-                    listener_error = Some(SnapshotSupervisorError::InvalidDeadline);
-                    break;
+                let deadline = match config.session_timeout {
+                    Some(session_timeout) => {
+                        let Some(deadline) = Instant::now().checked_add(session_timeout) else {
+                            drop(permit);
+                            drop(stream);
+                            listener_error = Some(SnapshotSupervisorError::InvalidDeadline);
+                            break;
+                        };
+                        Some(deadline)
+                    }
+                    None => None,
                 };
                 report.sessions_started = report.sessions_started.saturating_add(1);
                 let handler = Arc::clone(&handler);
@@ -152,14 +174,25 @@ where
                 tasks.spawn(async move {
                     let _permit = permit;
                     let session = async move { handler(stream, deadline).await };
-                    tokio::select! {
-                        biased;
-                        () = wait_for_shutdown(&mut cancelled) => SessionOutcome::Cancelled,
-                        result = timeout_at(deadline, session) => match result {
-                            Ok(Ok(())) => SessionOutcome::Completed,
-                            Ok(Err(_)) => SessionOutcome::Failed,
-                            Err(_) => SessionOutcome::TimedOut,
-                        },
+                    if let Some(deadline) = deadline {
+                        tokio::select! {
+                            biased;
+                            () = wait_for_shutdown(&mut cancelled) => SessionOutcome::Cancelled,
+                            result = timeout_at(deadline, session) => match result {
+                                Ok(Ok(())) => SessionOutcome::Completed,
+                                Ok(Err(_)) => SessionOutcome::Failed,
+                                Err(_) => SessionOutcome::TimedOut,
+                            },
+                        }
+                    } else {
+                        tokio::select! {
+                            biased;
+                            () = wait_for_shutdown(&mut cancelled) => SessionOutcome::Cancelled,
+                            result = session => match result {
+                                Ok(()) => SessionOutcome::Completed,
+                                Err(_) => SessionOutcome::Failed,
+                            },
+                        }
                     }
                 });
             }
@@ -337,7 +370,7 @@ mod tests {
             config(Duration::from_millis(40)),
             shutdown,
             |mut stream, deadline| async move {
-                assert!(deadline > Instant::now());
+                assert!(deadline.unwrap() > Instant::now());
                 let mut hello = [0_u8; 1];
                 stream.read_exact(&mut hello).await.map_err(|_| ())?;
                 Ok::<_, ()>(())
@@ -427,11 +460,12 @@ mod tests {
             let entered_sender = Arc::clone(&entered_sender);
             tokio::spawn(supervise_snapshot_sessions(
                 listener,
-                config(Duration::from_secs(30)),
+                SnapshotSupervisorConfig::handler_managed(),
                 shutdown,
-                move |mut stream, _| {
+                move |mut stream, deadline| {
                     let entered_sender = Arc::clone(&entered_sender);
                     async move {
+                        assert_eq!(deadline, None);
                         if let Some(sender) = entered_sender.lock().unwrap().take() {
                             let _ = sender.send(());
                         }

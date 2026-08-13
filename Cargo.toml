@@ -39,6 +39,9 @@ url = "2.5.8"
 zeromq = { version = "0.6.0", default-features = false, features = ["tcp-transport", "tokio-runtime"] }
 zmq = "0.10.0"
 
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util"] }
+
 [profile.release]
 codegen-units = 1
 lto = "thin"
