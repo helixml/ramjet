@@ -20,12 +20,12 @@ ATTESTATION_PROFILE = "snapshot-attestation"
 SESSION_GID = "12000"
 LB_UID = "12002"
 EXPECTED_LB_IMAGE = (
-    "ghcr.io/helixml/mini-dynamo:rust-4203b06@"
-    "sha256:9151c298700e85211adc1236e28cbe0f9543e0d9d5e75fd3dc552744fedaa292"
+    "ghcr.io/helixml/mini-dynamo:rust-123dd9d@"
+    "sha256:9ffc514d574f0b67fe089cfd9d1f368831331846fb94baad079f3a506d1f105c"
 )
 EXPECTED_COMPANION_IMAGE = (
-    "ghcr.io/helixml/mini-dynamo:companion-rust-4203b06@"
-    "sha256:86805b8c8408fc0d73945dca84e558253cdd84ea82aef01218d09eefc53d2578"
+    "ghcr.io/helixml/mini-dynamo:companion-rust-123dd9d@"
+    "sha256:386c88b99d9a11883451f599e10ccf036e16280f8f5daa14cb7d42685f57cfa3"
 )
 
 DOMAINS: dict[str, dict[str, str]] = {
