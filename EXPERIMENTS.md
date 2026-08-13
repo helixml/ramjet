@@ -2992,8 +2992,34 @@ store/remove/clear, mixed and unsupported groups, malformed/wire bounds, a
 capacity failure after partial mutation, wrong-rank clear, and content-free
 errors. The warm focused delta gate is below one second after compilation.
 
-This is not yet a runnable companion. The remaining join is an authenticated
-session handler connecting the supervisor, one-shot snapshot build, long-lived
-tail decoder, actor, and delta adapter, with cancellation reaching bounded CPU
-work. Metrics/config and Compose sandbox must land before an offline two-client
+This is not yet a runnable companion. The remaining runtime joins are distinct:
+an LB-side authenticated consumer connecting the one-shot snapshot, long-lived
+tail decoder, actor, and delta adapter; and companion-side production behind the
+accepted-stream supervisor. Cancellation must reach bounded CPU work on both
+sides. Metrics/config and Compose sandbox must land before an offline two-client
 end-to-end fault test or node06 shadow trial. No production state changed.
+
+## 2026-08-13 — issue #41 companion config and bounded observability
+
+The companion's startup contract is now typed and off by default. Serve mode
+requires distinct non-root companion/client UIDs, normalized absolute socket
+and secret paths, and one matched live/replay endpoint pair per engine. Every
+client, queue, deadline, frame, decoded-batch, and event count is bounded before
+any listener or network work begins. Custom debug output reports only typed
+state and presence/cardinality, never socket paths, secret paths, or endpoint
+hosts.
+
+The Prometheus surface is likewise content-free and pre-initialized. Its only
+labels are fixed engine/client slots and closed enums. It records readiness,
+active lifecycle states, terminal session outcomes and capacity rejection,
+snapshot prepare/decode/apply/catch-up time and bytes, decoded tail batches and
+events, fences/discards, identity changes, and published generation/index/token
+counts. Protocol keys, hashes, incarnations, paths, endpoints, request/session
+identities, and arbitrary error strings cannot create labels. Focused config
+and metric tests cover safe defaults, all validation boundaries, debug
+redaction, fixed cardinality, zero-valued series, and typed updates.
+
+This remains library-only and off by default. It does not bind a listener,
+export the collectors through the production metrics endpoint, change Compose,
+or deploy to node06. The authenticated session join, sandbox, offline fault
+matrix, and shadow comparison gate remain outstanding.
