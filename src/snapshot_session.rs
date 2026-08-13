@@ -1,18 +1,17 @@
-//! Authenticated, bounded wire primitives for snapshot companion sessions.
+//! Bounded authenticated one-shot exchange for a KV snapshot companion.
 //!
-//! This is an authenticated server-response frame foundation, not a complete
-//! peer-authenticated session or handshake. It deliberately contains no socket,
-//! transport-credential, key-negotiation, or task-lifecycle code. The caller
-//! supplies a fresh challenge and the exact expected engine/snapshot binding,
-//! while these primitives provide strict framing and response authentication.
+//! Both messages use fixed binary outer frames. A client hello proves knowledge
+//! of the session-auth key before a companion starts snapshot work. A server
+//! response authenticates the exact fixed prefix, named-MessagePack metadata,
+//! and opaque snapshot bytes. Decoding validates all declared lengths and the
+//! MAC over borrowed slices before `MessagePack` can allocate or payload bytes
+//! are copied.
 //!
-//! # Security status
-//!
-//! This slice is not deployable as a complete session protocol. The hello is
-//! unauthenticated, response decoding uses bounded owned `Vec` fields, and the
-//! exact watermark/generation expectations arrive out of band. A transport
-//! must add peer-authenticated fixed framing, trusted expectation derivation,
-//! freshness tracking, and connection lifecycle fencing before deployment.
+//! This is deployable only as the one-shot snapshot exchange inside a larger
+//! transport. Production must additionally enforce Unix-socket permissions and
+//! `SO_PEERCRED`, provision the session-auth secret independently from the block
+//! digest key, remember challenges to prevent reuse, authenticate all later
+//! tail/control frames, and fence on disconnect or lifecycle mismatch.
 
 use std::fmt;
 
@@ -26,12 +25,20 @@ pub const SNAPSHOT_SESSION_SCHEMA_VERSION: u16 = 1;
 pub const SNAPSHOT_SESSION_CHALLENGE_BYTES: usize = 32;
 pub const SNAPSHOT_SESSION_SECRET_BYTES: usize = 32;
 pub const SNAPSHOT_DIGEST_KEY_ID_BYTES: usize = 32;
+
 const SHA256_BYTES: usize = 32;
 const SHA256_BLOCK_BYTES: usize = 64;
-/// Direction is part of the domain so a valid server response cannot be used
-/// as an authenticated client message in a future bidirectional protocol.
-const SERVER_RESPONSE_AUTH_DOMAIN: &[u8] =
-    b"mini-dynamo/snapshot-session/server-response/auth/v1\0";
+const MAGIC: &[u8; 8] = b"MDSNAP01";
+const CLIENT_HELLO_TYPE: u8 = 1;
+const SNAPSHOT_RESPONSE_TYPE: u8 = 2;
+const CLIENT_TO_SERVER: u8 = 1;
+const SERVER_TO_CLIENT: u8 = 2;
+const HELLO_PREFIX_BYTES: usize = 8 + 2 + 1 + 1 + 4 + SNAPSHOT_SESSION_CHALLENGE_BYTES;
+const HELLO_FRAME_BYTES: usize = HELLO_PREFIX_BYTES + SHA256_BYTES;
+const RESPONSE_PREFIX_BYTES: usize = 8 + 2 + 1 + 1 + 8 + 4 + 8 + SNAPSHOT_SESSION_CHALLENGE_BYTES;
+const RESPONSE_OVERHEAD_BYTES: usize = RESPONSE_PREFIX_BYTES + SHA256_BYTES;
+const HELLO_AUTH_DOMAIN: &[u8] = b"mini-dynamo/snapshot-session/client-hello/auth/v1\0";
+const RESPONSE_AUTH_DOMAIN: &[u8] = b"mini-dynamo/snapshot-session/server-response/auth/v1\0";
 
 #[derive(Clone, Copy, Debug)]
 pub struct SnapshotSessionLimits {
@@ -40,24 +47,22 @@ pub struct SnapshotSessionLimits {
     pub max_header_bytes: usize,
     pub max_snapshot_frame_bytes: usize,
     pub max_incarnation_component_bytes: usize,
-    pub max_key_id_bytes: usize,
 }
 
 impl Default for SnapshotSessionLimits {
     fn default() -> Self {
         Self {
-            max_hello_frame_bytes: 512,
+            max_hello_frame_bytes: HELLO_FRAME_BYTES,
             max_response_frame_bytes: 64 * 1024 * 1024 + 4 * 1024,
             max_header_bytes: 4 * 1024,
             max_snapshot_frame_bytes: 64 * 1024 * 1024,
             max_incarnation_component_bytes: 512,
-            max_key_id_bytes: SNAPSHOT_DIGEST_KEY_ID_BYTES,
         }
     }
 }
 
-/// Caller-generated freshness challenge. Randomness is intentionally outside
-/// this module so a deployment can use its audited entropy source.
+/// Caller-generated freshness challenge. Randomness and reuse tracking are
+/// intentionally outside this module.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct SnapshotSessionChallenge([u8; SNAPSHOT_SESSION_CHALLENGE_BYTES]);
 
@@ -79,12 +84,11 @@ impl fmt::Debug for SnapshotSessionChallenge {
     }
 }
 
-/// Exact 256-bit session-authenticator secret.
+/// Exact 256-bit session-auth key, distinct from the block-digest key.
 ///
-/// This is a distinct type and protocol domain from the block-digest key. A
-/// deployment must derive/provision it independently and never reuse the block
-/// digest secret. It has no serialization implementation and its debug
-/// representation is always redacted.
+/// It intentionally implements neither serialization nor `Clone`; its debug
+/// representation is redacted and its directly owned bytes are cleared on
+/// drop as defense in depth.
 pub struct SnapshotSessionSecret([u8; SNAPSHOT_SESSION_SECRET_BYTES]);
 
 impl SnapshotSessionSecret {
@@ -106,25 +110,72 @@ impl Drop for SnapshotSessionSecret {
     }
 }
 
+/// Metadata asserted by the snapshot producer and covered by the response MAC.
 #[derive(Clone, Copy)]
 pub struct SnapshotSessionBinding<'a> {
     pub challenge: SnapshotSessionChallenge,
     pub engine_incarnation: &'a EngineIncarnation,
     pub snapshot_watermark: u64,
-    pub digest_key_id: &'a [u8],
+    pub digest_key_id: &'a [u8; SNAPSHOT_DIGEST_KEY_ID_BYTES],
     pub companion_generation: u64,
+}
+
+/// Independently established client expectations.
+///
+/// Incarnation and digest key identity must match exactly. Watermark and
+/// generation are monotonic freshness floors because their current exact
+/// values are learned from the authenticated producer response.
+#[derive(Clone, Copy)]
+pub struct SnapshotSessionExpectations<'a> {
+    pub challenge: SnapshotSessionChallenge,
+    pub engine_incarnation: &'a EngineIncarnation,
+    pub digest_key_id: &'a [u8; SNAPSHOT_DIGEST_KEY_ID_BYTES],
+    pub minimum_snapshot_watermark: u64,
+    pub minimum_companion_generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedSnapshot {
-    pub engine_incarnation: EngineIncarnation,
-    pub snapshot_watermark: u64,
-    pub digest_key_id: Vec<u8>,
-    pub companion_generation: u64,
-    pub snapshot_frame: Vec<u8>,
+    engine_incarnation: EngineIncarnation,
+    snapshot_watermark: u64,
+    digest_key_id: [u8; SNAPSHOT_DIGEST_KEY_ID_BYTES],
+    companion_generation: u64,
+    snapshot_frame: Vec<u8>,
 }
 
-#[derive(Debug, Error, Eq, PartialEq)]
+impl AuthenticatedSnapshot {
+    #[must_use]
+    pub const fn engine_incarnation(&self) -> &EngineIncarnation {
+        &self.engine_incarnation
+    }
+
+    #[must_use]
+    pub const fn snapshot_watermark(&self) -> u64 {
+        self.snapshot_watermark
+    }
+
+    #[must_use]
+    pub const fn digest_key_id(&self) -> &[u8; SNAPSHOT_DIGEST_KEY_ID_BYTES] {
+        &self.digest_key_id
+    }
+
+    #[must_use]
+    pub const fn companion_generation(&self) -> u64 {
+        self.companion_generation
+    }
+
+    #[must_use]
+    pub fn snapshot_frame(&self) -> &[u8] {
+        &self.snapshot_frame
+    }
+
+    #[must_use]
+    pub fn into_snapshot_frame(self) -> Vec<u8> {
+        self.snapshot_frame
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum SnapshotSessionError {
     #[error("snapshot session hello exceeds configured byte limit")]
     HelloFrameTooLarge,
@@ -134,63 +185,63 @@ pub enum SnapshotSessionError {
     HeaderTooLarge,
     #[error("snapshot session payload exceeds configured byte limit")]
     SnapshotFrameTooLarge,
+    #[error("invalid snapshot session frame length")]
+    InvalidFrameLength,
     #[error("invalid snapshot session MessagePack")]
     InvalidMessagePack,
     #[error("unsupported snapshot session schema")]
     UnsupportedSchema,
-    #[error("invalid snapshot session challenge")]
-    InvalidChallenge,
+    #[error("invalid snapshot session message type")]
+    InvalidMessageType,
+    #[error("invalid snapshot session direction")]
+    InvalidDirection,
+    #[error("invalid snapshot session magic")]
+    InvalidMagic,
     #[error("invalid snapshot session engine incarnation")]
     InvalidIncarnation,
-    #[error("invalid snapshot session digest key identifier")]
-    InvalidKeyId,
     #[error("invalid snapshot companion generation")]
     InvalidGeneration,
-    #[error("invalid snapshot session payload length")]
-    InvalidPayloadLength,
     #[error("invalid snapshot session payload checksum")]
     InvalidChecksum,
-    #[error("invalid snapshot session authenticator")]
-    InvalidAuthenticator,
     #[error("snapshot session authentication failed")]
     AuthenticationFailed,
     #[error("snapshot session challenge does not match")]
     ChallengeMismatch,
     #[error("snapshot session engine incarnation does not match")]
     IncarnationMismatch,
-    #[error("snapshot session watermark does not match")]
-    WatermarkMismatch,
+    #[error("snapshot session watermark is stale")]
+    StaleWatermark,
     #[error("snapshot session digest key identifier does not match")]
     KeyIdMismatch,
-    #[error("snapshot companion generation does not match")]
-    GenerationMismatch,
+    #[error("snapshot companion generation is stale")]
+    StaleGeneration,
     #[error("snapshot session encoding failed")]
     EncodeFailed,
 }
 
 impl SnapshotSessionError {
     #[must_use]
-    pub const fn reason(&self) -> &'static str {
+    pub const fn reason(self) -> &'static str {
         match self {
             Self::HelloFrameTooLarge => "hello_frame_too_large",
             Self::ResponseFrameTooLarge => "response_frame_too_large",
             Self::HeaderTooLarge => "header_too_large",
             Self::SnapshotFrameTooLarge => "snapshot_frame_too_large",
+            Self::InvalidFrameLength => "invalid_frame_length",
             Self::InvalidMessagePack => "invalid_messagepack",
             Self::UnsupportedSchema => "unsupported_schema",
-            Self::InvalidChallenge => "invalid_challenge",
+            Self::InvalidMessageType => "invalid_message_type",
+            Self::InvalidDirection => "invalid_direction",
+            Self::InvalidMagic => "invalid_magic",
             Self::InvalidIncarnation => "invalid_incarnation",
-            Self::InvalidKeyId => "invalid_key_id",
             Self::InvalidGeneration => "invalid_generation",
-            Self::InvalidPayloadLength => "invalid_payload_length",
             Self::InvalidChecksum => "invalid_checksum",
-            Self::InvalidAuthenticator => "invalid_authenticator",
             Self::AuthenticationFailed => "authentication_failed",
             Self::ChallengeMismatch => "challenge_mismatch",
             Self::IncarnationMismatch => "incarnation_mismatch",
-            Self::WatermarkMismatch => "watermark_mismatch",
+            Self::StaleWatermark => "stale_watermark",
             Self::KeyIdMismatch => "key_id_mismatch",
-            Self::GenerationMismatch => "generation_mismatch",
+            Self::StaleGeneration => "stale_generation",
             Self::EncodeFailed => "encode_failed",
         }
     }
@@ -198,251 +249,276 @@ impl SnapshotSessionError {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ClientHello {
-    schema_version: u16,
-    #[serde(with = "serde_bytes")]
-    challenge: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResponseHeader {
-    schema_version: u16,
-    #[serde(with = "serde_bytes")]
-    challenge: Vec<u8>,
+struct ResponseMetadata {
     engine_incarnation: EngineIncarnation,
     snapshot_watermark: u64,
     #[serde(with = "serde_bytes")]
     digest_key_id: Vec<u8>,
     companion_generation: u64,
-    snapshot_frame_bytes: u64,
     #[serde(with = "serde_bytes")]
     snapshot_frame_sha256: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResponseEnvelope {
-    /// Opaque named-MessagePack [`ResponseHeader`]. Keeping its original bytes
-    /// makes the MAC bind the exact wire representation, not a re-encoding.
-    #[serde(with = "serde_bytes")]
-    header: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    snapshot_frame: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    authenticator: Vec<u8>,
-}
-
-/// Encode the unauthenticated freshness challenge for a future session.
-///
-/// This hello alone does not authenticate either peer and must not be treated
-/// as a complete handshake.
+/// Encode an authenticated fixed-width client hello.
 ///
 /// # Errors
 ///
-/// Returns `SnapshotSessionError` if the named `MessagePack` frame cannot be
-/// encoded within the configured limit.
+/// Returns `SnapshotSessionError` when the configured frame bound is smaller
+/// than the protocol's fixed hello size.
 pub fn encode_client_hello(
     challenge: SnapshotSessionChallenge,
+    secret: &SnapshotSessionSecret,
     limits: SnapshotSessionLimits,
 ) -> Result<Vec<u8>, SnapshotSessionError> {
-    let hello = ClientHello {
-        schema_version: SNAPSHOT_SESSION_SCHEMA_VERSION,
-        challenge: challenge.0.to_vec(),
-    };
-    let frame = rmp_serde::to_vec_named(&hello).map_err(|_| SnapshotSessionError::EncodeFailed)?;
-    if frame.len() > limits.max_hello_frame_bytes {
+    if HELLO_FRAME_BYTES > limits.max_hello_frame_bytes {
         return Err(SnapshotSessionError::HelloFrameTooLarge);
     }
+    let mut frame = Vec::with_capacity(HELLO_FRAME_BYTES);
+    frame.extend_from_slice(MAGIC);
+    frame.extend_from_slice(&SNAPSHOT_SESSION_SCHEMA_VERSION.to_be_bytes());
+    frame.push(CLIENT_HELLO_TYPE);
+    frame.push(CLIENT_TO_SERVER);
+    frame.extend_from_slice(
+        &u32::try_from(HELLO_FRAME_BYTES)
+            .map_err(|_| SnapshotSessionError::EncodeFailed)?
+            .to_be_bytes(),
+    );
+    frame.extend_from_slice(challenge.as_bytes());
+    let authenticator = authenticate(secret, HELLO_AUTH_DOMAIN, &[&frame]);
+    frame.extend_from_slice(&authenticator);
     Ok(frame)
 }
 
-/// Decode a bounded client hello. The returned challenge must be copied into
-/// the authenticated response binding.
+/// Verify and decode an authenticated client hello without deserializing or
+/// allocating attacker-declared fields.
 ///
 /// # Errors
 ///
-/// Returns `SnapshotSessionError` for malformed, unsupported, or oversized
-/// input.
+/// Returns `SnapshotSessionError` for malformed, unauthenticated, unsupported,
+/// or oversized input.
 pub fn decode_client_hello(
     frame: &[u8],
+    secret: &SnapshotSessionSecret,
     limits: SnapshotSessionLimits,
 ) -> Result<SnapshotSessionChallenge, SnapshotSessionError> {
     if frame.len() > limits.max_hello_frame_bytes {
         return Err(SnapshotSessionError::HelloFrameTooLarge);
     }
-    let hello: ClientHello =
-        rmp_serde::from_slice(frame).map_err(|_| SnapshotSessionError::InvalidMessagePack)?;
-    if hello.schema_version != SNAPSHOT_SESSION_SCHEMA_VERSION {
-        return Err(SnapshotSessionError::UnsupportedSchema);
+    if frame.len() != HELLO_FRAME_BYTES {
+        return Err(SnapshotSessionError::InvalidFrameLength);
     }
-    let challenge = hello
-        .challenge
+    validate_fixed_header(frame, CLIENT_HELLO_TYPE, CLIENT_TO_SERVER)?;
+    if usize::try_from(read_u32(frame, 12)?).ok() != Some(HELLO_FRAME_BYTES) {
+        return Err(SnapshotSessionError::InvalidFrameLength);
+    }
+    let prefix = &frame[..HELLO_PREFIX_BYTES];
+    let authenticator = &frame[HELLO_PREFIX_BYTES..];
+    let expected = authenticate(secret, HELLO_AUTH_DOMAIN, &[prefix]);
+    if !constant_work_mac_eq(authenticator, &expected) {
+        return Err(SnapshotSessionError::AuthenticationFailed);
+    }
+    let challenge = frame[16..HELLO_PREFIX_BYTES]
         .try_into()
-        .map_err(|_| SnapshotSessionError::InvalidChallenge)?;
+        .map_err(|_| SnapshotSessionError::InvalidFrameLength)?;
     Ok(SnapshotSessionChallenge(challenge))
 }
 
-/// Encode a snapshot response authenticated over the exact header and exact
-/// snapshot frame bytes.
+/// Encode an authenticated response with a fixed binary envelope and named
+/// `MessagePack` metadata.
 ///
 /// # Errors
 ///
-/// Returns `SnapshotSessionError` if a binding is invalid, a configured
-/// bound is exceeded, or `MessagePack` encoding fails.
+/// Returns `SnapshotSessionError` when metadata is invalid, encoding fails, or
+/// a configured bound is exceeded.
 pub fn encode_authenticated_snapshot(
     snapshot_frame: &[u8],
     binding: SnapshotSessionBinding<'_>,
     secret: &SnapshotSessionSecret,
     limits: SnapshotSessionLimits,
 ) -> Result<Vec<u8>, SnapshotSessionError> {
-    validate_binding(binding, limits)?;
+    validate_incarnation(binding.engine_incarnation, limits)?;
+    if binding.companion_generation == 0 {
+        return Err(SnapshotSessionError::InvalidGeneration);
+    }
     if snapshot_frame.len() > limits.max_snapshot_frame_bytes {
         return Err(SnapshotSessionError::SnapshotFrameTooLarge);
     }
-    let header = ResponseHeader {
-        schema_version: SNAPSHOT_SESSION_SCHEMA_VERSION,
-        challenge: binding.challenge.0.to_vec(),
+    let metadata = ResponseMetadata {
         engine_incarnation: binding.engine_incarnation.clone(),
         snapshot_watermark: binding.snapshot_watermark,
         digest_key_id: binding.digest_key_id.to_vec(),
         companion_generation: binding.companion_generation,
-        snapshot_frame_bytes: u64::try_from(snapshot_frame.len())
-            .map_err(|_| SnapshotSessionError::SnapshotFrameTooLarge)?,
         snapshot_frame_sha256: Sha256::digest(snapshot_frame).to_vec(),
     };
-    let header =
-        rmp_serde::to_vec_named(&header).map_err(|_| SnapshotSessionError::EncodeFailed)?;
-    if header.len() > limits.max_header_bytes {
+    let metadata =
+        rmp_serde::to_vec_named(&metadata).map_err(|_| SnapshotSessionError::EncodeFailed)?;
+    if metadata.len() > limits.max_header_bytes {
         return Err(SnapshotSessionError::HeaderTooLarge);
     }
-    let authenticator = authenticate(secret, &header, snapshot_frame).to_vec();
-    let envelope = ResponseEnvelope {
-        header,
-        snapshot_frame: snapshot_frame.to_vec(),
-        authenticator,
-    };
-    let frame =
-        rmp_serde::to_vec_named(&envelope).map_err(|_| SnapshotSessionError::EncodeFailed)?;
-    if frame.len() > limits.max_response_frame_bytes {
+    let total = RESPONSE_OVERHEAD_BYTES
+        .checked_add(metadata.len())
+        .and_then(|value| value.checked_add(snapshot_frame.len()))
+        .ok_or(SnapshotSessionError::ResponseFrameTooLarge)?;
+    if total > limits.max_response_frame_bytes {
         return Err(SnapshotSessionError::ResponseFrameTooLarge);
     }
+
+    let mut frame = Vec::with_capacity(total);
+    frame.extend_from_slice(MAGIC);
+    frame.extend_from_slice(&SNAPSHOT_SESSION_SCHEMA_VERSION.to_be_bytes());
+    frame.push(SNAPSHOT_RESPONSE_TYPE);
+    frame.push(SERVER_TO_CLIENT);
+    frame.extend_from_slice(
+        &u64::try_from(total)
+            .map_err(|_| SnapshotSessionError::ResponseFrameTooLarge)?
+            .to_be_bytes(),
+    );
+    frame.extend_from_slice(
+        &u32::try_from(metadata.len())
+            .map_err(|_| SnapshotSessionError::HeaderTooLarge)?
+            .to_be_bytes(),
+    );
+    frame.extend_from_slice(
+        &u64::try_from(snapshot_frame.len())
+            .map_err(|_| SnapshotSessionError::SnapshotFrameTooLarge)?
+            .to_be_bytes(),
+    );
+    frame.extend_from_slice(binding.challenge.as_bytes());
+    frame.extend_from_slice(&metadata);
+    frame.extend_from_slice(snapshot_frame);
+    let authenticator = authenticate(secret, RESPONSE_AUTH_DOMAIN, &[&frame]);
+    frame.extend_from_slice(&authenticator);
     Ok(frame)
 }
 
-/// Authenticate, decode, bound, and exactly match a snapshot response.
-/// Authentication happens before header parsing or expectation checks.
+/// Authenticate and decode a response. No response field is deserialized and
+/// no response-owned payload/header buffer is allocated before length checks
+/// and MAC verification over borrowed input slices succeed.
 ///
 /// # Errors
 ///
-/// Returns `SnapshotSessionError` on malformed input, failed
-/// authentication, a configured capacity breach, or a binding mismatch.
+/// Returns `SnapshotSessionError` on malformed input, failed authentication, a
+/// configured capacity breach, or an independent expectation mismatch.
 pub fn decode_authenticated_snapshot(
     frame: &[u8],
-    expected: SnapshotSessionBinding<'_>,
+    expected: SnapshotSessionExpectations<'_>,
     secret: &SnapshotSessionSecret,
     limits: SnapshotSessionLimits,
 ) -> Result<AuthenticatedSnapshot, SnapshotSessionError> {
-    validate_binding(expected, limits)?;
+    validate_incarnation(expected.engine_incarnation, limits)?;
     if frame.len() > limits.max_response_frame_bytes {
         return Err(SnapshotSessionError::ResponseFrameTooLarge);
     }
-    let envelope: ResponseEnvelope =
-        rmp_serde::from_slice(frame).map_err(|_| SnapshotSessionError::InvalidMessagePack)?;
-    if envelope.header.len() > limits.max_header_bytes {
+    if frame.len() < RESPONSE_OVERHEAD_BYTES {
+        return Err(SnapshotSessionError::InvalidFrameLength);
+    }
+    validate_fixed_header(frame, SNAPSHOT_RESPONSE_TYPE, SERVER_TO_CLIENT)?;
+
+    let declared_total = usize::try_from(read_u64(frame, 12)?)
+        .map_err(|_| SnapshotSessionError::ResponseFrameTooLarge)?;
+    let metadata_len =
+        usize::try_from(read_u32(frame, 20)?).map_err(|_| SnapshotSessionError::HeaderTooLarge)?;
+    let snapshot_len = usize::try_from(read_u64(frame, 24)?)
+        .map_err(|_| SnapshotSessionError::SnapshotFrameTooLarge)?;
+    if declared_total > limits.max_response_frame_bytes {
+        return Err(SnapshotSessionError::ResponseFrameTooLarge);
+    }
+    if metadata_len > limits.max_header_bytes {
         return Err(SnapshotSessionError::HeaderTooLarge);
     }
-    if envelope.snapshot_frame.len() > limits.max_snapshot_frame_bytes {
+    if snapshot_len > limits.max_snapshot_frame_bytes {
         return Err(SnapshotSessionError::SnapshotFrameTooLarge);
     }
-    let authenticator_has_valid_length = envelope.authenticator.len() == SHA256_BYTES;
-    let computed = authenticate(secret, &envelope.header, &envelope.snapshot_frame);
-    if !constant_work_mac_eq(&envelope.authenticator, &computed) {
-        return Err(if authenticator_has_valid_length {
-            SnapshotSessionError::AuthenticationFailed
-        } else {
-            SnapshotSessionError::InvalidAuthenticator
-        });
+    let expected_total = RESPONSE_OVERHEAD_BYTES
+        .checked_add(metadata_len)
+        .and_then(|value| value.checked_add(snapshot_len))
+        .ok_or(SnapshotSessionError::InvalidFrameLength)?;
+    if declared_total != expected_total || frame.len() != expected_total {
+        return Err(SnapshotSessionError::InvalidFrameLength);
     }
 
-    let header: ResponseHeader = rmp_serde::from_slice(&envelope.header)
-        .map_err(|_| SnapshotSessionError::InvalidMessagePack)?;
-    validate_response_header(&header, limits)?;
-    if u64::try_from(envelope.snapshot_frame.len()).ok() != Some(header.snapshot_frame_bytes) {
-        return Err(SnapshotSessionError::InvalidPayloadLength);
+    let challenge: &[u8; SNAPSHOT_SESSION_CHALLENGE_BYTES] = frame[32..RESPONSE_PREFIX_BYTES]
+        .try_into()
+        .map_err(|_| SnapshotSessionError::InvalidFrameLength)?;
+    let metadata_end = RESPONSE_PREFIX_BYTES + metadata_len;
+    let snapshot_end = metadata_end + snapshot_len;
+    let metadata_bytes = &frame[RESPONSE_PREFIX_BYTES..metadata_end];
+    let snapshot_bytes = &frame[metadata_end..snapshot_end];
+    let authenticator = &frame[snapshot_end..];
+    let computed = authenticate(secret, RESPONSE_AUTH_DOMAIN, &[&frame[..snapshot_end]]);
+    if !constant_work_mac_eq(authenticator, &computed) {
+        return Err(SnapshotSessionError::AuthenticationFailed);
     }
-    let checksum: [u8; SHA256_BYTES] = Sha256::digest(&envelope.snapshot_frame).into();
-    if !constant_work_mac_eq(&header.snapshot_frame_sha256, &checksum) {
-        return Err(SnapshotSessionError::InvalidChecksum);
-    }
-
-    if header.challenge.as_slice() != expected.challenge.as_bytes() {
+    if !constant_work_mac_eq(challenge, expected.challenge.as_bytes()) {
         return Err(SnapshotSessionError::ChallengeMismatch);
     }
-    if header.engine_incarnation != *expected.engine_incarnation {
+
+    let metadata: ResponseMetadata = rmp_serde::from_slice(metadata_bytes)
+        .map_err(|_| SnapshotSessionError::InvalidMessagePack)?;
+    validate_response_metadata(&metadata, limits)?;
+    if metadata.engine_incarnation != *expected.engine_incarnation {
         return Err(SnapshotSessionError::IncarnationMismatch);
     }
-    if header.snapshot_watermark != expected.snapshot_watermark {
-        return Err(SnapshotSessionError::WatermarkMismatch);
-    }
-    if header.digest_key_id != expected.digest_key_id {
+    if metadata.digest_key_id.as_slice() != expected.digest_key_id {
         return Err(SnapshotSessionError::KeyIdMismatch);
     }
-    if header.companion_generation != expected.companion_generation {
-        return Err(SnapshotSessionError::GenerationMismatch);
+    if metadata.snapshot_watermark < expected.minimum_snapshot_watermark {
+        return Err(SnapshotSessionError::StaleWatermark);
     }
+    if metadata.companion_generation < expected.minimum_companion_generation {
+        return Err(SnapshotSessionError::StaleGeneration);
+    }
+    let checksum: [u8; SHA256_BYTES] = Sha256::digest(snapshot_bytes).into();
+    if !constant_work_mac_eq(&metadata.snapshot_frame_sha256, &checksum) {
+        return Err(SnapshotSessionError::InvalidChecksum);
+    }
+    let digest_key_id = metadata
+        .digest_key_id
+        .try_into()
+        .map_err(|_| SnapshotSessionError::KeyIdMismatch)?;
 
     Ok(AuthenticatedSnapshot {
-        engine_incarnation: header.engine_incarnation,
-        snapshot_watermark: header.snapshot_watermark,
-        digest_key_id: header.digest_key_id,
-        companion_generation: header.companion_generation,
-        snapshot_frame: envelope.snapshot_frame,
+        engine_incarnation: metadata.engine_incarnation,
+        snapshot_watermark: metadata.snapshot_watermark,
+        digest_key_id,
+        companion_generation: metadata.companion_generation,
+        snapshot_frame: snapshot_bytes.to_vec(),
     })
 }
 
-fn validate_binding(
-    binding: SnapshotSessionBinding<'_>,
-    limits: SnapshotSessionLimits,
+fn validate_fixed_header(
+    frame: &[u8],
+    expected_type: u8,
+    expected_direction: u8,
 ) -> Result<(), SnapshotSessionError> {
-    validate_incarnation(binding.engine_incarnation, limits)?;
-    if binding.digest_key_id.len() != SNAPSHOT_DIGEST_KEY_ID_BYTES
-        || binding.digest_key_id.len() > limits.max_key_id_bytes
-    {
-        return Err(SnapshotSessionError::InvalidKeyId);
+    if frame.get(..8) != Some(MAGIC.as_slice()) {
+        return Err(SnapshotSessionError::InvalidMagic);
     }
-    if binding.companion_generation == 0 {
-        return Err(SnapshotSessionError::InvalidGeneration);
+    if read_u16(frame, 8)? != SNAPSHOT_SESSION_SCHEMA_VERSION {
+        return Err(SnapshotSessionError::UnsupportedSchema);
+    }
+    if frame.get(10).copied() != Some(expected_type) {
+        return Err(SnapshotSessionError::InvalidMessageType);
+    }
+    if frame.get(11).copied() != Some(expected_direction) {
+        return Err(SnapshotSessionError::InvalidDirection);
     }
     Ok(())
 }
 
-fn validate_response_header(
-    header: &ResponseHeader,
+fn validate_response_metadata(
+    metadata: &ResponseMetadata,
     limits: SnapshotSessionLimits,
 ) -> Result<(), SnapshotSessionError> {
-    if header.schema_version != SNAPSHOT_SESSION_SCHEMA_VERSION {
-        return Err(SnapshotSessionError::UnsupportedSchema);
+    validate_incarnation(&metadata.engine_incarnation, limits)?;
+    if metadata.digest_key_id.len() != SNAPSHOT_DIGEST_KEY_ID_BYTES {
+        return Err(SnapshotSessionError::KeyIdMismatch);
     }
-    if header.challenge.len() != SNAPSHOT_SESSION_CHALLENGE_BYTES {
-        return Err(SnapshotSessionError::InvalidChallenge);
-    }
-    validate_incarnation(&header.engine_incarnation, limits)?;
-    if header.digest_key_id.len() != SNAPSHOT_DIGEST_KEY_ID_BYTES
-        || header.digest_key_id.len() > limits.max_key_id_bytes
-    {
-        return Err(SnapshotSessionError::InvalidKeyId);
-    }
-    if header.companion_generation == 0 {
+    if metadata.companion_generation == 0 {
         return Err(SnapshotSessionError::InvalidGeneration);
     }
-    if header.snapshot_frame_sha256.len() != SHA256_BYTES {
+    if metadata.snapshot_frame_sha256.len() != SHA256_BYTES {
         return Err(SnapshotSessionError::InvalidChecksum);
-    }
-    if header.snapshot_frame_bytes
-        > u64::try_from(limits.max_snapshot_frame_bytes).unwrap_or(u64::MAX)
-    {
-        return Err(SnapshotSessionError::SnapshotFrameTooLarge);
     }
     Ok(())
 }
@@ -451,11 +527,11 @@ fn validate_incarnation(
     incarnation: &EngineIncarnation,
     limits: SnapshotSessionLimits,
 ) -> Result<(), SnapshotSessionError> {
-    let valid_component =
+    let valid =
         |value: &str| !value.is_empty() && value.len() <= limits.max_incarnation_component_bytes;
-    if !valid_component(&incarnation.engine_id)
-        || !valid_component(&incarnation.model_revision)
-        || !valid_component(&incarnation.image_digest)
+    if !valid(&incarnation.engine_id)
+        || !valid(&incarnation.model_revision)
+        || !valid(&incarnation.image_digest)
         || incarnation.process_started_unix_ns == 0
         || incarnation.attestation_sha256.len() != SHA256_BYTES
     {
@@ -464,28 +540,41 @@ fn validate_incarnation(
     Ok(())
 }
 
+fn read_u16(frame: &[u8], offset: usize) -> Result<u16, SnapshotSessionError> {
+    frame
+        .get(offset..offset + 2)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u16::from_be_bytes)
+        .ok_or(SnapshotSessionError::InvalidFrameLength)
+}
+
+fn read_u32(frame: &[u8], offset: usize) -> Result<u32, SnapshotSessionError> {
+    frame
+        .get(offset..offset + 4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_be_bytes)
+        .ok_or(SnapshotSessionError::InvalidFrameLength)
+}
+
+fn read_u64(frame: &[u8], offset: usize) -> Result<u64, SnapshotSessionError> {
+    frame
+        .get(offset..offset + 8)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_be_bytes)
+        .ok_or(SnapshotSessionError::InvalidFrameLength)
+}
+
 fn authenticate(
     secret: &SnapshotSessionSecret,
-    header: &[u8],
-    snapshot_frame: &[u8],
+    domain: &[u8],
+    parts: &[&[u8]],
 ) -> [u8; SHA256_BYTES] {
     let mut hmac = HmacSha256::new(&secret.0);
-    // The exact named header binds schema version, challenge/request,
-    // incarnation, watermark/sequence, digest key identity, companion
-    // generation/session, checksum, and the repeated payload length.
-    hmac.update(SERVER_RESPONSE_AUTH_DOMAIN);
-    hmac.update(
-        &u64::try_from(header.len())
-            .unwrap_or(u64::MAX)
-            .to_be_bytes(),
-    );
-    hmac.update(header);
-    hmac.update(
-        &u64::try_from(snapshot_frame.len())
-            .unwrap_or(u64::MAX)
-            .to_be_bytes(),
-    );
-    hmac.update(snapshot_frame);
+    hmac.update(domain);
+    for part in parts {
+        hmac.update(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hmac.update(part);
+    }
     hmac.finalize()
 }
 
@@ -506,13 +595,9 @@ impl HmacSha256 {
     fn new(secret: &[u8; SNAPSHOT_SESSION_SECRET_BYTES]) -> Self {
         let mut inner_pad = [0x36_u8; SHA256_BLOCK_BYTES];
         let mut outer_pad = [0x5c_u8; SHA256_BLOCK_BYTES];
-        for ((inner, outer), secret_byte) in inner_pad
-            .iter_mut()
-            .zip(&mut outer_pad)
-            .zip(secret.iter().copied().chain(std::iter::repeat(0)))
-        {
-            *inner ^= secret_byte;
-            *outer ^= secret_byte;
+        for (index, secret_byte) in secret.iter().enumerate() {
+            inner_pad[index] ^= secret_byte;
+            outer_pad[index] ^= secret_byte;
         }
         let mut inner = Sha256::new();
         inner.update(inner_pad);
@@ -562,7 +647,17 @@ mod tests {
         }
     }
 
-    fn encode_fixture() -> (Vec<u8>, EngineIncarnation) {
+    fn expectations(incarnation: &EngineIncarnation) -> SnapshotSessionExpectations<'_> {
+        SnapshotSessionExpectations {
+            challenge: CHALLENGE,
+            engine_incarnation: incarnation,
+            digest_key_id: &KEY_ID,
+            minimum_snapshot_watermark: 9_000,
+            minimum_companion_generation: 6,
+        }
+    }
+
+    fn response() -> (Vec<u8>, EngineIncarnation) {
         let incarnation = incarnation();
         let secret = SnapshotSessionSecret::new(SECRET_BYTES);
         let frame = encode_authenticated_snapshot(
@@ -576,83 +671,78 @@ mod tests {
     }
 
     #[test]
-    fn hello_and_authenticated_snapshot_round_trip() {
+    fn authenticated_exchange_round_trips() {
         let limits = SnapshotSessionLimits::default();
-        let hello = encode_client_hello(CHALLENGE, limits).unwrap();
-        assert_eq!(decode_client_hello(&hello, limits).unwrap(), CHALLENGE);
-
-        let (frame, incarnation) = encode_fixture();
         let secret = SnapshotSessionSecret::new(SECRET_BYTES);
+        let hello = encode_client_hello(CHALLENGE, &secret, limits).unwrap();
+        assert_eq!(
+            decode_client_hello(&hello, &secret, limits).unwrap(),
+            CHALLENGE
+        );
+
+        let (frame, incarnation) = response();
         let decoded =
-            decode_authenticated_snapshot(&frame, binding(&incarnation), &secret, limits).unwrap();
-        assert_eq!(decoded.engine_incarnation, incarnation);
-        assert_eq!(decoded.snapshot_watermark, 9_123);
-        assert_eq!(decoded.digest_key_id, KEY_ID);
-        assert_eq!(decoded.companion_generation, 7);
-        assert_eq!(decoded.snapshot_frame, b"opaque-kv-snapshot-frame");
+            decode_authenticated_snapshot(&frame, expectations(&incarnation), &secret, limits)
+                .unwrap();
+        assert_eq!(decoded.engine_incarnation(), &incarnation);
+        assert_eq!(decoded.snapshot_watermark(), 9_123);
+        assert_eq!(decoded.digest_key_id(), &KEY_ID);
+        assert_eq!(decoded.companion_generation(), 7);
+        assert_eq!(decoded.snapshot_frame(), b"opaque-kv-snapshot-frame");
     }
 
     #[test]
-    fn tampering_and_reparenting_fail_authentication() {
-        let (frame, incarnation) = encode_fixture();
-        let mut envelope: ResponseEnvelope = rmp_serde::from_slice(&frame).unwrap();
-        let original_header = envelope.header.clone();
-        envelope.header[5] ^= 1;
-        let tampered_header = rmp_serde::to_vec_named(&envelope).unwrap();
+    fn unauthenticated_hello_is_rejected() {
+        let limits = SnapshotSessionLimits::default();
         let secret = SnapshotSessionSecret::new(SECRET_BYTES);
+        let mut hello = encode_client_hello(CHALLENGE, &secret, limits).unwrap();
+        hello[20] ^= 1;
         assert_eq!(
-            decode_authenticated_snapshot(
-                &tampered_header,
-                binding(&incarnation),
-                &secret,
-                SnapshotSessionLimits::default(),
-            ),
+            decode_client_hello(&hello, &secret, limits),
             Err(SnapshotSessionError::AuthenticationFailed)
         );
-
-        envelope.header = original_header;
-        envelope.snapshot_frame[3] ^= 1;
-        let tampered = rmp_serde::to_vec_named(&envelope).unwrap();
+        let wrong = SnapshotSessionSecret::new([0x44; 32]);
+        let hello = encode_client_hello(CHALLENGE, &secret, limits).unwrap();
         assert_eq!(
-            decode_authenticated_snapshot(
-                &tampered,
-                binding(&incarnation),
-                &secret,
-                SnapshotSessionLimits::default(),
-            ),
-            Err(SnapshotSessionError::AuthenticationFailed)
-        );
-
-        let other_secret = SnapshotSessionSecret::new(SECRET_BYTES);
-        let other = encode_authenticated_snapshot(
-            b"another-snapshot",
-            binding(&incarnation),
-            &other_secret,
-            SnapshotSessionLimits::default(),
-        )
-        .unwrap();
-        let other: ResponseEnvelope = rmp_serde::from_slice(&other).unwrap();
-        envelope.snapshot_frame = other.snapshot_frame;
-        let reparented = rmp_serde::to_vec_named(&envelope).unwrap();
-        assert_eq!(
-            decode_authenticated_snapshot(
-                &reparented,
-                binding(&incarnation),
-                &secret,
-                SnapshotSessionLimits::default(),
-            ),
+            decode_client_hello(&hello, &wrong, limits),
             Err(SnapshotSessionError::AuthenticationFailed)
         );
     }
 
     #[test]
-    fn wrong_secret_fails_authentication() {
-        let (frame, incarnation) = encode_fixture();
+    fn response_tamper_is_rejected_before_decode() {
+        let (mut frame, incarnation) = response();
+        let secret = SnapshotSessionSecret::new(SECRET_BYTES);
+        frame[RESPONSE_PREFIX_BYTES + 3] ^= 1;
+        assert_eq!(
+            decode_authenticated_snapshot(
+                &frame,
+                expectations(&incarnation),
+                &secret,
+                SnapshotSessionLimits::default(),
+            ),
+            Err(SnapshotSessionError::AuthenticationFailed)
+        );
+
+        let (mut frame, _) = response();
+        let last_payload_byte = frame.len() - SHA256_BYTES - 1;
+        frame[last_payload_byte] ^= 1;
+        assert_eq!(
+            decode_authenticated_snapshot(
+                &frame,
+                expectations(&incarnation),
+                &secret,
+                SnapshotSessionLimits::default(),
+            ),
+            Err(SnapshotSessionError::AuthenticationFailed)
+        );
+
+        let (frame, _) = response();
         let wrong = SnapshotSessionSecret::new([0x44; 32]);
         assert_eq!(
             decode_authenticated_snapshot(
                 &frame,
-                binding(&incarnation),
+                expectations(&incarnation),
                 &wrong,
                 SnapshotSessionLimits::default(),
             ),
@@ -661,144 +751,154 @@ mod tests {
     }
 
     #[test]
-    fn exact_expectations_reject_replay_and_mixups() {
-        let (frame, incarnation) = encode_fixture();
+    fn malicious_lengths_are_rejected_without_deserialization() {
+        let (mut frame, incarnation) = response();
+        let secret = SnapshotSessionSecret::new(SECRET_BYTES);
+        frame[20..24].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            decode_authenticated_snapshot(
+                &frame,
+                expectations(&incarnation),
+                &secret,
+                SnapshotSessionLimits::default(),
+            ),
+            Err(SnapshotSessionError::HeaderTooLarge)
+        );
+
+        let (mut frame, _) = response();
+        frame[24..32].copy_from_slice(&u64::MAX.to_be_bytes());
+        assert_eq!(
+            decode_authenticated_snapshot(
+                &frame,
+                expectations(&incarnation),
+                &secret,
+                SnapshotSessionLimits::default(),
+            ),
+            Err(SnapshotSessionError::SnapshotFrameTooLarge)
+        );
+    }
+
+    #[test]
+    fn stale_floors_and_identity_mixups_are_rejected() {
+        let (frame, incarnation) = response();
         let secret = SnapshotSessionSecret::new(SECRET_BYTES);
         let limits = SnapshotSessionLimits::default();
-
-        let mut expected = binding(&incarnation);
+        let mut expected = expectations(&incarnation);
+        expected.minimum_snapshot_watermark = 9_124;
+        assert_eq!(
+            decode_authenticated_snapshot(&frame, expected, &secret, limits),
+            Err(SnapshotSessionError::StaleWatermark)
+        );
+        let mut expected = expectations(&incarnation);
+        expected.minimum_companion_generation = 8;
+        assert_eq!(
+            decode_authenticated_snapshot(&frame, expected, &secret, limits),
+            Err(SnapshotSessionError::StaleGeneration)
+        );
+        let mut expected = expectations(&incarnation);
         expected.challenge = SnapshotSessionChallenge::new([0x32; 32]);
         assert_eq!(
             decode_authenticated_snapshot(&frame, expected, &secret, limits),
             Err(SnapshotSessionError::ChallengeMismatch)
         );
-
         let wrong_incarnation = EngineIncarnation {
             engine_id: "engine-b".to_owned(),
             ..incarnation.clone()
         };
+        let mut expected = expectations(&incarnation);
+        expected.engine_incarnation = &wrong_incarnation;
         assert_eq!(
-            decode_authenticated_snapshot(
-                &frame,
-                SnapshotSessionBinding {
-                    engine_incarnation: &wrong_incarnation,
-                    ..binding(&incarnation)
-                },
-                &secret,
-                limits,
-            ),
+            decode_authenticated_snapshot(&frame, expected, &secret, limits),
             Err(SnapshotSessionError::IncarnationMismatch)
         );
-
+        let wrong_key = [0x7c; 32];
+        let mut expected = expectations(&incarnation);
+        expected.digest_key_id = &wrong_key;
         assert_eq!(
-            decode_authenticated_snapshot(
-                &frame,
-                SnapshotSessionBinding {
-                    snapshot_watermark: 9_124,
-                    ..binding(&incarnation)
-                },
-                &secret,
-                limits,
-            ),
-            Err(SnapshotSessionError::WatermarkMismatch)
-        );
-        assert_eq!(
-            decode_authenticated_snapshot(
-                &frame,
-                SnapshotSessionBinding {
-                    digest_key_id: &[0x7c; 32],
-                    ..binding(&incarnation)
-                },
-                &secret,
-                limits,
-            ),
+            decode_authenticated_snapshot(&frame, expected, &secret, limits),
             Err(SnapshotSessionError::KeyIdMismatch)
         );
-        assert_eq!(
-            decode_authenticated_snapshot(
-                &frame,
-                SnapshotSessionBinding {
-                    companion_generation: 8,
-                    ..binding(&incarnation)
-                },
-                &secret,
-                limits,
-            ),
-            Err(SnapshotSessionError::GenerationMismatch)
-        );
     }
 
     #[test]
-    fn wire_and_semantic_limits_are_strict() {
-        let limits = SnapshotSessionLimits {
-            max_hello_frame_bytes: 1,
-            ..SnapshotSessionLimits::default()
-        };
-        assert_eq!(
-            encode_client_hello(CHALLENGE, limits),
-            Err(SnapshotSessionError::HelloFrameTooLarge)
-        );
-
-        let incarnation = incarnation();
+    fn truncation_trailing_version_type_and_direction_are_rejected() {
+        let (frame, incarnation) = response();
         let secret = SnapshotSessionSecret::new(SECRET_BYTES);
-        let limits = SnapshotSessionLimits {
-            max_snapshot_frame_bytes: 3,
-            ..SnapshotSessionLimits::default()
+        let limits = SnapshotSessionLimits::default();
+        let decode = |candidate: &[u8]| {
+            decode_authenticated_snapshot(candidate, expectations(&incarnation), &secret, limits)
         };
         assert_eq!(
-            encode_authenticated_snapshot(b"four", binding(&incarnation), &secret, limits),
-            Err(SnapshotSessionError::SnapshotFrameTooLarge)
+            decode(&frame[..frame.len() - 1]),
+            Err(SnapshotSessionError::InvalidFrameLength)
         );
-
-        let limits = SnapshotSessionLimits {
-            max_key_id_bytes: KEY_ID.len() - 1,
-            ..SnapshotSessionLimits::default()
-        };
+        let mut trailing = frame.clone();
+        trailing.push(0);
         assert_eq!(
-            encode_authenticated_snapshot(b"ok", binding(&incarnation), &secret, limits),
-            Err(SnapshotSessionError::InvalidKeyId)
+            decode(&trailing),
+            Err(SnapshotSessionError::InvalidFrameLength)
         );
-
-        let oversized = EngineIncarnation {
-            engine_id: "too-long".to_owned(),
-            ..incarnation
-        };
-        let limits = SnapshotSessionLimits {
-            max_incarnation_component_bytes: 3,
-            ..SnapshotSessionLimits::default()
-        };
+        let mut version = frame.clone();
+        version[9] ^= 1;
         assert_eq!(
-            encode_authenticated_snapshot(b"ok", binding(&oversized), &secret, limits),
-            Err(SnapshotSessionError::InvalidIncarnation)
+            decode(&version),
+            Err(SnapshotSessionError::UnsupportedSchema)
+        );
+        let mut message_type = frame.clone();
+        message_type[10] = CLIENT_HELLO_TYPE;
+        assert_eq!(
+            decode(&message_type),
+            Err(SnapshotSessionError::InvalidMessageType)
+        );
+        let mut direction = frame;
+        direction[11] = CLIENT_TO_SERVER;
+        assert_eq!(
+            decode(&direction),
+            Err(SnapshotSessionError::InvalidDirection)
         );
     }
 
     #[test]
-    fn secrets_and_errors_are_content_free() {
+    fn direction_domains_prevent_cross_message_authentication() {
+        let limits = SnapshotSessionLimits::default();
+        let secret = SnapshotSessionSecret::new(SECRET_BYTES);
+        let mut hello = encode_client_hello(CHALLENGE, &secret, limits).unwrap();
+        hello[10] = SNAPSHOT_RESPONSE_TYPE;
+        hello[11] = SERVER_TO_CLIENT;
+        assert_eq!(
+            decode_client_hello(&hello, &secret, limits),
+            Err(SnapshotSessionError::InvalidMessageType)
+        );
+
+        let authentic_prefix = &hello[..HELLO_PREFIX_BYTES];
+        assert_ne!(
+            authenticate(&secret, HELLO_AUTH_DOMAIN, &[authentic_prefix]),
+            authenticate(&secret, RESPONSE_AUTH_DOMAIN, &[authentic_prefix])
+        );
+    }
+
+    #[test]
+    fn redaction_and_secret_nonserialization_hold() {
         let secret = SnapshotSessionSecret::new(SECRET_BYTES);
         assert_eq!(format!("{secret:?}"), "SnapshotSessionSecret([REDACTED])");
         assert_eq!(
             format!("{CHALLENGE:?}"),
             "SnapshotSessionChallenge([REDACTED])"
         );
-        let (frame, _) = encode_fixture();
+        let (frame, _) = response();
         assert!(
             !frame
                 .windows(SECRET_BYTES.len())
                 .any(|part| part == SECRET_BYTES)
         );
-
         for error in [
             SnapshotSessionError::AuthenticationFailed,
             SnapshotSessionError::IncarnationMismatch,
-            SnapshotSessionError::WatermarkMismatch,
+            SnapshotSessionError::StaleWatermark,
             SnapshotSessionError::KeyIdMismatch,
         ] {
-            let display = error.to_string();
-            assert!(!display.contains("engine-a"));
-            assert!(!display.contains("9123"));
-            assert!(!display.contains("sha256:image-a"));
-            assert!(!error.reason().contains("engine"));
+            assert!(!error.to_string().contains("engine-a"));
+            assert!(!error.reason().contains("engine-a"));
         }
     }
 }
