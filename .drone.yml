@@ -109,6 +109,15 @@ steps:
     when:
       event:
         - push
+      paths:
+        include:
+          - .drone.yml
+          - Cargo.toml
+          - Cargo.lock
+          - rust-toolchain.toml
+          - Dockerfile
+          - compat/**
+          - src/**
     depends_on:
       - quality-complete
 

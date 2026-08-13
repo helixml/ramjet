@@ -81,6 +81,13 @@ Compose run beside them. Build #205 completed the full PR gate in 58s versus
 69s for the prior serial Rust lane. If a no-dependency change regresses that
 loop, inspect the step timings and cache/export path before accepting it.
 
+Both GHCR publishers are path-gated to their real image inputs. Preserve those
+guards: a docs-only push that re-tags an image from imported inline cache can
+drop reusable intermediate dependency metadata from the rolling edge tag. That
+made the next Rust build pay a 57s dependency rebuild in Drone #223. A normal
+Markdown/bench/deploy-only merge should stop after the quality gate and must
+not rewrite either `rust-edge` tag.
+
 `Cargo.toml` deliberately limits the crate package to Rust sources, examples,
 compatibility fixtures, and Cargo manifests. This keeps edits under `bench/`
 and the operational Markdown files from invalidating the thin-LTO release
