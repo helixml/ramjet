@@ -475,9 +475,17 @@ node06). The design rationale for each lives in DESIGN.md.
   encodes in 10.3ms, decodes and validates in 10.8ms (8.3ms repeated), and
   peaks at 27MiB standalone RSS. A separate digest radix prototype stores one
   256-bit commitment per block, detects/poisons compact-key conflicts, and
-  traverses a 524,288-token chain in 1.36ms. Next move the digest index behind
-  the existing inventory interface, add raw-token/digest golden parity and a
-  full snapshot-to-index benchmark, then implement the UDS companion actor.
+  traverses a 524,288-token chain in 1.36ms. The production digest module now
+  uses a canonical domain-separated HMAC-SHA256 contract, retains tombstones,
+  rejects ambiguous multi-group/partial-scope snapshots, and imports into
+  private state atomically with cancellation. Thirty-two deterministic
+  1,000-action differential traces plus geometry/hash/tombstone cases have
+  exact raw-index parity. At the matched 80,896-token shape it looks up in
+  235us versus raw exact's 50.5us (4.66x); 524,288 tokens take 1.53ms; the
+  complete 36,612-block snapshot builds an index in 13.1ms. At 15,168 blocks,
+  digest RSS grows 8.1MiB versus raw exact's 21.5MiB (37.7%). Next implement
+  the authenticated UDS companion actor and lifecycle fence, then run at least
+  100,000 revision-stable shadow comparisons before placement can consume it.
   Compare exact versus approximate decisions in telemetry before the router
   may consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.

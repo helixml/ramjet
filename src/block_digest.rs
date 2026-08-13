@@ -21,16 +21,16 @@ const BLOCK_DOMAIN: &[u8] = b"mini-dynamo:block-digest:v1\0";
 ///
 /// This value may be serialized in a snapshot. It is not the secret itself.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
-pub(crate) struct KeyId([u8; SHA256_BYTES]);
+pub struct KeyId([u8; SHA256_BYTES]);
 
 impl KeyId {
     #[must_use]
-    pub(crate) const fn as_bytes(&self) -> &[u8; SHA256_BYTES] {
+    pub const fn as_bytes(&self) -> &[u8; SHA256_BYTES] {
         &self.0
     }
 
     #[must_use]
-    pub(crate) fn to_vec(self) -> Vec<u8> {
+    pub fn to_vec(self) -> Vec<u8> {
         self.0.to_vec()
     }
 
@@ -39,7 +39,7 @@ impl KeyId {
     /// A key ID is public metadata, so its length is not secret. All 32 content
     /// bytes are nevertheless inspected for an exact-length candidate.
     #[must_use]
-    pub(crate) fn matches_wire(self, candidate: &[u8]) -> bool {
+    pub fn matches_wire(self, candidate: &[u8]) -> bool {
         if candidate.len() != SHA256_BYTES {
             return false;
         }
@@ -59,22 +59,22 @@ impl fmt::Debug for KeyId {
 
 /// Compact radix-key portion of a block commitment.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct PrimaryCommitment {
-    pub(crate) token_count: u32,
-    pub(crate) digest: [u8; PRIMARY_BYTES],
+pub struct PrimaryCommitment {
+    pub token_count: u32,
+    pub digest: [u8; PRIMARY_BYTES],
 }
 
 /// Full 256-bit keyed block commitment split into radix key and collision guard.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct BlockCommitment {
-    pub(crate) primary: PrimaryCommitment,
-    pub(crate) guard: [u8; SHA256_BYTES - PRIMARY_BYTES],
+pub struct BlockCommitment {
+    pub primary: PrimaryCommitment,
+    pub guard: [u8; SHA256_BYTES - PRIMARY_BYTES],
 }
 
 impl BlockCommitment {
     /// Reconstitute the complete HMAC stored in a snapshot record.
     #[must_use]
-    pub(crate) fn digest_bytes(self) -> [u8; SHA256_BYTES] {
+    pub fn digest_bytes(self) -> [u8; SHA256_BYTES] {
         let mut digest = [0_u8; SHA256_BYTES];
         digest[..PRIMARY_BYTES].copy_from_slice(&self.primary.digest);
         digest[PRIMARY_BYTES..].copy_from_slice(&self.guard);
@@ -84,7 +84,7 @@ impl BlockCommitment {
 
 /// Static, content-free failures from block commitment construction.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub(crate) enum BlockDigestError {
+pub enum BlockDigestError {
     #[error("block digest secret must contain exactly 32 bytes")]
     InvalidSecretLength,
     #[error("KV block token count exceeds the supported range")]
@@ -96,7 +96,7 @@ pub(crate) enum BlockDigestError {
 /// The type intentionally implements neither `Clone` nor serialization. Its
 /// `Debug` representation reveals only the public key identity, and `Drop`
 /// overwrites the directly owned secret as a defense in depth measure.
-pub(crate) struct BlockDigester {
+pub struct BlockDigester {
     secret: [u8; SHA256_BYTES],
     key_id: KeyId,
 }
@@ -104,20 +104,25 @@ pub(crate) struct BlockDigester {
 impl BlockDigester {
     /// Take ownership of an exact-size secret.
     #[must_use]
-    pub(crate) fn new(secret: [u8; SHA256_BYTES]) -> Self {
+    pub fn new(secret: [u8; SHA256_BYTES]) -> Self {
         let key_id = derive_key_id(&secret);
         Self { secret, key_id }
     }
 
     /// Copy an exact-size secret from protected configuration storage.
-    pub(crate) fn from_slice(secret: &[u8]) -> Result<Self, BlockDigestError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockDigestError::InvalidSecretLength`] unless `secret`
+    /// contains exactly 32 bytes.
+    pub fn from_slice(secret: &[u8]) -> Result<Self, BlockDigestError> {
         let secret = <[u8; SHA256_BYTES]>::try_from(secret)
             .map_err(|_| BlockDigestError::InvalidSecretLength)?;
         Ok(Self::new(secret))
     }
 
     #[must_use]
-    pub(crate) const fn key_id(&self) -> KeyId {
+    pub const fn key_id(&self) -> KeyId {
         self.key_id
     }
 
@@ -126,7 +131,12 @@ impl BlockDigester {
     /// The HMAC input is unambiguous: a versioned domain, a little-endian u32
     /// token count, then fixed-width little-endian token IDs. No raw token is
     /// retained in the returned value.
-    pub(crate) fn commit(&self, token_ids: &[u32]) -> Result<BlockCommitment, BlockDigestError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockDigestError::TokenCountOverflow`] when the token slice
+    /// length cannot be represented by the version-one `u32` wire contract.
+    pub fn commit(&self, token_ids: &[u32]) -> Result<BlockCommitment, BlockDigestError> {
         let token_count =
             u32::try_from(token_ids.len()).map_err(|_| BlockDigestError::TokenCountOverflow)?;
         let token_count_bytes = token_count.to_le_bytes();
