@@ -133,6 +133,7 @@ cargo test --locked snapshot_consumer
 cargo test --locked --test snapshot_consumer_adversarial
 cargo test --locked snapshot_producer
 cargo test --locked snapshot_reconnect
+cargo test --locked companion_runtime
 cargo test --locked --test snapshot_digest_lifecycle
 ```
 
@@ -161,6 +162,13 @@ supervisor. Its source callback must subscribe live before building a snapshot,
 return owned state, observe cancellation, and never retain engine/global locks
 across serialization or socket writes. Tail delivery is bounded and applies
 backpressure; a dropped LB client must cancel source work immediately.
+
+`companion_runtime` is library-only and off by default. It must validate and
+load all state before binding, bind the public socket last, clear readiness and
+inode-check-clean the socket on every exit, and bound supervisor drain on
+shutdown. Until the authenticated hello carries an engine selector, fail closed
+unless exactly one source is configured; never guess which engine a client
+intended.
 
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.

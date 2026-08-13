@@ -541,6 +541,16 @@ node06). The design rationale for each lives in DESIGN.md.
   lived index source and Compose runtime, then run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
 
+  The off-by-default library runtime now composes typed config, hardened secret
+  loading, bind-last safe socket publication, the bounded supervisor, producer,
+  shutdown drain, cleanup, readiness, and closed-label aggregate metrics. It
+  refuses missing sources and multi-source mode before filesystem mutation:
+  the current authenticated hello does not identify an engine, so a two-engine
+  executable would be ambiguous. The coordinator uses the stricter snapshot or
+  tail-idle duration as its one absolute session deadline until phase-specific
+  deadlines exist. Next add authenticated engine selection or one socket per
+  engine, then inject the concrete long-lived index sources.
+
   Deployment hardening is also part of the gate: distinct fixed LB/companion
   UIDs with one shared GID; a companion-owned non-LB-writable socket directory
   and mode-0660 socket; Linux `SO_PEERCRED` on both ends before protocol work;

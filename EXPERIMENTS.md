@@ -3110,3 +3110,25 @@ and jitter bounds. Focused test runtime is 0.04 seconds.
 This stays outside approximate serving and is not wired into proxy startup.
 The 2ms publication poll should eventually become an actor notification, and
 refreshed expected engine incarnation remains a control-plane responsibility.
+
+## 2026-08-13 — issue #41 off-by-default companion runtime coordinator
+
+The library runtime now composes typed companion configuration, Prometheus
+collectors, hardened 32-byte secret loading, safe bind-last socket publication,
+the two-client supervisor, authenticated producer, bounded shutdown drain, and
+inode-safe cleanup. Off mode returns before requiring a source or touching the
+filesystem. Serve-mode startup validates and constructs every fallible object
+before publishing the socket; readiness clears and the exact inode is removed
+after normal exit, supervisor error, or bounded shutdown.
+
+The current hello does not carry an engine selector, so the coordinator accepts
+exactly one configured source and fails closed otherwise. It also uses the
+stricter of snapshot and tail-idle durations as the producer's single absolute
+session deadline; separate phase semantics remain future work. The supervisor
+currently erases typed handler failures, so aggregate failures map to one closed
+`application` metric reason rather than an arbitrary error label.
+
+Four focused tests cover off mode without source/filesystem state, post-bind
+supervisor failure cleanup, bounded shutdown cleanup, and terminal/capacity
+report mapping. The full Rust suite and strict Clippy pass. This is still not a
+CLI command and changes neither ordinary LB startup nor node06.
