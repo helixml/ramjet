@@ -86,10 +86,10 @@ steps:
   # GHCR publishing lives here, not GitHub Actions. The push-event guard keeps
   # registry credentials out of pull-request builds.
   - name: publish-image
-    image: plugins/docker
+    # Pin the official Buildx plugin: the legacy plugins/docker wrapper only
+    # imports image caches and cannot export a BuildKit registry cache.
+    image: plugins/buildx:1.3.23@sha256:a56d0109728d264d04244ef2ce3d2610348935fffb93f1ac75a8364bdc577505
     pull: if-not-exists
-    environment:
-      DOCKER_BUILDKIT: "1"
     settings:
       registry: ghcr.io
       repo: ghcr.io/helixml/mini-dynamo
@@ -100,9 +100,14 @@ steps:
       tags:
         - rust-${DRONE_COMMIT_SHA:0:7}
         - rust-edge
-      # The Dockerfile uses locked BuildKit Cargo registry/target cache mounts.
-      # Keep those caches across main builds; the runner owns disk GC policy.
-      purge: false
+      # Only trusted main pushes can update this cache because pull requests do
+      # not run the credentialed publish step. mode=max retains the dependency
+      # builder stage as well as the small runtime image layers.
+      builder_driver: docker-container
+      cache_from:
+        - type=registry,ref=ghcr.io/helixml/mini-dynamo:rust-buildcache
+      cache_to:
+        - type=registry,ref=ghcr.io/helixml/mini-dynamo:rust-buildcache,mode=max,compression=zstd,compression-level=3,oci-mediatypes=true,image-manifest=true
     when:
       event:
         - push
