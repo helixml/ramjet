@@ -1,0 +1,306 @@
+# Production-shaped, explicitly enabled snapshot-companion overlay.
+#
+# Render and validate before use:
+#   docker compose -f docker-compose.yaml \
+#     -f docker-compose.snapshot-companion.yaml \
+#     --profile snapshot-companion config --quiet
+#
+# The ordinary stack never reads this file. Applying the overlay without the
+# profile still changes the LB authority mounts, so operators must use it only
+# for a qualified companion rollout. Snapshot routing itself remains off unless
+# DS4_SNAPSHOT_ROUTE_MODE=shadow is set explicitly.
+
+x-snapshot-companion-production: &snapshot-companion-production
+  profiles: [snapshot-companion]
+  image: ${SNAPSHOT_COMPANION_IMAGE:-ghcr.io/helixml/mini-dynamo:companion-rust-e20a928@sha256:b0d403ad6fe294c071662dab42af2c32310fce8ffefa6418f3cef6997ca9a89f}
+  restart: unless-stopped
+  init: true
+  ipc: private
+  read_only: true
+  privileged: false
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 128
+  cpus: 1.0
+  mem_limit: 512m
+  mem_reservation: 128m
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700
+  environment: &snapshot-companion-environment
+    DS4_SNAPSHOT_COMPANION_MODE: serve
+    DS4_SNAPSHOT_SOCKET_PATH: /run/mini-dynamo-snapshot/companion.sock
+    DS4_SNAPSHOT_CLIENT_UID: "12002"
+    DS4_SNAPSHOT_SECRET_PATH: /run/secrets/snapshot-session
+    DS4_SNAPSHOT_SECRET_OWNER_UID: "0"
+    DS4_SNAPSHOT_DIGEST_SECRET_PATH: /run/secrets/snapshot-digest
+    DS4_SNAPSHOT_ATTESTATION_PATH: /run/attestation/engine.json
+    DS4_SNAPSHOT_MAX_CLIENTS: "2"
+    DS4_SNAPSHOT_TAIL_QUEUE_CAPACITY: "1024"
+    DS4_SNAPSHOT_TAIL_QUEUE_MAX_BYTES: "16777216"
+    DS4_SNAPSHOT_DEADLINE_MS: "3000"
+    DS4_SNAPSHOT_TAIL_IDLE_DEADLINE_MS: "30000"
+    DS4_SNAPSHOT_SHUTDOWN_DEADLINE_MS: "5000"
+    DS4_SNAPSHOT_REPLAY_LIMIT: "10000"
+    DS4_SNAPSHOT_REPLAY_TAIL_LIMIT: "1024"
+    DS4_SNAPSHOT_CONNECT_TIMEOUT_MS: "2000"
+    DS4_SNAPSHOT_REPLAY_TIMEOUT_MS: "300000"
+    DS4_SNAPSHOT_RECONNECT_MIN_MS: "250"
+    DS4_SNAPSHOT_RECONNECT_MAX_MS: "5000"
+    DS4_SNAPSHOT_ATTESTATION_REFRESH_MS: "1000"
+    DS4_SNAPSHOT_BLOCK_SIZE: "256"
+    DS4_SNAPSHOT_ATTENTION_KIND: mla
+    DS4_SNAPSHOT_DATA_PARALLEL_RANK: "0"
+    DS4_SNAPSHOT_GROUP_INDEX: "0"
+
+x-snapshot-attestation-provisioner: &snapshot-attestation-provisioner
+  profiles: [snapshot-attestation]
+  image: ${SNAPSHOT_COMPANION_IMAGE:-ghcr.io/helixml/mini-dynamo:companion-rust-e20a928@sha256:b0d403ad6fe294c071662dab42af2c32310fce8ffefa6418f3cef6997ca9a89f}
+  entrypoint: ["/mini-dynamo-attestation-provisioner"]
+  restart: "no"
+  user: "0:12000"
+  network_mode: none
+  ipc: private
+  read_only: true
+  privileged: false
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 32
+  cpus: 0.25
+  mem_limit: 64m
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=4m,mode=0700
+  environment: &snapshot-attestation-environment
+    DS4_SNAPSHOT_ENGINE_METADATA_PATH: /run/metadata/engine.json
+    DS4_SNAPSHOT_DIGEST_SECRET_PATH: /run/secrets/snapshot-digest
+    DS4_SNAPSHOT_ATTESTATION_PATH: /run/attestation/engine.json
+    DS4_SNAPSHOT_SECRET_OWNER_UID: "0"
+    DS4_SNAPSHOT_SECRET_GROUP_GID: "12000"
+    DS4_SNAPSHOT_ATTESTATION_MAX_AGE_MS: "30000"
+
+services:
+  ds4-loadbalancer:
+    # SO_PEERCRED is part of the session authority. Numeric identity avoids a
+    # mutable passwd database and is required only when this overlay is used.
+    image: ${SNAPSHOT_LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-908e3dc@sha256:19da8eb3c7b0f42a84ef67aafe043f331ddacd9295f402b793fc87eced232d6b}
+    user: "12002:12000"
+    environment:
+      # Raw vLLM event consumers and companion snapshots are mutually exclusive.
+      DS4_KV_EVENT_MODE: "off"
+      DS4_SNAPSHOT_ROUTE_MODE: ${DS4_SNAPSHOT_ROUTE_MODE:-off}
+      DS4_SNAPSHOT_ROUTE_SOCKET_PATHS: /run/mini-dynamo-snapshot-a/companion.sock,/run/mini-dynamo-snapshot-b/companion.sock
+      DS4_SNAPSHOT_ROUTE_COMPANION_UIDS: "12001,12003"
+      DS4_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS: /run/secrets/snapshot-session-a,/run/secrets/snapshot-session-b
+      DS4_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS: /run/secrets/snapshot-digest-a,/run/secrets/snapshot-digest-b
+      DS4_SNAPSHOT_ROUTE_ATTESTATION_PATHS: /run/attestation-a/engine.json,/run/attestation-b/engine.json
+      DS4_SNAPSHOT_ROUTE_GROUPS: "0:0,0:0"
+      DS4_SNAPSHOT_ROUTE_SECRET_OWNER_UID: "0"
+      DS4_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS: "30000"
+      DS4_SNAPSHOT_ROUTE_RECONNECT_MIN_MS: "250"
+      DS4_SNAPSHOT_ROUTE_RECONNECT_MAX_MS: "5000"
+    volumes:
+      - type: bind
+        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/mini-dynamo-snapshot-a.invalid}
+        target: /run/mini-dynamo-snapshot-a
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/mini-dynamo-snapshot-b.invalid}
+        target: /run/mini-dynamo-snapshot-b
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-session-a.invalid}
+        target: /run/secrets/snapshot-session-a
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-session-b.invalid}
+        target: /run/secrets/snapshot-session-b
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-digest-a.invalid}
+        target: /run/secrets/snapshot-digest-a
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-digest-b.invalid}
+        target: /run/secrets/snapshot-digest-b
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_ATTESTATION_DIR_A:-/run/mini-dynamo-snapshot-attestation-a.invalid}
+        target: /run/attestation-a
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_ATTESTATION_DIR_B:-/run/mini-dynamo-snapshot-attestation-b.invalid}
+        target: /run/attestation-b
+        read_only: true
+        bind:
+          create_host_path: false
+
+  snapshot-companion-a:
+    <<: *snapshot-companion-production
+    container_name: snapshot-companion-a
+    user: "12001:12000"
+    group_add: ["12004"]
+    environment:
+      <<: *snapshot-companion-environment
+      DS4_SNAPSHOT_COMPANION_UID: "12001"
+      DS4_SNAPSHOT_LIVE_ENDPOINTS: tcp://dspark-0731:5557
+      DS4_SNAPSHOT_REPLAY_ENDPOINTS: tcp://dspark-0731:5558
+      DS4_SNAPSHOT_METRICS_SOCKET_PATH: /run/mini-dynamo-metrics/metrics.sock
+      DS4_SNAPSHOT_METRICS_GROUP_GID: "12004"
+    volumes:
+      - type: bind
+        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/mini-dynamo-snapshot-a.invalid}
+        target: /run/mini-dynamo-snapshot
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_METRICS_DIR_A:-/run/mini-dynamo-snapshot-metrics-a.invalid}
+        target: /run/mini-dynamo-metrics
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-session-a.invalid}
+        target: /run/secrets/snapshot-session
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-digest-a.invalid}
+        target: /run/secrets/snapshot-digest
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_ATTESTATION_DIR_A:-/run/mini-dynamo-snapshot-attestation-a.invalid}
+        target: /run/attestation
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "/mini-dynamo-snapshot-companion", "healthcheck", "/run/mini-dynamo-snapshot/companion.sock"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 10s
+    labels:
+      org.helixml.mini-dynamo.engine: engine-a
+      org.helixml.mini-dynamo.role: snapshot-companion
+
+  snapshot-companion-b:
+    <<: *snapshot-companion-production
+    container_name: snapshot-companion-b
+    user: "12003:12000"
+    group_add: ["12005"]
+    environment:
+      <<: *snapshot-companion-environment
+      DS4_SNAPSHOT_COMPANION_UID: "12003"
+      DS4_SNAPSHOT_LIVE_ENDPOINTS: tcp://dspark-0731-b:5557
+      DS4_SNAPSHOT_REPLAY_ENDPOINTS: tcp://dspark-0731-b:5558
+      DS4_SNAPSHOT_METRICS_SOCKET_PATH: /run/mini-dynamo-metrics/metrics.sock
+      DS4_SNAPSHOT_METRICS_GROUP_GID: "12005"
+    volumes:
+      - type: bind
+        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/mini-dynamo-snapshot-b.invalid}
+        target: /run/mini-dynamo-snapshot
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_METRICS_DIR_B:-/run/mini-dynamo-snapshot-metrics-b.invalid}
+        target: /run/mini-dynamo-metrics
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-session-b.invalid}
+        target: /run/secrets/snapshot-session
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-digest-b.invalid}
+        target: /run/secrets/snapshot-digest
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_ATTESTATION_DIR_B:-/run/mini-dynamo-snapshot-attestation-b.invalid}
+        target: /run/attestation
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "/mini-dynamo-snapshot-companion", "healthcheck", "/run/mini-dynamo-snapshot/companion.sock"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 10s
+    labels:
+      org.helixml.mini-dynamo.engine: engine-b
+      org.helixml.mini-dynamo.role: snapshot-companion
+
+  snapshot-attestation-a:
+    <<: *snapshot-attestation-provisioner
+    container_name: snapshot-attestation-a
+    environment:
+      <<: *snapshot-attestation-environment
+    volumes:
+      - type: bind
+        source: ${SNAPSHOT_ENGINE_METADATA_FILE_A:-/run/mini-dynamo-engine-metadata-a.invalid}
+        target: /run/metadata/engine.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-digest-a.invalid}
+        target: /run/secrets/snapshot-digest
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_ATTESTATION_DIR_A:-/run/mini-dynamo-snapshot-attestation-a.invalid}
+        target: /run/attestation
+        bind:
+          create_host_path: false
+    labels:
+      org.helixml.mini-dynamo.engine: engine-a
+      org.helixml.mini-dynamo.role: attestation-provisioner
+
+  snapshot-attestation-b:
+    <<: *snapshot-attestation-provisioner
+    container_name: snapshot-attestation-b
+    environment:
+      <<: *snapshot-attestation-environment
+    volumes:
+      - type: bind
+        source: ${SNAPSHOT_ENGINE_METADATA_FILE_B:-/run/mini-dynamo-engine-metadata-b.invalid}
+        target: /run/metadata/engine.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-digest-b.invalid}
+        target: /run/secrets/snapshot-digest
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_ATTESTATION_DIR_B:-/run/mini-dynamo-snapshot-attestation-b.invalid}
+        target: /run/attestation
+        bind:
+          create_host_path: false
+    labels:
+      org.helixml.mini-dynamo.engine: engine-b
+      org.helixml.mini-dynamo.role: attestation-provisioner

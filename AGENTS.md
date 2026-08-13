@@ -249,9 +249,12 @@ different from the snapshot/session parent group. The publisher verifies that
 both authority directories are setgid and group-traversable, that the mode-0660
 metrics socket inherited the configured group, and removes only its own inode.
 Put Caddy/Prometheus in only that metrics group, never in the
-snapshot/session authority group. The executable is not ready for node06 until
-the host-side attestation provisioner and production Compose/Caddy wiring exist
-and pass the extended dual-domain validator.
+snapshot/session authority group. The production-shaped overlay, Caddy snippet,
+and host/Compose validators now exist under `deploy/dspark_0731`; they remain
+admission artifacts until hot LB attestation refresh lands. Always render both
+profiles and run both production validators
+before touching node06, first start with snapshot routing off, and repin current
+immutable images rather than treating the committed candidates as evergreen.
 
 `mini-dynamo-attestation-provisioner` is a host-side, one-shot control-plane
 binary. It accepts no arguments and obtains only protected file paths, numeric

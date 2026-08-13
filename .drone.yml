@@ -60,8 +60,10 @@ steps:
       - apk add --no-cache bash python3
       - bash -n deploy/dspark_0731/sync-compose.sh
       - bash -n deploy/dspark_0731/validate-snapshot-companion-host.sh
+      - bash -n deploy/dspark_0731/validate-snapshot-production-host.sh
       - docker compose -f deploy/dspark_0731/docker-compose.yaml config --quiet
       - python3 deploy/dspark_0731/validate-snapshot-companion-compose.py
+      - python3 deploy/dspark_0731/validate-snapshot-production-compose.py
 
   - name: quality-complete
     image: alpine:3.23

@@ -3963,3 +3963,39 @@ the dependency image contains public dependency sources/artifacts only, and
 release compilation has no network access. Image signing or a post-seed digest
 pin would be a separate supply-chain improvement. No node06 process, container,
 image, route, engine, secret, or GPU state changed in this experiment.
+
+## 2026-08-13 — r59 production-shaped dual snapshot admission contract
+
+The canonical deployment now has a separate, explicitly profiled snapshot
+overlay instead of promoting the earlier fixture-only Compose file. It pins a
+snapshot-capable LB and companion image, runs one companion per engine under
+UIDs 12001/12003, gives the LB only client UID 12002, and keeps session GID
+12000 separate from per-engine metrics GIDs 12004/12005. Companions have
+read-only roots, dropped capabilities, no host IPC, no devices/GPU, no
+published port, exact engine-local ZMQ endpoints, and five narrowly scoped
+mounts. The one-shot root provisioners are behind their own profile, have no
+network/Docker/device access, and receive only metadata, digest secret, and
+attestation-output mounts.
+
+The LB overlay forces raw KV events off, defaults snapshot routing to off, and
+mounts exactly two read-only runtime/session/digest/attestation domains. Its
+pinned snapshot build independently permits compact state only in exact shadow;
+ordinary approximate routing and `/health` remain independent. A Caddy snippet
+can scrape only the two dedicated metrics sockets at
+`/metrics/snapshot/0|1`; it explicitly forbids adding Caddy to session GID
+12000.
+
+The semantic validator renders companion-only and companion+provisioner
+profiles and rejects cross-engine mounts, mutable images, raw/snapshot dual
+authority, TCP metrics, shared metrics/session groups, Docker sockets,
+GPU/device grants, broad mounts, incorrect identities, and implicit privileged
+provisioning. Seven focused Python tests exercise the real render plus negative
+mutations. The separate host preflight requires distinct symlink-free tmpfs
+parents, exact owner/group/mode contracts, 32-byte one-link secrets, bounded
+root-only metadata, provisioned attestations, and unique authority inodes.
+
+This slice is repository-only. It does not create host users, groups, files,
+directories, Caddy routes, containers, or node06 processes. Fixed-cardinality
+LB reconnect/readiness metrics and hot LB attestation refresh are now merged.
+Repin current images, pass host preflight, and first start with snapshot routing
+still off.
