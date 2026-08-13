@@ -4711,3 +4711,44 @@ publisher/reconnect churn. Snapshot routing remains off and approximate
 serving remains 2/2 healthy. The next admissible readiness and sub-3s LB-only
 recovery measurement still waits for an independently justified fresh engine
 generation; this rollout does not manufacture one.
+
+## 2026-08-13 — r95 fail-closed snapshot recovery gate
+
+The next natural engine generation previously required another manual
+inspect/Compose/poll/rollback sequence before issue #41's sub-three-second
+claim could be tested. `bench/snapshot_recovery_gate.py` now packages that
+operational boundary without weakening it. Read-only mode runs the production
+host/Compose validators, immutable companion pin checks, current-container
+health checks, and a base-service config-hash comparison that proves the exact
+rollback is reproducible. It samples each metrics UDS twice and returns a
+dedicated not-ready result before any mutation unless both sources are
+authoritative, watermarked, in the ready phase, listening, and stable.
+
+Explicit apply mode reserves a new mode-`0600` journal before mutation and
+holds the common node06 deployment lock through five LB-only shadow recreates
+and the mandatory rollback. Every sample requires two connected authoritative
+LB inventories, 2/2 serving health, and unchanged engine container/image/start/
+restart identity. Recovery is measured from the new LB process start; the
+nearest-rank five-sample p95 must be at most three seconds. Success, timeout,
+identity drift, or SLO failure all restore and verify the original base image
+and Compose hash before releasing the lock. The journal excludes commands,
+environment, secrets, socket paths, prompts, token IDs, responses, and logs.
+
+Eleven focused tests cover authoritative metric parsing, duplicate/missing-
+series fencing, exact-health cardinality, read-only and apply-mode refusal,
+five-sample p95, mid-run failure, engine replacement/restart detection, locked
+rollback, rollback-failure dominance, and no-overwrite journals. The first
+node06 audit took 7.8s
+including all validators and the one-second stability sample. It returned
+`companion_source_not_ready` with both sources at zero indexed blocks and one
+stable connection each. All five container IDs, start timestamps, and restart
+counts were identical before/after, and `/health` remained 2/2. No Compose
+mutation was attempted. The first `--apply` run remains correctly deferred
+until a naturally fresh engine generation establishes authority.
+
+The widened local gate passed strict Clippy, 334 Rust unit tests plus every
+integration suite, 199 Python tests, the synthetic agent corpus, both Compose
+validators, full profile render, and the release build. Python completed in
+2.02s and deployment validation in 0.40s beside the single Rust lane. The Rust
+lane took 60.12s, including a 33.28s release link from this worktree; no second
+Cargo lane competed for the shared target.
