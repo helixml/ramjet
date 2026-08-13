@@ -504,8 +504,14 @@ node06). The design rationale for each lives in DESIGN.md.
   tail queues, preserves same-identity publication during catch-up, revokes on
   identity change, and atomically publishes only a verifier-constructed opaque
   generation after caught-up. Epochs make stale disconnects harmless. Next
-  wire the runtime listener/tail tasks, bounded CPU cancellation, KV delta
-  decoding/application, metrics, and Compose sandbox, then run at least
+  The accept-loop supervisor and KV delta adapter are now complete: exactly two
+  client tasks run independently under one absolute deadline, excess clients
+  are closed immediately, shutdown drops stalled streams, and every exit frees
+  its slot. Authenticated payloads decode under existing vLLM bounds, filter to
+  the selected local-GPU main-attention group, and apply store/remove/clear to
+  actor-owned digest state; any late batch error clears the private generation
+  before the actor fences it. Next wire the session handler and bounded CPU
+  cancellation, add metrics and the Compose sandbox, then run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
 
   Deployment hardening is also part of the gate: distinct fixed LB/companion

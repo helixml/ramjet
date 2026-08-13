@@ -2968,3 +2968,32 @@ post-merge `main` push. Its redundant release build was removed: the required
 local pre-push gate still builds release, and GitHub builds the published
 release container on `main`. Drone continues to enforce format, strict Clippy,
 all Rust tests, Go parity/vet/format, and Python protocol tests.
+
+## 2026-08-13 — issue #41 bounded runtime supervision and KV deltas
+
+The first runtime slice remains transport-composable and offline. A Tokio Unix
+listener supervisor owns a hard two-permit semaphore and never waits for a slot
+inside the accept loop: a third accepted connection is dropped immediately, so
+a slow client cannot stop admission or another client. Each handler receives
+the same absolute deadline that encloses its future. Completion, failure,
+panic, timeout, and watch-based shutdown all drop the owned stream and release
+the permit. Four real Unix tests prove two-client isolation, stalled-hello
+timeout and slot reuse, immediate third-client capacity rejection, and shutdown
+cancellation; the focused supervisor plus strict Clippy gate took 10.2 seconds.
+
+The actor callback now has a bounded digest-delta adapter. It decodes the exact
+vLLM MessagePack batch contract, selects only the configured data-parallel rank
+and cache group, local/GPU state, known main-attention stores, and unnamespaced
+events, then applies store/remove/rank-scoped clear directly to actor-owned
+digest state. Decode or index failure clears the whole index even when an
+earlier event in the same batch succeeded; the actor then fences/discards that
+generation, so partial overclaims cannot survive. Seven tests cover shaped
+store/remove/clear, mixed and unsupported groups, malformed/wire bounds, a
+capacity failure after partial mutation, wrong-rank clear, and content-free
+errors. The warm focused delta gate is below one second after compilation.
+
+This is not yet a runnable companion. The remaining join is an authenticated
+session handler connecting the supervisor, one-shot snapshot build, long-lived
+tail decoder, actor, and delta adapter, with cancellation reaching bounded CPU
+work. Metrics/config and Compose sandbox must land before an offline two-client
+end-to-end fault test or node06 shadow trial. No production state changed.

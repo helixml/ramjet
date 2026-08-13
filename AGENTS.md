@@ -127,6 +127,8 @@ cargo test --locked snapshot_tail
 cargo test --locked snapshot_secret_file
 cargo test --locked snapshot_socket_path
 cargo test --locked snapshot_actor
+cargo test --locked snapshot_supervisor
+cargo test --locked snapshot_digest_delta
 cargo test --locked --test snapshot_digest_lifecycle
 ```
 
