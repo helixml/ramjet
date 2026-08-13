@@ -517,7 +517,14 @@ node06). The design rationale for each lives in DESIGN.md.
   only bounded engine slots and enums for session outcomes, capacity rejects,
   build/apply/catch-up work, tail batches/events, fences/discards, and published
   inventory size; arbitrary errors and protocol identity never become labels.
-  Next wire the session handler and bounded CPU cancellation, add the Compose
+  The LB-side consumer now verifies peer credentials, authenticates one framed
+  snapshot, builds the digest index on a cancellation-aware blocking worker
+  while queuing authenticated tail frames, then publishes only on exact caught-
+  up. One absolute deadline encloses the session, and timeout, abort, EOF, MAC
+  failure, delivery gap, or stale generation synchronously fences its epoch and
+  revokes owned publication. Keep this separate from companion/server admission:
+  the remaining runtime seams are outbound reconnect plus challenge reuse
+  prevention and companion-side snapshot/tail production. Add the Compose
   sandbox, then run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
 

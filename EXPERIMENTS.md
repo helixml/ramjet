@@ -3023,3 +3023,27 @@ This remains library-only and off by default. It does not bind a listener,
 export the collectors through the production metrics endpoint, change Compose,
 or deploy to node06. The authenticated session join, sandbox, offline fault
 matrix, and shadow comparison gate remain outstanding.
+
+## 2026-08-13 — issue #41 authenticated LB snapshot consumer
+
+The LB/client half of the runtime now consumes an already-connected Unix
+stream under one absolute deadline. It verifies `SO_PEERCRED` before sending an
+authenticated hello, reads a length-bounded authenticated snapshot, and builds
+the private digest index on a cancellation-aware blocking worker. Authenticated
+tail frames are read concurrently and queued by the actor during the build;
+their dense delivery sequence is checked independently of sparse real vLLM
+watermarks. The generation becomes visible only after exact caught-up.
+
+A synchronous guard fences the actor epoch and signals blocking work whenever
+the future returns or is dropped. Six real Unix-pair tests cover sparse happy
+publication followed by authenticated disconnect, malformed tail MAC, delivery
+gap, stale generation before actor admission, EOF revocation, and task-abort
+revocation. The full Rust test suite and strict Clippy pass.
+
+This is not deployed or connected to routing. The next runtime joins are an
+outbound connect/reconnect owner with fresh challenge generation and reuse
+prevention, plus companion/server snapshot and tail production behind the
+separate accepted-stream supervisor. The offline fault matrix must still add
+explicit deadline, oversized/truncated framing, slow-build cancellation,
+two-session replacement, live store/remove after publication, and coordinated
+incarnation/key rollover cases before node06 shadowing.
