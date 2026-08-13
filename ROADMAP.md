@@ -334,7 +334,12 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   revision-bound publisher plan while Git is available; all three main-push
   steps consume only their marker before Docker startup or registry login.
   CI/docs/bench/deploy-only changes execute only those cheap guards and perform
-  zero image work. The Rust cutover is complete and the obsolete Go lane and
+  zero image work. A separate `refs/tags/v*` pipeline validates the exact Cargo
+  version, waits for the same full quality gate, validates the existing
+  SHA-tagged images' OCI identity, and digest-preservingly promotes them to
+  immutable semver LB/companion tags—never rebuilding, updating edge aliases,
+  overwriting a different existing digest, or creating PR/push artifacts. The Rust
+  cutover is complete and the obsolete Go lane and
   packages are removed. Preserve the measured ~58–59s PR quality budget and
   investigate cache or scheduling regressions rather than adding duplicate CI
   systems.

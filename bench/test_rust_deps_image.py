@@ -43,7 +43,7 @@ class RustDepsImageTest(unittest.TestCase):
                 "ARG RUST_DEPS_IMAGE=ghcr.io/helixml/mini-dynamo:rust-deps-sha256-deadbeef\n"
             )
             (root / ".drone.yml").write_text(
-                "tags:\n        - rust-deps-sha256-deadbeef\n"
+                "--destination ghcr.io/example:rust-deps-sha256-deadbeef\n"
             )
 
             expected = rust_deps_image.image_reference(

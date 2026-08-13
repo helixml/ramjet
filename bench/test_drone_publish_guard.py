@@ -126,6 +126,22 @@ class DronePublishGuardTest(unittest.TestCase):
             {"rust-deps": False, "lb": False, "companion": True},
         )
 
+    def test_dependency_seed_and_both_app_images_publish_in_one_merge(self):
+        before = self.commit({"README.md": "base"})
+        after = self.commit(
+            {
+                "Dockerfile.deps": "cache builder change",
+                "Dockerfile": "lb dependency reference",
+                "Dockerfile.companion": "companion dependency reference",
+                ".docker/rust-deps-key": "fresh key",
+            }
+        )
+        self.assert_matrix(
+            before,
+            after,
+            {"rust-deps": True, "lb": True, "companion": True},
+        )
+
     def test_missing_invalid_mismatched_and_empty_ranges_fail_closed(self):
         commit = self.commit({"README.md": "base"})
         cases = (

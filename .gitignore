@@ -4,3 +4,4 @@ mini-dynamo
 __pycache__/
 /.drone-publish-plan*
 .env
+/.drone-release-plan*

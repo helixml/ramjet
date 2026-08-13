@@ -4096,3 +4096,49 @@ and revision/range failures. No node06 state changed.
 A real GitHub depth-one clone of `b652abd` recovered predecessor `fc4aa91`,
 published the empty-marker plan in 0.85s, left no `FETCH_HEAD`, and all three
 publisher consumers returned skip.
+
+## 2026-08-13 — r64 fail-closed semver tag releases
+
+A second Drone document now owns release tags independently of normal PR/main
+publishing. Only a `tag` event whose ref matches `refs/tags/v*` can instantiate
+it. Before fetching dependencies, the Rust step verifies an exact 40-hex
+checkout identity, `DRONE_TAG`/`DRONE_COMMIT_REF` agreement, checkout HEAD, and
+an exact `v<Cargo package version>` match. It atomically publishes private LB
+and companion markers bound to both SHA and tag. The Docker steps revalidate
+those markers and the tag event without Git, wait for the complete Rust lint,
+Rust test, agent-protocol, and deployment-Compose gate, then publish only
+`${DRONE_TAG}` and `companion-${DRONE_TAG}` by registry manifest copy. The
+publisher verifies OCI source, semantic version, and exact Git revision on the
+existing SHA-tagged candidates, and requires copied destination digest equality.
+It performs no build and no edge alias is present.
+
+Eight focused behavioral/static tests finished in 0.74s. They cover a valid
+prerelease, push/PR rejection in both planner and publisher, tag/ref/version/HEAD
+mismatches, invalid revisions, Docker-incompatible Cargo build metadata,
+malicious plan symlink replacement, stale/symlink marker rejection, trigger
+isolation, immutable tag names, and full-quality dependencies. Drone lint also
+accepted both pipeline documents. No tag, release, image, registry write, or
+node06 change was made.
+
+The first `0.1.0` dependency seed exposed a separate normal-main issue in Drone
+#256 and its single retry #258. Both passed all quality steps, selected the
+dependency publisher, then failed in 16–17s because `/usr/local/bin/dockerd`
+never became reachable; the dependent LB and companion publishers correctly
+stayed skipped. Compared with successful pre-guard #245, the compiled step no
+longer carried plugin schema metadata after `commands` was added, so automatic
+privileged-plugin treatment was absent. The repository API reports
+`trusted=false`; the supplied account's apparently successful trust update did
+not change server state, and normal lint rejects explicit privilege. Main
+publishers now use a digest-pinned unprivileged Kaniko executor with the same
+fail-closed plan and a GHCR remote cache. The tag pipeline uses unprivileged
+`crane` manifest copies. A third blind retry was not attempted.
+
+Pre-merge review found that #256/#258 never published the referenced dependency
+image, so a source-only main build could have skipped its seed and failed both
+application builds. `Dockerfile.deps` now separates the locked registry fetch
+into its own reusable Kaniko layer, intentionally rotates the content key, and
+the merge diff selects dependency, LB, and companion publishers together. The
+same review closed a release immutability gap: an existing destination with the
+source digest is idempotent success, a different digest is a hard conflict, and
+only an explicit registry not-found result permits a copy. Ambiguous lookup
+failures remain closed.
