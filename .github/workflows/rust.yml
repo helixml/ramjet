@@ -59,12 +59,24 @@ jobs:
             type=sha,prefix=rust-
             type=ref,event=tag
             type=raw,value=rust-edge,enable=${{ github.ref == 'refs/heads/main' }}
-      - uses: docker/build-push-action@v7
+      # Export the expensive Rust build cache before the permission-dependent
+      # registry write. A GHCR ACL failure must not make the next run rebuild
+      # every dependency from scratch (issue #39).
+      - name: Build image and persist cache
+        uses: docker/build-push-action@v7
         with:
           context: .
-          push: true
+          load: true
+          push: false
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Push image
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            test -z "$tag" || docker push "$tag"
+          done <<< "$IMAGE_TAGS"
