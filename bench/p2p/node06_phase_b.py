@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
 import hashlib
 import json
 import math
@@ -22,6 +23,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -34,6 +36,8 @@ EXPECTED_DRIVER = "595.84"
 CONTROL_CONTAINER = "dspark-0731"
 TARGET_CONTAINER = "dspark-0731-b"
 LB_CONTAINER = "ds4-loadbalancer"
+HARNESS_OWNER_LABEL = "org.helixml.mini-dynamo.p2p-phase-b-owner"
+DEPLOYMENT_LOCK = pathlib.Path("/run/lock/mini-dynamo-node06-deployment.lock")
 COMPOSE_DIR = pathlib.Path("/home/luke/inference/dspark_0731")
 COMPOSE_FILE = COMPOSE_DIR / "docker-compose.yaml"
 PROFILE_ACK = "I_ACKNOWLEDGE_NODE06_PRODUCTION_RISK"
@@ -436,6 +440,8 @@ class ComposeBaseline:
     runtime_spec: dict[str, Any]
     service_hash: str
     restore_service_hash: str
+    owner_id: str
+    single_service_hash: str
 
 
 def env_map(values: list[str]) -> dict[str, str]:
@@ -580,7 +586,7 @@ def validate_rendered_runtime(
         raise GateError("running LB full Compose service hash differs from render")
 
 
-def capture_compose_baseline(result: pathlib.Path) -> ComposeBaseline:
+def capture_compose_baseline(result: pathlib.Path, owner_id: str) -> ComposeBaseline:
     identities = source_identities()
     rendered_text, document = render_compose(COMPOSE_FILE)
     project_name = str(document.get("name") or "")
@@ -600,6 +606,8 @@ def capture_compose_baseline(result: pathlib.Path) -> ComposeBaseline:
 
     single_document = copy.deepcopy(document)
     service = single_document["services"][LB_CONTAINER]
+    labels = service.setdefault("labels", {})
+    labels[HARNESS_OWNER_LABEL] = owner_id
     environment = service.setdefault("environment", {})
     environment.update(
         {
@@ -610,6 +618,7 @@ def capture_compose_baseline(result: pathlib.Path) -> ComposeBaseline:
     )
     single_path = result / "compose-single-home.json"
     write_private(single_path, json.dumps(single_document, indent=2) + "\n")
+    single_service_hash = compose_service_hash(single_path, project_name)
     baseline = ComposeBaseline(
         render_path=render_path,
         single_path=single_path,
@@ -619,6 +628,8 @@ def capture_compose_baseline(result: pathlib.Path) -> ComposeBaseline:
         runtime_spec=runtime_spec,
         service_hash=service_hash,
         restore_service_hash=restore_service_hash,
+        owner_id=owner_id,
+        single_service_hash=single_service_hash,
     )
     write_private(
         result / "compose-baseline-identity.json",
@@ -627,6 +638,8 @@ def capture_compose_baseline(result: pathlib.Path) -> ComposeBaseline:
                 "render_sha256": baseline.render_sha256,
                 "service_hash": service_hash,
                 "restore_service_hash": restore_service_hash,
+                "owner_id": owner_id,
+                "single_service_hash": single_service_hash,
                 "sources": identities,
             },
             indent=2,
@@ -680,6 +693,67 @@ def verify_restored_baseline(baseline: ComposeBaseline) -> None:
     reject_compose_drift(baseline)
 
 
+def current_is_harness_owned(baseline: ComposeBaseline) -> bool:
+    current = docker_inspect(LB_CONTAINER)
+    labels = current.get("Config", {}).get("Labels") or {}
+    return (
+        labels.get(HARNESS_OWNER_LABEL) == baseline.owner_id
+        and labels.get("com.docker.compose.config-hash")
+        == baseline.single_service_hash
+    )
+
+
+def verify_current_canonical_dual() -> None:
+    identities = source_identities()
+    rendered_text, document = render_compose(COMPOSE_FILE)
+    project_name = str(document.get("name") or "")
+    if not project_name:
+        raise GateError("current canonical Compose project name is absent")
+    service_hash = compose_service_hash(COMPOSE_FILE, project_name)
+    current = docker_inspect(LB_CONTAINER)
+    validate_rendered_runtime(document, current, service_hash)
+    if source_identities() != identities:
+        raise GateError("canonical Compose sources changed during verification")
+    health = health_json(8006)
+    if health.get("healthy_replicas") != 2 or health.get("total_replicas") != 2:
+        raise GateError("current canonical LB is not healthy 2/2")
+    if not rendered_text:
+        raise GateError("current canonical Compose render is empty")
+
+
+def restore_or_accept_superseding_canonical(baseline: ComposeBaseline) -> bool:
+    """Restore only our container; return true when a canonical deploy superseded us."""
+    if current_is_harness_owned(baseline):
+        run_compose(baseline.render_path, baseline.project_name)
+        verify_restored_baseline(baseline)
+        return False
+    verify_current_canonical_dual()
+    return True
+
+
+@contextmanager
+def deployment_lock():
+    descriptor = os.open(
+        DEPLOYMENT_LOCK,
+        os.O_RDWR | os.O_CREAT | os.O_CLOEXEC,
+        0o600,
+    )
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise GateError("another node06 deployment operation holds the lock") from exc
+        os.ftruncate(descriptor, 0)
+        os.write(descriptor, f"pid={os.getpid()}\n".encode())
+        os.fsync(descriptor)
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
 def wait_for_health(expected_replicas: int, timeout: int = 30) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -723,7 +797,9 @@ def quiet_fence(
 def container_base(
     name: str, uuids: tuple[str, ...], tools: pathlib.Path
 ) -> list[str]:
-    gpu_request = "device=" + ",".join(uuids)
+    # Docker parses --gpus with its CSV reader even when argv bypasses a shell.
+    # The literal quotes keep the comma-delimited UUID list in one CSV field.
+    gpu_request = '"device=' + ",".join(uuids) + '"'
     return [
         "docker",
         "create",
@@ -963,6 +1039,11 @@ def capture_metadata(result: pathlib.Path, state: Preflight, tools: pathlib.Path
 
 
 def active_run(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
+    with deployment_lock():
+        return active_run_locked(args, state)
+
+
+def active_run_locked(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
     if os.geteuid() != 0:
         raise GateError("active mode must run as root for immutable tool ownership")
     result = pathlib.Path(tempfile.mkdtemp(prefix="mini-dynamo-p2p-phase-b.", dir="/tmp"))
@@ -973,7 +1054,8 @@ def active_run(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
         args.expected_tools_manifest_sha256,
         result / "verified-tools",
     )
-    baseline = capture_compose_baseline(result)
+    owner_id = result.name
+    baseline = capture_compose_baseline(result, owner_id)
     wait_for_health(2)
     capture_metadata(result, state, tools)
 
@@ -1007,10 +1089,9 @@ def active_run(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
         single_document = json.loads(
             baseline.single_path.read_text(encoding="utf-8")
         )
-        single_hash = compose_service_hash(
-            baseline.single_path, baseline.project_name
+        validate_rendered_runtime(
+            single_document, current, baseline.single_service_hash
         )
-        validate_rendered_runtime(single_document, current, single_hash)
         propagate_pending_signal()
         start, end = quiet_fence(args.quiet_seconds, pending_signal)
         write_private(
@@ -1137,10 +1218,17 @@ def active_run(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
         return result
     finally:
         restore_error: Exception | None = None
+        restore_error_context = "captured baseline restoration failed"
+        superseded_by_canonical = False
         if restore_needed:
             try:
-                run_compose(baseline.render_path, baseline.project_name)
-                verify_restored_baseline(baseline)
+                restore_error_context = (
+                    "restoration ownership fence failed; the harness will not "
+                    "overwrite an unowned LB and manual intervention may be required"
+                )
+                superseded_by_canonical = restore_or_accept_superseding_canonical(
+                    baseline
+                )
             except Exception as exc:
                 restore_error = exc
         else:
@@ -1151,7 +1239,14 @@ def active_run(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
         if restore_error is not None:
-            raise GateError(f"CRITICAL: LB restoration failed: {restore_error}") from restore_error
+            raise GateError(
+                f"CRITICAL: {restore_error_context}: {restore_error}"
+            ) from restore_error
+        if superseded_by_canonical:
+            raise GateError(
+                "concurrent healthy canonical deployment superseded the harness; "
+                "captured results are invalid and no restore was attempted"
+            )
         if interrupted_signum is not None:
             raise DeferredSignal(interrupted_signum)
 

@@ -148,7 +148,7 @@ class P2PPrerequisiteTest(unittest.TestCase):
                     tools, digest, root / "symlink", owner_uid=os.getuid()
                 )
 
-    def test_gpu_container_argv_is_exact_and_has_no_literal_quotes(self):
+    def test_gpu_container_argv_preserves_docker_csv_quotes(self):
         uuids = (
             "GPU-00000000-0000-0000-0000-000000000000",
             "GPU-11111111-1111-1111-1111-111111111111",
@@ -156,8 +156,7 @@ class P2PPrerequisiteTest(unittest.TestCase):
         command = phase_b.container_base("md-p2p-test", uuids, pathlib.Path("/safe"))
         self.assertEqual(command[:4], ["docker", "create", "--name", "md-p2p-test"])
         index = command.index("--gpus")
-        self.assertEqual(command[index + 1], "device=" + ",".join(uuids))
-        self.assertNotIn('"', command[index + 1])
+        self.assertEqual(command[index + 1], '"device=' + ",".join(uuids) + '"')
         joined = "\0".join(command)
         for expected in (
             "--network\0none",
@@ -303,6 +302,8 @@ class P2PPrerequisiteTest(unittest.TestCase):
             runtime_spec={},
             service_hash="d" * 64,
             restore_service_hash="e" * 64,
+            owner_id="owner",
+            single_service_hash="f" * 64,
         )
         with mock.patch.object(
             phase_b, "source_identities", return_value={"docker-compose.yaml": "changed"}
@@ -333,6 +334,8 @@ class P2PPrerequisiteTest(unittest.TestCase):
             runtime_spec={},
             service_hash="b" * 64,
             restore_service_hash="c" * 64,
+            owner_id="result",
+            single_service_hash="d" * 64,
         )
         args = types.SimpleNamespace(
             tools_dir=pathlib.Path("tools"),
@@ -366,13 +369,99 @@ class P2PPrerequisiteTest(unittest.TestCase):
             mock.patch.object(phase_b, "wait_for_health"),
             mock.patch.object(phase_b, "run_compose", side_effect=compose),
             mock.patch.object(phase_b, "verify_restored_baseline") as verified,
+            mock.patch.object(phase_b, "current_is_harness_owned", return_value=True),
             mock.patch.object(phase_b.signal, "signal", side_effect=install),
             mock.patch.object(phase_b.sys, "stderr", io.StringIO()),
         ):
             with self.assertRaisesRegex(phase_b.DeferredSignal, "signal 15"):
-                phase_b.active_run(args, self.sample_state())
+                phase_b.active_run_locked(args, self.sample_state())
         verified.assert_called_once_with(baseline)
         self.assertEqual(calls[-1], (baseline.render_path, baseline.project_name))
+
+    def test_restore_never_overwrites_superseding_canonical_deployment(self):
+        baseline = phase_b.ComposeBaseline(
+            render_path=pathlib.Path("baseline"),
+            single_path=pathlib.Path("single"),
+            render_sha256="a" * 64,
+            project_name="project",
+            source_identities={},
+            runtime_spec={},
+            service_hash="b" * 64,
+            restore_service_hash="c" * 64,
+            owner_id="owner",
+            single_service_hash="d" * 64,
+        )
+        with (
+            mock.patch.object(phase_b, "current_is_harness_owned", return_value=False),
+            mock.patch.object(phase_b, "verify_current_canonical_dual") as canonical,
+            mock.patch.object(phase_b, "run_compose") as compose,
+        ):
+            superseded = phase_b.restore_or_accept_superseding_canonical(baseline)
+        self.assertTrue(superseded)
+        canonical.assert_called_once_with()
+        compose.assert_not_called()
+
+    def test_restore_ownership_requires_run_label_and_exact_service_hash(self):
+        baseline = phase_b.ComposeBaseline(
+            render_path=pathlib.Path("baseline"),
+            single_path=pathlib.Path("single"),
+            render_sha256="a" * 64,
+            project_name="project",
+            source_identities={},
+            runtime_spec={},
+            service_hash="b" * 64,
+            restore_service_hash="c" * 64,
+            owner_id="owner",
+            single_service_hash="d" * 64,
+        )
+        labels = {
+            phase_b.HARNESS_OWNER_LABEL: "owner",
+            "com.docker.compose.config-hash": "d" * 64,
+        }
+        with mock.patch.object(
+            phase_b, "docker_inspect", return_value={"Config": {"Labels": labels}}
+        ):
+            self.assertTrue(phase_b.current_is_harness_owned(baseline))
+        labels[phase_b.HARNESS_OWNER_LABEL] = "concurrent-writer"
+        with mock.patch.object(
+            phase_b, "docker_inspect", return_value={"Config": {"Labels": labels}}
+        ):
+            self.assertFalse(phase_b.current_is_harness_owned(baseline))
+
+    def test_deployment_lock_rejects_concurrent_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lock = pathlib.Path(directory) / "deployment.lock"
+            with mock.patch.object(phase_b, "DEPLOYMENT_LOCK", lock):
+                with phase_b.deployment_lock():
+                    with self.assertRaisesRegex(phase_b.GateError, "holds the lock"):
+                        with phase_b.deployment_lock():
+                            self.fail("concurrent deployment lock unexpectedly acquired")
+
+    def test_restore_unowned_noncanonical_state_requires_manual_intervention(self):
+        baseline = phase_b.ComposeBaseline(
+            render_path=pathlib.Path("baseline"),
+            single_path=pathlib.Path("single"),
+            render_sha256="a" * 64,
+            project_name="project",
+            source_identities={},
+            runtime_spec={},
+            service_hash="b" * 64,
+            restore_service_hash="c" * 64,
+            owner_id="owner",
+            single_service_hash="d" * 64,
+        )
+        with (
+            mock.patch.object(phase_b, "current_is_harness_owned", return_value=False),
+            mock.patch.object(
+                phase_b,
+                "verify_current_canonical_dual",
+                side_effect=phase_b.GateError("not healthy canonical"),
+            ),
+            mock.patch.object(phase_b, "run_compose") as compose,
+        ):
+            with self.assertRaisesRegex(phase_b.GateError, "not healthy canonical"):
+                phase_b.restore_or_accept_superseding_canonical(baseline)
+        compose.assert_not_called()
 
 
 if __name__ == "__main__":

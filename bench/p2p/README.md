@@ -98,6 +98,21 @@ drift, captures the complete rendered baseline plus service config hash, and
 refuses active mode if the running LB has missing or unexpected environment or
 other relevant spec differences.
 
+The direct subprocess argv deliberately passes Docker's GPU request as the
+literal value `"device=UUID1,UUID2"`. Those quotes are data, not shell syntax:
+Docker's `--gpus` flag uses a CSV parser and needs them to preserve a comma-
+separated device list as one field. The unit test locks this exact argv.
+
+The active interval holds
+`/run/lock/mini-dynamo-node06-deployment.lock`. Every node06 LB deployment tool
+must take this same exclusive lock before recreating `ds4-loadbalancer`; the
+ownership fence remains mandatory even for cooperating writers. The single-home
+render carries a unique run label and exact Compose service hash. Immediately
+before restoration the harness requires both. If another writer has replaced
+the LB, the harness never overwrites it: a new canonical 2/2 deployment is left
+untouched and invalidates the experiment, while any other unowned state fails
+CRITICAL for manual intervention.
+
 Results live under a newly created mode-0700
 `/tmp/mini-dynamo-p2p-phase-b.*` directory; each file is mode 0600. Treat the
 entire directory as sensitive: the immutable Compose baseline intentionally
