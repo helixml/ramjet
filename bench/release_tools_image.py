@@ -35,8 +35,8 @@ def validation_errors(root: pathlib.Path = ROOT) -> list[str]:
     drone = (root / ".drone.yml").read_text()
     reference = image_reference(key)
     pinned = f"{reference}@{PUBLISHED_DIGEST}"
-    if drone.count(f"image: {pinned}") != 4:
-        errors.append(f".drone.yml must consume {pinned!r} exactly four times")
+    if drone.count(f"image: {pinned}") != 2:
+        errors.append(f".drone.yml must consume {pinned!r} exactly two times")
     if drone.count(f"--destination {reference}") != 1:
         errors.append(f".drone.yml must publish {reference!r} exactly once")
     return errors
@@ -54,9 +54,9 @@ def update_references(root: pathlib.Path = ROOT) -> str:
     updated, consumers = re.subn(
         consumer_pattern, rf"\g<1>{reference}@{PUBLISHED_DIGEST}", updated
     )
-    if destinations != 1 or consumers != 4:
+    if destinations != 1 or consumers != 2:
         raise ValueError(
-            ".drone.yml: expected one release-tools destination and four consumers, "
+            ".drone.yml: expected one release-tools destination and two consumers, "
             f"found {destinations} and {consumers}"
         )
     path.write_text(updated)

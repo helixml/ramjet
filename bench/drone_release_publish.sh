@@ -20,4 +20,4 @@ sha=$(printf '%s' "$sha" | tr 'A-F' 'a-f')
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || fail invalid_script_path
 
 sh "$script_dir/drone_release_guard.sh" "$kind" >/dev/null || fail invalid_plan
-exec sh "$script_dir/drone_registry_promote.sh" "$kind" "$tag" "$sha" release_publish
+exec sh "$script_dir/drone_registry_promote.sh" "$kind" "$tag" "$sha"

@@ -26,7 +26,7 @@ class ReleaseToolsImageTest(unittest.TestCase):
         pinned = f"{reference}@{release_tools_image.PUBLISHED_DIGEST}"
         self.assertEqual(drone.count(f"--destination {reference}"), 1)
         self.assertNotIn(f"--destination {pinned}", drone)
-        self.assertEqual(drone.count(f"image: {pinned}"), 4)
+        self.assertEqual(drone.count(f"image: {pinned}"), 2)
 
 
 if __name__ == "__main__":
