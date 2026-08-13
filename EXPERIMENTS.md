@@ -3498,3 +3498,35 @@ Git tree and imported `vllm.parser.deepseek_v4` from the staged source path.
 Root remained at 58GB free / 85% used, and the LB plus both r34 engines retained
 their prior uptime. The image is local-only and still must pass the corruption
 smoke and deterministic agent gate before B may serve a measured request.
+
+## 2026-08-13 — Infernal r5 direct-engine correctness rejection
+
+Production was first single-homed on unchanged r34 A and verified 1/1 healthy.
+The exact local candidate image
+`sha256:1f3a54246d5ecdb1bae53360b89881b629921b557c44e739c0034b373fa21d26`
+then replaced only B. Its effective argv matched the prior r4 canary contract:
+A16/K5 probabilistic-standard, TP4, graph96, MNS16, MBT4096, 393,216 context,
+GMU0.975, and the native KV publisher. B reached API-ready in 12m32s with zero
+restarts, OOM, CUDA, NCCL, Xid, traceback, or fatal markers during startup.
+Startup populated only the new `vllm0eb3d442a4` JIT namespace.
+
+The fail-fast direct candidate gate stopped in 7.70s after its first stage. Five
+deterministic agent cases completed, but only three were protocol-valid:
+
+| case | result | structural failure |
+|---|---|---|
+| text non-stream | pass | — |
+| typed required stream | reject | two calls instead of one; one argument was invalid JSON |
+| parallel required stream | reject | three calls instead of two; `engine` was duplicated |
+| auto-tool DSML stream | pass | — |
+| reasoning/tool history | pass | — |
+
+The same bounded log interval also contained a late JIT marker, so performance
+would have required a warm rerun even if correctness passed. Correctness is the
+independent hard stop: the C128A and synthetic parser fixes do not make this
+model/runtime composition agent-safe. No c8 scout, six-cell matrix, LB route,
+or Helix workflow was attempted. B was immediately recreated from canonical
+r34 while production remained on A; the local candidate image and privacy-safe
+gate journal were retained for diagnosis. The next Infernal successor must add
+goldens for real model-emitted extra calls and malformed arguments rather than
+only wrapper/orphan parser fixtures.
