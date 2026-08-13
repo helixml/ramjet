@@ -3530,3 +3530,13 @@ r34 while production remained on A; the local candidate image and privacy-safe
 gate journal were retained for diagnosis. The next Infernal successor must add
 goldens for real model-emitted extra calls and malformed arguments rather than
 only wrapper/orphan parser fixtures.
+
+The rollback B became API-ready on canonical r34 without a restart. Direct
+`/health` and `/v1/models` probes returned 200, and a deterministic 32-token
+smoke stopped normally with reconciled usage (88 prompt + 24 completion = 112
+total tokens). Its rollback interval contained zero CUDA, NCCL, OOM, Xid,
+traceback, or fatal markers. The load balancer was then recreated from the
+canonical dual-upstream Compose: `/health` reported 2/2 healthy, both
+`ds4proxy_upstream_up` gauges were one, and both A and B resolved to r34 image
+ID `sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b`
+with zero restarts. The candidate remained unserved throughout.
