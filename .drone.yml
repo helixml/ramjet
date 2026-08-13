@@ -12,6 +12,9 @@ steps:
     image: rust:1.95-bookworm
     pull: if-not-exists
     commands:
+      # Parallel Drone steps share the checkout. Keep Cargo's transient files
+      # out of it so Go's ./... walk cannot race a disappearing rmeta file.
+      - export CARGO_TARGET_DIR=/tmp/mini-dynamo-target
       - rustup component add rustfmt clippy
       - cargo fmt --check
       - cargo clippy --locked --all-targets --all-features -- -D warnings
