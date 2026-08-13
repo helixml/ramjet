@@ -20,6 +20,8 @@ import time
 import urllib.error
 import urllib.request
 
+from engine_metrics import fetch_speculative, speculative_delta
+
 
 DEFAULT_CORPUS = pathlib.Path(__file__).with_name("agent_cases") / "v1.jsonl"
 UPSTREAM_RESPONSE_FIXTURES = (
@@ -539,6 +541,23 @@ def command_validate(args):
     return 0
 
 
+def fetch_speculation_snapshot(url, timeout=10):
+    """Read one engine's bounded speculative counters without aborting a cell."""
+    if not url:
+        return None
+    try:
+        return fetch_speculative(url, timeout=timeout)
+    except Exception:
+        return None
+
+
+def benchmark_exit_status(records, report_protocol_failures, dspark, require_reconciled):
+    status = run_exit_status(records, report_protocol_failures)
+    if status or not require_reconciled:
+        return status
+    return 0 if dspark and dspark.get("reconciled") else 1
+
+
 def command_run(args):
     token = os.environ.get("BENCH_TOKEN") or os.environ.get("VLLM_API_KEY")
     if not token:
@@ -581,6 +600,7 @@ def command_run(args):
             warmup_results = [future.result() for future in warmups]
         if not all(result["ok"] for result in warmup_results):
             raise SystemExit("warmup failed structural validation")
+    metrics_before = fetch_speculation_snapshot(args.engine_metrics)
     jobs = [
         (repetition, case)
         for repetition in range(args.repetitions)
@@ -619,6 +639,15 @@ def command_run(args):
     cached = sum(record.get("cached_tokens", 0) for record in records)
     good_completion = sum(record.get("completion_tokens", 0) for record in good)
     walls = [record["wall_ms"] for record in records if record.get("wall_ms") is not None]
+    dspark = None
+    if args.engine_metrics:
+        dspark = speculative_delta(
+            metrics_before,
+            fetch_speculation_snapshot(args.engine_metrics),
+            completion,
+            len(transport_good),
+            expected_enabled=True,
+        )
     summary = {
         "type": "summary",
         "metadata": metadata,
@@ -662,8 +691,15 @@ def command_run(args):
         ),
         "wall_seconds": round(elapsed, 3),
     }
+    if dspark is not None:
+        summary["dspark"] = dspark
     print(json.dumps(summary, sort_keys=True))
-    return run_exit_status(records, args.report_protocol_failures)
+    return benchmark_exit_status(
+        records,
+        args.report_protocol_failures,
+        dspark,
+        args.require_reconciled_speculation,
+    )
 
 
 def parser():
@@ -684,6 +720,15 @@ def parser():
     run.add_argument("--concurrency", type=int, default=1)
     run.add_argument("--repetitions", type=int, default=1)
     run.add_argument("--warmup", action="store_true")
+    run.add_argument(
+        "--engine-metrics",
+        help="direct engine /metrics URL used to reconcile speculative work",
+    )
+    run.add_argument(
+        "--require-reconciled-speculation",
+        action="store_true",
+        help="fail the cell unless native speculative counters exactly match its usage",
+    )
     run.add_argument(
         "--prefix-kib",
         type=int,
@@ -714,6 +759,10 @@ def main(argv=None):
         raise SystemExit("concurrency and repetitions must be positive")
     if getattr(args, "prefix_kib", 0) < 0:
         raise SystemExit("prefix-kib must be non-negative")
+    if getattr(args, "require_reconciled_speculation", False) and not getattr(
+        args, "engine_metrics", None
+    ):
+        raise SystemExit("--require-reconciled-speculation requires --engine-metrics")
     max_output_tokens = getattr(args, "max_output_tokens", None)
     if max_output_tokens is not None and not 1 <= max_output_tokens <= 4096:
         raise SystemExit("max-output-tokens must be between 1 and 4096")

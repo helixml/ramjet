@@ -630,6 +630,13 @@ c1/c8/c16, and cold/warm passes. Narrow `AGENT_PROFILES`,
 `AGENT_PREFIX_KIBS`, or `AGENT_CONCURRENCIES` in the development loop; set
 `AGENT_RUNS=3` only for a final variance-qualified candidate. Run direct-engine
 A/B cells with the two-round crossover below to use both TP4 pairs at once.
+For a speculative-decoding comparison, set `AGENT_ENGINE_METRICS` to that
+direct engine's `/metrics` endpoint and
+`AGENT_REQUIRE_RECONCILED_SPECULATION=1`. Each cell then fails unless native
+generation/request counters exactly reconcile with its response usage and
+reports draft acceptance plus proposed, accepted, and effective tokens per
+target step. Never enable the requirement for an LB cell that can reach more
+than the one measured engine.
 
 For issue #14, `reasoning_matrix.sh BASE MODEL LABEL` compares the same
 correctness oracle across low/high/max reasoning and 96/192/256 output caps.

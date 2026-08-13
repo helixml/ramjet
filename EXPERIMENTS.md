@@ -4752,3 +4752,76 @@ validators, full profile render, and the release build. Python completed in
 2.02s and deployment validation in 0.40s beside the single Rust lane. The Rust
 lane took 60.12s, including a 33.28s release link from this worktree; no second
 Cargo lane competed for the shared target.
+
+## 2026-08-13 — r96 K5 standard versus block rejection
+
+The checkpoint and pinned r34 runtime narrow issue #12 before GPU work. The
+model declares `dspark_block_size=5`, and r34's own engine configuration rejects
+K3 and K4 with an explicit incorrect/garbled-output error because speculative
+depth must be at least five. K5 with standard or block rejection both pass
+configuration validation. The supported one-variable matrix is therefore K5
+probabilistic/standard versus K5 probabilistic/block, not six nominal cells.
+
+`agentbench.py` now optionally snapshots the direct engine's bounded native
+speculative counters after warmup and again after the measured work. Every cell
+reports draft steps, proposed and accepted tokens, strict acceptance, accepted
+tokens per step, and effective tokens per target step. A required mode exits
+nonzero unless engine generation tokens and finished requests exactly reconcile
+with authoritative response usage. The matrix wrapper exposes this only through
+an explicit direct-engine metrics endpoint; it cannot accidentally claim
+reconciliation for a two-engine LB cell. Two focused tests plus the complete
+201-test Python suite passed in 1.76–1.78s.
+
+Production was single-homed on engine A under the common deployment lock while
+the unchanged r34 engine B was measured directly. Three mature K5/standard
+rounds covered deterministic and official-agentic profiles, cold and warm
+cells, and c1/c8/c16. All 420/420 requests were transport-successful,
+protocol-valid, and exactly counter-reconciled. Across the 36 heterogeneous
+summary cells, median output was 323.0 tok/s, median successful work was
+3,154.2 tasks/GPU-hour, median strict acceptance was 87.65%, median effective
+tokens/step was 5.365, and the worst TTFT p95 was 1.489s. The five-case
+reconciliation smoke independently matched 459 generation tokens and five
+finished requests exactly.
+
+The committed `docker-compose.k5-block-canary.yaml` changes only engine B's
+draft/rejection environment and leaves the base Compose as the one-command
+rollback. B's effective environment was verified as K5, probabilistic, block;
+A's container identity never changed. Candidate readiness took 563s. The first
+block smoke was discarded because nine post-readiness JIT/warmup markers
+overlapped it. After an additional warmup, a clean interval had zero late-JIT
+or fatal markers and passed 5/5 at 184.8 output tok/s, 346.1ms TTFT p95, 91.46%
+strict acceptance, and 5.573 effective tokens/step. That narrow c1 result
+justified, but did not qualify, the matrix.
+
+The broader result rejected block mode. Its first two rounds completed 280/280
+measured requests with valid protocol and exact counter reconciliation, but the
+candidate emitted 267 compile/warmup markers during the matrix, so those
+performance intervals are observational rather than admissible. Even on that
+generous basis, their median was 157.1 output tok/s and 1,619.6 successful
+tasks/GPU-hour versus 321.0 and 3,154.2 for the matched first two standard
+rounds. Median strict acceptance rose from 87.65% to 88.25% and effective
+tokens/step from 5.361 to 5.398, demonstrating why proposal acceptance alone is
+not a serving objective. Block's maximum cell TTFT p95 reached 7.967s versus
+1.489s for standard.
+
+Round three then stopped at the official-agentic warm-c8 boundary because its
+warmup failed structural validation. The nine summaries completed before that
+boundary remained 90/90 valid and reconciled; the failed warmup itself is the
+correctness guardrail and ends the candidate. Decision: retain K5 probabilistic
+drafting with standard rejection, do not run locality/box/Helix promotion gates,
+and preserve the negative overlay for reproducibility. The rollback recreated
+only engine B; normal dual-engine serving was restored after authenticated
+readiness and identity checks.
+
+The independently justified rollback also supplied issue #41's first fresh
+engine-B generation under the production companion. A new mode-`0600` engine
+identity was captured and the one-shot provisioner atomically published a
+mode-`0440`, `0:12000` attestation for the restored process. The companion
+accepted the authority change, attempted the bounded replay, and failed closed
+at its `apply` boundary with zero indexed blocks; its attempt/connection/invalid
+counters then stayed unchanged across two samples. The post-rollback recovery
+audit therefore returned `companion_source_not_ready` in 2.66s without any
+Compose mutation. Both engines remained healthy with zero restarts and ordinary
+2/2 approximate serving was unaffected. This replaces the previous “wait for a
+fresh generation” uncertainty with a concrete compact-index replay defect to
+diagnose before snapshot shadow mode can be enabled.

@@ -1,6 +1,7 @@
 import json
 import pathlib
 import unittest
+from unittest import mock
 
 from agentbench import (
     Assembly,
@@ -10,9 +11,12 @@ from agentbench import (
     UPSTREAM_RESPONSE_FIXTURES,
     add_prefix,
     apply_request_policy,
+    benchmark_exit_status,
     bounded_finish_reason_counts,
     bounded_route_counts,
+    fetch_speculation_snapshot,
     load_cases,
+    main,
     run_exit_status,
     validate_case,
     validate_choice_results,
@@ -34,6 +38,55 @@ def sse(event):
 
 
 class AgentBenchTest(unittest.TestCase):
+    def test_reconciled_speculation_flag_requires_metrics_endpoint(self):
+        with self.assertRaisesRegex(
+            SystemExit, "requires --engine-metrics"
+        ):
+            main(
+                [
+                    "run",
+                    "http://127.0.0.1:8013",
+                    "model",
+                    "--metadata-json",
+                    "/does/not/matter.json",
+                    "--require-reconciled-speculation",
+                ]
+            )
+
+    def test_speculation_snapshot_is_optional_and_fail_closed(self):
+        sample = {"draft_steps": 7}
+        with mock.patch("agentbench.fetch_speculative", return_value=sample) as fetch:
+            self.assertEqual(
+                fetch_speculation_snapshot("http://127.0.0.1:8013/metrics"), sample
+            )
+            fetch.assert_called_once_with(
+                "http://127.0.0.1:8013/metrics", timeout=10
+            )
+        with mock.patch(
+            "agentbench.fetch_speculative", side_effect=TimeoutError("late")
+        ):
+            self.assertIsNone(
+                fetch_speculation_snapshot("http://127.0.0.1:8013/metrics")
+            )
+        self.assertIsNone(fetch_speculation_snapshot(None))
+
+    def test_required_speculation_must_reconcile_without_masking_request_errors(self):
+        valid = [{"ok": True}]
+        transport_failure = [{"ok": False, "error": "TimeoutError"}]
+
+        self.assertEqual(
+            benchmark_exit_status(valid, False, {"reconciled": True}, True), 0
+        )
+        self.assertEqual(
+            benchmark_exit_status(valid, False, {"reconciled": False}, True), 1
+        )
+        self.assertEqual(benchmark_exit_status(valid, False, None, True), 1)
+        self.assertEqual(
+            benchmark_exit_status(transport_failure, False, {"reconciled": True}, True),
+            1,
+        )
+        self.assertEqual(benchmark_exit_status(valid, False, None, False), 0)
+
     def test_request_policy_override_is_explicit_and_non_mutating(self):
         fixture = case()
         fixture["request"].update({"reasoning_effort": "low", "max_tokens": 96})
