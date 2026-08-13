@@ -132,6 +132,7 @@ cargo test --locked snapshot_digest_delta
 cargo test --locked snapshot_consumer
 cargo test --locked --test snapshot_consumer_adversarial
 cargo test --locked snapshot_producer
+cargo test --locked snapshot_reconnect
 cargo test --locked --test snapshot_digest_lifecycle
 ```
 
@@ -160,6 +161,13 @@ supervisor. Its source callback must subscribe live before building a snapshot,
 return owned state, observe cancellation, and never retain engine/global locks
 across serialization or socket writes. Tail delivery is bounded and applies
 backpressure; a dropped LB client must cancel source work immediately.
+
+`snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
+are serial; only an explicit bounded replacement may overlap a second session.
+Validate the trusted socket parent on every connect, use a fresh OS-random
+challenge under the bounded reuse ledger, and carry one absolute attempt
+deadline through connect and consumption. Shutdown drops the consumer future
+immediately; approximate serving is never owned by this path.
 
 ## node06 — the test/production box
 

@@ -530,8 +530,15 @@ node06). The design rationale for each lives in DESIGN.md.
   preserving sparse real watermarks. Bounded queues apply backpressure; client
   EOF, slow-write deadline, shutdown, source failure, or identity rollover
   cancels source work and ends the session without holding engine locks across
-  serialization or I/O. Add the concrete long-lived index source, outbound
-  reconnect/challenge owner, and Compose runtime, then run at least
+  serialization or I/O. The LB reconnect owner now revalidates the trusted
+  socket parent on every connection, generates OS-random 256-bit challenges
+  under a bounded nonreuse ledger, applies bounded half-to-full jittered
+  exponential backoff, and carries one absolute deadline through connect and
+  consumption. Normal attempts are serial; only an explicit capacity-one
+  replacement command overlaps a second session, preserves the old same-
+  identity publication until the new epoch is caught up, and drops the old
+  future only after handoff. Shutdown cancels promptly. Add the concrete long-
+  lived index source and Compose runtime, then run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
 
   Deployment hardening is also part of the gate: distinct fixed LB/companion

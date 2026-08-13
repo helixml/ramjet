@@ -223,6 +223,23 @@ pub fn validate_socket_parent(
     Ok(())
 }
 
+/// Validate a client-supplied public socket path and its trusted parent.
+///
+/// The target itself is intentionally resolved by `connect(2)`. The validated
+/// parent must remain exclusively companion-writable, and the authenticated
+/// session independently verifies the connected peer UID before protocol I/O.
+///
+/// # Errors
+///
+/// Returns [`SnapshotSocketPathError`] for a relative/non-normalized target or
+/// an unsafe parent path.
+pub fn validate_socket_client_path(
+    public_path: &Path,
+    policy: SocketParentPolicy,
+) -> Result<(), SnapshotSocketPathError> {
+    validate_socket_parent(normalized_parent(public_path)?, policy)
+}
+
 /// Bind a unique private socket, set mode `0660`, and atomically publish it
 /// without replacing any existing public target.
 ///
