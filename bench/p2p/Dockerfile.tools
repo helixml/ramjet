@@ -1,0 +1,20 @@
+ARG R34_IMAGE=voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b
+FROM ${R34_IMAGE} AS build
+
+COPY nvbandwidth /src/nvbandwidth
+COPY nccl-tests /src/nccl-tests
+
+RUN /opt/venv/bin/cmake -S /src/nvbandwidth -B /src/nvbandwidth/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CUDA_ARCHITECTURES=120 \
+      -DCMAKE_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib/stubs \
+    && /opt/venv/bin/cmake --build /src/nvbandwidth/build --parallel
+
+RUN make -C /src/nccl-tests -j"$(nproc)" \
+      CUDA_HOME=/usr/local/cuda \
+      NCCL_HOME=/opt/venv/lib/python3.12/site-packages/nvidia/nccl \
+      NVCC_GENCODE='-gencode=arch=compute_120,code=sm_120 -gencode=arch=compute_120,code=compute_120'
+
+FROM scratch AS export
+COPY --from=build /src/nvbandwidth/build/nvbandwidth /nvbandwidth
+COPY --from=build /src/nccl-tests/build/all_reduce_perf /all_reduce_perf
