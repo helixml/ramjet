@@ -409,8 +409,13 @@ node06). The design rationale for each lives in DESIGN.md.
   parallel-tool case (4/5), while adjacent r34 passed 5/5 cold and warm. B was
   rolled back. Do not test MBT8192, MTP0, offload, or custom all-reduce on this
   image. No successor is packaged yet. A fixed candidate must first pass the
-  retained malformed-wrapper/orphan-invoke fixtures (upstream vLLM #49117 and
-  #51914 remain open). The immutable r4 tree definitely lacks vLLM #51318's
+  retained malformed-wrapper/orphan-invoke fixtures. A stdlib-only source gate
+  now runs seven synthetic cases against the actual composed parser in about
+  0.05s, emits no response content, and pins every V4 parser file touched by
+  the candidate. Upstream vLLM #49117 recovers missing wrappers but needs the
+  proven conservative exact-`toolcalls` prefix extension to close #51914.
+  Candidate mismatch is a hard stop before image/GPU work. The immutable r4
+  tree also definitely lacks vLLM #51318's
   C128A FULL-graph capture-stable row stride: its active width depends on each
   batch while capture uses `max_model_len`. The content-safe
   `bench/infernal_c128a_preflight.py` gate now proves the exact r4 source
