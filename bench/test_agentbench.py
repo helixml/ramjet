@@ -8,6 +8,7 @@ from agentbench import (
     DEFAULT_CORPUS,
     SSEDecoder,
     UPSTREAM_RESPONSE_FIXTURES,
+    bounded_route_counts,
     load_cases,
     validate_case,
     validate_choice_results,
@@ -29,11 +30,27 @@ def sse(event):
 
 
 class AgentBenchTest(unittest.TestCase):
+    def test_route_summary_has_fixed_privacy_safe_cardinality(self):
+        self.assertEqual(
+            bounded_route_counts(
+                [
+                    {"route": "0"},
+                    {"route": "1"},
+                    {"route": None},
+                    {"route": "unexpected-upstream-value"},
+                ]
+            ),
+            {"0": 1, "1": 1, "missing": 1, "other": 1},
+        )
+
     def test_committed_corpus_is_valid_and_versioned(self):
         cases = load_cases(DEFAULT_CORPUS)
         self.assertGreaterEqual(len(cases), 5)
         self.assertEqual(len({item["id"] for item in cases}), len(cases))
         self.assertEqual({item["schema_version"] for item in cases}, {1})
+
+        typed = next(item for item in cases if item["id"] == "typed-required-stream")
+        self.assertGreaterEqual(typed["request"]["max_tokens"], 256)
 
     def test_stream_reassembles_split_tool_name_and_typed_arguments(self):
         assembly = Assembly()

@@ -4355,3 +4355,35 @@ LB-only restarts, require recovery p95 below three seconds, and then begin the
 100,000-decision exact-versus-approximate comparison. Caddy metrics membership
 and routes remain unapplied until that state is useful, so no Caddy restart or
 external traffic interruption occurred.
+
+## 2026-08-13 — r73 agent-corpus output-budget correction
+
+With issue #41 waiting on natural engine generations, the idle two-TP4 box was
+used for the next non-disruptive issue #10 slice. A fresh deterministic c1
+smoke passed all five agent/DSML cases in 3.099s: 100% protocol validity,
+833.8ms streaming TTFT p95, 2.06ms median mean-ITL, 135.9 output tok/s, and
+726.1 successful tasks/GPU-hour. The subsequent bounded 0/256KiB cold/warm
+c8/c16 run used both replicas concurrently and stopped on its first protocol
+failure rather than continuing through the full matrix.
+
+All four zero-prefix cells passed, 60/60 requests total. Their route splits
+were 6/4, 6/4, 11/9, and 10/10. Cold c8/c16 produced 117.7/450.9 output tok/s
+and 2.087/2.575s TTFT p95; warm c8/c16 produced 107.5/277.3 output tok/s and
+7.064/0.986s TTFT p95. The warm-c8 tail and throughput inversion make this a
+correctness pass, not a variance-qualified performance result.
+
+The first 256KiB/c8 cell was 9/10 valid. One `typed-required-stream` response
+used exactly the case's 192-token maximum and omitted the required nested
+metadata object while still returning a structured tool call. A fresh
+single-request schedule at the same 192-token cap passed 5/5, using 184-186
+tokens, which showed that the cap was marginal rather than a deterministic
+parser break. Raising only this synthetic case to 256 passed 8/8 at c8; valid
+calls used 184-206 tokens with a balanced 4/4 route split. No content or tool
+arguments were retained.
+
+The committed corpus now reserves 256 tokens for that required nested JSON and
+a unit test prevents lowering the bound. This is a benchmark correction, not a
+serving-policy change: a correctness oracle must not create intermittent
+truncation and misclassify it as an engine regression. The full matrix resumes
+from the corrected corpus. LB, both engines, and both companions stayed healthy
+with zero restarts after the experiments.

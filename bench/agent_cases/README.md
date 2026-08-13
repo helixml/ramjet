@@ -16,8 +16,10 @@ python3 -m unittest discover -s bench -p 'test_*.py'
 Live runs require a metadata JSON object so results cannot lose deployment
 provenance. The required fields are `engine_image`, `model_revision`,
 `tokenizer_sha256`, `config_sha256`, `router_version`, and `gpu_count`. The
-runner emits only structural outcomes, timing/token counters, routing identity, and this
-metadata; it never emits completion text, reasoning, or tool arguments.
+runner emits only structural outcomes, timing/token counters, routing identity,
+and this metadata; it never emits completion text, reasoning, or tool arguments.
+Summaries reduce route headers to fixed `0`, `1`, `missing`, and `other`
+buckets so placement balance is visible without retaining arbitrary values.
 
 ```bash
 export BENCH_TOKEN=...
@@ -31,6 +33,12 @@ top_p=0.95` distribution. Deterministic runs use `temperature=0`, `top_p=1`,
 and a fixed seed. A result fails if DSML fragments appear in normal content,
 tool names/JSON/types do not match, reasoning is missing where required, or
 the task-completion expectation is absent.
+
+The typed required-tool case deliberately reserves 256 output tokens. A live
+256KiB/c8 run used 184-206 tokens for valid nested JSON, while its former
+192-token cap produced an intermittent structurally incomplete call. Keep
+correctness budgets above measured valid output instead of treating benchmark-
+induced truncation as a frontend-parser failure.
 
 The corpus follows the public DeepSeek-V4 encoding contract in which tools use
 DSML internally but OpenAI-compatible endpoints must return structured

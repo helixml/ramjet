@@ -361,6 +361,20 @@ def token_counts(usage):
     )
 
 
+def bounded_route_counts(records):
+    """Count production ordinals without retaining arbitrary route headers."""
+    counts = {"0": 0, "1": 0, "missing": 0, "other": 0}
+    for record in records:
+        route = record.get("route")
+        if route in ("0", "1"):
+            counts[route] += 1
+        elif route is None:
+            counts["missing"] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
 def add_prefix(case, prefix_kib, salt):
     selected = copy.deepcopy(case)
     if prefix_kib <= 0:
@@ -567,6 +581,7 @@ def command_run(args):
         "output_tok_s": round(completion / elapsed, 1) if elapsed else None,
         "total_tok_s": round((prompt + completion) / elapsed, 1) if elapsed else None,
         "cache_hit_pct": round(100 * cached / prompt, 1) if prompt else None,
+        "route_counts": bounded_route_counts(records),
         "successful_tasks_per_gpu_hour": (
             round(len(good) * 3600 / elapsed / int(metadata["gpu_count"]), 1)
             if elapsed and int(metadata["gpu_count"]) > 0
