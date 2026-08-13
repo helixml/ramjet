@@ -47,6 +47,8 @@ class CacheBenchTest(unittest.TestCase):
 # TYPE ds4proxy_kv_event_clears_total counter
 # HELP ds4proxy_exact_route_placement_total exact route placement decisions
 # TYPE ds4proxy_exact_route_placement_total counter
+# HELP ds4proxy_exact_route_projected_balance_total projected balance decisions
+# TYPE ds4proxy_exact_route_projected_balance_total counter
 """
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = body
@@ -60,6 +62,10 @@ class CacheBenchTest(unittest.TestCase):
 ds4proxy_exact_route_placement_total{endpoint="chat",mode="shadow",outcome="would_balance"} 3
 ds4proxy_exact_route_placement_total{endpoint="chat",mode="shadow",outcome="kept_balance_load_gate"} 5
 ds4proxy_exact_route_placement_total{endpoint="chat",mode="placement",outcome="would_balance"} 99
+# HELP ds4proxy_exact_route_projected_balance_total projected decisions
+# TYPE ds4proxy_exact_route_projected_balance_total counter
+ds4proxy_exact_route_projected_balance_total{endpoint="chat",outcome="kept_selected"} 7
+ds4proxy_exact_route_projected_balance_total{endpoint="chat",outcome="would_balance"} 2
 '''
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = body
@@ -68,6 +74,9 @@ ds4proxy_exact_route_placement_total{endpoint="chat",mode="placement",outcome="w
         self.assertEqual(metrics["shadow_cold_would_balance"], 3)
         self.assertEqual(metrics["shadow_cold_load_gate"], 5)
         self.assertEqual(metrics["shadow_cold_delta_gate"], 0)
+        self.assertEqual(metrics["projected_cold_kept_selected"], 7)
+        self.assertEqual(metrics["projected_cold_would_balance"], 2)
+        self.assertEqual(metrics["projected_cold_load_gate"], 0)
 
     def test_workload_round_robins_apps_before_reuse(self):
         self.assertEqual(

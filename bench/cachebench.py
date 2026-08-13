@@ -67,6 +67,26 @@ LB_COUNTERS = {
             "outcome": "kept_balance_load_gate",
         },
     ),
+    "projected_cold_kept_selected": (
+        "ds4proxy_exact_route_projected_balance_total",
+        {"endpoint": "chat", "outcome": "kept_selected"},
+    ),
+    "projected_cold_would_balance": (
+        "ds4proxy_exact_route_projected_balance_total",
+        {"endpoint": "chat", "outcome": "would_balance"},
+    ),
+    "projected_cold_delta_gate": (
+        "ds4proxy_exact_route_projected_balance_total",
+        {"endpoint": "chat", "outcome": "kept_delta_gate"},
+    ),
+    "projected_cold_load_gate": (
+        "ds4proxy_exact_route_projected_balance_total",
+        {"endpoint": "chat", "outcome": "kept_load_gate"},
+    ),
+    "projected_cold_fallback": (
+        "ds4proxy_exact_route_projected_balance_total",
+        {"endpoint": "chat", "outcome": "fallback"},
+    ),
 }
 
 

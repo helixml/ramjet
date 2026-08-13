@@ -97,6 +97,27 @@ enum PlacementOutcome {
     Fallback,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectedBalanceOutcome {
+    KeptSelected,
+    WouldBalance { delta_tokens: usize },
+    KeptDeltaGate,
+    KeptLoadGate,
+    Fallback,
+}
+
+impl ProjectedBalanceOutcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::KeptSelected => "kept_selected",
+            Self::WouldBalance { .. } => "would_balance",
+            Self::KeptDeltaGate => "kept_delta_gate",
+            Self::KeptLoadGate => "kept_load_gate",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
 impl PlacementOutcome {
     const fn label(self, active: bool) -> &'static str {
         match self {
@@ -278,6 +299,19 @@ impl ExactRouteShadow {
                 .exact_route_residency_delta
                 .with_label_values(&[endpoint.label()])
                 .observe(usize_to_f64(delta_tokens));
+        }
+        if result.shadow.outcome == ShadowOutcome::AllZero {
+            let projected = evaluate_projected_cold_balance(decision, &result, policy);
+            if let ProjectedBalanceOutcome::WouldBalance { delta_tokens } = projected {
+                self.metrics
+                    .exact_route_projected_residency_delta
+                    .with_label_values(&[endpoint.label()])
+                    .observe(usize_to_f64(delta_tokens));
+            }
+            self.metrics
+                .exact_route_projected_balance
+                .with_label_values(&[endpoint.label(), projected.label()])
+                .inc();
         }
         if mode.applies()
             && let PlacementOutcome::Move(winner) = placement
@@ -759,6 +793,77 @@ fn evaluate_cold_balance(
     PlacementOutcome::WouldBalance { delta_tokens }
 }
 
+/// Compare cold placement after conservatively translating each replica's
+/// bounded active load into current-request-equivalent token pressure. This is
+/// observation-only: load units may include decode work and are not asserted
+/// to be future resident KV state.
+fn evaluate_projected_cold_balance(
+    decision: &Decision,
+    exact: &PreRouteResult,
+    policy: ExactPlacementPolicy,
+) -> ProjectedBalanceOutcome {
+    let Some(selected) = decision.candidates.first().copied() else {
+        return ProjectedBalanceOutcome::Fallback;
+    };
+    let mut eligible = Vec::new();
+    for candidate in decision
+        .candidate_state
+        .iter()
+        .filter(|candidate| candidate.healthy)
+    {
+        let Some(resident) = exact
+            .resident_tokens
+            .get(candidate.index)
+            .copied()
+            .flatten()
+        else {
+            return ProjectedBalanceOutcome::Fallback;
+        };
+        let Some(pressure) = load_equivalent_token_pressure(candidate, exact.prompt_tokens) else {
+            return ProjectedBalanceOutcome::Fallback;
+        };
+        eligible.push((candidate, resident.saturating_add(pressure)));
+    }
+    eligible.sort_by_key(|(candidate, projected)| (*projected, candidate.index));
+    let Some((winner_state, winner_projected)) = eligible.first().copied() else {
+        return ProjectedBalanceOutcome::Fallback;
+    };
+    let Some((selected_state, selected_projected)) = eligible
+        .iter()
+        .copied()
+        .find(|(candidate, _)| candidate.index == selected)
+    else {
+        return ProjectedBalanceOutcome::Fallback;
+    };
+    if winner_state.index == selected {
+        return ProjectedBalanceOutcome::KeptSelected;
+    }
+    let delta_tokens = selected_projected.saturating_sub(winner_projected);
+    if delta_tokens < exact.prompt_tokens.max(1) {
+        return ProjectedBalanceOutcome::KeptDeltaGate;
+    }
+    if winner_state.load_units
+        > selected_state
+            .load_units
+            .saturating_add(policy.max_load_delta)
+    {
+        return ProjectedBalanceOutcome::KeptLoadGate;
+    }
+    ProjectedBalanceOutcome::WouldBalance { delta_tokens }
+}
+
+fn load_equivalent_token_pressure(
+    candidate: &CandidateState,
+    prompt_tokens: usize,
+) -> Option<usize> {
+    let request_units = u128::try_from(candidate.request_load_units).ok()?;
+    if request_units == 0 {
+        return None;
+    }
+    let numerator = (candidate.load_units as u128).saturating_mul(prompt_tokens as u128);
+    usize::try_from(numerator.div_ceil(request_units)).ok()
+}
+
 fn apply_placement(
     winner: usize,
     prompt_tokens: usize,
@@ -1164,6 +1269,99 @@ mod tests {
                 .with_label_values(&["shadow", "chat", "kept_balance_load_gate"])
                 .get(),
         );
+        assert_one(
+            metrics
+                .exact_route_projected_balance
+                .with_label_values(&["chat", "kept_load_gate"])
+                .get(),
+        );
+    }
+
+    #[test]
+    fn projected_cold_balance_accounts_for_inflight_load_without_changing_route() {
+        let fuller = trusted_inventory(vec![store_hash(7, &[1, 2, 3, 4, 5, 6, 7, 8])]);
+        let emptier = trusted_inventory(Vec::new());
+        let registry = Registry::new();
+        let metrics = Arc::new(Metrics::new(&registry).unwrap());
+        let shadow =
+            ExactRouteShadow::new(Arc::from([fuller, emptier]), Arc::clone(&metrics), 1.0, 8);
+        let mut route = decision();
+        route.candidate_state[1].load_units = 2;
+        let original = route.clone();
+
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[9, 10, 11, 12],
+            &mut route,
+            ExactPlacementPolicy {
+                min_gain_tokens: 4,
+                max_load_delta: 0,
+            },
+            ExactPlacementMode::Shadow,
+        );
+
+        assert_eq!(route, original);
+        assert_one(
+            metrics
+                .exact_route_placement
+                .with_label_values(&["shadow", "chat", "kept_balance_load_gate"])
+                .get(),
+        );
+        assert_one(
+            metrics
+                .exact_route_projected_balance
+                .with_label_values(&["chat", "kept_selected"])
+                .get(),
+        );
+        assert_eq!(
+            metrics
+                .exact_route_projected_residency_delta
+                .with_label_values(&["chat"])
+                .get_sample_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn projected_cold_balance_records_only_a_full_prompt_delta() {
+        let fuller = trusted_inventory(vec![store_hash(7, &[1, 2, 3, 4, 5, 6, 7, 8])]);
+        let emptier = trusted_inventory(Vec::new());
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        let shadow =
+            ExactRouteShadow::new(Arc::from([fuller, emptier]), Arc::clone(&metrics), 1.0, 8);
+        let mut route = decision();
+
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[9, 10, 11, 12],
+            &mut route,
+            ExactPlacementPolicy {
+                min_gain_tokens: 4,
+                max_load_delta: 0,
+            },
+            ExactPlacementMode::Shadow,
+        );
+
+        assert_one(
+            metrics
+                .exact_route_projected_balance
+                .with_label_values(&["chat", "would_balance"])
+                .get(),
+        );
+        assert_eq!(
+            metrics
+                .exact_route_projected_residency_delta
+                .with_label_values(&["chat"])
+                .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            load_equivalent_token_pressure(&candidate(0, 0, 3), 10),
+            Some(30)
+        );
+        let mut invalid = candidate(0, 0, 3);
+        invalid.request_load_units = 0;
+        assert_eq!(load_equivalent_token_pressure(&invalid, 10), None);
     }
 
     #[test]

@@ -565,6 +565,11 @@ produce controlled request-reuse targets of 50/75/90/95/99%; do not call that
 the token hit ratio—the runner reports both separately. Increase app count and
 prefix size to grow the working set. Keep these cells sequential because
 reuse distance, cache residency, and counter deltas are the experiment.
+Keep raw exact residency and projected pressure as separate counterfactuals.
+Projected pressure converts bounded active load into current-request-equivalent
+tokens only to observe reservations whose KV events have not arrived. It is
+not future cache truth and stays observation-only until repeated capacity-
+boundary evidence proves otherwise.
 
 ### Concurrent same-app load — `concurrent_sameapp.sh BASE N SALT TOK`
 

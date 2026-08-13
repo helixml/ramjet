@@ -86,6 +86,16 @@ Placement additionally requires `DS4_AFFINITY=prefix`; snapshot inventories are
 shadow-only. Any timeout, attestation failure, event gap, revision change, or
 missing `X-Session-ID` preserves the approximate route.
 
+Cold exact misses also emit a strictly observation-only projected-balance
+counterfactual. `ds4proxy_exact_route_projected_balance_total` adds each
+replica's exact resident tokens to a conservative, current-request-equivalent
+translation of its bounded active load. This makes an in-flight cold prefill
+visible before its KV events arrive. The estimate is token pressure, not a
+claim that decode work will become resident KV, and it never changes placement.
+`bench/cachebench.py` captures its fixed `kept_selected`, `would_balance`,
+`kept_delta_gate`, `kept_load_gate`, and `fallback` outcomes alongside the
+existing raw-residency shadow.
+
 ### Direct KV-event inventory (experimental)
 
 | Variable | Default | Description |
