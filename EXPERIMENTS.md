@@ -3540,3 +3540,40 @@ canonical dual-upstream Compose: `/health` reported 2/2 healthy, both
 `ds4proxy_upstream_up` gauges were one, and both A and B resolved to r34 image
 ID `sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b`
 with zero restarts. The candidate remained unserved throughout.
+
+## 2026-08-13 — immutable upstream audit after Infernal r5 rejection
+
+A read-only public refresh at `2026-08-13T07:04:44Z` found no newer Infernal
+candidate. Docker Hub still exposed only r2, r3, and r4; r4 remained
+`sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6`.
+The [DS4 runbook at `999653a8`](https://github.com/local-inference-lab/rtx6kpro/blob/999653a839121bca58ef46ebdf9743fb3a9284f8/models/deepseek-v4-flash.md)
+still selected r4, the [container repository at `1429cb30`](https://github.com/local-inference-lab/blackwell-llm-docker/commit/1429cb3010be38e68bcaa069322bc0a587db452f)
+still ended at its r4 qualification receipt, and the Infernal vLLM branch was
+unchanged at [`ce5f50f6`](https://github.com/local-inference-lab/vllm/commit/ce5f50f6d01b02336c4207f11277fd7bedacb4d6).
+
+The two relevant upstream fixes also remained unmerged. vLLM
+[#49117](https://github.com/vllm-project/vllm/pull/49117) was open/dirty at
+`7ef0ae2480799e95fb7cb801a8105c1db2585164` (audited patch SHA-256
+`5a56dfd4cf8d12a237a39df2993522ad9f5f2cd65603c1a0340a0eac7d585907`), and
+[#51318](https://github.com/vllm-project/vllm/pull/51318) was open/blocked at
+`b5a04d25e8e9f3b01a26b57ea6644b71ce44c414` (patch SHA-256
+`ae80086e6de06712524c3f7b5060c958623e3fd7bbde9bbdd1d34594b5d2795a`).
+Rejected r5 had already ported both changes. Issue
+[#51914](https://github.com/vllm-project/vllm/issues/51914) still had no public
+fix, and official vLLM main at [`373592ef`](https://github.com/vllm-project/vllm/commit/373592ef57d4a19b057237fb015b0bd1382daa03)
+still lacked both the required DSML hardening and a capture-stable C128A row
+stride.
+
+Track, but do not roll, vLLM
+[#51538](https://github.com/vllm-project/vllm/pull/51538): its audited head was
+`e468291b196a9d6f6c8700c28f95916e02484dea` (patch SHA-256
+`706a371ad72aebbc00428302722d684af60929f33a2c1e1dcc82da3b18c6db81`),
+open/blocked with CI incomplete. Its RTX PRO 6000 sparse-MLA/DSpark hardening is
+valuable, but r4 already contains the workspace, sample-mapping, output-lifetime,
+and null-block protections relevant to this stack. The remaining changes harden
+FlashInfer, padded MTP, and top-k hangs; they change neither DSML parsing nor the
+C128A stride and do not explain r5's sequential extra calls and invalid JSON.
+
+Verdict: **no-go** for another image or node06 experiment from current public
+upstream. Reopen only for an immutable r5+ artifact or a narrow source-locked
+patch that first passes the retained real-output and synthetic parser goldens.

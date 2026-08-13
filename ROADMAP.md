@@ -437,6 +437,15 @@ node06). The design rationale for each lives in DESIGN.md.
   matrix, LB exposure, or Helix workflow. Do not retry this tree; the next
   successor needs goldens for actual model-emitted extra/malformed calls in
   addition to synthetic parser shapes.
+  A source-locked public refresh found no newer Infernal artifact or targeted
+  fix: r4 remains the latest digest, the Infernal branch remains at
+  `ce5f50f6`, #49117 and #51318 remain unmerged, and #51914 has no patch. Track
+  vLLM #51538 at `e468291b` for its RTX PRO 6000 sparse-MLA/DSpark hardening,
+  but do not roll it: r4 already includes the relevant workspace and lifetime
+  protections, while the remaining changes touch neither DSML nor the C128A
+  stride and do not address r5's sequential extra-call failures. Reopen only
+  for an immutable r5+ artifact or a narrow patch that passes the retained
+  real-output goldens before any image build.
 
 - 🔨 **KV-event ground truth.** Subscribe to vLLM `kv_events` (block
   stored/removed) and replace the approximate LRU index with the engine's
