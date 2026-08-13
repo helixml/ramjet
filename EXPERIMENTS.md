@@ -4142,3 +4142,76 @@ same review closed a release immutability gap: an existing destination with the
 source digest is idempotent success, a different digest is a hard conflict, and
 only an explicit registry not-found result permits a copy. Ambiguous lookup
 failures remain closed.
+
+## 2026-08-13 — v0.1.0 candidate publication and node06 acceptance
+
+The first public-release boundary is commit `b0e0700`. Stable v0.1 scope is the
+OpenAI-compatible Rust proxy, approximate prefix/load routing, health-gated
+failover, immediate downstream cancellation, compatibility shims, and the
+existing `ds4proxy_*` serving telemetry. Local/remote tokenization, raw KV
+events, compact snapshot companions, and exact placement remain observation
+only, default-off where applicable, and outside the release contract.
+
+Drone #263 passed the complete quality gate and the new daemonless main
+publishers. The one-time cold content-keyed dependency seed took 286s; LB and
+companion Kaniko publishers then ran concurrently for 142s/141s. Total wall was
+503s. Dependency compilation itself was 52.19s and the two application compiles
+were 45.53s/41.54s; snapshot, cache export, and registry upload dominated the
+remaining cold wall. The published identities were independently checked with
+the pinned registry client:
+
+- dependency: `rust-deps-sha256-7da447db...` at
+  `sha256:bdde49027da3c71761f7b86371d98cdfb5231b63f6779cd3424fc1944cdacdcd`;
+- LB: `rust-b0e0700` at
+  `sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1`;
+- companion: `companion-rust-b0e0700` at
+  `sha256:4af08be5c011ac56d1bde2463e525c1d57d9ddd21391a3565ec55183566d9f95`.
+
+Both application configs carry source
+`https://github.com/helixml/mini-dynamo`, semantic version `0.1.0`, and full
+revision `b0e070073d4266018d2f907ff35a7ee88adfdcd4`. Edge aliases resolved to
+the same SHA-tag digests. No release tag exists yet; tag promotion will copy
+these already-qualified manifests and reject any conflicting destination.
+
+The LB-only node06 swap completed in 6.9s under the shared deployment lock.
+Both TP4 engines retained their containers and zero restart counts. Startup
+reported version 0.1.0 with approximate prefix routing active, local tokenizer
+and raw KV routing in shadow, exact placement canary zero, and snapshot routing
+off. `/health` remained `ok` with 2/2 replicas.
+
+A label-isolated cold cancellation gate deliberately used otherwise-idle engine
+A while live Helix affinity traffic occupied B. The request entered vLLM at
+631ms, curl closed at 2.016s with no response bytes, the LB's A-specific
+inflight/load reservation reached zero 46ms later, vLLM A reached zero running
+requests 269ms later, and the disconnect counter advanced exactly once. The
+privacy-bounded journal recorded `client_disconnect` at 2.002s.
+
+Fresh serving gates then measured:
+
+- locality 3 apps x 4 sessions x 2 turns: 24/24 success, 371,712 / 450,564
+  cached prompt tokens (**82.5%**), with exactly three cold app prefills;
+- concurrent same-app c12/max256: 12/12, exact 6/6 split, **452 tok/s**;
+- direct idle-engine-A c12/max256 while production remained on B: 12/12,
+  **794.5 tok/s**, within 3.4% of the 822.1 tok/s matched control;
+- the first box c24/max256 cell completed 24/24 at 1,306 tok/s but is rejected
+  as a regression comparison: a live 1,495-token Helix turn occupied B for
+  roughly 4.5-5.4s of every 5.4s throughout the cell.
+
+The live workload continued rather than yielding a homogeneous c24 window. It
+therefore became the production soak instead of being interrupted for a
+synthetic number. At the final acceptance sample the candidate had served 206
+chat requests (84 non-streaming and 122 streaming), all HTTP 200, plus ten
+successful compatibility/other requests. There were no upstream-error series,
+warning/error logs, or container restarts; both probes remained up. B's exact
+shadow inventory stayed trusted at 6,178 blocks / 1,580,560 tokens while A's
+old retained replay stayed conservatively untrusted, which did not affect
+ordinary serving. The uncontaminated A-pair capacity control and balanced
+same-app gate close the performance check; the contaminated c24 number is not
+used as a release claim.
+
+The previous immutable LB digest
+`sha256:26f7a30fb5523be5b8fdecc251545a33580eb9b4fb8c66eba4b512de7a32052f`
+remains the rollback. The candidate is accepted and stays live: correctness,
+locality, balanced routing, isolated capacity, cancellation, health, restart,
+and real-workflow soak gates all passed. A future idle-box c24 sample may update
+the operating-range record but is not needed to manufacture a release result.
