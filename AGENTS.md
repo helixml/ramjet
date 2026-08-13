@@ -124,6 +124,10 @@ change; these focused tests complete in a few seconds and do not need node06:
 cargo test --locked snapshot_transport
 cargo test --locked snapshot_tail_wire
 cargo test --locked snapshot_tail
+cargo test --locked snapshot_secret_file
+cargo test --locked snapshot_socket_path
+cargo test --locked snapshot_actor
+cargo test --locked --test snapshot_digest_lifecycle
 ```
 
 The one-shot exchange intentionally owns one Unix stream and reads its response
@@ -132,6 +136,12 @@ gets a separate authenticated tail connection, bounded queue, and deadline.
 Socket path creation/removal belongs to the companion-owned listener lifecycle,
 not the generic transport helper; never unlink a path supplied by an untrusted
 or LB-writable directory.
+
+Only `snapshot_bootstrap` may construct a prepared generation. Keep that token
+opaque: the actor must not accept a separately asserted reset scope, watermark,
+identity, lifecycle, or caller-built index. A same-identity replacement stays
+private until authenticated caught-up and preserves the current publication;
+an identity/key/generation change or owner-session failure revokes immediately.
 
 ## node06 — the test/production box
 

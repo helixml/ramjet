@@ -5,6 +5,8 @@
 //! scope, watermark, incarnation, and digest key before returning any state an
 //! actor could eventually publish.
 
+use std::fmt;
+
 use thiserror::Error;
 
 use crate::{
@@ -14,6 +16,7 @@ use crate::{
         DigestAlgorithm, DigestSpec, ResetScope, SnapshotError, SnapshotExpectations,
         SnapshotLimits, decode_snapshot_with_cancel,
     },
+    snapshot_actor::SnapshotActorIdentity,
     snapshot_session::AuthenticatedSnapshot,
     snapshot_tail::{SnapshotAction, SnapshotTailFence, SnapshotTailFenceReason},
 };
@@ -46,15 +49,38 @@ impl SnapshotBootstrapError {
 
 /// A fully validated private generation. It cannot be created from a decoded
 /// snapshot body alone and is not published merely by being constructed.
-#[derive(Debug)]
-pub struct PreparedSnapshotGeneration {
-    index: DigestKvIndex,
+pub struct PreparedSnapshotGeneration<I = DigestKvIndex> {
+    identity: SnapshotActorIdentity,
+    snapshot_watermark: u64,
+    index: I,
     lifecycle: SnapshotTailFence,
 }
 
-impl PreparedSnapshotGeneration {
+impl<I> fmt::Debug for PreparedSnapshotGeneration<I> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedSnapshotGeneration")
+            .field("identity", &self.identity)
+            .field("snapshot_watermark", &self.snapshot_watermark)
+            .field("index", &"[REDACTED]")
+            .field("lifecycle", &self.lifecycle.status())
+            .finish()
+    }
+}
+
+impl<I> PreparedSnapshotGeneration<I> {
     #[must_use]
-    pub const fn index(&self) -> &DigestKvIndex {
+    pub const fn identity(&self) -> &SnapshotActorIdentity {
+        &self.identity
+    }
+
+    #[must_use]
+    pub const fn snapshot_watermark(&self) -> u64 {
+        self.snapshot_watermark
+    }
+
+    #[must_use]
+    pub const fn index(&self) -> &I {
         &self.index
     }
 
@@ -63,9 +89,28 @@ impl PreparedSnapshotGeneration {
         &self.lifecycle
     }
 
-    #[must_use]
-    pub fn into_index_and_lifecycle(self) -> (DigestKvIndex, SnapshotTailFence) {
-        (self.index, self.lifecycle)
+    pub(crate) fn into_actor_parts(self) -> (SnapshotActorIdentity, u64, I, SnapshotTailFence) {
+        (
+            self.identity,
+            self.snapshot_watermark,
+            self.index,
+            self.lifecycle,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_parts(
+        identity: SnapshotActorIdentity,
+        snapshot_watermark: u64,
+        index: I,
+        lifecycle: SnapshotTailFence,
+    ) -> Self {
+        Self {
+            identity,
+            snapshot_watermark,
+            index,
+            lifecycle,
+        }
     }
 }
 
@@ -114,6 +159,11 @@ pub fn prepare_authenticated_snapshot_with_cancel(
     minimum_snapshot_watermark: u64,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<PreparedSnapshotGeneration, SnapshotBootstrapError> {
+    let identity = SnapshotActorIdentity {
+        engine_incarnation: authenticated.engine_incarnation().clone(),
+        digest_key_id: *authenticated.digest_key_id(),
+        companion_generation: authenticated.companion_generation(),
+    };
     let digester = BlockDigester::new(*digest_secret);
     if !digester
         .key_id()
@@ -158,7 +208,12 @@ pub fn prepare_authenticated_snapshot_with_cancel(
     let action = lifecycle.accept_snapshot(&authenticated, body.reset_scope);
     drop(authenticated);
     match action {
-        SnapshotAction::Accepted { .. } => Ok(PreparedSnapshotGeneration { index, lifecycle }),
+        SnapshotAction::Accepted { .. } => Ok(PreparedSnapshotGeneration {
+            identity,
+            snapshot_watermark: body.watermark,
+            index,
+            lifecycle,
+        }),
         SnapshotAction::Fenced(reason) => Err(SnapshotBootstrapError::Lifecycle(reason)),
     }
 }

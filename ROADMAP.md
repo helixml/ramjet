@@ -495,10 +495,18 @@ node06). The design rationale for each lives in DESIGN.md.
   connect/production/I/O/decode, bounds reads with a max+1 sentinel, and drops
   the producer future when the client disconnects. Tail frames derive ephemeral
   session/generation/direction keys and bind lifecycle admission to the exact
-  authenticated payload; downstream decode/apply failure is terminal. Next
-  implement the listener/socket lifecycle, bounded companion actor, atomic
-  private-index swap, and metrics, then run at least 100,000 revision-stable
-  shadow comparisons before placement can consume it.
+  authenticated payload; downstream decode/apply failure is terminal. The
+  filesystem and actor boundary is now implemented too: raw session secrets
+  require trusted ancestors plus exact owner/mode/inode/link/32-byte checks;
+  socket publication uses a companion-owned non-writable directory, unique
+  private bind, mode 0660, atomic no-clobber publication, and same-inode-only
+  cleanup. A hard two-session actor keeps replacement state private, bounds
+  tail queues, preserves same-identity publication during catch-up, revokes on
+  identity change, and atomically publishes only a verifier-constructed opaque
+  generation after caught-up. Epochs make stale disconnects harmless. Next
+  wire the runtime listener/tail tasks, bounded CPU cancellation, KV delta
+  decoding/application, metrics, and Compose sandbox, then run at least
+  100,000 revision-stable shadow comparisons before placement can consume it.
 
   Deployment hardening is also part of the gate: distinct fixed LB/companion
   UIDs with one shared GID; a companion-owned non-LB-writable socket directory

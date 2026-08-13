@@ -12,9 +12,10 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::kv_snapshot::{EngineIncarnation, ResetScope};
-use crate::snapshot_session::{AuthenticatedSnapshot, SNAPSHOT_DIGEST_KEY_ID_BYTES};
-use crate::snapshot_tail::{SnapshotAction, SnapshotTailFence, SnapshotTailFenceReason};
+use crate::kv_snapshot::EngineIncarnation;
+use crate::snapshot_bootstrap::PreparedSnapshotGeneration;
+use crate::snapshot_session::SNAPSHOT_DIGEST_KEY_ID_BYTES;
+use crate::snapshot_tail::{SnapshotTailFence, SnapshotTailFenceReason};
 use crate::snapshot_tail_wire::{VerifiedTailAction, VerifiedTailFrame};
 
 const MAX_SESSIONS: usize = 2;
@@ -88,7 +89,7 @@ pub struct StartSessionResult {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActorAction {
-    SnapshotAccepted,
+    SnapshotBuildStarted,
     SnapshotInstalled,
     TailQueued,
     TailApplied,
@@ -133,6 +134,7 @@ struct Published<I> {
 
 struct BootstrapSession<I> {
     identity: SnapshotActorIdentity,
+    minimum_snapshot_watermark: u64,
     fence: SnapshotTailFence,
     state: BootstrapSessionState,
     private_index: Option<I>,
@@ -244,6 +246,7 @@ impl<I> SnapshotBootstrapActor<I> {
             epoch,
             BootstrapSession {
                 identity,
+                minimum_snapshot_watermark,
                 fence,
                 state: BootstrapSessionState::AwaitingSnapshot,
                 private_index: None,
@@ -257,25 +260,16 @@ impl<I> SnapshotBootstrapActor<I> {
         })
     }
 
-    /// Admit authenticated snapshot metadata before an external CPU build.
-    pub fn accept_snapshot(
-        &mut self,
-        epoch: SessionEpoch,
-        snapshot: &AuthenticatedSnapshot,
-        reset_scope: ResetScope,
-    ) -> ActorAction {
+    /// Mark the start of external bounded snapshot verification/build work.
+    /// Installation still requires an opaque [`PreparedSnapshotGeneration`].
+    pub fn begin_snapshot_build(&mut self, epoch: SessionEpoch) -> ActorAction {
         let action = {
             let Some(session) = self.sessions.get_mut(&epoch) else {
                 return ActorAction::StaleEpochIgnored;
             };
             if session.state == BootstrapSessionState::AwaitingSnapshot {
-                match session.fence.accept_snapshot(snapshot, reset_scope) {
-                    SnapshotAction::Accepted { .. } => {
-                        session.state = BootstrapSessionState::BuildingSnapshot;
-                        ActorAction::SnapshotAccepted
-                    }
-                    SnapshotAction::Fenced(reason) => Self::fence_session_record(session, reason),
-                }
+                session.state = BootstrapSessionState::BuildingSnapshot;
+                ActorAction::SnapshotBuildStarted
             } else {
                 Self::fence_session_record(session, SnapshotTailFenceReason::UnexpectedState)
             }
@@ -308,10 +302,10 @@ impl<I> SnapshotBootstrapActor<I> {
     ///
     /// Returns [`SnapshotActorError::InvalidState`] unless the snapshot was
     /// previously admitted and is still unfenced.
-    pub fn install_private_snapshot<E, F>(
+    pub fn install_prepared_snapshot<E, F>(
         &mut self,
         epoch: SessionEpoch,
-        index: I,
+        prepared: PreparedSnapshotGeneration<I>,
         mut apply_payload: F,
     ) -> Result<ActorAction, SnapshotActorError>
     where
@@ -323,6 +317,16 @@ impl<I> SnapshotBootstrapActor<I> {
         if session.state != BootstrapSessionState::BuildingSnapshot {
             return Err(SnapshotActorError::InvalidState);
         }
+        if prepared.identity() != &session.identity
+            || prepared.snapshot_watermark() < session.minimum_snapshot_watermark
+        {
+            return Ok(Self::fence_session_record(
+                session,
+                SnapshotTailFenceReason::UnexpectedState,
+            ));
+        }
+        let (_, _, index, lifecycle) = prepared.into_actor_parts();
+        session.fence = lifecycle;
         session.state = BootstrapSessionState::CatchingUp;
         let queued = std::mem::take(&mut session.queued_tail_frames);
         let Some(session) = self.sessions.get_mut(&epoch) else {
@@ -519,11 +523,13 @@ mod tests {
     use std::convert::Infallible;
 
     use super::*;
+    use crate::kv_snapshot::ResetScope;
     use crate::snapshot_session::{
-        SnapshotSessionBinding, SnapshotSessionChallenge, SnapshotSessionExpectations,
-        SnapshotSessionLimits, SnapshotSessionSecret, decode_authenticated_snapshot,
-        encode_authenticated_snapshot,
+        AuthenticatedSnapshot, SnapshotSessionBinding, SnapshotSessionChallenge,
+        SnapshotSessionExpectations, SnapshotSessionLimits, SnapshotSessionSecret,
+        decode_authenticated_snapshot, encode_authenticated_snapshot,
     };
+    use crate::snapshot_tail::SnapshotAction;
     use crate::snapshot_tail_wire::{
         TailDirection, TailFrameBinding, TailFrameDecoder, TailFrameType, TailSessionExpectations,
         TailSessionKey, TailWireLimits, encode_tail_frame,
@@ -646,14 +652,29 @@ mod tests {
             .unwrap()
             .epoch;
         assert_eq!(
-            actor.accept_snapshot(
-                epoch,
-                &snapshot(identity, watermark),
-                ResetScope::full_engine()
-            ),
-            ActorAction::SnapshotAccepted
+            actor.begin_snapshot_build(epoch),
+            ActorAction::SnapshotBuildStarted
         );
         epoch
+    }
+
+    fn prepared(
+        identity: &SnapshotActorIdentity,
+        watermark: u64,
+        index: Vec<u8>,
+    ) -> PreparedSnapshotGeneration<Vec<u8>> {
+        let authenticated = snapshot(identity, watermark);
+        let mut lifecycle = SnapshotTailFence::start_bootstrap(
+            identity.engine_incarnation.clone(),
+            watermark,
+            identity.digest_key_id.to_vec(),
+            identity.companion_generation,
+        );
+        assert!(matches!(
+            lifecycle.accept_snapshot(&authenticated, ResetScope::full_engine()),
+            SnapshotAction::Accepted { .. }
+        ));
+        PreparedSnapshotGeneration::from_test_parts(identity.clone(), watermark, index, lifecycle)
     }
 
     fn finish_publish(
@@ -664,7 +685,7 @@ mod tests {
         index: Vec<u8>,
     ) {
         assert_eq!(
-            actor.install_private_snapshot(epoch, index, no_apply),
+            actor.install_prepared_snapshot(epoch, prepared(identity, watermark, index), no_apply),
             Ok(ActorAction::SnapshotInstalled)
         );
         assert_eq!(
@@ -687,7 +708,7 @@ mod tests {
         let new = begin_build(&mut actor, &identity, 200);
         assert_eq!(actor.published_index(), Some(&vec![1]));
         assert_eq!(
-            actor.install_private_snapshot(new, vec![2], no_apply),
+            actor.install_prepared_snapshot(new, prepared(&identity, 200, vec![2]), no_apply),
             Ok(ActorAction::SnapshotInstalled)
         );
         assert_eq!(actor.published_index(), Some(&vec![1]));
@@ -797,10 +818,14 @@ mod tests {
             ActorAction::TailQueued
         );
         let action = actor
-            .install_private_snapshot(epoch, vec![1], |index, payload| {
-                index.extend_from_slice(payload);
-                Ok::<_, Infallible>(())
-            })
+            .install_prepared_snapshot(
+                epoch,
+                prepared(&identity, 100, vec![1]),
+                |index, payload| {
+                    index.extend_from_slice(payload);
+                    Ok::<_, Infallible>(())
+                },
+            )
             .unwrap();
         assert_eq!(action, ActorAction::Published { epoch });
         assert_eq!(actor.published_index(), Some(&vec![1, 9]));
@@ -852,7 +877,7 @@ mod tests {
             no_apply,
         );
         let action = actor
-            .install_private_snapshot(new, vec![2], |index, payload| {
+            .install_prepared_snapshot(new, prepared(&identity, 200, vec![2]), |index, payload| {
                 index.extend_from_slice(payload);
                 Err::<(), _>(())
             })
@@ -917,5 +942,42 @@ mod tests {
         );
         assert_eq!(actor.published_epoch(), Some(old));
         assert_eq!(actor.published_index(), Some(&vec![1]));
+    }
+
+    #[test]
+    fn prepared_identity_mismatch_fences_only_replacement() {
+        let original = identity("engine-a", KEY_A, 7);
+        let changed = identity("engine-b", KEY_A, 7);
+        let mut actor = SnapshotBootstrapActor::new(SnapshotActorLimits::default()).unwrap();
+        let old = begin_build(&mut actor, &original, 100);
+        finish_publish(&mut actor, &original, old, 100, vec![1]);
+        let replacement = begin_build(&mut actor, &original, 200);
+
+        assert_eq!(
+            actor.install_prepared_snapshot(
+                replacement,
+                prepared(&changed, 200, vec![2]),
+                no_apply,
+            ),
+            Ok(ActorAction::SessionFenced(
+                SnapshotTailFenceReason::UnexpectedState
+            ))
+        );
+        assert_eq!(actor.published_epoch(), Some(old));
+        assert_eq!(actor.published_index(), Some(&vec![1]));
+    }
+
+    #[test]
+    fn invalid_owner_transition_revokes_its_publication() {
+        let identity = identity("engine-a", KEY_A, 7);
+        let mut actor = SnapshotBootstrapActor::new(SnapshotActorLimits::default()).unwrap();
+        let epoch = begin_build(&mut actor, &identity, 100);
+        finish_publish(&mut actor, &identity, epoch, 100, vec![1]);
+
+        assert_eq!(
+            actor.begin_snapshot_build(epoch),
+            ActorAction::SessionFenced(SnapshotTailFenceReason::UnexpectedState)
+        );
+        assert_eq!(actor.published_index(), None);
     }
 }
