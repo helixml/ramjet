@@ -258,6 +258,17 @@ challenge under the bounded reuse ledger, and carry one absolute attempt
 deadline through connect and consumption. Shutdown drops the consumer future
 immediately; approximate serving is never owned by this path.
 
+LB consumption is separately gated by `DS4_SNAPSHOT_ROUTE_MODE=shadow`. Keep
+its per-upstream socket, companion UID, session secret, digest secret,
+attestation, and group lists at exact upstream cardinality and preflight all
+authorities before spawning any reconnect task. Direct `DS4_KV_EVENT_MODE`
+authority and snapshot authority must remain mutually exclusive. Snapshot
+inventory is shadow-only until the recorded comparison gate is met: never let
+this mode select placement, affect upstream health, or make `/health` fail.
+Attestation is currently pinned at LB startup, so restart the stateless LB
+after a qualified engine incarnation change; do not silently accept a new
+incarnation through a stale session.
+
 Keep the true public-stack harness green: it composes safe socket publication,
 supervisor, producer, reconnect owner, consumer, actor, and digest index. Use
 `cargo run --release --locked --example snapshot_shape_bench` for the captured
