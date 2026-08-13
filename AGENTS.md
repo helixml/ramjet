@@ -260,7 +260,9 @@ ssh node06 'rm -rf /tmp/md && mkdir /tmp/md && tar xzf /tmp/md.tgz -C /tmp/md \
 
 # swap the LB (engines untouched; ~4s, LB-only)
 ssh node06 'cd /home/luke/inference/dspark_0731 \
-  && LB_IMAGE=ghcr.io/helixml/ds4-loadbalancer:<tag> docker compose up -d ds4-loadbalancer'
+  && flock --nonblock /run/lock/mini-dynamo-node06-deployment.lock \
+    env LB_IMAGE=ghcr.io/helixml/ds4-loadbalancer:<tag> \
+    docker compose up -d ds4-loadbalancer'
 
 # verify
 ssh node06 'docker logs ds4-loadbalancer --tail 1; curl -s :8007/metrics | grep ds4proxy_upstream_up'
@@ -268,6 +270,12 @@ ssh node06 'docker logs ds4-loadbalancer --tail 1; curl -s :8007/metrics | grep 
 
 Rollback is the same command with `LB_IMAGE=...:1.0.1`. The LB is stateless;
 swapping it never touches the engines or their KV caches.
+
+Every tool that recreates `ds4-loadbalancer` must hold the same exclusive
+`/run/lock/mini-dynamo-node06-deployment.lock` for its complete inspect/mutate/
+verify interval. The Phase-B P2P harness also adds a unique ownership label and
+service hash; it will not restore over a container it no longer owns. Do not
+bypass either fence with a raw concurrent `docker compose up`.
 
 ### Preflight engine flags before a rolling restart
 
