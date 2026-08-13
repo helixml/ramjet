@@ -258,7 +258,12 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   model/config/tokenizer/router provenance, TTFT, mean ITL, throughput, cache,
   protocol validity, and successful tasks/GPU-hour. Complete the 0/256KiB,
   cold/warm, c1/c8/c16 matrix with three qualified runs and add sovereign
-  redacted trace-shape ingestion before closing the issue.
+  redacted trace-shape ingestion before closing the issue. The first bounded
+  c8/c16 run stopped correctly at a 256KiB/c8 typed-call failure caused by the
+  corpus's own 192-token ceiling; valid nested calls use up to 206 tokens. That
+  case now reserves 256 tokens and a live c8 control passed 8/8. Resume the
+  matrix from this corrected corpus rather than counting the truncated cell as
+  an engine-parser regression.
 - 🔨 **Reproducible experiment journal + workload matrix.** Keep
   `EXPERIMENTS.md`; measure deterministic code, prose, shared-app, cold/warm
   prefill, and mixed prefill+decode separately. Never report speculative decode
