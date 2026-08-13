@@ -168,6 +168,14 @@ pub enum CompanionIndexOwnerReplayOutcome {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompanionIndexOwnerReplayInvalidPhase {
+    Apply,
+    Boundary,
+    Tail,
+    Commit,
+}
+
 /// Closed, content-free event surface suitable for metrics and diagnostics.
 ///
 /// No endpoint, engine identity, sequence, payload, token, or hash is exposed.
@@ -183,6 +191,7 @@ pub enum CompanionIndexOwnerEvent {
         outcome: CompanionIndexOwnerReplayOutcome,
         profile: Option<ReplayProfile>,
     },
+    ReplayInvalid(CompanionIndexOwnerReplayInvalidPhase),
     Ready,
     LiveApplied,
     LiveDuplicate,
@@ -731,26 +740,33 @@ async fn recover_full(
             return Ok(ReplayExit::AuthorityChanged(refreshed));
         }
     };
-    if replayed.apply_error.is_some()
-        || fence.accept_replay(&replayed.sequences, replayed.establishes_boundary)
-            != ReplayAction::Recovered
-    {
-        record_replay(
+    if replayed.apply_error.is_some() {
+        record_invalid_replay(
             transport,
             observer,
-            CompanionIndexOwnerReplayKind::Full,
-            CompanionIndexOwnerReplayOutcome::Invalid,
+            CompanionIndexOwnerReplayInvalidPhase::Apply,
+        );
+        return Ok(ReplayExit::Fenced(
+            CompanionIndexOwnerRebuildReason::ReplayInvalid,
+        ));
+    }
+    if fence.accept_replay(&replayed.sequences, replayed.establishes_boundary)
+        != ReplayAction::Recovered
+    {
+        record_invalid_replay(
+            transport,
+            observer,
+            CompanionIndexOwnerReplayInvalidPhase::Boundary,
         );
         return Ok(ReplayExit::Fenced(
             CompanionIndexOwnerRebuildReason::ReplayInvalid,
         ));
     }
     if !accept_replay_tail(fence, &replayed.tail) {
-        record_replay(
+        record_invalid_replay(
             transport,
             observer,
-            CompanionIndexOwnerReplayKind::Full,
-            CompanionIndexOwnerReplayOutcome::Invalid,
+            CompanionIndexOwnerReplayInvalidPhase::Tail,
         );
         return Ok(ReplayExit::Fenced(
             CompanionIndexOwnerRebuildReason::ReplayInvalid,
@@ -761,13 +777,12 @@ async fn recover_full(
         .last()
         .map_or(through, |(sequence, _)| *sequence);
     if source.finish_replay(final_watermark).is_err() {
-        record_replay(
+        record_invalid_replay(
             transport,
             observer,
-            CompanionIndexOwnerReplayKind::Full,
-            CompanionIndexOwnerReplayOutcome::Invalid,
+            CompanionIndexOwnerReplayInvalidPhase::Commit,
         );
-        return Ok(ReplayExit::Retry(CompanionIndexOwnerRebuildReason::Apply));
+        return Ok(ReplayExit::Fenced(CompanionIndexOwnerRebuildReason::Apply));
     }
     report.replay_batches = report.replay_batches.saturating_add(
         u64::try_from(replayed.sequences.len().saturating_add(replayed.tail.len()))
@@ -838,6 +853,20 @@ fn record_replay(
         outcome,
         profile: transport.take_replay_profile(),
     });
+}
+
+fn record_invalid_replay(
+    transport: &mut dyn CompanionKvEventTransport,
+    observer: &Arc<dyn CompanionIndexOwnerObserver>,
+    phase: CompanionIndexOwnerReplayInvalidPhase,
+) {
+    observer.observe(CompanionIndexOwnerEvent::ReplayInvalid(phase));
+    record_replay(
+        transport,
+        observer,
+        CompanionIndexOwnerReplayKind::Full,
+        CompanionIndexOwnerReplayOutcome::Invalid,
+    );
 }
 
 fn rebuild(
@@ -1526,6 +1555,15 @@ mod tests {
         })
         .await;
         assert!(!source.status().ready);
+        assert!(
+            observer
+                .0
+                .lock()
+                .unwrap()
+                .contains(&CompanionIndexOwnerEvent::ReplayInvalid(
+                    CompanionIndexOwnerReplayInvalidPhase::Boundary
+                ))
+        );
 
         activity_tx
             .send(Ok(LiveActivity::Batch(batch(3, Some(12)))))
