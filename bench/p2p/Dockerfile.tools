@@ -10,9 +10,14 @@ RUN /opt/venv/bin/cmake -S /src/nvbandwidth -B /src/nvbandwidth/build \
       -DCMAKE_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib/stubs \
     && /opt/venv/bin/cmake --build /src/nvbandwidth/build --parallel
 
-RUN make -C /src/nccl-tests -j"$(nproc)" \
+RUN mkdir -p /tmp/nccl-dev/lib \
+    && ln -s /opt/venv/lib/python3.12/site-packages/nvidia/nccl/include \
+      /tmp/nccl-dev/include \
+    && ln -s /opt/venv/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2 \
+      /tmp/nccl-dev/lib/libnccl.so \
+    && make -C /src/nccl-tests -j"$(nproc)" \
       CUDA_HOME=/usr/local/cuda \
-      NCCL_HOME=/opt/venv/lib/python3.12/site-packages/nvidia/nccl \
+      NCCL_HOME=/tmp/nccl-dev \
       NVCC_GENCODE='-gencode=arch=compute_120,code=sm_120 -gencode=arch=compute_120,code=compute_120'
 
 FROM scratch AS export
