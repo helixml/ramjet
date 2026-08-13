@@ -2951,3 +2951,14 @@ publication consumer yet. No node06 process changed. The next gate wires those
 pieces under absolute deadlines and bounded cancellation, then exercises two
 fast clients, a stalled third/slow reader, overflow, disconnect, and late CPU
 completion before any shadow deployment.
+
+The first PR #48 Drone attempt ran two identical cold Rust lanes concurrently
+(`push` and `pull_request`) and both failed after the local 29.5-second gate and
+GitHub's full 1m14s Rust gate had passed. Reproducing the exact
+`rust:1.95-bookworm` container from a cold registry/index completed the new
+Linux socket tests successfully in 46.5 seconds. To remove this avoidable CI
+contention, Drone now runs feature work once for PRs targeting `main` and again
+only for the post-merge `main` push. Its redundant release build was removed:
+the required local pre-push gate still builds release, and GitHub builds the
+published release container on `main`. Drone continues to enforce format,
+strict Clippy, all Rust tests, Go parity/vet/format, and Python protocol tests.

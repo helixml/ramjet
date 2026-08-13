@@ -222,6 +222,11 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
 - Run independent local gates together: Rust tests/Clippy, Go parity, and
   Python benchmark tests do not depend on one another. Keep Cargo's shared
   `target/` and Docker BuildKit cache warm; do not clean either between runs.
+- Drone intentionally runs once per PR (and once after merge on `main`), not
+  again for every feature-branch push. Its Rust lane omits a redundant release
+  build: the local pre-push gate builds release, while the GitHub main workflow
+  builds and publishes the release container. This halves cold CI contention
+  without dropping format, Clippy, test, Go, or protocol coverage.
 - Build the LB locally and stream it to node06 when the local amd64 Docker
   cache is warm. A typical warm LB transfer is seconds and avoids consuming
   node06's scarce 8-9GiB available host memory:
