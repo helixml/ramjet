@@ -21,6 +21,9 @@ import urllib.request
 
 
 DEFAULT_CORPUS = pathlib.Path(__file__).with_name("agent_cases") / "v1.jsonl"
+UPSTREAM_RESPONSE_FIXTURES = (
+    pathlib.Path(__file__).with_name("agent_cases") / "vllm_frontend_v1.jsonl"
+)
 DSML_FRAGMENTS = ("｜DSML｜", "|DSML|", "<｜DSML", "</｜DSML")
 REQUIRED_METADATA = (
     "engine_image",
@@ -84,6 +87,9 @@ def validate_case(case):
         raise CorpusError(f"{case_id}: model is supplied by the runner")
     if not isinstance(request.get("stream"), bool):
         raise CorpusError(f"{case_id}: request.stream must be boolean")
+    choice_count = request.get("n", 1)
+    if type(choice_count) is not int or choice_count < 1:
+        raise CorpusError(f"{case_id}: request.n must be a positive integer")
 
     expected = case.get("expected")
     if not isinstance(expected, dict):
@@ -148,14 +154,70 @@ def load_cases(path=DEFAULT_CORPUS):
     return cases
 
 
-class Assembly:
-    """Reassemble OpenAI chat responses across arbitrary SSE delta boundaries."""
+class _ChoiceAssembly:
+    """Reassemble one OpenAI response choice without sharing parser state."""
 
     def __init__(self):
         self.content = []
         self.reasoning = []
         self.tool_calls = {}
         self.finish_reason = None
+
+    def feed(self, choice):
+        if choice.get("finish_reason") is not None:
+            self.finish_reason = choice["finish_reason"]
+        node = choice.get("delta")
+        if not isinstance(node, dict) or not node:
+            node = choice.get("message") or {}
+        generated = False
+        content = node.get("content")
+        if isinstance(content, str) and content:
+            self.content.append(content)
+            generated = True
+        for field in ("reasoning_content", "reasoning"):
+            value = node.get(field)
+            if isinstance(value, str) and value:
+                self.reasoning.append(value)
+                generated = True
+        for position, delta in enumerate(node.get("tool_calls") or []):
+            if not isinstance(delta, dict):
+                continue
+            index = delta.get("index", position)
+            call = self.tool_calls.setdefault(
+                index, {"id": "", "type": "function", "name": "", "arguments": ""}
+            )
+            if isinstance(delta.get("id"), str):
+                call["id"] += delta["id"]
+            if isinstance(delta.get("type"), str):
+                call["type"] = delta["type"]
+            function = delta.get("function") or {}
+            if isinstance(function.get("name"), str):
+                call["name"] += function["name"]
+            arguments = function.get("arguments")
+            if arguments is None:
+                arguments = function.get("input", delta.get("input"))
+            if isinstance(arguments, str):
+                call["arguments"] += arguments
+            elif isinstance(arguments, dict):
+                call["arguments"] += json.dumps(arguments, separators=(",", ":"))
+            generated = True
+        return generated
+
+    def result(self, usage):
+        return {
+            "content": "".join(self.content),
+            "reasoning_content": "".join(self.reasoning),
+            "tool_calls": [self.tool_calls[key] for key in sorted(self.tool_calls)],
+            "finish_reason": self.finish_reason,
+            "usage": usage,
+        }
+
+
+class Assembly:
+    """Reassemble OpenAI chat responses across arbitrary SSE delta boundaries."""
+
+    def __init__(self):
+        self.choices = {}
         self.usage = {}
         self.generated_at = []
 
@@ -163,55 +225,25 @@ class Assembly:
         usage = event.get("usage")
         if isinstance(usage, dict) and usage:
             self.usage.update(usage)
-        for choice in event.get("choices") or []:
-            if choice.get("finish_reason") is not None:
-                self.finish_reason = choice["finish_reason"]
-            node = choice.get("delta")
-            if not isinstance(node, dict) or not node:
-                node = choice.get("message") or {}
-            generated = False
-            content = node.get("content")
-            if isinstance(content, str) and content:
-                self.content.append(content)
-                generated = True
-            for field in ("reasoning_content", "reasoning"):
-                value = node.get(field)
-                if isinstance(value, str) and value:
-                    self.reasoning.append(value)
-                    generated = True
-            for position, delta in enumerate(node.get("tool_calls") or []):
-                if not isinstance(delta, dict):
-                    continue
-                index = delta.get("index", position)
-                call = self.tool_calls.setdefault(
-                    index, {"id": "", "type": "function", "name": "", "arguments": ""}
-                )
-                if isinstance(delta.get("id"), str):
-                    call["id"] += delta["id"]
-                if isinstance(delta.get("type"), str):
-                    call["type"] = delta["type"]
-                function = delta.get("function") or {}
-                if isinstance(function.get("name"), str):
-                    call["name"] += function["name"]
-                arguments = function.get("arguments")
-                if arguments is None:
-                    arguments = function.get("input", delta.get("input"))
-                if isinstance(arguments, str):
-                    call["arguments"] += arguments
-                elif isinstance(arguments, dict):
-                    call["arguments"] += json.dumps(arguments, separators=(",", ":"))
-                generated = True
-            if generated and observed_at is not None:
+        for position, choice in enumerate(event.get("choices") or []):
+            if not isinstance(choice, dict):
+                continue
+            index = choice.get("index", position)
+            state = self.choices.setdefault(index, _ChoiceAssembly())
+            if state.feed(choice) and observed_at is not None:
                 self.generated_at.append(observed_at)
 
-    def result(self):
+    def results(self):
+        if not self.choices:
+            return {0: _ChoiceAssembly().result(self.usage)}
         return {
-            "content": "".join(self.content),
-            "reasoning_content": "".join(self.reasoning),
-            "tool_calls": [self.tool_calls[key] for key in sorted(self.tool_calls)],
-            "finish_reason": self.finish_reason,
-            "usage": self.usage,
+            index: self.choices[index].result(self.usage)
+            for index in sorted(self.choices)
         }
+
+    def result(self):
+        results = self.results()
+        return results[0] if 0 in results else next(iter(results.values()))
 
 
 class SSEDecoder:
@@ -310,6 +342,16 @@ def validate_result(case, result):
     return errors
 
 
+def validate_choice_results(case, results):
+    """Validate every alternative independently."""
+    errors = []
+    multiple = len(results) > 1
+    for index, result in results.items():
+        for error in validate_result(case, result):
+            errors.append(f"choice {index}: {error}" if multiple else error)
+    return errors
+
+
 def token_counts(usage):
     details = usage.get("prompt_tokens_details") or {}
     return (
@@ -379,8 +421,13 @@ def execute_case(base, model, token, case, sampling, timeout, repetition=0):
             "repetition": repetition,
         }
     ended = time.perf_counter()
-    result = assembly.result()
-    errors = validate_result(case, result)
+    choice_results = assembly.results()
+    result = (
+        choice_results[0]
+        if 0 in choice_results
+        else next(iter(choice_results.values()))
+    )
+    errors = validate_choice_results(case, choice_results)
     prompt, cached, completion = token_counts(result["usage"])
     arrivals = assembly.generated_at
     intervals = [right - left for left, right in zip(arrivals, arrivals[1:])]
@@ -398,7 +445,10 @@ def execute_case(base, model, token, case, sampling, timeout, repetition=0):
         "stream": body["stream"],
         "route": route,
         "finish_reason": result["finish_reason"],
-        "tool_calls": len(result["tool_calls"]),
+        "choices": len(choice_results),
+        "tool_calls": sum(
+            len(choice["tool_calls"]) for choice in choice_results.values()
+        ),
         "prompt_tokens": prompt,
         "cached_tokens": cached,
         "completion_tokens": completion,

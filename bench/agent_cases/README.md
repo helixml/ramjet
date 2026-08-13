@@ -36,3 +36,14 @@ The corpus follows the public DeepSeek-V4 encoding contract in which tools use
 DSML internally but OpenAI-compatible endpoints must return structured
 `tool_calls`. Raw DSML is therefore always a protocol failure at the client
 boundary.
+
+`vllm_frontend_v1.jsonl` is a GPU-free response-shape fixture, not a live
+workload. It locks the generic named-tool JSON fallback to the vLLM merge that
+unified required/named streaming (`8eb401134e750781a202c0b6dc4059616cdb4954`)
+and the independent-choice state contract to the `n > 1` isolation fix
+(`3683fe6c0651fe54a0201552ae7dfb7acb1e0cea`). The fixtures prove local
+assembly/validation for both streaming and non-streaming forced choices, and
+prove that identical choice-scoped tool-call IDs do not merge alternative
+choices' names or arguments. They deliberately do not join `v1.jsonl`:
+replaying already-shaped frontend responses should not spend GPU time in the
+candidate gate.

@@ -7,8 +7,10 @@ from agentbench import (
     CorpusError,
     DEFAULT_CORPUS,
     SSEDecoder,
+    UPSTREAM_RESPONSE_FIXTURES,
     load_cases,
     validate_case,
+    validate_choice_results,
     validate_result,
 )
 
@@ -210,6 +212,144 @@ class AgentBenchTest(unittest.TestCase):
         second = Assembly().result()
         self.assertEqual(second["reasoning_content"], "")
         self.assertEqual(second["tool_calls"], [])
+
+    def test_choices_keep_independent_streaming_tool_call_state(self):
+        assembly = Assembly()
+        assembly.feed(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_shared",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "probe",
+                                        "arguments": '{"host":"A"}',
+                                    },
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "index": 1,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_shared",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "probe",
+                                        "arguments": '{"host":"B"}',
+                                    },
+                                }
+                            ]
+                        },
+                    },
+                ]
+            }
+        )
+
+        results = assembly.results()
+
+        self.assertEqual(results[0]["tool_calls"][0]["id"], "call_shared")
+        self.assertEqual(results[1]["tool_calls"][0]["id"], "call_shared")
+        self.assertEqual(
+            json.loads(results[0]["tool_calls"][0]["arguments"]), {"host": "A"}
+        )
+        self.assertEqual(
+            json.loads(results[1]["tool_calls"][0]["arguments"]), {"host": "B"}
+        )
+
+    def test_source_locked_vllm_frontend_response_fixtures(self):
+        fixtures = [
+            json.loads(line)
+            for line in UPSTREAM_RESPONSE_FIXTURES.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(
+            {fixture["id"] for fixture in fixtures},
+            {
+                "named-json-fallback-nonstream",
+                "named-json-fallback-stream",
+                "named-json-fallback-stream-two-choices",
+            },
+        )
+        for fixture in fixtures:
+            validate_case(fixture)
+            assembly = Assembly()
+            if fixture["request"]["stream"]:
+                decoder = SSEDecoder(assembly)
+                payload = b"".join(sse(event) for event in fixture["response_events"])
+                payload += b"data: [DONE]\n\n"
+                for offset in range(0, len(payload), 11):
+                    decoder.feed(payload[offset : offset + 11])
+                decoder.finish()
+            else:
+                for event in fixture["response_events"]:
+                    assembly.feed(event)
+            self.assertEqual(
+                validate_choice_results(fixture, assembly.results()),
+                [],
+                fixture["id"],
+            )
+
+        forced = fixtures[:2]
+        self.assertEqual(
+            {fixture["request"]["stream"] for fixture in forced}, {False, True}
+        )
+        for fixture in forced:
+            self.assertEqual(
+                fixture["request"]["tool_choice"],
+                {"type": "function", "function": {"name": "record_probe"}},
+            )
+
+    def test_source_locked_n_choice_fixture_accepts_choice_scoped_id_reuse(self):
+        fixture = next(
+            json.loads(line)
+            for line in UPSTREAM_RESPONSE_FIXTURES.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if "named-json-fallback-stream-two-choices" in line
+        )
+        assembly = Assembly()
+        for event in fixture["response_events"]:
+            assembly.feed(event)
+
+        results = assembly.results()
+        self.assertEqual(validate_choice_results(fixture, results), [])
+        self.assertEqual(
+            results[0]["tool_calls"][0]["id"], results[1]["tool_calls"][0]["id"]
+        )
+        self.assertEqual(results[0]["tool_calls"][0]["name"], "record_probe")
+        self.assertEqual(results[1]["tool_calls"][0]["name"], "record_probe")
+        self.assertEqual(
+            json.loads(results[0]["tool_calls"][0]["arguments"]), {"host": "A"}
+        )
+        self.assertEqual(
+            json.loads(results[1]["tool_calls"][0]["arguments"]), {"host": "B"}
+        )
+
+    def test_vllm_fixture_sources_are_immutable_merge_commits(self):
+        expected = {
+            "3683fe6c0651fe54a0201552ae7dfb7acb1e0cea",
+            "8eb401134e750781a202c0b6dc4059616cdb4954",
+        }
+        observed = set()
+        for line in UPSTREAM_RESPONSE_FIXTURES.read_text(
+            encoding="utf-8"
+        ).splitlines():
+            fixture = json.loads(line)
+            source = fixture["upstream_source"]
+            self.assertEqual(source["repository"], "https://github.com/vllm-project/vllm")
+            observed.update(source["merge_commits"])
+        self.assertEqual(observed, expected)
 
     def test_reasoning_tool_history_requires_reasoning_and_matching_result(self):
         broken = case({"mode": "text", "reasoning_history": True})
