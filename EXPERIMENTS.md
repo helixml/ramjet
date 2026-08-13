@@ -2868,3 +2868,39 @@ This remains intentionally unwired. Production still requires UDS
 read-only secret files, authenticated tail/control decoding, absolute IO and
 bootstrap deadlines, bounded clients/queues, atomic tail catch-up/swap,
 metrics, and failure tests. No node06 process, container, or engine changed.
+
+## 2026-08-13 — issue #41 authenticated Unix exchange and tail wire
+
+The third GPU-free slice puts the authenticated snapshot protocol on a real
+one-request Unix stream without taking ownership of pathname lifecycle. Both
+client and server verify Linux peer UIDs through `SO_PEERCRED` before sending or
+reading protocol bytes. One absolute timeout covers connect, authenticated
+hello, snapshot production, I/O, and decode. Responses are bounded with a
+max+1 read, malformed/truncated exchanges fail content-free, and dropping the
+client drops the server's pending producer future immediately. The transport
+does no path lookup, chmod, bind, rename, or unlink; those operations remain in
+the future companion-owned listener where directory and inode invariants can be
+enforced together.
+
+Tail and control frames now use fixed authenticated binary envelopes. Their
+ephemeral HMAC key is derived from the separate snapshot-session secret and is
+bound to the fresh session challenge, companion generation, and direction.
+Every MAC covers schema/type/direction, message and delivery sequences, sparse
+real-event watermark, exact engine incarnation, digest-key identity,
+generation, lengths, and payload. Authentication and bounds checks precede
+MessagePack identity decode and payload copying. Replay, direction/session
+mixups, tamper, gaps, and identity changes fail closed. An authenticated payload
+is released only after the lifecycle accepts that exact delivery; any later
+payload decode or private-index application error has an explicit terminal
+`application_failed` fence and can never publish the partially updated
+generation.
+
+The warm focused gate completed in 3.4 seconds: seven Unix transport tests, nine
+tail-wire tests, and twenty filtered tail/lifecycle tests all passed. Coverage
+includes success, wrong peer UID/key, truncation, max+1 oversize detection,
+single-deadline timeout, dropped-client cancellation, full authenticated-region
+tamper, replay, sparse real watermarks, key derivation separation, redaction,
+and application failure. This is still not connected to the proxy or node06.
+The next slice is the safe socket/listener lifecycle plus bounded companion
+actor and atomic private-index catch-up/swap; only after offline fault/load
+tests pass should it be deployed shadow-only.

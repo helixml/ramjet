@@ -18,5 +18,7 @@ pub mod router;
 pub mod shims;
 pub mod snapshot_session;
 pub mod snapshot_tail;
+pub mod snapshot_tail_wire;
+pub mod snapshot_transport;
 pub mod tokenizer;
 pub mod usage;

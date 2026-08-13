@@ -117,6 +117,22 @@ tail transport therefore needs its own contiguous authenticated delivery
 sequence while preserving the last real-event sequence as the authoritative
 watermark. A numeric gap in real vLLM event sequences is not data loss.
 
+For snapshot transport work, keep the warm inner loop to the module under
+change; these focused tests complete in a few seconds and do not need node06:
+
+```bash
+cargo test --locked snapshot_transport
+cargo test --locked snapshot_tail_wire
+cargo test --locked snapshot_tail
+```
+
+The one-shot exchange intentionally owns one Unix stream and reads its response
+to EOF. Do not bolt tail frames onto that stream: the long-lived companion actor
+gets a separate authenticated tail connection, bounded queue, and deadline.
+Socket path creation/removal belongs to the companion-owned listener lifecycle,
+not the generic transport helper; never unlink a path supplied by an untrusted
+or LB-writable directory.
+
 ## node06 — the test/production box
 
 node06 is a Tailscale host running two vLLM+DSpark TP4 instances behind this
