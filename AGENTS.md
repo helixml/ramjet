@@ -621,7 +621,9 @@ the input or output, publish it as a CI artifact, print its lines, or move it
 outside the sovereign boundary. A replay is admissible only when every request
 passes both protocol validation and the response-usage prompt-token density
 gate; keep target/actual variance visible rather than widening tolerance to
-manufacture a pass.
+manufacture a pass. The preflight `/tokenize` calibration is synthetic and
+bounded; it may adjust filler for the active chat template, but it never
+replaces the authoritative post-response usage gate.
 
 ### Long-prefill interference — `mixed_bench.py`
 

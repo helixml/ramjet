@@ -93,9 +93,16 @@ chmod 0600 /run/user/$(id -u)/mini-dynamo-traces/result.jsonl
 ```
 
 Replay builds synthetic messages in memory. Same-group prefixes are nested;
-different groups and salts are unlinkable. The recorded target prompt-token
-count is checked against authoritative response usage with a bounded default
-tolerance (5% or 256 tokens), so a synthetic density mismatch fails the shape
+different groups and salts are unlinkable. Before GPU execution, one small
+synthetic `/tokenize` probe per unique protocol/history/tool/reasoning shape
+measures the active engine chat-template overhead and adjusts only the repeated
+tail filler. Calibration has a 30s timeout and 1MiB response cap; returned token
+IDs are discarded in memory and never logged. A missing, malformed, oversized,
+or implausible calibration fails before inference.
+
+The recorded target prompt-token count is still checked against authoritative
+completion response usage with a bounded default tolerance (5% or 256 tokens),
+so tokenizer/template drift or a synthetic density mismatch fails the shape
 gate instead of silently becoming performance evidence. Arrival timing is
 scheduled from relative buckets and client queueing remains measurable.
 
