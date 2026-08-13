@@ -47,7 +47,7 @@ class DroneReleaseConfigTest(unittest.TestCase):
             body = section.group(1)
             self.assertRegex(
                 body,
-                r"image: ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]{64}",
+                r"image: ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]{64}@sha256:[0-9a-f]{64}",
             )
             self.assertIn(f"sh bench/drone_release_publish.sh {kind}", body)
             self.assertNotIn("drone-docker", body)
@@ -100,7 +100,7 @@ class DroneReleaseConfigTest(unittest.TestCase):
             body = section.group(1)
             self.assertRegex(
                 body,
-                r"image: ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]{64}",
+                r"image: ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]{64}@sha256:[0-9a-f]{64}",
             )
             self.assertIn(f"sh bench/drone_release_recovery_publish.sh {kind}", body)
             self.assertRegex(

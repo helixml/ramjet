@@ -466,7 +466,11 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   `/bin/sh`, and the Crane binary is copied from its digest-pinned upstream image
   and smoke-tested during the build. `bench/release_tools_image.py` binds all
   consumers and the sole guarded Kaniko publisher to the Dockerfile hash. Never
-  point release steps directly at an unknown third-party shell layout.
+  point release steps directly at an unknown third-party shell layout. After
+  main publishes a new tools content tag, independently verify `/bin/sh`, Crane,
+  and CA roots, then pin every tag/recovery consumer as `tag@sha256:digest`; the
+  publisher destination itself remains tag-only. A digest-pin-only follow-up
+  must select zero image publishers.
   The narrowly scoped
   `release-v0.1.0-recovery` promote pipeline is the only recovery: it accepts
   target `release-v0.1.0`, fetches and peels the existing immutable tag to
