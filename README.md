@@ -66,7 +66,8 @@ docker compose up -d
 curl --fail http://localhost:8000/health
 ```
 
-The example pins the first public Rust release (`v0.1.0`) by immutable digest.
+Version 0.1.0 is the first public Rust release. The example pins it by immutable
+digest.
 Safe defaults enable locality/load routing and keep tokenizer, raw KV-event,
 exact-placement, and snapshot paths off. See the complete
 [configuration table](docs/configuration.md), or start from the validated

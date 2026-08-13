@@ -610,6 +610,14 @@ c1/c8/c16, and cold/warm passes. Narrow `AGENT_PROFILES`,
 `AGENT_RUNS=3` only for a final variance-qualified candidate. Run direct-engine
 A/B cells with the two-round crossover below to use both TP4 pairs at once.
 
+For issue #14, `reasoning_matrix.sh BASE MODEL LABEL` compares the same
+correctness oracle across low/high/max reasoning and 96/192/256 output caps.
+It reports completion tokens per successful task, bounded finish outcomes,
+latency, throughput, and protocol validity. Use `REASONING_START_CELL` to
+resume; never promote a lower-token cell with any correctness loss. The matrix
+is evidence for an explicit Helix-side policy, not authorization for the LB to
+classify prompts or silently rewrite caller settings.
+
 Optional sovereign workload replay uses `bench/agent_trace.py`, never raw API
 requests or logs. Validate the strict numeric/enumerated JSONL locally before
 any GPU call. The source must be mode `0600` beneath a mode `0700` parent;

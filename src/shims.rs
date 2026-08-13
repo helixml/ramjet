@@ -192,6 +192,16 @@ mod tests {
     }
 
     #[test]
+    fn preserves_bounded_caller_policy_fields() {
+        let body = br#"{"messages":[],"reasoning_effort":"high","max_tokens":256,"max_completion_tokens":512}"#;
+        let value: Value =
+            serde_json::from_slice(&sanitize_request(Endpoint::Chat, body, 100_000)).unwrap();
+        assert_eq!(value["reasoning_effort"], "high");
+        assert_eq!(value["max_tokens"], 256);
+        assert_eq!(value["max_completion_tokens"], 512);
+    }
+
+    #[test]
     fn rewrites_nested_context_fields() {
         let body = br#"{"data":[{"max_model_len":393216,"nested":{"context_length":393216}}]}"#;
         let value: Value =

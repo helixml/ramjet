@@ -9,8 +9,11 @@ from agentbench import (
     SSEDecoder,
     UPSTREAM_RESPONSE_FIXTURES,
     add_prefix,
+    apply_request_policy,
+    bounded_finish_reason_counts,
     bounded_route_counts,
     load_cases,
+    run_exit_status,
     validate_case,
     validate_choice_results,
     validate_result,
@@ -31,6 +34,42 @@ def sse(event):
 
 
 class AgentBenchTest(unittest.TestCase):
+    def test_request_policy_override_is_explicit_and_non_mutating(self):
+        fixture = case()
+        fixture["request"].update({"reasoning_effort": "low", "max_tokens": 96})
+        original = json.loads(json.dumps(fixture))
+
+        preserved = apply_request_policy(fixture)
+        overridden = apply_request_policy(fixture, "high", 256)
+
+        self.assertEqual(preserved["request"]["reasoning_effort"], "low")
+        self.assertEqual(preserved["request"]["max_tokens"], 96)
+        self.assertEqual(overridden["request"]["reasoning_effort"], "high")
+        self.assertEqual(overridden["request"]["max_tokens"], 256)
+        self.assertEqual(fixture, original)
+
+    def test_finish_reason_summary_has_fixed_cardinality(self):
+        self.assertEqual(
+            bounded_finish_reason_counts(
+                [
+                    {"finish_reason": "stop"},
+                    {"finish_reason": "tool_calls"},
+                    {"finish_reason": "length"},
+                    {"finish_reason": None},
+                    {"finish_reason": "engine-specific"},
+                ]
+            ),
+            {"stop": 1, "tool_calls": 1, "length": 1, "missing": 1, "other": 1},
+        )
+
+    def test_report_mode_allows_protocol_failures_but_not_transport_failures(self):
+        protocol_failure = [{"ok": False, "protocol_errors": ["invalid tool call"]}]
+        transport_failure = [{"ok": False, "error": "TimeoutError"}]
+
+        self.assertEqual(run_exit_status(protocol_failure), 1)
+        self.assertEqual(run_exit_status(protocol_failure, True), 0)
+        self.assertEqual(run_exit_status(transport_failure, True), 1)
+
     def test_zero_prefix_uses_stable_per_run_cache_namespace(self):
         fixture = case()
         original = json.loads(json.dumps(fixture))
