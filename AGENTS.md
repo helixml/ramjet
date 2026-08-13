@@ -124,6 +124,10 @@ change; these focused tests complete in a few seconds and do not need node06:
 cargo test --locked snapshot_transport
 cargo test --locked snapshot_tail_wire
 cargo test --locked snapshot_tail
+cargo test --locked snapshot_secret_file
+cargo test --locked snapshot_socket_path
+cargo test --locked snapshot_actor
+cargo test --locked --test snapshot_digest_lifecycle
 ```
 
 The one-shot exchange intentionally owns one Unix stream and reads its response
@@ -132,6 +136,12 @@ gets a separate authenticated tail connection, bounded queue, and deadline.
 Socket path creation/removal belongs to the companion-owned listener lifecycle,
 not the generic transport helper; never unlink a path supplied by an untrusted
 or LB-writable directory.
+
+Only `snapshot_bootstrap` may construct a prepared generation. Keep that token
+opaque: the actor must not accept a separately asserted reset scope, watermark,
+identity, lifecycle, or caller-built index. A same-identity replacement stays
+private until authenticated caught-up and preserves the current publication;
+an identity/key/generation change or owner-session failure revokes immediately.
 
 ## node06 — the test/production box
 
@@ -212,6 +222,11 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
 - Run independent local gates together: Rust tests/Clippy, Go parity, and
   Python benchmark tests do not depend on one another. Keep Cargo's shared
   `target/` and Docker BuildKit cache warm; do not clean either between runs.
+- Drone intentionally runs once per PR (and once after merge on `main`), not
+  again for every feature-branch push. Its Rust lane omits a redundant release
+  build: the local pre-push gate builds release, while the GitHub main workflow
+  builds and publishes the release container. This halves cold CI contention
+  without dropping format, Clippy, test, Go, or protocol coverage.
 - Build the LB locally and stream it to node06 when the local amd64 Docker
   cache is warm. A typical warm LB transfer is seconds and avoids consuming
   node06's scarce 8-9GiB available host memory:

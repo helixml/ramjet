@@ -19,7 +19,6 @@ steps:
       - cargo fmt --check
       - cargo clippy --locked --all-targets --all-features -- -D warnings
       - cargo test --locked
-      - cargo build --release --locked
 
   - name: go-parity-oracle
     image: golang:1.26.0-bookworm
@@ -51,3 +50,8 @@ trigger:
   event:
     - push
     - pull_request
+  branch:
+    # Pull requests targeting main still run. Feature-branch pushes no longer
+    # duplicate the same cold Rust build beside their PR build; main pushes
+    # retain the post-merge gate.
+    - main

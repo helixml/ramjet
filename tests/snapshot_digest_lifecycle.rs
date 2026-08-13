@@ -1,17 +1,18 @@
 use mini_dynamo::{
     block_digest::BlockDigester,
-    digest_index::{DigestIndexLimits, DigestKvIndex, SnapshotGroupKey},
+    digest_index::{DigestIndexLimits, SnapshotGroupKey},
     kv_snapshot::{
         AttentionKind, DigestAlgorithm, DigestRecord, DigestSpec, EngineIncarnation,
-        GroupDisposition, GroupMetadata, ResetScope, SnapshotBlockHash, SnapshotBody,
-        SnapshotCapacity, SnapshotExpectations, SnapshotLimits, decode_snapshot, encode_snapshot,
+        GroupDisposition, GroupMetadata, ResetKind, ResetScope, SnapshotBlockHash, SnapshotBody,
+        SnapshotCapacity, SnapshotError, SnapshotLimits, encode_snapshot,
     },
+    snapshot_bootstrap::{SnapshotBootstrapError, prepare_authenticated_snapshot},
     snapshot_session::{
         SnapshotSessionBinding, SnapshotSessionChallenge, SnapshotSessionExpectations,
         SnapshotSessionLimits, SnapshotSessionSecret, decode_authenticated_snapshot,
         decode_client_hello, encode_authenticated_snapshot, encode_client_hello,
     },
-    snapshot_tail::{SnapshotAction, SnapshotTailFence, SnapshotTailState},
+    snapshot_tail::SnapshotTailState,
 };
 
 const DIGEST_SECRET: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
@@ -34,76 +35,139 @@ fn authenticated_snapshot_builds_private_index_before_catch_up() {
         decode_client_hello(&hello, &session_secret, session_limits).unwrap(),
         CHALLENGE
     );
+    let authenticated = authenticate(&body, &snapshot_frame, body.watermark, &key_id);
+
+    let prepared = prepare_authenticated_snapshot(
+        authenticated,
+        &DIGEST_SECRET,
+        snapshot_limits,
+        DigestIndexLimits::default(),
+        SnapshotGroupKey {
+            data_parallel_rank: 0,
+            group_idx: 0,
+        },
+        body.watermark,
+    )
+    .unwrap();
+    assert_eq!(
+        prepared
+            .index()
+            .find_longest(&[1, 2, 3, 4])
+            .unwrap()
+            .token_ids,
+        4
+    );
+    assert_eq!(
+        prepared.lifecycle().status().state,
+        SnapshotTailState::CatchingUp
+    );
+}
+
+#[test]
+fn authenticated_outer_watermark_cannot_diverge_from_snapshot_body() {
+    let digester = BlockDigester::new(DIGEST_SECRET);
+    let key_id = *digester.key_id().as_bytes();
+    let mut body = snapshot_body(&digester, key_id);
+    body.refresh_capacity().unwrap();
+    let frame = encode_snapshot(&body, SnapshotLimits::default()).unwrap();
+    let authenticated = authenticate(&body, &frame, body.watermark + 1, &key_id);
+
+    assert_eq!(
+        prepare(authenticated).unwrap_err(),
+        SnapshotBootstrapError::BindingMismatch
+    );
+}
+
+#[test]
+fn partial_scope_and_wrong_digest_secret_fail_before_private_state_escapes() {
+    let digester = BlockDigester::new(DIGEST_SECRET);
+    let key_id = *digester.key_id().as_bytes();
+    let mut body = snapshot_body(&digester, key_id);
+    body.reset_scope = ResetScope {
+        kind: ResetKind::DataParallelRank,
+        data_parallel_rank: Some(0),
+        group_idx: None,
+    };
+    body.refresh_capacity().unwrap();
+    let frame = encode_snapshot(&body, SnapshotLimits::default()).unwrap();
+    let authenticated = authenticate(&body, &frame, body.watermark, &key_id);
+    assert_eq!(
+        prepare(authenticated).unwrap_err(),
+        SnapshotBootstrapError::Snapshot(SnapshotError::ResetScopeMismatch)
+    );
+
+    let mut body = snapshot_body(&digester, key_id);
+    body.refresh_capacity().unwrap();
+    let frame = encode_snapshot(&body, SnapshotLimits::default()).unwrap();
+    let authenticated = authenticate(&body, &frame, body.watermark, &key_id);
+    assert_eq!(
+        prepare_authenticated_snapshot(
+            authenticated,
+            &[0x77; 32],
+            SnapshotLimits::default(),
+            DigestIndexLimits::default(),
+            group(),
+            body.watermark,
+        )
+        .unwrap_err(),
+        SnapshotBootstrapError::BindingMismatch
+    );
+}
+
+fn prepare(
+    authenticated: mini_dynamo::snapshot_session::AuthenticatedSnapshot,
+) -> Result<mini_dynamo::snapshot_bootstrap::PreparedSnapshotGeneration, SnapshotBootstrapError> {
+    let watermark = authenticated.snapshot_watermark();
+    prepare_authenticated_snapshot(
+        authenticated,
+        &DIGEST_SECRET,
+        SnapshotLimits::default(),
+        DigestIndexLimits::default(),
+        group(),
+        watermark.saturating_sub(1),
+    )
+}
+
+fn group() -> SnapshotGroupKey {
+    SnapshotGroupKey {
+        data_parallel_rank: 0,
+        group_idx: 0,
+    }
+}
+
+fn authenticate(
+    body: &SnapshotBody,
+    snapshot_frame: &[u8],
+    outer_watermark: u64,
+    key_id: &[u8; 32],
+) -> mini_dynamo::snapshot_session::AuthenticatedSnapshot {
+    let secret = SnapshotSessionSecret::new(SESSION_SECRET);
     let response = encode_authenticated_snapshot(
-        &snapshot_frame,
+        snapshot_frame,
         SnapshotSessionBinding {
             challenge: CHALLENGE,
             engine_incarnation: &body.engine_incarnation,
-            snapshot_watermark: body.watermark,
-            digest_key_id: &key_id,
+            snapshot_watermark: outer_watermark,
+            digest_key_id: key_id,
             companion_generation: 7,
         },
-        &session_secret,
-        session_limits,
+        &secret,
+        SnapshotSessionLimits::default(),
     )
     .unwrap();
-    let authenticated = decode_authenticated_snapshot(
+    decode_authenticated_snapshot(
         &response,
         SnapshotSessionExpectations {
             challenge: CHALLENGE,
             engine_incarnation: &body.engine_incarnation,
-            digest_key_id: &key_id,
+            digest_key_id: key_id,
             minimum_snapshot_watermark: body.watermark,
             minimum_companion_generation: 7,
         },
-        &session_secret,
-        session_limits,
+        &secret,
+        SnapshotSessionLimits::default(),
     )
-    .unwrap();
-
-    let decoded = decode_snapshot(
-        authenticated.snapshot_frame(),
-        snapshot_limits,
-        SnapshotExpectations {
-            engine_incarnation: &body.engine_incarnation,
-            reset_scope: ResetScope::full_engine(),
-            digest: &body.digest,
-        },
-    )
-    .unwrap();
-    let mut private_index =
-        DigestKvIndex::from_secret(DigestIndexLimits::default(), &DIGEST_SECRET).unwrap();
-    assert_eq!(
-        private_index
-            .replace_from_snapshot(
-                &decoded,
-                SnapshotGroupKey {
-                    data_parallel_rank: 0,
-                    group_idx: 0,
-                },
-            )
-            .unwrap(),
-        2
-    );
-    assert_eq!(
-        private_index.find_longest(&[1, 2, 3, 4]).unwrap().token_ids,
-        4
-    );
-
-    let mut lifecycle = SnapshotTailFence::start_bootstrap(
-        body.engine_incarnation.clone(),
-        body.watermark,
-        key_id.to_vec(),
-        7,
-    );
-    assert_eq!(
-        lifecycle.accept_snapshot(&authenticated, decoded.reset_scope),
-        SnapshotAction::Accepted {
-            snapshot_watermark: body.watermark,
-            delivery_sequence: 0,
-        }
-    );
-    assert_eq!(lifecycle.status().state, SnapshotTailState::CatchingUp);
+    .unwrap()
 }
 
 fn snapshot_body(digester: &BlockDigester, key_id: [u8; 32]) -> SnapshotBody {

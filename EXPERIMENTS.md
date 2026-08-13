@@ -2904,3 +2904,67 @@ and application failure. This is still not connected to the proxy or node06.
 The next slice is the safe socket/listener lifecycle plus bounded companion
 actor and atomic private-index catch-up/swap; only after offline fault/load
 tests pass should it be deployed shadow-only.
+
+## 2026-08-13 — issue #41 filesystem boundary and atomic publication actor
+
+Four isolated CPU tracks were integrated behind the authenticated exchange.
+The verifier is now the sole production constructor of an opaque prepared
+generation: it cross-checks outer and inner incarnation, digest identity,
+watermark, and full-engine scope, builds the digest index privately, and returns
+the already-accepted CatchingUp lifecycle with that exact index. The actor no
+longer accepts a caller-supplied reset scope or arbitrary ready index. Three
+integration tests reject outer/inner watermark mismatch, partial reset scope,
+and a wrong digest secret before private state escapes.
+
+Secret loading is synchronous startup-only and accepts exactly 32 raw bytes.
+It walks an absolute normalized ancestor chain, rejects symlinks and unsafe
+writers, requires the expected owner, regular file, one link, safe mode, and
+matching pre-open/opened/post-open device+inode, reads at most 33 bytes, and
+clears its temporary buffer. Seven tests cover valid loading, short/long/
+newline/hex inputs, target/parent symlinks, unsafe modes, hard links,
+non-regular files, owner policy, relative paths, and redaction.
+
+Socket publication requires an absolute symlink-free companion-owned parent
+that is not group/world writable. It binds a unique private Unix socket, sets
+0660, publishes with an atomic no-clobber hard link, records device+inode, and
+removes only that same socket inode. A pre-existing file, directory, symlink,
+or socket is preserved; this deliberately requires a fresh runtime directory
+after an unclean companion exit rather than guessing that a socket is stale.
+Six real Linux tests cover connectivity/mode, all pre-existing target kinds,
+unsafe parents, ownership/path policy, idempotent cleanup, and replacement
+inode preservation.
+
+The deterministic single-owner actor has a hard two-session ceiling and a
+bounded tail queue per private replacement. Same-identity catch-up preserves
+the published index; authenticated identity/key/generation changes revoke it
+immediately. Tail application occurs only inside actor-owned state, application
+failure and queue overflow fence only a private replacement, caught-up swaps
+the whole index atomically, and monotonically allocated session epochs prevent
+an old disconnect from revoking a newer publication. Thirteen focused tests
+cover those race orderings, including prepared-identity mismatch and invalid
+owner transitions. Focused actor/integration/Clippy validation completed in
+5.8 seconds after the API review correction.
+
+This is still offline: there is no runtime accept loop, long-lived tail stream,
+KV delta decoder/application adapter, metrics, container service, or proxy
+publication consumer yet. No node06 process changed. The next gate wires those
+pieces under absolute deadlines and bounded cancellation, then exercises two
+fast clients, a stalled third/slow reader, overflow, disconnect, and late CPU
+completion before any shadow deployment.
+
+The first PR #48 Drone attempt ran two identical cold Rust lanes concurrently
+(`push` and `pull_request`) after the local 29.5-second and GitHub full Rust
+gates had passed. An exact cold reproduction found one root-sensitive test
+assertion: with a deliberately wrong expected UID, a non-root run rejects the
+parent first as `UntrustedParent`, while Drone's root-owned directory remains a
+trusted ancestor and the root-owned target is then rejected as
+`UnexpectedOwner`. Both are the intended fail-closed result; the test now
+accepts either content-free policy rejection. The reproduction also passed the
+new Linux socket tests in 46.5 seconds and all Go/Python container gates.
+
+To remove avoidable CI contention independent of that test correction, Drone
+now runs feature work once for PRs targeting `main` and again only for the
+post-merge `main` push. Its redundant release build was removed: the required
+local pre-push gate still builds release, and GitHub builds the published
+release container on `main`. Drone continues to enforce format, strict Clippy,
+all Rust tests, Go parity/vet/format, and Python protocol tests.
