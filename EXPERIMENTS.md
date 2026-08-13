@@ -4423,3 +4423,60 @@ median), demonstrating a sub-minute iteration loop for this bounded two-pair
 slice. The remaining issue #10 work is the c1 and 0KiB three-run coverage plus
 sovereign redacted trace-shape ingestion; no serving-policy change is justified
 by this workload alone.
+
+## 2026-08-13 — r77 completed deterministic agent matrix
+
+The first attempted 0KiB repeats revealed a benchmark isolation bug rather
+than a serving result: `add_prefix` returned the committed corpus unchanged at
+zero, so `agent_matrix.sh` generated a fresh salt that never reached the
+request. Those nominally cold cells inherited old KV state and reported a 53%
+median hit rate. Their latency and throughput results are rejected.
+
+#108 derives a fixed-size BLAKE2 cache namespace for every salt, including
+zero-prefix runs. The digest is placed at the start of the first system message
+so the first content-bearing cache block changes across runs; cold and warm
+within one pair remain identical. Positive prefixes retain exactly their
+requested byte size. Two focused tests prove per-salt identity, same-salt
+stability, corpus immutability, privacy of the raw salt, and positive-prefix
+size. The focused test took 0.05s; 168 Python tests took 2.08s. The widened gate
+also passed strict Clippy in 6.76s, 330 Rust unit tests plus all integration
+suites in 24.26s, and a 0.49s warm release verification. Drone #288 passed in
+60s before the corrected script was mirrored to node06.
+
+Three fresh-salt corrected 0KiB runs then passed all 210 requests:
+
+| cell | TTFT p95 median (range) | output tok/s median (range) | tasks/GPU-hour median (range) | cache-hit median |
+| --- | ---: | ---: | ---: | ---: |
+| c1 cold | 0.354s (0.343-0.378) | 176.5 (168.0-182.1) | 892.4 (809.6-934.6) | 0.0% |
+| c1 warm | 0.444s (0.442-0.466) | 171.1 (161.6-182.1) | 871.7 (853.3-901.4) | 64.3% |
+| c8 cold | 1.494s (1.445-1.643) | 353.7 (326.1-365.6) | 1,765.4 (1,757.3-1,784.3) | 0.0% |
+| c8 warm | 0.839s (0.725-1.010) | 491.1 (485.0-528.7) | 2,480.1 (2,361.2-2,536.3) | 64.7% |
+| c16 cold-first | 2.194s (2.184-2.335) | 474.7 (458.9-504.8) | 2,510.3 (2,371.0-2,529.5) | 32.5% |
+| c16 warm | 0.863s (0.846-0.985) | 811.6 (714.3-818.5) | 3,922.6 (3,624.0-4,286.5) | 65.1% |
+
+The short serial c1 workload did not benefit from caching, so no latency claim
+is made there. At c8, warm reuse reduced median TTFT p95 by 43.8%, raised
+output throughput 1.39x, and raised successful-task capacity 1.40x. At c16 it
+reduced TTFT p95 by 60.7%, raised output throughput 1.71x, and raised task
+capacity 1.56x. The c16 initial wave already reused some identical concurrent
+case state, hence `cold-first` and its 32.5% hit rate rather than `cold`.
+Aggregate route counts remained balanced: c1 7/8 in each phase, c8 15/15, and
+c16 29/31 cold-first plus 28/32 warm. Matrix walls were 21.793-22.665s with a
+22.516s median.
+
+The previously captured 256KiB c1 slice was unaffected because positive
+prefixes already incorporated the fresh salt. It passed 30/30. Cold-first
+medians were 0.755s TTFT p95, 41.5 output tok/s, 213.8 tasks/GPU-hour, and
+79.6% cache hit; warm medians were 0.739s, 97.7 tok/s, 504.3 tasks/GPU-hour,
+and 99.7%. One B-routed cold run reached 4.230s TTFT while the two A-routed
+runs were 0.750-0.755s, so the wide 0.750-4.230s range remains explicit and no
+c1 latency improvement is claimed. Its median matrix wall was 19.687s.
+
+Together with r74's 180/180 corrected 256KiB c8/c16 slice, the complete
+deterministic 0/256KiB × c1/c8/c16 × cold-first/warm × three-run matrix is now
+420/420 protocol-valid. The three slice medians imply an approximately 84.6s
+deterministic iteration, while keeping every result independently resumable.
+The LB, both TP4 engines, and both snapshot companions were healthy with zero
+restarts after qualification. Issue #10 now needs only the optional sovereign
+redacted trace-shape ingestion; this matrix does not justify a serving-policy
+change by itself.

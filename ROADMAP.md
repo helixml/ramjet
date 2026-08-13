@@ -264,9 +264,14 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   79.5%/89.7% first-wave cache rate is expected within each concurrent cell:
   only the first placement on each replica is cold while peers share the same
   prefix. Do not call it an independently-cold-request result or interpret
-  cached prompt accounting as compute throughput. Complete the remaining c1
-  and 0KiB three-run cells and add sovereign redacted trace-shape ingestion
-  before closing the issue.
+  cached prompt accounting as compute throughput. The remaining c1 and 0KiB
+  cells are also three-run qualified after fixing a harness bug that ignored
+  fresh salts at zero prefix. The complete corrected deterministic matrix is
+  420/420 protocol-valid. At 0KiB, warm reuse reduced median TTFT p95 from
+  1.49s to 0.84s at c8 and from 2.19s to 0.86s at c16; c1 showed no latency
+  win, as expected for tiny serial prompts. The full deterministic iteration
+  is now about 85s from the three independently measured slices. Add sovereign
+  redacted trace-shape ingestion before closing the issue.
 - 🔨 **Reproducible experiment journal + workload matrix.** Keep
   `EXPERIMENTS.md`; measure deterministic code, prose, shared-app, cold/warm
   prefill, and mixed prefill+decode separately. Never report speculative decode

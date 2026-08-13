@@ -21,6 +21,7 @@ placement. Current measured landmarks:
 | v0.1 locality, 3×4×2 | **82.5% cached prompt tokens; 24/24** |
 | v0.1 same-app c12/max256 | **452 tok/s; exact 6/6 split; 12/12** |
 | v0.1 direct TP4 c12/max256 under B production load | **794.5 tok/s; 12/12** |
+| deterministic agent/DSML 0/256KiB × c1/c8/c16 × cold/warm × 3 | **420/420 protocol-valid** |
 | box code c24/max256, rc7 | **1,820–1,844 tok/s**, 144/144 requests |
 | box code c24 best matched gate, rc6 | **1,891 tok/s**, 72/72 requests |
 | direct TP4 code c16/max256 | **1,130 tok/s**, 48/48 requests |

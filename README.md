@@ -1,21 +1,64 @@
 # mini-dynamo
 
-KV-cache-locality-aware load balancer for OpenAI-compatible inference
-engines. Compact Rust binary; drop-in replacement for `ds4-loadbalancer`
-(same env vars, same `ds4proxy_*` metrics), plus an overlap-scored router:
+mini-dynamo is a compact Rust inference router for OpenAI-compatible model
+servers. It increases useful GPU capacity by sending each request to a healthy
+replica that already has the most reusable prompt state, while accounting for
+live prefill and decode load:
 
-    score(upstream) = min(prefixOverlapBlocks, maxAffinityBlocks) − alpha × loadUnits
+```text
+score(replica) = min(prefix overlap, affinity cap) - alpha * load units
+```
 
-Conversations stick to their warm engine, sessions that share prompt
-templates co-locate, and cold big prefills reserve size-weighted load so short
-requests remain on the other engine. See DESIGN.md for the full story and
-roadmap (NVIDIA Dynamo, Kimi K3/KDA, and DwarfStar are the acknowledged
-influences).
+It is deployed as a stateless proxy in front of vLLM/DSpark. Conversations
+stay on a warm engine, sessions sharing a large system prompt co-locate, and
+concurrent work spills to an idle replica before affinity creates a hotspot.
+The design incorporates applicable ideas from NVIDIA Dynamo, DwarfStar, and
+Kimi K3/KDA without making ordinary serving depend on experimental exact-KV
+state. See [DESIGN.md](DESIGN.md) and [ROADMAP.md](ROADMAP.md).
 
-The canonical deployment stack is
-`deploy/dspark_0731/docker-compose.yaml`. Its adjacent README documents
-validation, the generated infra mirror, and safe LB-only deployment. The infra
-copy is operational convenience only; do not edit it independently.
+## Main features
+
+- **Cache-locality plus load routing:** bounded prompt fingerprints preserve
+  reusable prefixes while size-weighted reservations protect short decodes
+  from large cold prefills.
+- **Production failover:** active health probes, unhealthy-replica exclusion,
+  retryable-status failover, and aggregate `ok`, `degraded`, or `unhealthy`
+  readiness at `/health`.
+- **Immediate cancellation:** a disconnected client drops the upstream stream
+  and releases router load accounting even while the model server is silent.
+- **OpenAI compatibility:** streaming chat/completions, request sanitization,
+  model metadata rewriting, reasoning/tool-call handling, and opaque route
+  correlation.
+- **Operational telemetry:** stable `ds4proxy_*` Prometheus metrics, true
+  generated-token TTFT, cache outcomes, health/load state, and privacy-bounded
+  decision journals with offline policy replay.
+- **Fail-closed exact-routing research:** bounded Rust tokenization, fenced vLLM
+  KV-event indexes, authenticated snapshot companions, and placement canaries
+  are available for shadow evaluation but remain outside the v0.1 serving
+  dependency chain.
+
+## Performance on 8× RTX PRO 6000
+
+The reference node06 stack runs DeepSeek-V4-Flash-0731 as two independent TP4
+vLLM+DSpark replicas across eight RTX PRO 6000 Blackwell GPUs. These are
+workload-specific qualified measurements, not hardware peak claims:
+
+| Measurement | Result |
+| --- | ---: |
+| Whole box, deterministic code, c24/max256 | **1,820–1,844 output tok/s**, 144/144 requests |
+| One TP4 replica, code c16/max256 | **1,130 output tok/s**, 48/48 requests |
+| One TP4 replica, prose c16/max256 | **824 output tok/s**, 48/48 requests |
+| v0.1 shared-app c12/max256 | **452 output tok/s**, 6/6 replica split, 12/12 requests |
+| Load-blind hash router → overlap/load router A/B | **298 → 469 tok/s (1.57×)** |
+| Fresh 3-app × 4-session × 2-turn locality gate | **82.5% cached prompt tokens**, 24/24 requests |
+| 209K-token cold prefill | **~7.7–8.1K effective prompt tok/s** |
+| Client cancellation on an active generation | router released in **46ms**; vLLM work in **269ms** |
+| Rust request preparation at 256KiB / 2MiB | **0.49ms / 4.53ms**, about **10× faster** than the retired Go path |
+
+See [RESULTS.md](RESULTS.md) for workload definitions and comparisons,
+[EXPERIMENTS.md](EXPERIMENTS.md) for the append-only evidence and rejected
+candidates, and the [v0.1.0 release](https://github.com/helixml/mini-dynamo/releases/tag/v0.1.0)
+for the exact qualified image digests.
 
 ## Release status
 
@@ -34,12 +77,51 @@ off-by-default snapshot companion and attestation provisioner.
 See [CHANGELOG.md](CHANGELOG.md) for the qualified release surface and
 [RELEASE.md](RELEASE.md) for the fail-closed tag and deployment checklist.
 
-## Run
+## Deployment
 
-    DS4_UPSTREAM=http://engine-a:8000,http://engine-b:8000 \
-    DS4_UPSTREAM_TOKEN=<bearer for engine probes> \
-    ./mini-dynamo
-    # API :8000 (/health), Prometheus :9090 (/metrics, /metrics/upstream/{i})
+The canonical complete server deployment is
+[deploy/dspark_0731/docker-compose.yaml](deploy/dspark_0731/docker-compose.yaml):
+two TP4 engines plus mini-dynamo, GPU/NUMA placement, immutable image defaults,
+and the qualified DeepSeek-V4/DSpark settings. Follow the adjacent
+[deployment guide](deploy/dspark_0731/README.md) for validation, mirroring,
+LB-only promotion, rollback, and the optional snapshot overlay. The infra
+repository copy is a generated operational mirror; edit this repository first.
+
+For existing OpenAI-compatible engines, a minimal standalone deployment is:
+
+```yaml
+services:
+  mini-dynamo:
+    image: ghcr.io/helixml/mini-dynamo:v0.1.0@sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1
+    ports:
+      - "8000:8000"  # OpenAI API and /health
+      - "9090:9090"  # Prometheus metrics
+    environment:
+      DS4_UPSTREAM: http://engine-a:8000,http://engine-b:8000
+      DS4_UPSTREAM_TOKEN: ${VLLM_API_KEY}
+      DS4_ROUTE_ALPHA: 4
+      DS4_ROUTE_LOAD_UNIT_BYTES: 32768
+      DS4_ROUTE_MAX_OVERLAP_BLOCKS: 32
+      DS4_TOKENIZER_MODE: "off"
+      DS4_KV_EVENT_MODE: "off"
+      DS4_EXACT_ROUTE_MODE: "off"
+      DS4_SNAPSHOT_ROUTE_MODE: "off"
+```
+
+Or run the binary directly:
+
+```bash
+DS4_UPSTREAM=http://engine-a:8000,http://engine-b:8000 \
+DS4_UPSTREAM_TOKEN=<bearer-for-engine-probes> \
+./mini-dynamo
+# OpenAI API and /health: :8000; Prometheus: :9090
+```
+
+Use an immutable digest in production. Both examples deliberately keep exact
+tokenization/KV/snapshot paths off; enable experimental modes only with their
+attestation, replay, and fallback gates described below.
+
+## Configuration
 
 `GET /health` returns every opaque replica ordinal with its serving health,
 inflight count, load units, and approximate-index size. It is `200 ok` when all
@@ -50,7 +132,11 @@ from request attempts, including the final failover slot.
 Successful proxied responses include `X-Mini-Dynamo-Upstream: 0|1` for
 opaque per-request route correlation; internal upstream names are not exposed.
 
-Key env (all optional): DS4_ADVERTISE_CTX_MARGIN (16384),
+The production configuration example is the
+[`ds4-loadbalancer` service](deploy/dspark_0731/docker-compose.yaml) in the
+canonical Compose stack. Key environment variables (defaults in parentheses;
+set the upstream list/token explicitly in production):
+DS4_ADVERTISE_CTX_MARGIN (16384),
 DS4_MAX_TOKENS_STRIP (100000), DS4_ROUTE_ALPHA (4), DS4_ROUTE_CHUNK_BYTES
 (2048), DS4_ROUTE_MAX_PREFIX_BYTES (2097152), DS4_ROUTE_MAX_OVERLAP_BLOCKS
 (32), DS4_ROUTE_INDEX_CAPACITY (100000), DS4_ROUTE_LOAD_UNIT_BYTES (32768),
