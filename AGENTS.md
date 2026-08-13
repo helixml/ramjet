@@ -130,6 +130,7 @@ cargo test --locked snapshot_actor
 cargo test --locked snapshot_supervisor
 cargo test --locked snapshot_digest_delta
 cargo test --locked snapshot_consumer
+cargo test --locked --test snapshot_consumer_adversarial
 cargo test --locked --test snapshot_digest_lifecycle
 ```
 

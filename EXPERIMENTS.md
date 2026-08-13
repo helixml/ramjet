@@ -3047,3 +3047,14 @@ separate accepted-stream supervisor. The offline fault matrix must still add
 explicit deadline, oversized/truncated framing, slow-build cancellation,
 two-session replacement, live store/remove after publication, and coordinated
 incarnation/key rollover cases before node06 shadowing.
+
+That adversarial matrix is now covered by nine public-API Unix-stream
+integration tests: absolute-deadline revocation after publication; oversized
+snapshot and tail prefixes rejected before body allocation/read; truncated
+snapshot and tail frames; abort during a 60,000-record, greater-than-8MiB
+private build; same-identity two-session replacement with stale-disconnect
+isolation; generation rollover and republish; authenticated vLLM-shaped live
+store/remove mutation; and content-safe error/debug/reason output. No runtime
+bug was found. The warm test body takes about 1.6 seconds; the intentionally
+large cancellation fixture peaks around 1.1–1.3GiB RSS, so keep it in the full
+gate rather than duplicating it across parallel local loops.
