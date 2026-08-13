@@ -1,83 +1,177 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="440" viewBox="0 0 1000 440" role="img" aria-labelledby="title desc">
-  <title id="title">mini-dynamo deployment</title>
-  <desc id="desc">OpenAI clients send requests to mini-dynamo, which balances traffic across two GPU inference engines using prompt locality and live load. Prometheus reads health and routing metrics.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">How mini-dynamo chooses a GPU replica</title>
+  <desc id="desc">An incoming prompt with reusable prefix blocks is scored against two healthy GPU replicas. The route with high prefix overlap and acceptable load is selected, while an idle cold replica remains available for spillover and failover.</desc>
   <defs>
-    <linearGradient id="router" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#6d5dfc"/>
-      <stop offset="1" stop-color="#3b82f6"/>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f9faff"/>
+      <stop offset="1" stop-color="#f1f5ff"/>
     </linearGradient>
-    <linearGradient id="engine" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#123454"/>
-      <stop offset="1" stop-color="#16233f"/>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#795cff"/>
+      <stop offset=".52" stop-color="#586cff"/>
+      <stop offset="1" stop-color="#2f91ff"/>
     </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#071126" flood-opacity=".16"/>
+    <linearGradient id="warm" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#20c997"/>
+      <stop offset="1" stop-color="#00a878"/>
+    </linearGradient>
+    <linearGradient id="warmLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#6170ff"/>
+      <stop offset="1" stop-color="#16b887"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0v32" fill="none" stroke="#8ca0c8" stroke-opacity=".09"/>
+    </pattern>
+    <filter id="softShadow" x="-20%" y="-25%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#26345c" flood-opacity=".12"/>
     </filter>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0 0l10 5-10 5z" fill="#71809e"/>
+    <filter id="brandGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#586cff" flood-opacity=".28"/>
+    </filter>
+    <marker id="arrowWarm" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0l10 5-10 5z" fill="#16b887"/>
+    </marker>
+    <marker id="arrowMuted" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0l10 5-10 5z" fill="#8795b5"/>
     </marker>
     <style>
-      .label{font:600 20px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#13213c}
-      .small{font:500 14px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#69748c}
+      .title{font:700 22px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#17203a}
+      .body{font:500 15px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#5f6c88}
+      .tiny{font:700 12px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:.12em;fill:#7a86a3}
+      .metric{font:650 14px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#394562}
       .inverse{fill:#fff}
-      .line{fill:none;stroke:#71809e;stroke-width:3;marker-end:url(#arrow)}
-      .chip{fill:#eaf0ff}
+      .card{fill:#fff;stroke:#dce3f2;stroke-width:1.5}
+      .selected-card{stroke:#16b887;stroke-width:2}
+      .muted-card{fill:#f8faff;stroke:#dce3f2;stroke-width:1.5}
+      .divider{stroke:#e3e8f3}
+      .muted-line{fill:none;stroke:#8795b5;stroke-width:2.5;stroke-dasharray:7 8;marker-end:url(#arrowMuted)}
       @media (prefers-color-scheme:dark){
-        .canvas{fill:#0b1120}.label{fill:#edf2ff}.small{fill:#aab6ce}.client{fill:#151f35;stroke:#33405e}.chip{fill:#182845}.metrics{fill:#121d32;stroke:#33405e}
+        .panel{fill:#0a1020}.grid{opacity:.48}.title{fill:#f4f7ff}.body{fill:#a8b4cf}.tiny{fill:#8492b1}.metric{fill:#d4dcf1}
+        .card{fill:#111a2e;stroke:#283654}.selected-card{stroke:#19c995}.muted-card{fill:#0e1729;stroke:#26334f}.divider{stroke:#273550}
       }
     </style>
   </defs>
 
-  <rect class="canvas" width="1000" height="440" rx="28" fill="#f8faff"/>
+  <rect class="panel" width="1200" height="560" rx="32" fill="url(#panel)"/>
+  <rect class="grid" width="1200" height="560" rx="32" fill="url(#grid)"/>
 
-  <path class="line" d="M220 185H350"/>
-  <path class="line" d="M650 190C710 190 710 112 760 112"/>
-  <path class="line" d="M650 250C710 250 710 328 760 328"/>
-  <path d="M500 315v56H300" fill="none" stroke="#8b97ad" stroke-width="2.5" stroke-dasharray="7 7" marker-end="url(#arrow)"/>
+  <text class="tiny" x="52" y="52">ONE REQUEST · TWO HEALTHY REPLICAS · ONE BETTER ROUTE</text>
+  <text class="body" x="1148" y="52" text-anchor="end">example score · α = 4</text>
 
-  <g filter="url(#shadow)">
-    <rect class="client" x="55" y="138" width="165" height="94" rx="18" fill="#fff" stroke="#d9e1ef" stroke-width="2"/>
-    <circle cx="90" cy="173" r="12" fill="#6d5dfc"/>
-    <circle cx="125" cy="173" r="12" fill="#8b7fff"/>
-    <circle cx="160" cy="173" r="12" fill="#aaa3ff"/>
-    <text class="label" x="137.5" y="210" text-anchor="middle">OpenAI clients</text>
+  <!-- Request -->
+  <g filter="url(#softShadow)">
+    <rect class="card" x="52" y="108" width="252" height="324" rx="24"/>
+  </g>
+  <text class="tiny" x="78" y="143">INCOMING REQUEST</text>
+  <text class="title" x="78" y="177">Shared prompt</text>
+  <text class="body" x="78" y="202">system + conversation prefix</text>
+
+  <g transform="translate(78 235)">
+    <rect width="116" height="18" rx="9" fill="#665dff"/>
+    <rect x="124" width="48" height="18" rx="9" fill="#8d85ff"/>
+    <rect x="180" width="46" height="18" rx="9" fill="#b2adff"/>
+    <rect y="32" width="72" height="18" rx="9" fill="#665dff"/>
+    <rect x="80" y="32" width="92" height="18" rx="9" fill="#8d85ff"/>
+    <rect x="180" y="32" width="46" height="18" rx="9" fill="#b2adff"/>
+    <rect y="64" width="138" height="18" rx="9" fill="#665dff"/>
+    <rect x="146" y="64" width="80" height="18" rx="9" fill="#8d85ff"/>
+    <rect y="96" width="58" height="18" rx="9" fill="#665dff"/>
+    <rect x="66" y="96" width="106" height="18" rx="9" fill="#8d85ff"/>
+    <rect x="180" y="96" width="46" height="18" rx="9" fill="#d8dcE8"/>
+  </g>
+  <rect x="78" y="378" width="126" height="30" rx="15" fill="#eceaff"/>
+  <circle cx="96" cy="393" r="5" fill="#665dff"/>
+  <text x="108" y="398" style="font:650 13px ui-sans-serif,system-ui,sans-serif;fill:#5047d8">reusable prefix</text>
+
+  <!-- Ingress line -->
+  <path d="M304 270C335 270 338 270 366 270" fill="none" stroke="#6573ef" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="368" cy="270" r="6" fill="#6573ef"/>
+
+  <!-- Router -->
+  <g filter="url(#brandGlow)">
+    <rect x="368" y="92" width="392" height="364" rx="28" fill="url(#brand)"/>
+  </g>
+  <g transform="translate(400 126)">
+    <rect width="48" height="48" rx="14" fill="#fff" fill-opacity=".17"/>
+    <path d="M10 26h8l6-12 9 22 6-12h9" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="title inverse" x="64" y="23" font-size="24">mini-dynamo</text>
+    <text class="body inverse" x="64" y="45" opacity=".78">prefix locality × live load</text>
+  </g>
+  <line x1="400" y1="198" x2="728" y2="198" stroke="#fff" stroke-opacity=".25"/>
+
+  <g transform="translate(400 220)">
+    <rect width="328" height="82" rx="18" fill="#fff" fill-opacity=".98"/>
+    <circle cx="28" cy="27" r="9" fill="#18b887"/>
+    <text x="48" y="32" style="font:750 16px ui-sans-serif,system-ui,sans-serif;fill:#15203a">Replica A</text>
+    <rect x="241" y="14" width="70" height="26" rx="13" fill="#dcf8ee"/>
+    <text x="276" y="32" text-anchor="middle" style="font:750 12px ui-sans-serif,system-ui,sans-serif;fill:#07845e">WINNER</text>
+    <text x="20" y="61" style="font:650 14px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#4d5974">24 overlap − (4 × 1 load) =</text>
+    <text x="307" y="62" text-anchor="end" style="font:800 18px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#07845e">20</text>
+  </g>
+  <g transform="translate(400 318)">
+    <rect width="328" height="82" rx="18" fill="#17224a" fill-opacity=".28" stroke="#fff" stroke-opacity=".2"/>
+    <circle cx="28" cy="27" r="9" fill="#aab4d0"/>
+    <text x="48" y="32" style="font:700 16px ui-sans-serif,system-ui,sans-serif;fill:#fff">Replica B</text>
+    <text x="20" y="61" style="font:600 14px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#e1e6f6">4 overlap − (4 × 0 load) =</text>
+    <text x="307" y="62" text-anchor="end" style="font:750 18px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#fff">4</text>
+  </g>
+  <text x="564" y="430" text-anchor="middle" style="font:650 13px ui-sans-serif,system-ui,sans-serif;fill:#fff;opacity:.78">health gates run before scoring</text>
+
+  <!-- Route lines -->
+  <path d="M760 251C795 251 800 188 838 188" fill="none" stroke="url(#warmLine)" stroke-width="5" stroke-linecap="round" marker-end="url(#arrowWarm)"/>
+  <path class="muted-line" d="M760 359C795 359 800 370 838 370"/>
+
+  <!-- Engines -->
+  <g filter="url(#softShadow)">
+    <rect class="card selected-card" x="842" y="104" width="306" height="168" rx="24"/>
+  </g>
+  <rect x="866" y="128" width="50" height="50" rx="15" fill="url(#warm)"/>
+  <path d="M879 141h24v24h-24zM885 135v6m12-6v6m-12 24v6m12-6v6m-24-24h6m-6 12h6m24-12h6m-6 12h6" fill="none" stroke="#fff" stroke-width="2"/>
+  <text class="tiny" x="936" y="137" fill="#07845e">SELECTED</text>
+  <text class="title" x="936" y="165">GPU replica A</text>
+  <text class="body" x="936" y="188">warm prefix · moderate load</text>
+  <line class="divider" x1="866" y1="210" x2="1124" y2="210"/>
+  <g transform="translate(866 228)">
+    <rect width="24" height="14" rx="4" fill="#12b981"/>
+    <rect x="30" width="24" height="14" rx="4" fill="#12b981"/>
+    <rect x="60" width="24" height="14" rx="4" fill="#12b981"/>
+    <rect x="90" width="24" height="14" rx="4" fill="#12b981"/>
+    <rect x="120" width="24" height="14" rx="4" fill="#12b981"/>
+    <rect x="150" width="24" height="14" rx="4" fill="#12b981"/>
+    <rect x="180" width="24" height="14" rx="4" fill="#12b981"/>
+    <rect x="210" width="24" height="14" rx="4" fill="#dce3ef"/>
+    <rect x="240" width="18" height="14" rx="4" fill="#dce3ef"/>
   </g>
 
-  <g filter="url(#shadow)">
-    <rect x="350" y="135" width="300" height="180" rx="26" fill="url(#router)"/>
-    <path d="M398 201h36l18-28 27 57 20-35h44" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-    <text class="label inverse" x="500" y="265" text-anchor="middle" font-size="25">mini-dynamo</text>
-    <text class="small inverse" x="500" y="290" text-anchor="middle" opacity=".86">prefix locality + live load</text>
+  <g filter="url(#softShadow)">
+    <rect class="muted-card" x="842" y="296" width="306" height="168" rx="24"/>
+  </g>
+  <rect x="866" y="320" width="50" height="50" rx="15" fill="#e7ecf7"/>
+  <path d="M879 333h24v24h-24zM885 327v6m12-6v6m-12 24v6m12-6v6m-24-24h6m-6 12h6m24-12h6m-6 12h6" fill="none" stroke="#71809f" stroke-width="2"/>
+  <text class="tiny" x="936" y="329">SPILLOVER</text>
+  <text class="title" x="936" y="357">GPU replica B</text>
+  <text class="body" x="936" y="380">cold prefix · idle capacity</text>
+  <line class="divider" x1="866" y1="402" x2="1124" y2="402"/>
+  <g transform="translate(866 420)">
+    <rect width="24" height="14" rx="4" fill="#7e8daa"/>
+    <rect x="30" width="24" height="14" rx="4" fill="#dce3ef"/>
+    <rect x="60" width="24" height="14" rx="4" fill="#dce3ef"/>
+    <rect x="90" width="24" height="14" rx="4" fill="#dce3ef"/>
+    <rect x="120" width="24" height="14" rx="4" fill="#dce3ef"/>
+    <rect x="150" width="24" height="14" rx="4" fill="#dce3ef"/>
+    <rect x="180" width="24" height="14" rx="4" fill="#dce3ef"/>
+    <rect x="210" width="24" height="14" rx="4" fill="#dce3ef"/>
+    <rect x="240" width="18" height="14" rx="4" fill="#dce3ef"/>
   </g>
 
-  <g filter="url(#shadow)">
-    <rect x="760" y="50" width="190" height="125" rx="20" fill="url(#engine)"/>
-    <rect x="785" y="73" width="45" height="45" rx="9" fill="#23c483"/>
-    <path d="M795 83h25v25h-25zM801 77v6m13-6v6m-13 25v6m13-6v6m-25-25h6m-6 13h6m25-13h6m-6 13h6" fill="none" stroke="#fff" stroke-width="2"/>
-    <text class="label inverse" x="850" y="142" text-anchor="middle">Engine A</text>
-    <text class="small inverse" x="890" y="91" text-anchor="middle">GPU replica</text>
-    <text class="small inverse" x="890" y="112" text-anchor="middle">warm prefixes</text>
-  </g>
-
-  <g filter="url(#shadow)">
-    <rect x="760" y="265" width="190" height="125" rx="20" fill="url(#engine)"/>
-    <rect x="785" y="288" width="45" height="45" rx="9" fill="#36a4ff"/>
-    <path d="M795 298h25v25h-25zM801 292v6m13-6v6m-13 25v6m13-6v6m-25-25h6m-6 13h6m25-13h6m-6 13h6" fill="none" stroke="#fff" stroke-width="2"/>
-    <text class="label inverse" x="850" y="357" text-anchor="middle">Engine B</text>
-    <text class="small inverse" x="890" y="306" text-anchor="middle">GPU replica</text>
-    <text class="small inverse" x="890" y="327" text-anchor="middle">idle capacity</text>
-  </g>
-
-  <g filter="url(#shadow)">
-    <rect class="metrics" x="80" y="344" width="220" height="62" rx="16" fill="#fff" stroke="#d9e1ef" stroke-width="2"/>
-    <circle cx="111" cy="375" r="12" fill="#f59e0b"/>
-    <path d="M105 375h12M111 369v12" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
-    <text class="label" x="135" y="372">Prometheus</text>
-    <text class="small" x="135" y="392">health · load · cache</text>
-  </g>
-
-  <g>
-    <rect class="chip" x="672" y="196" width="113" height="34" rx="17"/>
-    <text class="small" x="728.5" y="218" text-anchor="middle">best score</text>
+  <!-- Operational footer -->
+  <g transform="translate(52 500)">
+    <circle cx="7" cy="7" r="7" fill="#18b887"/>
+    <text class="body" x="22" y="12">health-aware</text>
+    <circle cx="148" cy="7" r="7" fill="#6573ef"/>
+    <text class="body" x="163" y="12">stateless proxy</text>
+    <circle cx="310" cy="7" r="7" fill="#f59e0b"/>
+    <text class="body" x="325" y="12">Prometheus metrics</text>
+    <text class="body" x="1096" y="12" text-anchor="end">OpenAI API in · OpenAI API out</text>
   </g>
 </svg>

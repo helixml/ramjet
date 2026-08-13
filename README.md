@@ -1,37 +1,52 @@
-# mini-dynamo
+<div align="center">
 
-**Make every GPU feel warmer.** mini-dynamo is a fast, cache-aware router for
-OpenAI-compatible inference servers. It sends each request to the healthy
-replica with the best reusable prompt state—without piling work onto a busy
-GPU.
-
-<p align="center">
-  <img src="docs/assets/deployment.svg" alt="mini-dynamo routing clients across two GPU inference engines" width="960">
+<h1>mini-dynamo</h1>
+<h3>Reuse the prefix. Balance the load.</h3>
+<p>A compact Rust router that puts each OpenAI-compatible inference request on<br>the healthy GPU replica where it can do the least repeated work.</p>
+<p>
+  <a href="https://github.com/helixml/mini-dynamo/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/helixml/mini-dynamo?style=flat-square&amp;color=635bff"></a>
+  <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/github/license/helixml/mini-dynamo?style=flat-square&amp;color=18a36b"></a>
+  <a href="rust-toolchain.toml"><img alt="Rust 1.95 or newer" src="https://img.shields.io/badge/Rust-1.95%2B-f06a35?style=flat-square"></a>
 </p>
 
-```text
-score(replica) = min(prefix overlap, affinity cap) - alpha × live load
-```
+</div>
 
-## Why mini-dynamo?
+<p align="center">
+  <img src="docs/assets/deployment.svg" alt="An incoming prompt is scored by mini-dynamo and routed to the GPU replica with the best combination of reusable prefix and available capacity" width="1100">
+</p>
 
-- **More useful throughput.** Keep conversations and shared system prompts on
-  warm replicas while spilling concurrent work to idle capacity.
-- **Production-safe routing.** Health-aware failover, immediate cancellation,
-  bounded memory, and a stateless Rust proxy.
-- **Drop-in operations.** OpenAI-compatible streaming, Prometheus
-  `ds4proxy_*` metrics, `/health`, and opaque per-request route correlation.
+mini-dynamo sits between your clients and replicated model servers. It keeps
+conversations and shared system prompts near warm cache state, then lets live
+load override affinity before one replica becomes a hotspot. Clients keep the
+same OpenAI API; engines need no mini-dynamo-specific integration.
 
-On the reference 8× RTX PRO 6000 stack, the overlap/load router improved a
-shared-app concurrency test from **298 to 469 output tok/s (1.57×)** and reached
-**82.5% cached prompt tokens** in a fresh multi-app locality run. See
-[RESULTS.md](RESULTS.md) for workloads and [EXPERIMENTS.md](EXPERIMENTS.md) for
-the evidence log.
+## Why it exists
 
-## Run it
+| Reuse more | Queue less | Fail cleanly |
+| --- | --- | --- |
+| Bounded prefix fingerprints find the replica most likely to reuse prior work. | Size-weighted reservations spread cold prefills and concurrent decodes. | Active health probes, retryable failover, and immediate disconnect cancellation keep capacity honest. |
 
-mini-dynamo has good defaults. For existing engines, set the upstream list and
-start the container:
+The router is stateless, privacy-bounded, and deliberately useful without raw
+KV-cache events. The production path is just the proxy plus your existing
+OpenAI-compatible engines.
+
+## Measured on real hardware
+
+Reference stack: DeepSeek-V4-Flash-0731, two TP4 replicas, 8× RTX PRO 6000.
+
+| Result | Measured outcome |
+| --- | ---: |
+| Shared-app concurrency, load-blind → mini-dynamo | **298 → 469 output tok/s · 1.57×** |
+| Fresh 3-app × 4-session locality run | **82.5% cached prompt tokens** |
+| Whole-box deterministic code, c24/max256 | **1,820–1,844 output tok/s** |
+
+These are workload results, not theoretical peaks. Reproduce them from
+[RESULTS.md](RESULTS.md); inspect every accepted and rejected experiment in
+[EXPERIMENTS.md](EXPERIMENTS.md).
+
+## Start in one minute
+
+For existing engines, the upstream list is normally the only setting you need:
 
 ```yaml
 services:
@@ -43,7 +58,7 @@ services:
       - "9090:9090" # Prometheus
     environment:
       DS4_UPSTREAM: http://engine-a:8000,http://engine-b:8000
-      # DS4_UPSTREAM_TOKEN: ${VLLM_API_KEY} # only for protected engines
+      # DS4_UPSTREAM_TOKEN: ${VLLM_API_KEY} # if your engines require one
 ```
 
 ```bash
@@ -51,38 +66,50 @@ docker compose up -d
 curl --fail http://localhost:8000/health
 ```
 
-All tuning and experimental features are optional and off by default. See the
-[configuration reference](docs/configuration.md) for every variable. For the
-complete two-replica DeepSeek-V4/DSpark stack, use the canonical
-[Docker Compose deployment](deploy/dspark_0731/docker-compose.yaml) and its
-[operator guide](deploy/dspark_0731/README.md).
+The example pins the first public Rust release (`v0.1.0`) by immutable digest.
+Safe defaults enable locality/load routing and keep tokenizer, raw KV-event,
+exact-placement, and snapshot paths off. See the complete
+[configuration table](docs/configuration.md), or start from the validated
+[two-replica Compose stack](deploy/dspark_0731/docker-compose.yaml).
 
-## How it works
+## The routing rule
 
-mini-dynamo builds a bounded fingerprint of each reusable prompt prefix and
-scores it against every healthy replica. A size-weighted reservation subtracts
-live prefill/decode pressure, so affinity wins when it is useful and load wins
-before a warm replica becomes a hotspot. If an engine fails, requests move to a
-healthy peer; if a client disconnects, upstream work is cancelled promptly.
+```text
+score(replica) = min(prefix overlap, affinity cap) − α × live load
+```
 
-The v0.1 serving path uses approximate locality and does not depend on raw KV
-state. Exact tokenization, KV-event indexes, authenticated snapshot companions,
-and placement canaries are available for fail-closed shadow research and stay
-off unless explicitly configured.
+mini-dynamo fingerprints only a bounded prefix, scores every healthy replica,
+and reserves load before forwarding. Warm state wins when it is valuable; idle
+capacity wins when reuse no longer pays for the queue. Score ties prefer the
+deeper raw overlap.
 
-Version 0.1.0 is the first public Rust release. Its image is pinned above by
-immutable digest so the documented deployment remains reproducible.
+## Production surface
 
-## Operate with an agent
+- OpenAI-compatible chat/completions, streaming, reasoning, and tool calls.
+- `ok`, `degraded`, and `unhealthy` readiness at `GET /health`.
+- Stable `ds4proxy_*` Prometheus metrics on port `9090`.
+- Opaque `X-Mini-Dynamo-Upstream` route correlation without leaking hosts.
+- Bounded memory, request sanitization, model metadata rewriting, and upstream
+  cancellation when the client disappears.
 
-Repo-scoped agent skills capture the safe workflows:
+Exact tokenization, fenced KV indexes, authenticated snapshot companions, and
+placement canaries remain opt-in research surfaces. They fail closed and are
+not dependencies of ordinary serving.
 
-- [`$deploy-mini-dynamo`](.agents/skills/deploy-mini-dynamo/SKILL.md) — deploy
-  Docker Compose on a GPU node.
-- [`$optimize-mini-dynamo-node`](.agents/skills/optimize-mini-dynamo-node/SKILL.md)
-  — benchmark and tune one variable at a time.
-- [`$troubleshoot-mini-dynamo-node`](.agents/skills/troubleshoot-mini-dynamo-node/SKILL.md)
-  — check GPUs, containers, health, metrics, logs, and basic requests.
+## Operate it
+
+| Task | Start here |
+| --- | --- |
+| Deploy or roll back | [Docker Compose operator guide](deploy/dspark_0731/README.md) |
+| Configure the router | [Environment reference](docs/configuration.md) |
+| Understand the design | [Architecture and routing model](DESIGN.md) |
+| Inspect current work | [Roadmap](ROADMAP.md) |
+
+Codex-compatible repo skills are included for repeatable node operations:
+[`$deploy-mini-dynamo`](.agents/skills/deploy-mini-dynamo/SKILL.md),
+[`$optimize-mini-dynamo-node`](.agents/skills/optimize-mini-dynamo-node/SKILL.md),
+and
+[`$troubleshoot-mini-dynamo-node`](.agents/skills/troubleshoot-mini-dynamo-node/SKILL.md).
 
 ## Develop
 
@@ -92,12 +119,16 @@ cargo test --locked
 cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
+<details>
+<summary>Privacy-safe production-shape replay</summary>
+
 For privacy-safe production-shape validation, `bench/agent_trace.py` accepts
 only numeric/enumerated trace shapes and synthesizes all request content. A
 bounded `/tokenize` preflight adjusts for the active chat-template overhead;
 authoritative response usage still enforces the token-density gate. See the
 [sovereign trace replay contract](bench/agent_cases/README.md#sovereign-trace-shape-replay).
 
-Read [DESIGN.md](DESIGN.md) for internals, [ROADMAP.md](ROADMAP.md) for current
-work, and [AGENTS.md](AGENTS.md) for the full development and node06 benchmark
-contract. mini-dynamo is Apache-2.0 licensed.
+</details>
+
+See [AGENTS.md](AGENTS.md) for the GPU-free inner loop, full release gate, and
+node06 benchmark contract. Apache-2.0 licensed.
