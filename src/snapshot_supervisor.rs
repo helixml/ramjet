@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(report.connections_rejected_capacity, 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stalled_hello_times_out_and_releases_its_slot() {
         let (socket, listener) = TestSocket::new();
         let (shutdown_sender, shutdown) = watch::channel(false);
