@@ -485,6 +485,7 @@ async fn consume_connection(
                     ready = true;
                     observer.observe(CompanionIndexOwnerEvent::Ready);
                 }
+                ReplayExit::ObserveOnly => {}
                 ReplayExit::Shutdown => return Ok(ConnectionExit::Shutdown),
                 ReplayExit::AuthorityChanged(refreshed) => {
                     return Ok(ConnectionExit::AuthorityChanged(refreshed));
@@ -519,19 +520,28 @@ async fn consume_connection(
                 // payloads could consume replay_limit * max_payload_bytes.
                 // Fence immediately and stream one full private rebuild while
                 // this already-subscribed connection buffers newer live data.
+                let replay_within_limit = fence.can_prepare_full_replay(through);
                 rebuild(
                     source,
                     fence,
                     None,
-                    CompanionIndexOwnerRebuildReason::Replay,
+                    if replay_within_limit {
+                        CompanionIndexOwnerRebuildReason::Replay
+                    } else {
+                        CompanionIndexOwnerRebuildReason::ReplayTooLarge
+                    },
                     observer,
                     report,
                 )?;
                 if !fence.prepare_full_replay(through) {
-                    return Ok(ConnectionExit::Retry {
-                        reason: CompanionIndexOwnerRebuildReason::ReplayTooLarge,
-                        was_ready: true,
-                    });
+                    // The engine's retained history cannot establish a full
+                    // generation. Keep this already-subscribed transport and
+                    // advance only the fence's observation watermark. A later
+                    // authoritative clear can recover without reconnect churn.
+                    let action = fence.ingest(through, false);
+                    debug_assert_eq!(action, IngestAction::ObserveOnly);
+                    ready = false;
+                    continue;
                 }
                 match recover_full(
                     Arc::clone(source),
@@ -548,6 +558,9 @@ async fn consume_connection(
                     ReplayExit::Complete => {
                         observer.observe(CompanionIndexOwnerEvent::Ready);
                     }
+                    ReplayExit::ObserveOnly => {
+                        ready = false;
+                    }
                     ReplayExit::Shutdown => return Ok(ConnectionExit::Shutdown),
                     ReplayExit::AuthorityChanged(refreshed) => {
                         return Ok(ConnectionExit::AuthorityChanged(refreshed));
@@ -561,10 +574,17 @@ async fn consume_connection(
                 }
             }
             IngestAction::ObserveOnly | IngestAction::UnrecoverableGap => {
-                return Ok(ConnectionExit::Retry {
-                    reason: CompanionIndexOwnerRebuildReason::ReplayTooLarge,
-                    was_ready: true,
-                });
+                rebuild(
+                    source,
+                    fence,
+                    None,
+                    CompanionIndexOwnerRebuildReason::ReplayTooLarge,
+                    observer,
+                    report,
+                )?;
+                let action = fence.ingest(batch.sequence, batch.batch.clears_all());
+                debug_assert_eq!(action, IngestAction::ObserveOnly);
+                ready = false;
             }
         }
     }
@@ -572,6 +592,7 @@ async fn consume_connection(
 
 enum ReplayExit {
     Complete,
+    ObserveOnly,
     Shutdown,
     AuthorityChanged(Option<EngineIncarnation>),
     Retry(CompanionIndexOwnerRebuildReason),
@@ -614,9 +635,11 @@ async fn bootstrap_from_live(
         IngestAction::Duplicate => Ok(ReplayExit::Retry(
             CompanionIndexOwnerRebuildReason::ReplayInvalid,
         )),
-        IngestAction::ObserveOnly | IngestAction::UnrecoverableGap => Ok(ReplayExit::Retry(
-            CompanionIndexOwnerRebuildReason::ReplayTooLarge,
-        )),
+        // Old, still-running engines commonly have more history than a new
+        // companion is willing to replay. Remaining subscribed and fenced is
+        // stable: ordinary events advance observation only, while an explicit
+        // clear establishes the next authoritative generation.
+        IngestAction::ObserveOnly | IngestAction::UnrecoverableGap => Ok(ReplayExit::ObserveOnly),
     }
 }
 
@@ -981,6 +1004,18 @@ mod tests {
         }
     }
 
+    fn clear_batch(sequence: u64) -> SequencedBatch {
+        SequencedBatch {
+            sequence,
+            payload: Bytes::from_static(b"bounded-clear"),
+            batch: KvEventBatch {
+                timestamp: 1.0,
+                events: vec![KvEvent::AllBlocksCleared],
+                data_parallel_rank: Some(0),
+            },
+        }
+    }
+
     enum ReplayPlan {
         Complete(Vec<SequencedBatch>),
         Pending(Arc<AtomicBool>),
@@ -1077,9 +1112,18 @@ mod tests {
         transports: Vec<Box<dyn CompanionKvEventTransport>>,
         observer: Arc<RecordingObserver>,
     ) -> CompanionIndexOwner {
+        owner_with_replay_limit(source, transports, observer, 16)
+    }
+
+    fn owner_with_replay_limit(
+        source: Arc<CompanionIndexSource>,
+        transports: Vec<Box<dyn CompanionKvEventTransport>>,
+        observer: Arc<RecordingObserver>,
+        replay_limit: u64,
+    ) -> CompanionIndexOwner {
         CompanionIndexOwner::new(
             CompanionIndexOwnerConfig {
-                replay_limit: 16,
+                replay_limit,
                 reconnect_min: Duration::from_millis(5),
                 reconnect_max: Duration::from_millis(20),
             },
@@ -1336,6 +1380,126 @@ mod tests {
 
         shutdown_tx.send(true).unwrap();
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_history_beyond_replay_limit_stays_connected_until_clear_boundary() {
+        let source = source();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (activity_tx, activity_rx) = mpsc::unbounded_channel();
+        let transport = MockTransport {
+            activities: activity_rx,
+            replays: VecDeque::new(),
+            requests: Arc::clone(&requests),
+        };
+        let observer = Arc::new(RecordingObserver::default());
+        let (_authority_tx, authority_rx) = watch::channel(Some(incarnation("engine-a", 1)));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(
+            owner_with_replay_limit(
+                Arc::clone(&source),
+                vec![Box::new(transport)],
+                Arc::clone(&observer),
+                2,
+            )
+            .run(authority_rx, shutdown_rx),
+        );
+
+        activity_tx
+            .send(Ok(LiveActivity::Batch(batch(10, Some(10)))))
+            .unwrap();
+        wait_until(|| {
+            observer
+                .0
+                .lock()
+                .unwrap()
+                .contains(&CompanionIndexOwnerEvent::Connected)
+        })
+        .await;
+        let fenced_generation = source.status().companion_generation;
+        activity_tx
+            .send(Ok(LiveActivity::Batch(batch(11, Some(11)))))
+            .unwrap();
+        activity_tx
+            .send(Ok(LiveActivity::Batch(clear_batch(12))))
+            .unwrap();
+        wait_until(|| source.status().ready && source.status().watermark == Some(12)).await;
+        assert_eq!(source.status().indexed_blocks, 0);
+        assert_eq!(source.status().companion_generation, fenced_generation);
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(
+            observer
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| **event == CompanionIndexOwnerEvent::ConnectAttempt)
+                .count(),
+            1
+        );
+
+        shutdown_tx.send(true).unwrap();
+        let report = task.await.unwrap().unwrap();
+        assert_eq!(report.connections, 1);
+        assert_eq!(report.rebuilds, 1);
+    }
+
+    #[tokio::test]
+    async fn live_gap_beyond_replay_limit_stays_connected_until_clear_boundary() {
+        let source = source();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (activity_tx, activity_rx) = mpsc::unbounded_channel();
+        let transport = MockTransport {
+            activities: activity_rx,
+            replays: VecDeque::new(),
+            requests: Arc::clone(&requests),
+        };
+        let observer = Arc::new(RecordingObserver::default());
+        let (_authority_tx, authority_rx) = watch::channel(Some(incarnation("engine-a", 1)));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(
+            owner_with_replay_limit(
+                Arc::clone(&source),
+                vec![Box::new(transport)],
+                Arc::clone(&observer),
+                2,
+            )
+            .run(authority_rx, shutdown_rx),
+        );
+
+        activity_tx
+            .send(Ok(LiveActivity::Batch(batch(0, Some(10)))))
+            .unwrap();
+        wait_until(|| source.status().ready).await;
+        activity_tx
+            .send(Ok(LiveActivity::Batch(batch(4, Some(11)))))
+            .unwrap();
+        wait_until(|| !source.status().ready).await;
+        let fenced_generation = source.status().companion_generation;
+        activity_tx
+            .send(Ok(LiveActivity::Batch(batch(5, Some(12)))))
+            .unwrap();
+        activity_tx
+            .send(Ok(LiveActivity::Batch(clear_batch(6))))
+            .unwrap();
+        wait_until(|| source.status().ready && source.status().watermark == Some(6)).await;
+        assert_eq!(source.status().companion_generation, fenced_generation);
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(
+            observer
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| **event == CompanionIndexOwnerEvent::ConnectAttempt)
+                .count(),
+            1
+        );
+
+        shutdown_tx.send(true).unwrap();
+        let report = task.await.unwrap().unwrap();
+        assert_eq!(report.connections, 1);
+        assert_eq!(report.rebuilds, 2);
     }
 
     #[tokio::test]

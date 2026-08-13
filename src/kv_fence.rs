@@ -208,13 +208,19 @@ impl KvEventFence {
     /// The caller must already have discarded the prior generation's index.
     /// Only a complete range beginning at sequence zero can establish trust
     /// without retaining any state from the disconnected generation.
+    #[must_use]
+    pub const fn can_prepare_full_replay(&self, through: u64) -> bool {
+        match through.checked_add(1) {
+            Some(next_sequence) => next_sequence <= self.replay_limit,
+            None => false,
+        }
+    }
+
     pub fn prepare_full_replay(&mut self, through: u64) -> bool {
-        let Some(next_sequence) = through.checked_add(1) else {
-            return false;
-        };
-        if next_sequence > self.replay_limit {
+        if !self.can_prepare_full_replay(through) {
             return false;
         }
+        let next_sequence = through + 1;
         self.next_sequence = Some(next_sequence);
         self.pending = Some(PendingReplay {
             from: 0,

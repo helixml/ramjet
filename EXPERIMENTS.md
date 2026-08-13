@@ -3382,3 +3382,28 @@ markup but cannot repair arbitrary KV/graph output. The exact issue #32 live
 response cannot be replayed byte-for-byte because the privacy-bounded journal
 correctly retained only structural outcomes; the synthetic fixtures reproduce
 the parser shapes, not production content.
+
+## 2026-08-13 — r44 stable observe-only owner for old engine history
+
+The process owner now treats history older than its bounded replay window as a
+stable fenced state on the already-installed live subscription. This matters
+for node06 engine A: a newly started companion can encounter a current sequence
+beyond its 8,192-event recovery budget. Retrying the transport for every new
+event cannot recover missing history and would churn connections, companion
+generations, and logs while remaining unable to route exactly.
+
+On startup, over-limit events now advance only the private fence's observation
+watermark. After an over-limit live gap, the source and all sessions are fenced
+once, then the same behavior applies. Neither case requests replay, applies
+partial index state, reconnects, or reports ready. A genuine
+`AllBlocksCleared` event on that subscription resets and publishes an empty
+authoritative boundary; an attested incarnation change still takes the normal
+fresh-authority path. The replay-too-large rebuild reason remains visible as a
+closed, content-free observer value.
+
+Two async lifecycle tests cover startup at sequence 10 with a replay limit of
+2 and a ready source receiving a gap from 0 to 4. In each case another ordinary
+event causes zero reconnects, zero replay requests, and zero generation churn;
+the following clear restores readiness on the original connection. The full
+library suite passed 286/286 tests in 0.68 seconds. This is still library-only;
+node06, images, and production Compose were not changed.
