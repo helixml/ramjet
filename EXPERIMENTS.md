@@ -3321,3 +3321,64 @@ capacity is allocated from `max_model_len`, so it fails closed if either side
 of the invariant moves. Nine focused unit tests passed in 0.004s. No image was
 built or pushed and node06 was not touched. A packaged successor still needs
 the retained parser fixtures before any GPU smoke.
+## 2026-08-13 — Infernal r4 parser source reconstruction and GPU-free gate
+
+The Infernal r4 receipt was reconstructed without touching node06. The exact
+composition is Docker source `0040f0af0670d0e5bb0f6bea6ee7cd2de2990b01`,
+vLLM base `ce5f50f6d01b02336c4207f11277fd7bedacb4d6`, integration-patch SHA256
+`dec8963846acbd52dd76500900286fa596da83cafbe1abbc55a8b190e16b8279`, and
+result tree `3226eb7ff642702908f502a2402f9d083d16511c`. Applying the immutable
+release patch to that base and running `git write-tree` reproduced the receipt's
+result tree exactly. The probe's deterministic V4 candidate-surface identity
+for r4 is
+`sha256:149a52d9d606899a47adb55f460de22ab06eee1d00e4c1e68e5065efeab3ade3`;
+it includes every V4 runtime file modified by #49117, including the shared
+parser engine and tool-property helper even though the lightweight streaming
+fixture stubs their heavyweight dependencies.
+The image tested in issue #32 was
+`voipmonitor/vllm:infernal-invocation-vllm3226eb7-b12x1584743-fi1ac6942-cu133-torch213-20260812-r4`
+at registry digest
+`sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6`.
+
+Upstream vLLM PR #49117 head
+`7ef0ae2480799e95fb7cb801a8105c1db2585164` was compared from its base
+`34bb795ff3efee6cc08c9dd104deceefff2c4d55`. Its DeepSeek V4-only delta
+applies cleanly to four source files and `deepseek_v4.py`. There is one small
+source conflict in `streaming_parser_engine.py`: retain both r4's projected
+skip-state cleanup and #49117's recovery-hold abort. The V4 test file conflicts
+only because r4's duplicate-closer regression and #49117's new recovery suite
+were inserted at the same location; retain both. R4's duplicate-closer
+transition itself is orthogonal and applied cleanly.
+
+A new stdlib-only probe imports the actual composed `deepseek_v4_config` and
+`StreamingParserEngine`, without torch, a vLLM environment, or GPUs. Seven
+synthetic cases cover wrapped and orphan parallel calls, split markers,
+undeclared tools, `tool_choice=none`, and the malformed `toolcalls` opener from
+vLLM #51914. The immutable r4 source matched its profile in 0.04 seconds:
+orphan parallel output produced zero calls and leaked DSML. R4 plus #49117 also
+matched its profile in 0.04 seconds: both orphan calls were recovered with no
+content leak, including split markers, while undeclared and suppressed calls
+remained content.
+
+#49117 is necessary but not sufficient for #51914. Given
+`<｜DSML｜toolcalls><｜DSML｜invoke ...>`, it recovers the valid declared invokes
+but emits the malformed opener as content, so the agent correctness gate still
+fails. The minimal adjacent patch should hold that exact malformed opener and
+suppress it only after a following orphan invoke validates against a tool
+declared by the request; otherwise it must replay the prefix and invoke
+byte-for-byte as content. Two literal terminals combining the malformed opener
+and following invoke prefix (inline and LF-separated) can reuse #49117's hold
+without changing the engine: that three-constant/two-transition prototype made
+all seven `complete` cases pass in 0.05 seconds, including split chunks. Its
+V4 candidate-surface identity is
+`sha256:29c4307be05c78bfde1fbc043cc9189de66b85817a19e33b17eb76104319bbef`.
+The
+committed `complete` fixture profile encodes this remaining gate.
+
+Issue #48089 should not receive a parser workaround. Its concurrency-dependent,
+no-tools, and non-streaming corruption is now attributed to the C128A FULL-graph
+row-stride defect tracked by vLLM #51318. A parser can fail closed on corrupt
+markup but cannot repair arbitrary KV/graph output. The exact issue #32 live
+response cannot be replayed byte-for-byte because the privacy-bounded journal
+correctly retained only structural outcomes; the synthetic fixtures reproduce
+the parser shapes, not production content.
