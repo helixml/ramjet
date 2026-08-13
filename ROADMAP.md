@@ -566,7 +566,11 @@ node06). The design rationale for each lives in DESIGN.md.
   libzmq work on shutdown. A reconnect stays fenced until a fresh live watermark
   defines the replay boundary; it never trusts the last pre-disconnect value.
   Incremental gaps currently trigger a streamed full private rebuild rather
-  than retaining an adversarially large decoded replay vector. Next wire one
+  than retaining an adversarially large decoded replay vector. If an old engine
+  or live gap is already beyond that bounded replay window, the same subscribed
+  connection remains stably fenced and observe-only; ordinary subsequent events
+  neither cause reconnect/generation churn nor restore authority, while a real
+  all-blocks clear establishes a safe new boundary. Next wire one
   authenticated owner/socket per engine into an executable and run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
 

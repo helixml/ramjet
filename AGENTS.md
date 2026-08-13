@@ -205,7 +205,11 @@ an incremental gap the same way until the source has a transactional bounded
 gap stage: do not retain `replay_limit * max_payload_bytes` decoded batches or
 publish a partially validated gap. Generation-guard every blocking replay fold,
 make repeated connect failures and already-created clean stages idempotent, and
-keep observer events closed and content-free.
+keep observer events closed and content-free. If the current watermark or a
+live gap exceeds the replay limit, keep the installed SUB connection in stable
+fenced observe-only mode. Do not reconnect on each subsequent event: only an
+authoritative all-blocks clear or an attested incarnation change may restore
+trust without a complete replay from zero.
 
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
