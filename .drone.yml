@@ -80,29 +80,28 @@ steps:
 
   # Drone 2.12 silently discards `when.paths`, so every publisher has a
   # fail-closed repository-side changeset guard. A nonmatching step exits before
-  # dockerd or registry login; an unavailable revision is an error, not publish.
+  # registry login or Kaniko; an unavailable revision is an error, not publish.
   - name: publish-rust-deps-image
-    image: plugins/docker
+    image: gcr.io/kaniko-project/executor@sha256:2562c4fe551399514277ffff7dcca9a3b1628c4ea38cb017d7286dc6ea52f4cd
     pull: if-not-exists
     environment:
-      DOCKER_BUILDKIT: "1"
+      GHCR_USERNAME:
+        from_secret: ghcr_username
+      GHCR_TOKEN:
+        from_secret: ghcr_token
     commands:
       - |
         status=0
         sh bench/drone_publish_guard.sh rust-deps || status=$?
         if [ "$status" -eq 3 ]; then exit 0; fi
         if [ "$status" -ne 0 ]; then exit "$status"; fi
-        exec /bin/drone-docker
-    settings:
-      registry: ghcr.io
-      repo: ghcr.io/helixml/mini-dynamo
-      dockerfile: Dockerfile.deps
-      username:
-        from_secret: ghcr_username
-      password:
-        from_secret: ghcr_token
-      tags:
-        - rust-deps-sha256-3b4a156b301af9e116eecbd3cc0df2b5a38d43344d859ef40149499f45141cdf
+        auth=$(printf '%s:%s' "$GHCR_USERNAME" "$GHCR_TOKEN" | base64 | tr -d '\n')
+        mkdir -p /kaniko/.docker
+        printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" >/kaniko/.docker/config.json
+        exec /kaniko/executor --context . --dockerfile Dockerfile.deps \
+          --destination ghcr.io/helixml/mini-dynamo:rust-deps-sha256-3b4a156b301af9e116eecbd3cc0df2b5a38d43344d859ef40149499f45141cdf \
+          --cache=true --cache-repo=ghcr.io/helixml/mini-dynamo-build-cache \
+          --cache-ttl=336h --snapshot-mode=redo --reproducible
     when:
       event:
         - push
@@ -114,30 +113,28 @@ steps:
   # for the dependency guard; a dependency-input change seeds the required base
   # before either app publisher starts.
   - name: publish-image
-    image: plugins/docker
+    image: gcr.io/kaniko-project/executor@sha256:2562c4fe551399514277ffff7dcca9a3b1628c4ea38cb017d7286dc6ea52f4cd
     pull: if-not-exists
     environment:
-      DOCKER_BUILDKIT: "1"
+      GHCR_USERNAME:
+        from_secret: ghcr_username
+      GHCR_TOKEN:
+        from_secret: ghcr_token
     commands:
       - |
         status=0
         sh bench/drone_publish_guard.sh lb || status=$?
         if [ "$status" -eq 3 ]; then exit 0; fi
         if [ "$status" -ne 0 ]; then exit "$status"; fi
-        exec /bin/drone-docker
-    settings:
-      registry: ghcr.io
-      repo: ghcr.io/helixml/mini-dynamo
-      username:
-        from_secret: ghcr_username
-      password:
-        from_secret: ghcr_token
-      build_args:
-        - OCI_VERSION=rust-${DRONE_COMMIT_SHA:0:7}
-        - OCI_REVISION=${DRONE_COMMIT_SHA}
-      tags:
-        - rust-${DRONE_COMMIT_SHA:0:7}
-        - rust-edge
+        auth=$(printf '%s:%s' "$GHCR_USERNAME" "$GHCR_TOKEN" | base64 | tr -d '\n')
+        mkdir -p /kaniko/.docker
+        printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" >/kaniko/.docker/config.json
+        exec /kaniko/executor --context . --dockerfile Dockerfile \
+          --destination ghcr.io/helixml/mini-dynamo:rust-${DRONE_COMMIT_SHA:0:7} \
+          --destination ghcr.io/helixml/mini-dynamo:rust-edge \
+          --build-arg OCI_REVISION=${DRONE_COMMIT_SHA} \
+          --cache=true --cache-repo=ghcr.io/helixml/mini-dynamo-build-cache \
+          --cache-ttl=336h --snapshot-mode=redo --reproducible
     when:
       event:
         - push
@@ -149,31 +146,28 @@ steps:
   # Build it only when its Rust/build inputs change; it shares the same explicit
   # dependency image as the ordinary LB.
   - name: publish-companion-image
-    image: plugins/docker
+    image: gcr.io/kaniko-project/executor@sha256:2562c4fe551399514277ffff7dcca9a3b1628c4ea38cb017d7286dc6ea52f4cd
     pull: if-not-exists
     environment:
-      DOCKER_BUILDKIT: "1"
+      GHCR_USERNAME:
+        from_secret: ghcr_username
+      GHCR_TOKEN:
+        from_secret: ghcr_token
     commands:
       - |
         status=0
         sh bench/drone_publish_guard.sh companion || status=$?
         if [ "$status" -eq 3 ]; then exit 0; fi
         if [ "$status" -ne 0 ]; then exit "$status"; fi
-        exec /bin/drone-docker
-    settings:
-      registry: ghcr.io
-      repo: ghcr.io/helixml/mini-dynamo
-      dockerfile: Dockerfile.companion
-      username:
-        from_secret: ghcr_username
-      password:
-        from_secret: ghcr_token
-      build_args:
-        - OCI_VERSION=companion-rust-${DRONE_COMMIT_SHA:0:7}
-        - OCI_REVISION=${DRONE_COMMIT_SHA}
-      tags:
-        - companion-rust-${DRONE_COMMIT_SHA:0:7}
-        - companion-rust-edge
+        auth=$(printf '%s:%s' "$GHCR_USERNAME" "$GHCR_TOKEN" | base64 | tr -d '\n')
+        mkdir -p /kaniko/.docker
+        printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" >/kaniko/.docker/config.json
+        exec /kaniko/executor --context . --dockerfile Dockerfile.companion \
+          --destination ghcr.io/helixml/mini-dynamo:companion-rust-${DRONE_COMMIT_SHA:0:7} \
+          --destination ghcr.io/helixml/mini-dynamo:companion-rust-edge \
+          --build-arg OCI_REVISION=${DRONE_COMMIT_SHA} \
+          --cache=true --cache-repo=ghcr.io/helixml/mini-dynamo-build-cache \
+          --cache-ttl=336h --snapshot-mode=redo --reproducible
     when:
       event:
         - push
@@ -273,25 +267,16 @@ steps:
       - release-deployment-compose
 
   - name: release-image
-    image: plugins/docker
+    image: gcr.io/go-containerregistry/crane@sha256:ba318977330d2a41fdd4af7536d35567a4ceb204252b7dfcd19b01dad2567793
     pull: if-not-exists
     environment:
-      DOCKER_BUILDKIT: "1"
-    commands:
-      - sh bench/drone_release_guard.sh lb
-      - exec /bin/drone-docker
-    settings:
-      registry: ghcr.io
-      repo: ghcr.io/helixml/mini-dynamo
-      username:
+      GHCR_USERNAME:
         from_secret: ghcr_username
-      password:
+      GHCR_TOKEN:
         from_secret: ghcr_token
-      build_args:
-        - OCI_VERSION=${DRONE_TAG}
-        - OCI_REVISION=${DRONE_COMMIT_SHA}
-      tags:
-        - ${DRONE_TAG}
+    commands:
+      - export PATH=/ko-app:$PATH
+      - sh bench/drone_release_publish.sh lb
     when:
       event:
         - tag
@@ -299,26 +284,16 @@ steps:
       - release-quality-complete
 
   - name: release-companion-image
-    image: plugins/docker
+    image: gcr.io/go-containerregistry/crane@sha256:ba318977330d2a41fdd4af7536d35567a4ceb204252b7dfcd19b01dad2567793
     pull: if-not-exists
     environment:
-      DOCKER_BUILDKIT: "1"
-    commands:
-      - sh bench/drone_release_guard.sh companion
-      - exec /bin/drone-docker
-    settings:
-      registry: ghcr.io
-      repo: ghcr.io/helixml/mini-dynamo
-      dockerfile: Dockerfile.companion
-      username:
+      GHCR_USERNAME:
         from_secret: ghcr_username
-      password:
+      GHCR_TOKEN:
         from_secret: ghcr_token
-      build_args:
-        - OCI_VERSION=${DRONE_TAG}
-        - OCI_REVISION=${DRONE_COMMIT_SHA}
-      tags:
-        - companion-${DRONE_TAG}
+    commands:
+      - export PATH=/ko-app:$PATH
+      - sh bench/drone_release_publish.sh companion
     when:
       event:
         - tag

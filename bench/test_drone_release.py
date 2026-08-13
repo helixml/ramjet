@@ -8,6 +8,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLANNER = ROOT / "bench" / "drone_release_plan.sh"
 GUARD = ROOT / "bench" / "drone_release_guard.sh"
+PUBLISH = ROOT / "bench" / "drone_release_publish.sh"
 
 
 class DroneReleaseTest(unittest.TestCase):
@@ -181,6 +182,40 @@ class DroneReleaseTest(unittest.TestCase):
         linked = self.run_script(GUARD, "lb", environment=environment)
         self.assertEqual(linked.returncode, 2)
         self.assertEqual(linked.stderr.strip(), "release_guard=error reason=invalid_marker")
+
+    def test_registry_publish_validates_labels_and_preserves_digest(self):
+        environment = self.environment(GHCR_USERNAME="fixture", GHCR_TOKEN="secret")
+        plan = self.run_script(PLANNER, environment=environment)
+        self.assertEqual(plan.returncode, 0, plan)
+        sha = environment["DRONE_COMMIT_SHA"]
+        crane = self.fake_bin / "crane"
+        crane.write_text(
+            "#!/bin/sh\n"
+            "case \"${1-}\" in\n"
+            "  auth) exit 0 ;;\n"
+            "  config) printf '%s\\n' '{\"config\":{\"Labels\":{"
+            f"\"org.opencontainers.image.source\":\"https://github.com/helixml/mini-dynamo\","
+            f"\"org.opencontainers.image.version\":\"1.2.0-alpha.1\","
+            f"\"org.opencontainers.image.revision\":\"{sha}\"}}}}' ;;\n"
+            "  digest) printf '%s\\n' sha256:fixture ;;\n"
+            "  copy) printf '%s\\n' \"$2 -> $3\" >> crane-copies ;;\n"
+            "  *) exit 1 ;;\n"
+            "esac\n"
+        )
+        crane.chmod(0o755)
+        for kind in ("lb", "companion"):
+            result = self.run_script(PUBLISH, kind, environment=environment)
+            self.assertEqual(result.returncode, 0, result)
+            self.assertEqual(
+                result.stdout.strip(), f"release_publish=complete kind={kind}"
+            )
+        copies = (self.root / "crane-copies").read_text()
+        short = sha[:7]
+        self.assertIn(f":rust-{short} -> ghcr.io/helixml/mini-dynamo:v1.2.0-alpha.1", copies)
+        self.assertIn(
+            f":companion-rust-{short} -> ghcr.io/helixml/mini-dynamo:companion-v1.2.0-alpha.1",
+            copies,
+        )
 
 
 if __name__ == "__main__":

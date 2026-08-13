@@ -27,27 +27,36 @@ class DroneReleaseConfigTest(unittest.TestCase):
                 rf"(?ms)release-quality-complete.*?depends_on:.*?- {step}",
             )
 
-    def test_release_publishers_are_tag_only_immutable_and_quality_gated(self):
+    def test_release_publishers_copy_qualified_images_without_building(self):
         release = DRONE.read_text().split("\n---\n")[-1]
         expected = {
-            "release-image": ("lb", "- ${DRONE_TAG}"),
-            "release-companion-image": ("companion", "- companion-${DRONE_TAG}"),
+            "release-image": "lb",
+            "release-companion-image": "companion",
         }
-        for step, (kind, image_tag) in expected.items():
+        for step, kind in expected.items():
             section = re.search(
                 rf"(?ms)^  - name: {step}\n(.*?)(?=^  - name: |^trigger:)", release
             )
             self.assertIsNotNone(section, step)
             body = section.group(1)
-            self.assertIn(f"sh bench/drone_release_guard.sh {kind}", body)
-            self.assertIn("exec /bin/drone-docker", body)
-            self.assertIn(image_tag, body)
-            self.assertIn("- OCI_VERSION=${DRONE_TAG}", body)
-            self.assertIn("- OCI_REVISION=${DRONE_COMMIT_SHA}", body)
-            self.assertEqual(body.count("tags:"), 1)
+            self.assertIn("gcr.io/go-containerregistry/crane@sha256:", body)
+            self.assertIn(f"sh bench/drone_release_publish.sh {kind}", body)
+            self.assertNotIn("drone-docker", body)
+            self.assertNotIn("settings:", body)
+            self.assertNotIn("tags:", body)
             self.assertRegex(body, r"(?ms)when:\n      event:\n        - tag")
             self.assertRegex(body, r"(?ms)depends_on:\n      - release-quality-complete")
             self.assertNotIn("edge", body)
+
+        script = (ROOT / "bench" / "drone_release_publish.sh").read_text()
+        self.assertIn('source="ghcr.io/helixml/mini-dynamo:rust-$short"', script)
+        self.assertIn('source="ghcr.io/helixml/mini-dynamo:companion-rust-$short"', script)
+        self.assertIn('destination="ghcr.io/helixml/mini-dynamo:$tag"', script)
+        self.assertIn('destination="ghcr.io/helixml/mini-dynamo:companion-$tag"', script)
+        self.assertIn('crane copy "$source" "$destination"', script)
+        self.assertIn('[ "$source_digest" = "$destination_digest" ]', script)
+        for label in ("source_label_mismatch", "version_label_mismatch", "revision_label_mismatch"):
+            self.assertIn(label, script)
 
     def test_runtime_images_declare_exact_oci_identity_labels(self):
         for name in ("Dockerfile", "Dockerfile.companion"):
@@ -56,26 +65,18 @@ class DroneReleaseConfigTest(unittest.TestCase):
                 'org.opencontainers.image.source="https://github.com/helixml/mini-dynamo"',
                 dockerfile,
             )
-            self.assertIn('org.opencontainers.image.version="${OCI_VERSION}"', dockerfile)
+            self.assertIn('org.opencontainers.image.version="0.1.0"', dockerfile)
             self.assertIn('org.opencontainers.image.revision="${OCI_REVISION}"', dockerfile)
-            self.assertIn("ARG OCI_VERSION", dockerfile)
             self.assertIn("ARG OCI_REVISION", dockerfile)
 
     def test_main_candidates_also_receive_exact_revision_metadata(self):
         quality = DRONE.read_text().split("\n---\n")[0]
-        for step, version in (
-            ("publish-image", "OCI_VERSION=rust-${DRONE_COMMIT_SHA:0:7}"),
-            (
-                "publish-companion-image",
-                "OCI_VERSION=companion-rust-${DRONE_COMMIT_SHA:0:7}",
-            ),
-        ):
+        for step in ("publish-image", "publish-companion-image"):
             section = re.search(
                 rf"(?ms)^  - name: {step}\n(.*?)(?=^  - name: |^trigger:)", quality
             )
             self.assertIsNotNone(section, step)
             body = section.group(1)
-            self.assertIn(version, body)
             self.assertIn("OCI_REVISION=${DRONE_COMMIT_SHA}", body)
 
 

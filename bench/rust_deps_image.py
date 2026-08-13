@@ -56,7 +56,7 @@ def validation_errors(root: pathlib.Path = ROOT) -> list[str]:
 
     drone = (root / ".drone.yml").read_text()
     tag = f"rust-deps-sha256-{expected_key}"
-    if drone.count(f"- {tag}") != 1:
+    if drone.count(tag) != 1:
         errors.append(f".drone.yml must publish exactly one {tag!r} tag")
     return errors
 
@@ -81,8 +81,8 @@ def update_references(root: pathlib.Path = ROOT) -> str:
         ),
         (
             pathlib.Path(".drone.yml"),
-            r"(?m)^        - rust-deps-sha256-[0-9a-f]+$",
-            f"        - rust-deps-sha256-{key}",
+            r"rust-deps-sha256-[0-9a-f]+",
+            f"rust-deps-sha256-{key}",
         ),
     )
     for relative, pattern, replacement in replacements:

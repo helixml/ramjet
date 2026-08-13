@@ -4107,7 +4107,10 @@ an exact `v<Cargo package version>` match. It atomically publishes private LB
 and companion markers bound to both SHA and tag. The Docker steps revalidate
 those markers and the tag event without Git, wait for the complete Rust lint,
 Rust test, agent-protocol, and deployment-Compose gate, then publish only
-`${DRONE_TAG}` and `companion-${DRONE_TAG}`. No edge alias is present.
+`${DRONE_TAG}` and `companion-${DRONE_TAG}` by registry manifest copy. The
+publisher verifies OCI source, semantic version, and exact Git revision on the
+existing SHA-tagged candidates, and requires copied destination digest equality.
+It performs no build and no edge alias is present.
 
 Eight focused behavioral/static tests finished in 0.74s. They cover a valid
 prerelease, push/PR rejection in both planner and publisher, tag/ref/version/HEAD
@@ -4116,3 +4119,16 @@ malicious plan symlink replacement, stale/symlink marker rejection, trigger
 isolation, immutable tag names, and full-quality dependencies. Drone lint also
 accepted both pipeline documents. No tag, release, image, registry write, or
 node06 change was made.
+
+The first `0.1.0` dependency seed exposed a separate normal-main issue in Drone
+#256 and its single retry #258. Both passed all quality steps, selected the
+dependency publisher, then failed in 16–17s because `/usr/local/bin/dockerd`
+never became reachable; the dependent LB and companion publishers correctly
+stayed skipped. Compared with successful pre-guard #245, the compiled step no
+longer carried plugin schema metadata after `commands` was added, so automatic
+privileged-plugin treatment was absent. The repository API reports
+`trusted=false`; the supplied account's apparently successful trust update did
+not change server state, and normal lint rejects explicit privilege. Main
+publishers now use a digest-pinned unprivileged Kaniko executor with the same
+fail-closed plan and a GHCR remote cache. The tag pipeline uses unprivileged
+`crane` manifest copies. A third blind retry was not attempted.

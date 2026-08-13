@@ -84,8 +84,8 @@ workspace HEAD equals `DRONE_COMMIT_SHA`, fetches a missing shallow predecessor
 by exact object ID, and atomically replaces `.drone-publish-plan` with private
 per-image markers. On pull requests it does no planning. Every GHCR step calls
 `bench/drone_publish_guard.sh`, which requires only its revision-bound marker
-and never Git, before starting the Docker plugin. A missing marker skips the
-step successfully before `/bin/drone-docker`, dockerd, or registry login; a
+and never Git, before starting Kaniko. A missing marker skips the step
+successfully before registry login or image construction; a
 missing/invalid/unfetchable revision, unsafe marker, or empty changeset fails
 closed. Keep the path matrix and pipeline wrapper tests current whenever image
 inputs change.
@@ -116,12 +116,13 @@ docker build -f Dockerfile.deps -t "$deps_ref" .
 docker build --build-arg RUST_DEPS_IMAGE="$deps_ref" .
 ```
 
-`Cargo.toml` deliberately limits the crate package to Rust sources, examples,
-compatibility fixtures, and Cargo manifests. This keeps edits under `bench/`
-and the operational Markdown files from invalidating the thin-LTO release
-artifact. If a non-Rust edit unexpectedly triggers an 18–20s relink, run
-`cargo package --allow-dirty --list` and remove the accidental package input;
-do not paper over it with another target directory.
+`Cargo.toml` deliberately includes Rust sources, examples, compatibility
+fixtures, manifests, and the public README/CHANGELOG/RELEASE/LICENSE documents.
+The release Dockerfiles still copy only manifests plus `src/` and, for the LB,
+`compat/`, so benchmark and operational-document edits do not invalidate the
+container's thin-LTO build layer. If an unrelated edit unexpectedly triggers an
+18–20s relink, inspect both `cargo package --allow-dirty --list` and Docker
+`COPY` inputs; do not paper over it with another target directory.
 
 The router is the interesting surface — `src/router.rs` contains the active
 Rust tests and frozen legacy fingerprint goldens. Add a Rust test for every
@@ -355,7 +356,9 @@ ssh node06 'cd /home/luke/inference/dspark_0731 \
 ssh node06 'docker logs ds4-loadbalancer --tail 1; curl -s :8007/metrics | grep ds4proxy_upstream_up'
 ```
 
-Rollback is the same command with `LB_IMAGE=...:1.0.1`. The LB is stateless;
+Rollback is the same command with the previously accepted immutable
+`LB_IMAGE=repository:tag@sha256:digest`, recorded in the experiment/deployment
+journal. Never roll back through a mutable tag alone. The LB is stateless;
 swapping it never touches the engines or their KV caches.
 
 Every tool that recreates `ds4-loadbalancer` must hold the same exclusive
@@ -395,9 +398,11 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
 
 ## Fast iteration rules
 
-- Run independent local gates together: Rust tests/Clippy and Python benchmark
-  tests do not depend on one another. Keep Cargo's shared
-  `target/` and Docker BuildKit cache warm; do not clean either between runs.
+- Keep exactly one Rust lane against the shared `target/`: do not overlap
+  Clippy, tests, or release builds. Run Python protocol/benchmark tests and
+  Compose validation beside that one Rust lane because they do not consume its
+  artifacts. Keep Cargo's shared target and Docker BuildKit cache warm; do not
+  clean either between runs.
 - Drone intentionally runs once per PR (and once after merge on `main`), not
   again for every feature-branch push. Its Rust lane omits a redundant release
   build: the local pre-push gate builds release, and Drone's post-merge main
@@ -417,21 +422,32 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   any Docker activity on an equivalent diff as a guard regression. Source-only
   builds should pay the base pull plus one crate relink, never dependency
   compilation. Build #233's 135s/129s publishers remain the dependency-cache
-  regression control. Do not add privileged cache plugins or `purge: false`:
-  the publisher daemons remain ephemeral.
+  regression control. #256/#258 proved guarded `plugins/docker` steps lose
+  automatic plugin privilege, while this Drone repo is untrusted and cannot
+  request explicit privilege. Main publishing therefore uses a digest-pinned,
+  unprivileged Kaniko executor after the same shell guard, with a GHCR remote
+  layer cache. Keep credentials scoped to publisher steps and never add
+  privilege to PR, main, or tag-copy steps.
   Node06 deploys should keep using the warm local `bench/build_transfer.sh`
   path because it reuses the development BuildKit cache.
 - Release tags use the separate `release-tags` Drone pipeline. It triggers only
   for `refs/tags/v*`, repeats the full Rust/Python/Compose quality gate, and
-  publishes only `v<crate-version>` for the LB and
-  `companion-v<crate-version>` for the companion. It never publishes edge or
-  commit aliases. `bench/drone_release_plan.sh` requires the tag, ref, checked
+  promotes only the already-qualified `rust-$shortsha` and
+  `companion-rust-$shortsha` manifests to `v<crate-version>` and
+  `companion-v<crate-version>`. It never rebuilds or publishes edge aliases.
+  `bench/drone_release_plan.sh` requires the tag, ref, checked
   out commit, and Cargo package version to agree before producing private
   revision-bound markers; each publisher rechecks its marker and tag event
-  without Git. Cargo build metadata (`+...`) is rejected because it is not a
-  valid Docker tag. Merge and qualify a version bump on `main` before creating
-  its tag so the content-keyed dependency image already exists. Never create a
-  tag merely to test the pipeline; unit/static tests and Drone PR quality are
+  without Git. The registry publisher verifies exact source/version/revision
+  OCI labels, copies with `crane`, and requires destination digest equality.
+  Cargo build metadata (`+...`) is rejected because it is not a valid Docker
+  tag. Merge, build, deploy, and qualify the SHA-tagged images before creating
+  the release tag. Confirm the qualified refs are
+  `rust-$shortsha@sha256:<digest>` and
+  `companion-rust-$shortsha@sha256:<digest>`, then create the exact
+  `v<crate-version>` tag. The pipeline must report the same source and
+  destination digest for each manifest. Never create a tag merely to test the
+  pipeline; unit/static tests and Drone PR quality are
   the non-publishing acceptance path.
 - Build the LB locally and stream it to node06 when the local amd64 Docker
   cache is warm. A typical warm LB transfer is seconds and avoids consuming

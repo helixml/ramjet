@@ -289,10 +289,12 @@ revision-bound marker files because their command workspace may not expose
 nothing. Invalid, unfetchable, mismatched, or empty ranges fail closed.
 
 An exact Git tag matching the crate version, such as `v1.2.0-alpha.1`, runs a
-separate full-quality Drone release pipeline. It publishes only the version
-tags `v1.2.0-alpha.1` and `companion-v1.2.0-alpha.1`; it does not update either
-edge tag. Tag, ref, checkout SHA, and Cargo package version must all agree
-before either publisher can start.
+separate full-quality Drone release pipeline. It verifies the qualified
+`rust-$shortsha` and `companion-rust-$shortsha` images' OCI source, version, and
+exact revision, then copies those same manifests to `v1.2.0-alpha.1` and
+`companion-v1.2.0-alpha.1`. Source and destination digests must match. It does
+not rebuild images or update either edge tag. Tag, ref, checkout SHA, and Cargo
+package version must all agree before either registry copy can start.
 
 Measure the request-preparation hot path before and after tokenizer work:
 
