@@ -118,6 +118,11 @@ class P2PPrerequisiteTest(unittest.TestCase):
         for identity in expected:
             self.assertIn(identity, source)
 
+        dockerfile = DOCKERFILE.read_text()
+        self.assertIn("lib/libnccl.so.2", dockerfile)
+        self.assertIn("/tmp/nccl-dev/lib/libnccl.so", dockerfile)
+        self.assertIn("NCCL_HOME=/tmp/nccl-dev", dockerfile)
+
     def test_tool_staging_requires_external_hash_owner_lock_and_no_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
