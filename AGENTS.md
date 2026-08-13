@@ -130,6 +130,7 @@ cargo test --locked snapshot_actor
 cargo test --locked snapshot_supervisor
 cargo test --locked snapshot_digest_delta
 cargo test --locked snapshot_consumer
+cargo test --locked snapshot_producer
 cargo test --locked --test snapshot_digest_lifecycle
 ```
 
@@ -152,6 +153,12 @@ over an already-connected stream; a future outbound reconnect owner supplies a
 fresh non-reused challenge and the single absolute deadline. Dropping that
 consumer future must synchronously fence its actor epoch and signal any bounded
 blocking snapshot build to cancel.
+
+`snapshot_producer` is the engine-neutral companion/server half accepted by the
+supervisor. Its source callback must subscribe live before building a snapshot,
+return owned state, observe cancellation, and never retain engine/global locks
+across serialization or socket writes. Tail delivery is bounded and applies
+backpressure; a dropped LB client must cancel source work immediately.
 
 ## node06 — the test/production box
 
