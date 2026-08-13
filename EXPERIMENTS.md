@@ -3629,10 +3629,41 @@ no-op warm builds were 2.16s and 3.38s. Final images were 14.27MB and 11.50MB.
 This preserves the fast LB-only loop instead of paying the observed extra
 roughly 41-second companion relink for every router image.
 
-The rebased gate passed 298 library tests, 31 integration/E2E tests, strict
-Clippy, formatting, release builds, off-mode executable/container smoke, and
-the dual-domain offline Compose validator. No production Compose, image push,
-or node06 state changed. The executable is intentionally not deployment-ready
-yet: a bounded host provisioner must derive and atomically write the authenticated
-incarnation from current engine metadata before either per-engine service can be
-enabled.
+Review then closed three rollout defects before merge: serve mode now rejects
+any client cap other than exactly two before side effects; root-container tests
+use explicit non-root service identities without weakening production UID
+validation; and the binary implements a passive `healthcheck <socket>` that
+checks parent/socket ownership, type, mode 0660, and link count without consuming
+an authenticated client slot. The misleading container `EXPOSE 9091` metadata
+was removed because a loopback listener in a bridge container is not externally
+scrapable. Production metrics need a separate permission-isolated UDS and must
+not share the snapshot/session authority group.
+
+The final gate passed 299 library tests plus 35 integration/E2E tests (334
+total), strict Clippy, formatting, release builds, off-mode executable/container
+smoke, and the dual-domain offline Compose validator. Drone #207 completed this
+gate in 59 seconds. No production Compose, image push, or node06 state changed.
+The executable is intentionally not deployment-ready yet: a bounded host
+provisioner must derive and atomically write the authenticated incarnation from
+current engine metadata before either per-engine service can be enabled.
+
+## 2026-08-13 — Drone-only quality and release-cache iteration gate
+
+All CI tests moved from GitHub Actions into one Drone pipeline. Cargo fetches
+once, then strict Clippy and the full Rust suite use independent target
+directories in parallel while Go parity, the Python/agent corpus, and canonical
+plus offline Compose validation run alongside them. The first complete PR run,
+Drone #205, took 58 seconds versus 69 seconds for the previous successful serial
+Rust lane. The merged companion surface remained in the 59-second class on #207.
+
+The image publisher exposed a separate cold-build problem: the legacy DinD
+daemon is ephemeral, so `purge: false` did not retain its BuildKit cache (#208
+still spent 100 seconds publishing). A max-mode registry exporter was rejected
+after #210 proved the new Buildx plugin was not privileged on this runner; it
+failed before Dockerfile or GHCR work, and no broader runner trust was granted.
+The safe replacement keeps the allowed publisher, makes the Cargo dependency
+build an ordinary Docker layer, embeds inline BuildKit cache metadata in the
+private `rust-edge` image, and imports that image in the next fresh daemon.
+Drone #212 successfully seeded the cache in 113 seconds. The following
+documentation-only main build is the acceptance cell for a true fresh-runner
+cache hit; retain or revise the design based on that measured publisher time.
