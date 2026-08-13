@@ -737,6 +737,7 @@ mod tests {
         )));
         let observed = SequencedBatch {
             sequence: 4,
+            payload: Bytes::new(),
             batch: KvEventBatch {
                 timestamp: 1.0,
                 events: Vec::new(),
@@ -751,6 +752,7 @@ mod tests {
 
         let cleared = SequencedBatch {
             sequence: 5,
+            payload: Bytes::new(),
             batch: KvEventBatch {
                 timestamp: 2.0,
                 events: vec![KvEvent::AllBlocksCleared],
@@ -791,6 +793,7 @@ mod tests {
         )));
         let stored = SequencedBatch {
             sequence: 0,
+            payload: Bytes::new(),
             batch: KvEventBatch {
                 timestamp: 1.0,
                 events: vec![KvEvent::BlockStored(BlockStored {
@@ -812,6 +815,7 @@ mod tests {
         };
         let removed = SequencedBatch {
             sequence: 1,
+            payload: Bytes::new(),
             batch: KvEventBatch {
                 timestamp: 2.0,
                 events: vec![KvEvent::BlockRemoved(BlockRemoved {
@@ -969,6 +973,7 @@ mod tests {
         )));
         let observed = SequencedBatch {
             sequence: 4,
+            payload: Bytes::new(),
             batch: KvEventBatch {
                 timestamp: 1.0,
                 events: Vec::new(),
@@ -1092,6 +1097,7 @@ mod tests {
         )));
         let filtered = SequencedBatch {
             sequence: 0,
+            payload: Bytes::new(),
             batch: KvEventBatch {
                 timestamp: 1.0,
                 events: vec![KvEvent::BlockStored(BlockStored {

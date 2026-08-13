@@ -185,6 +185,37 @@ impl SnapshotTailPublisher {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_tail_channel(
+    capacity: usize,
+    max_payload_bytes: usize,
+) -> (
+    SnapshotTailPublisher,
+    SnapshotProducerCancellation,
+    mpsc::Receiver<ProducerTailEvent>,
+    watch::Sender<bool>,
+    Arc<AtomicBool>,
+) {
+    let (sender, receiver) = mpsc::channel(capacity);
+    let (changed_sender, changed) = watch::channel(false);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancellation = SnapshotProducerCancellation {
+        cancelled: Arc::clone(&cancelled),
+        changed,
+    };
+    (
+        SnapshotTailPublisher {
+            sender,
+            cancellation: cancellation.clone(),
+            max_payload_bytes,
+        },
+        cancellation,
+        receiver,
+        changed_sender,
+        cancelled,
+    )
+}
+
 /// Engine-independent source boundary. `start` must establish live-tail
 /// capture before returning its snapshot build future and must return quickly.
 /// The future and every task using the publisher must observe cancellation.

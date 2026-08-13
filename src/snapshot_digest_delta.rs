@@ -11,7 +11,9 @@ use thiserror::Error;
 
 use crate::{
     digest_index::{DigestIndexError, DigestKvIndex, SnapshotGroupKey},
-    kv_wire::{BlockRemoved, BlockStored, DecodeError, KvEvent, KvWireLimits, decode_batch},
+    kv_wire::{
+        BlockRemoved, BlockStored, DecodeError, KvEvent, KvEventBatch, KvWireLimits, decode_batch,
+    },
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -51,6 +53,24 @@ impl SnapshotDigestDeltaAdapter {
                 return Err(SnapshotDigestDeltaError::Decode(error));
             }
         };
+        self.apply_batch(index, &batch)
+    }
+
+    /// Apply one batch already decoded by the qualified vLLM transport.
+    ///
+    /// This avoids decoding live and replay payloads a second time while
+    /// retaining the same conservative group filters and fail-closed index
+    /// semantics as [`Self::apply`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a content-free digest-index error and clears `index` if any
+    /// event cannot be applied atomically.
+    pub fn apply_batch(
+        &self,
+        index: &mut DigestKvIndex,
+        batch: &KvEventBatch,
+    ) -> Result<DigestDeltaSummary, SnapshotDigestDeltaError> {
         let rank = batch.data_parallel_rank.unwrap_or(0);
         let mut summary = DigestDeltaSummary::default();
 
