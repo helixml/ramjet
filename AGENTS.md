@@ -40,10 +40,14 @@ disk-backed home filesystem. If an existing temporary worktree must be used,
 reuse the canonical checkout's warm target and move compiler scratch to disk:
 
 ```bash
-mkdir -p /home/karolis/.cache/mini-dynamo-tmp
+install -d -m 0700 /home/karolis/.ctmp
 CARGO_TARGET_DIR=/home/karolis/go/src/github.com/helixml/mini-dynamo/target \
-TMPDIR=/home/karolis/.cache/mini-dynamo-tmp cargo test --locked
+TMPDIR=/home/karolis/.ctmp cargo test --locked
 ```
+
+Keep `TMPDIR` short: snapshot tests create Unix sockets below it and production
+correctly rejects paths longer than 64 bytes. The scratch parent must also be
+mode `0700`; a group/world-writable parent is rejected by authority tests.
 
 Do not launch two Rust gates concurrently against that shared target; fan out
 Python and Compose beside one Rust lane instead. Check both `df -h /tmp` and target
@@ -267,8 +271,15 @@ metrics socket inherited the configured group, and removes only its own inode.
 Put Caddy/Prometheus in only that metrics group, never in the
 snapshot/session authority group. The production-shaped overlay, Caddy snippet,
 and host/Compose validators now exist under `deploy/dspark_0731`; they remain
-admission artifacts until hot LB attestation refresh lands. Always render both
-profiles and run both production validators
+admission artifacts until an explicit rollout. Prepare their fixed host
+authority only with `setup_snapshot_production_host.py`; its default mode must
+never alter Caddy membership, and `--configure-caddy` may grant only metrics
+GIDs 12004/12005, never session GID 12000. The helper must keep its production
+paths and IDs fixed, create secrets only with exclusive creation, and reject
+collisions, symlinks, non-tmpfs paths, unsafe existing material, or duplicate
+authority. Unit-test its policy through the in-memory backend; never exercise
+host identity or `/run` mutations in CI. Always render both profiles, run the
+helper's read-only `--check`, and run both production validators
 before touching node06, first start with snapshot routing off, and repin current
 immutable images rather than treating the committed candidates as evergreen.
 
