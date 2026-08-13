@@ -20,6 +20,14 @@ class ReleaseToolsImageTest(unittest.TestCase):
             (root / "Dockerfile.release-tools").write_text("FROM scratch\nLABEL changed=true\n")
             self.assertNotEqual(first, release_tools_image.image_key(root))
 
+    def test_publisher_is_tag_only_and_all_consumers_are_digest_pinned(self):
+        drone = (ROOT / ".drone.yml").read_text()
+        reference = release_tools_image.image_reference(release_tools_image.image_key(ROOT))
+        pinned = f"{reference}@{release_tools_image.PUBLISHED_DIGEST}"
+        self.assertEqual(drone.count(f"--destination {reference}"), 1)
+        self.assertNotIn(f"--destination {pinned}", drone)
+        self.assertEqual(drone.count(f"image: {pinned}"), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

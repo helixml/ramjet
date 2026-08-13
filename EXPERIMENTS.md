@@ -4180,6 +4180,18 @@ Kaniko, move a Git tag, update edge aliases, or overwrite a conflicting digest.
 This entry records the source correction and design only; no promotion or
 registry mutation was performed while preparing it.
 
+Main build #271 passed in 83s and published only the new content-keyed tools
+image; dependency, LB, and companion guards skipped in 0-1s. The tools Kaniko
+step took 24s and produced
+`release-tools-sha256-244bfd3b...@sha256:1d0d9c383119f43b832008d2b2866c43472175bf0d814d27032b677e30dcac43`.
+An independent pull of that exact tag and digest ran `/bin/sh`, resolved
+`/usr/local/bin/crane`, reported Crane revision
+`7b32099eb119a9fdd715d84ef18c088cbe434c7f`, and found the Alpine CA bundle.
+All four normal/recovery consumers are now pinned to that digest while the sole
+publisher destination remains its content tag. This digest-only change is not
+an image input and must select zero publishers. No second recovery promotion
+was attempted before that pin reached a green main build.
+
 ## 2026-08-13 — v0.1.0 candidate publication and node06 acceptance
 
 The first public-release boundary is commit `b0e0700`. Stable v0.1 scope is the

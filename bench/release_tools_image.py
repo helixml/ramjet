@@ -14,6 +14,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 DOCKERFILE = pathlib.Path("Dockerfile.release-tools")
 KEY_FILE = pathlib.Path(".docker/release-tools-key")
 REPOSITORY = "ghcr.io/helixml/mini-dynamo"
+PUBLISHED_DIGEST = "sha256:1d0d9c383119f43b832008d2b2866c43472175bf0d814d27032b677e30dcac43"
 
 
 def image_key(root: pathlib.Path = ROOT) -> str:
@@ -33,8 +34,9 @@ def validation_errors(root: pathlib.Path = ROOT) -> list[str]:
         errors.append(f"{KEY_FILE} is stale: expected {key}, found {actual or '<missing>'}")
     drone = (root / ".drone.yml").read_text()
     reference = image_reference(key)
-    if drone.count(f"image: {reference}") != 4:
-        errors.append(f".drone.yml must consume {reference!r} exactly four times")
+    pinned = f"{reference}@{PUBLISHED_DIGEST}"
+    if drone.count(f"image: {pinned}") != 4:
+        errors.append(f".drone.yml must consume {pinned!r} exactly four times")
     if drone.count(f"--destination {reference}") != 1:
         errors.append(f".drone.yml must publish {reference!r} exactly once")
     return errors
@@ -45,13 +47,18 @@ def update_references(root: pathlib.Path = ROOT) -> str:
     (root / KEY_FILE).write_text(f"{key}\n")
     path = root / ".drone.yml"
     reference = image_reference(key)
-    updated, count = re.subn(
-        r"ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]+",
-        reference,
-        path.read_text(),
+    text = path.read_text()
+    destination_pattern = r"(?m)(--destination )ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]+(?:@sha256:[0-9a-f]+)?"
+    updated, destinations = re.subn(destination_pattern, rf"\g<1>{reference}", text)
+    consumer_pattern = r"(?m)(image: )ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]+(?:@sha256:[0-9a-f]+)?"
+    updated, consumers = re.subn(
+        consumer_pattern, rf"\g<1>{reference}@{PUBLISHED_DIGEST}", updated
     )
-    if count != 5:
-        raise ValueError(f".drone.yml: expected five release-tools references, found {count}")
+    if destinations != 1 or consumers != 4:
+        raise ValueError(
+            ".drone.yml: expected one release-tools destination and four consumers, "
+            f"found {destinations} and {consumers}"
+        )
     path.write_text(updated)
     return reference
 
