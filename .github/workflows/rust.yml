@@ -32,7 +32,9 @@ jobs:
       - name: Validate node06 deployment
         run: |
           bash -n deploy/node06/dspark_0731/sync-compose.sh
+          bash -n deploy/node06/dspark_0731/validate-snapshot-companion-host.sh
           docker compose -f deploy/node06/dspark_0731/docker-compose.yaml config --quiet
+          deploy/node06/dspark_0731/validate-snapshot-companion-compose.py
 
   image:
     if: github.event_name != 'pull_request'
