@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import tempfile
 import unittest
 
 
@@ -113,6 +114,26 @@ def valid_document():
 
 
 class SnapshotCompanionComposeTest(unittest.TestCase):
+    def test_source_bind_policy_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory) / "compose.yaml"
+            source.write_text(
+                "services:\n  a:\n    volumes:\n"
+                "      - type: bind\n        source: /run/a\n"
+                "        target: /run/a\n        bind:\n"
+                "          create_host_path: false\n",
+                encoding="utf-8",
+            )
+            validator.validate_source_bind_policy(source)
+            source.write_text(
+                source.read_text(encoding="utf-8").replace(
+                    "create_host_path: false", "create_host_path: true"
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(validator.ValidationError, "source bind"):
+                validator.validate_source_bind_policy(source)
+
     def test_dual_domain_contract_is_valid(self):
         validator.validate_default({"services": {}})
         validator.validate_profile(valid_document())

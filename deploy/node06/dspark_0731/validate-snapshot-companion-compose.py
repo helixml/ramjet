@@ -106,6 +106,35 @@ def validate_default(document: dict[str, Any]) -> None:
         fail("offline services are active without the explicit profile")
 
 
+def validate_source_bind_policy(path: pathlib.Path = OVERLAY) -> int:
+    """Require create_host_path:false in source, independent of Compose output.
+
+    Older Compose renderers omit this bind option from normalized JSON. The
+    security contract belongs to the committed YAML, so inspect each bind
+    item at its list indentation and fail closed when the option is absent.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    bind_items = 0
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped != "- type: bind":
+            continue
+        bind_items += 1
+        indent = len(line) - len(stripped)
+        block: list[str] = []
+        for candidate in lines[index + 1 :]:
+            candidate_stripped = candidate.lstrip()
+            candidate_indent = len(candidate) - len(candidate_stripped)
+            if candidate_stripped and candidate_indent <= indent:
+                break
+            block.append(candidate_stripped)
+        if block.count("create_host_path: false") != 1:
+            fail("a source bind may create its host path")
+    if bind_items == 0:
+        fail("offline profile contains no source bind mounts")
+    return bind_items
+
+
 def validate_sandbox(name: str, service: dict[str, Any]) -> None:
     if service.get("profiles") != [PROFILE]:
         fail(f"{name} is not guarded by the offline profile")
@@ -139,7 +168,7 @@ def validate_sandbox(name: str, service: dict[str, Any]) -> None:
             fail(f"{name} mounts a broad host path")
         if volume.get("type") != "bind":
             fail(f"{name} has a non-bind persistent mount")
-        if volume.get("bind", {}).get("create_host_path") is not False:
+        if volume.get("bind", {}).get("create_host_path") is True:
             fail(f"{name} may create its host bind source")
 
 
@@ -314,8 +343,17 @@ def authority_status(
 
 def main() -> int:
     try:
+        source_bind_items = validate_source_bind_policy()
         validate_default(render(profile=False))
-        validate_profile(render(profile=True))
+        profile_document = render(profile=True)
+        rendered_bind_items = sum(
+            volume.get("type") == "bind"
+            for service in profile_document.get("services", {}).values()
+            for volume in service.get("volumes", [])
+        )
+        if rendered_bind_items != source_bind_items:
+            fail("rendered bind mounts are not all explicit source bind items")
+        validate_profile(profile_document)
     except ValidationError as exc:
         print(f"snapshot companion compose validation failed: {exc}", file=sys.stderr)
         return 1

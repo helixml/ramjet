@@ -8,17 +8,43 @@ platform:
   arch: amd64
 
 steps:
-  - name: rust
+  # Fetch once into a pipeline-scoped volume, then compile Clippy and tests in
+  # parallel. They use separate target directories because Cargo artifacts
+  # from the two profiles are not interchangeable.
+  - name: rust-fetch
     image: rust:1.95-bookworm
     pull: if-not-exists
     commands:
-      # Parallel Drone steps share the checkout. Keep Cargo's transient files
-      # out of it so Go's ./... walk cannot race a disappearing rmeta file.
-      - export CARGO_TARGET_DIR=/tmp/mini-dynamo-target
+      - cargo fetch --locked
+    volumes:
+      - name: cargo-registry
+        path: /usr/local/cargo/registry
+
+  - name: rust-lint
+    image: rust:1.95-bookworm
+    pull: if-not-exists
+    commands:
+      - export CARGO_TARGET_DIR=/tmp/mini-dynamo-clippy-target
       - rustup component add rustfmt clippy
       - cargo fmt --check
       - cargo clippy --locked --all-targets --all-features -- -D warnings
+    volumes:
+      - name: cargo-registry
+        path: /usr/local/cargo/registry
+    depends_on:
+      - rust-fetch
+
+  - name: rust-test
+    image: rust:1.95-bookworm
+    pull: if-not-exists
+    commands:
+      - export CARGO_TARGET_DIR=/tmp/mini-dynamo-test-target
       - cargo test --locked
+    volumes:
+      - name: cargo-registry
+        path: /usr/local/cargo/registry
+    depends_on:
+      - rust-fetch
 
   - name: go-parity-oracle
     image: golang:1.26.0-bookworm
@@ -32,10 +58,18 @@ steps:
     image: python:3.13-bookworm
     pull: if-not-exists
     commands:
-      - bash -n deploy/node06/dspark_0731/sync-compose.sh
-      - bash -n deploy/node06/dspark_0731/validate-snapshot-companion-host.sh
       - python3 bench/agentbench.py validate
       - python3 -m unittest discover -s bench -p 'test_*.py'
+
+  - name: deployment-compose
+    image: docker:29-cli
+    pull: if-not-exists
+    commands:
+      - apk add --no-cache bash python3
+      - bash -n deploy/node06/dspark_0731/sync-compose.sh
+      - bash -n deploy/node06/dspark_0731/validate-snapshot-companion-host.sh
+      - docker compose -f deploy/node06/dspark_0731/docker-compose.yaml config --quiet
+      - python3 deploy/node06/dspark_0731/validate-snapshot-companion-compose.py
 
   - name: quality-complete
     image: alpine:3.23
@@ -43,23 +77,18 @@ steps:
     commands:
       - 'true'
     depends_on:
-      - rust
+      - rust-lint
+      - rust-test
       - go-parity-oracle
       - agent-protocol
+      - deployment-compose
 
-  # GHCR publishing lives here, not GitHub Actions: the Actions GITHUB_TOKEN
-  # is denied write_package on the existing ghcr.io/helixml/mini-dynamo
-  # package (issue #39). Requires two Drone repository secrets:
-  #   ghcr_username — account with write access to the package
-  #   ghcr_token    — a PAT with the write:packages scope
-  # The push-event guard keeps secrets away from pull_request builds; the
-  # pipeline trigger already limits push events to main.
+  # GHCR publishing lives here, not GitHub Actions. The push-event guard keeps
+  # registry credentials out of pull-request builds.
   - name: publish-image
     image: plugins/docker
     pull: if-not-exists
     environment:
-      # The Dockerfile's `syntax` directive and cargo cache mounts need
-      # BuildKit; the plugin's docker CLI inherits this.
       DOCKER_BUILDKIT: "1"
     settings:
       registry: ghcr.io
@@ -71,6 +100,9 @@ steps:
       tags:
         - rust-${DRONE_COMMIT_SHA:0:7}
         - rust-edge
+      # The Dockerfile uses locked BuildKit Cargo registry/target cache mounts.
+      # Keep those caches across main builds; the runner owns disk GC policy.
+      purge: false
     when:
       event:
         - push
@@ -86,3 +118,7 @@ trigger:
     # duplicate the same cold Rust build beside their PR build; main pushes
     # retain the post-merge gate.
     - main
+
+volumes:
+  - name: cargo-registry
+    temp: {}
