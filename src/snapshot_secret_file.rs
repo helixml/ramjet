@@ -17,6 +17,7 @@ use thiserror::Error;
 use crate::snapshot_session::{SNAPSHOT_SESSION_SECRET_BYTES, SnapshotSessionSecret};
 
 const MAX_SECRET_READ_BYTES: usize = SNAPSHOT_SESSION_SECRET_BYTES + 1;
+const MAX_CONTROL_FILE_BYTES: usize = 64 * 1024;
 const GROUP_OR_WORLD_WRITE: u32 = 0o022;
 const STICKY_BIT: u32 = 0o1000;
 
@@ -144,6 +145,63 @@ pub fn load_snapshot_session_secret(
     Ok(SnapshotSessionSecret::new(secret_bytes))
 }
 
+/// Load a bounded, protected control-plane file with the same ownership,
+/// symlink, link-count, permission, and inode-stability policy as a secret.
+///
+/// This is used for authenticated incarnation envelopes. It returns bytes only
+/// after the post-read path and parent checks succeed.
+///
+/// # Errors
+///
+/// Returns a content-free error if `max_bytes` is zero/too large, the file is
+/// empty or oversized, or any hardened file invariant fails.
+pub fn load_snapshot_control_file(
+    path: &Path,
+    policy: SnapshotSecretFilePolicy,
+    max_bytes: usize,
+) -> Result<Vec<u8>, SnapshotSecretFileError> {
+    if max_bytes == 0 || max_bytes > MAX_CONTROL_FILE_BYTES {
+        return Err(SnapshotSecretFileError::InvalidLength);
+    }
+    validate_trusted_parents(path, policy)?;
+    let before =
+        fs::symlink_metadata(path).map_err(|_| SnapshotSecretFileError::InvalidMetadata)?;
+    validate_control_metadata(&before, policy, max_bytes)?;
+    let mut file = File::open(path).map_err(|_| SnapshotSecretFileError::OpenFailed)?;
+    let opened = file
+        .metadata()
+        .map_err(|_| SnapshotSecretFileError::InvalidMetadata)?;
+    validate_control_metadata(&opened, policy, max_bytes)?;
+    require_same_file(&before, &opened)?;
+
+    let opened_len = usize::try_from(opened.len()).unwrap_or(max_bytes);
+    let mut bytes = Vec::with_capacity(max_bytes.min(opened_len).saturating_add(1));
+    file.by_ref()
+        .take(
+            u64::try_from(max_bytes)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+        .read_to_end(&mut bytes)
+        .map_err(|_| SnapshotSecretFileError::ReadFailed)?;
+    if bytes.is_empty() || bytes.len() > max_bytes {
+        bytes.fill(0);
+        return Err(SnapshotSecretFileError::InvalidLength);
+    }
+    let post_read = fs::symlink_metadata(path)
+        .map_err(|_| SnapshotSecretFileError::InvalidMetadata)
+        .and_then(|after| {
+            validate_control_metadata(&after, policy, max_bytes)
+                .and_then(|()| require_same_file(&opened, &after))
+        })
+        .and_then(|()| validate_trusted_parents(path, policy));
+    if let Err(error) = post_read {
+        bytes.fill(0);
+        return Err(error);
+    }
+    Ok(bytes)
+}
+
 fn read_bounded(
     file: &mut File,
     destination: &mut [u8; MAX_SECRET_READ_BYTES],
@@ -177,6 +235,29 @@ fn validate_secret_metadata(
         return Err(SnapshotSecretFileError::UnsafePermissions);
     }
     if metadata.len() != u64::try_from(SNAPSHOT_SESSION_SECRET_BYTES).unwrap_or(u64::MAX) {
+        return Err(SnapshotSecretFileError::InvalidLength);
+    }
+    Ok(())
+}
+
+fn validate_control_metadata(
+    metadata: &Metadata,
+    policy: SnapshotSecretFilePolicy,
+    max_bytes: usize,
+) -> Result<(), SnapshotSecretFileError> {
+    if !metadata.file_type().is_file() {
+        return Err(SnapshotSecretFileError::NotRegularFile);
+    }
+    if metadata.nlink() != 1 {
+        return Err(SnapshotSecretFileError::InvalidLinkCount);
+    }
+    if metadata.uid() != policy.expected_owner_uid {
+        return Err(SnapshotSecretFileError::UnexpectedOwner);
+    }
+    if metadata.mode() & GROUP_OR_WORLD_WRITE != 0 {
+        return Err(SnapshotSecretFileError::UnsafePermissions);
+    }
+    if metadata.len() == 0 || metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
         return Err(SnapshotSecretFileError::InvalidLength);
     }
     Ok(())
