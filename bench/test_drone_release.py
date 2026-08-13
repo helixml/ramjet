@@ -23,6 +23,17 @@ class DroneReleaseTest(unittest.TestCase):
         subprocess.run(
             ["git", "config", "user.name", "CI test"], cwd=self.root, check=True
         )
+        self.fake_bin = self.root / "fake-bin"
+        self.fake_bin.mkdir()
+        cargo = self.fake_bin / "cargo"
+        cargo.write_text(
+            "#!/bin/sh\n"
+            "[ \"${1-}\" = pkgid ] || exit 1\n"
+            "version=$(sed -n 's/^version = \"\\(.*\\)\"$/\\1/p' Cargo.toml | head -1)\n"
+            "[ -n \"$version\" ] || exit 1\n"
+            "printf 'path+file:///fixture#release-fixture@%s\\n' \"$version\"\n"
+        )
+        cargo.chmod(0o755)
         self.write_manifest("1.2.0-alpha.1")
         self.commit()
 
@@ -67,6 +78,7 @@ class DroneReleaseTest(unittest.TestCase):
             text=True,
         ).stdout.strip()
         environment = os.environ.copy()
+        environment["PATH"] = f"{self.fake_bin}:{environment['PATH']}"
         environment.update(
             {
                 "DRONE_BUILD_EVENT": "tag",
