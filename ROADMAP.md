@@ -9,7 +9,7 @@ node06). The design rationale for each lives in DESIGN.md.
 - ✅ **Parity routing kernel.** Rust 2024 implementation of typed config,
   canonical prompt preparation, chained fingerprints, bounded LRU indexes,
   overlap/load scoring, health ordering, exact-score tie policy, and RAII
-  weighted-load accounting. Go-generated fingerprints are golden-tested.
+  weighted-load accounting. Frozen legacy fingerprints are golden-tested.
 - ✅ **Async compatibility data plane.** Axum/Tokio/Reqwest streaming proxy,
   bounded request bodies, request shims, model metadata rewrite, health probes,
   retryable-status failover, opaque route headers, true generated-token TTFT,
@@ -29,13 +29,14 @@ node06). The design rationale for each lives in DESIGN.md.
 - ✅ **Single-parse approximate preparation.** One JSON parse now feeds both
   compatibility mutations and canonical route fingerprints; cache observation
   reuses the prepared vector. Release-mode preparation is 0.49ms at 256KiB and
-  4.53ms at 2MiB on the development host, about 10× faster than the retained Go
+  4.53ms at 2MiB on the development host, about 10× faster than the original Go
   data path and 15% faster than the initial two-parse Rust implementation at
   2MiB. Keep `examples/preparation_bench.rs` as the pre-tokenizer baseline.
-- ✅ **Rolling Go/Rust node06 qualification.** Build and publish immutable
+- ✅ **Rolling Rust node06 qualification.** Build and publish immutable
   `rust-*` images, then run locality, concurrent same-app, c24 aggregate, route
-  telemetry, and occasional Helix workflow acceptance before promotion. Go
-  remains an LB-only rollback; neither engine is restarted for proxy trials.
+  telemetry, and occasional Helix workflow acceptance before promotion. A
+  prior immutable Rust image remains the LB-only rollback; neither engine is
+  restarted for proxy trials.
   Public r22 is live with both r34 publishers, manifest-attested pre-route
   exact scoring, and the placement policy in observation-only shadow mode.
   Exact state is not exposed to placement.
@@ -314,17 +315,15 @@ node06). The design rationale for each lives in DESIGN.md.
   transients. The 44.7K-token gain is not worth that operational fragility.
   Retain automatic sizing and do not jump to the profiler's full-memory value.
 
-- 🔨 **CI + package publishing.** GitHub Actions runs Rust fmt, strict Clippy,
-  and 104 unit tests with a pruned dependency cache. Drone independently adds
-  the release build plus retained Go tests/vet/gofmt and 18 GPU-free protocol
-  tests; its Rust, Go, and protocol steps fan out in parallel. Main's Docker
-  build is the second release-mode proof, avoiding a duplicate PR link. Both Drone push/PR builds
-  and GitHub Actions passed on r21. The post-merge image also compiled, but GHCR
-  denied its final push: because `mini-dynamo` was created by a manual push,
-  repository linkage did not grant Actions access. Add `helixml/mini-dynamo`
-  under the package's **Manage Actions access**, rerun the failed job, and
-  verify an anonymous pull before marking complete. Do not replace this
-  one-time ACL with a long-lived PAT secret.
+- ✅ **Drone-only CI + package publishing.** One PR pipeline fetches Cargo once,
+  then runs strict Clippy, the complete Rust suite, GPU-free protocol tests, and
+  Compose validation in parallel. Main publishes both the LB and companion
+  images only after that quality gate. Inline BuildKit metadata in the rolling
+  edge tags survives the runner's ephemeral Docker daemon; publishers are
+  path-gated so documentation/deployment changes cannot erase dependency-cache
+  metadata. The Rust cutover is complete and the obsolete Go lane and packages
+  are removed. Preserve the measured ~58–59s PR quality budget and investigate
+  cache or scheduling regressions rather than adding duplicate CI systems.
 - ⬜ **Secure post-deploy Helix acceptance.** The retired plaintext key was
   removed from both node06 guides. The separately supplied internal-account
   credential is also unusable for the test app (HTTP 403; `/users/me` returns

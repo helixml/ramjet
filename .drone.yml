@@ -46,14 +46,6 @@ steps:
     depends_on:
       - rust-fetch
 
-  - name: go-parity-oracle
-    image: golang:1.26.0-bookworm
-    pull: if-not-exists
-    commands:
-      - go test ./...
-      - go vet ./...
-      - test -z "$(gofmt -l .)"
-
   - name: agent-protocol
     image: python:3.13-bookworm
     pull: if-not-exists
@@ -66,10 +58,10 @@ steps:
     pull: if-not-exists
     commands:
       - apk add --no-cache bash python3
-      - bash -n deploy/node06/dspark_0731/sync-compose.sh
-      - bash -n deploy/node06/dspark_0731/validate-snapshot-companion-host.sh
-      - docker compose -f deploy/node06/dspark_0731/docker-compose.yaml config --quiet
-      - python3 deploy/node06/dspark_0731/validate-snapshot-companion-compose.py
+      - bash -n deploy/dspark_0731/sync-compose.sh
+      - bash -n deploy/dspark_0731/validate-snapshot-companion-host.sh
+      - docker compose -f deploy/dspark_0731/docker-compose.yaml config --quiet
+      - python3 deploy/dspark_0731/validate-snapshot-companion-compose.py
 
   - name: quality-complete
     image: alpine:3.23
@@ -79,7 +71,6 @@ steps:
     depends_on:
       - rust-lint
       - rust-test
-      - go-parity-oracle
       - agent-protocol
       - deployment-compose
 

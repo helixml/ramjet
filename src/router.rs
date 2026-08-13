@@ -213,7 +213,7 @@ impl Router {
                 })
         });
         let winner = &scores[0];
-        #[allow(clippy::float_cmp)] // Exact equality is the routing policy, matching Go.
+        #[allow(clippy::float_cmp)] // Exact equality is the established routing policy.
         let scores_differ = scores
             .iter()
             .skip(1)
@@ -628,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprints_match_go_goldens() {
+    fn fingerprints_match_legacy_goldens() {
         let router = Router::new(config());
         let cases: &[(&[u8], &[u64])] = &[
             (

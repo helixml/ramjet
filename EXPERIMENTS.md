@@ -3808,7 +3808,8 @@ protected authority and socket parent is validated before reconnect owners are
 spawned, and direct raw-event and snapshot authority cannot be enabled together.
 
 Snapshot mode is deliberately limited to `DS4_EXACT_ROUTE_MODE=shadow`.
-Configuration rejects placement, the compact inventories feed only the exact
+Configuration rejects placement and the scorer independently forces compact
+inventories back to shadow, so they feed only the exact
 counterfactual scorer, and approximate routing plus `/health` remain backed by
 their existing independent state. Each owner uses a bounded absolute attempt,
 fresh challenge, retry backoff, immediate shutdown signal, and two-second join
@@ -3823,3 +3824,20 @@ Clippy. No Compose, Caddy, node06 process, container, image, secret, route, or
 GPU state changed. The next boundary is fixed-cardinality LB reconnect/readiness
 metrics and production-shaped dual-domain Compose/Caddy validation; shadow
 deployment remains gated behind those pieces.
+
+## 2026-08-13 — r57 Rust cutover cleanup and server-neutral deploy layout
+
+The Rust implementation is now the sole source of truth. The obsolete Go
+module and 12 implementation/test files were removed (14 files, 2,528 lines),
+while frozen legacy fingerprint vectors remain covered by Rust tests. Drone no
+longer pulls a Go toolchain or spends runner CPU on the duplicate parity lane;
+strict Rust lint/tests, Python protocol tests, and Compose validation remain the
+quality gate. Historical Go/Rust benchmark evidence in this journal is retained
+unchanged.
+
+The canonical serving bundle moved from `deploy/node06/dspark_0731` to the
+server-neutral `deploy/dspark_0731` path for eventual open-source publication.
+Drone, the candidate-overlay tooling, documentation, validation commands, and
+the infra mirror helper now resolve the new location. This is a repository-only
+move: the existing node06 runtime and infra mirror paths are unchanged, and no
+container, process, route, secret, or GPU state changed.
