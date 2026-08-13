@@ -31,8 +31,8 @@ LB_READY_METRICS = """
 ds4proxy_snapshot_route_enabled 1
 ds4proxy_snapshot_route_ready{engine="engine-0"} 1
 ds4proxy_snapshot_route_ready{engine="engine-1"} 1
-ds4proxy_snapshot_route_attempts_active{engine="engine-0"} 0
-ds4proxy_snapshot_route_attempts_active{engine="engine-1"} 0
+ds4proxy_snapshot_route_attempts_active{engine="engine-0"} 1
+ds4proxy_snapshot_route_attempts_active{engine="engine-1"} 1
 ds4proxy_snapshot_route_connections_active{engine="engine-0"} 1
 ds4proxy_snapshot_route_connections_active{engine="engine-1"} 1
 """.strip()
@@ -145,6 +145,16 @@ class SnapshotRecoveryGateTest(unittest.TestCase):
         self.assertTrue(gate.companion_is_ready(snapshot))
         self.assertEqual(snapshot["indexed_blocks"], 36612)
         self.assertTrue(gate.lb_snapshot_ready(gate.parse_prometheus(LB_READY_METRICS)))
+
+    def test_lb_ready_requires_one_long_lived_attempt_and_connection(self):
+        for metric in (
+            'attempts_active{engine="engine-1"} 1',
+            'connections_active{engine="engine-1"} 1',
+        ):
+            for value in (0, 2):
+                with self.subTest(metric=metric, value=value):
+                    broken = LB_READY_METRICS.replace(metric, metric[:-1] + str(value))
+                    self.assertFalse(gate.lb_snapshot_ready(gate.parse_prometheus(broken)))
 
     def test_missing_or_duplicate_metrics_fail_closed(self):
         snapshot = gate.companion_snapshot(
