@@ -309,10 +309,11 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   pipeline builds and publishes the release container to GHCR (the Actions
   GITHUB_TOKEN is denied write on that package — issue #39; the `publish-image`
   step reads `ghcr_username`/`ghcr_token` Drone secrets instead). GitHub
-  Actions keeps format, Clippy, test, and deploy-config validation only. The
-  Drone image build runs in a fresh dind daemon, so it pays a cold cargo
-  release build on every publish; node06 deploys should keep using the warm
-  local `bench/build_transfer.sh` path.
+  Actions keeps format, Clippy, test, and deploy-config validation only.
+  Drone's Rust lane and image build stay warm across runs through host-backed
+  cargo/registry volumes and the runner host's Docker daemon, which requires
+  the repository's Trusted flag in Drone; node06 deploys should keep using
+  the warm local `bench/build_transfer.sh` path.
 - Build the LB locally and stream it to node06 when the local amd64 Docker
   cache is warm. A typical warm LB transfer is seconds and avoids consuming
   node06's scarce 8-9GiB available host memory:
