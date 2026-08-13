@@ -274,6 +274,8 @@ steps:
   - name: release-image
     image: gcr.io/go-containerregistry/crane@sha256:ba318977330d2a41fdd4af7536d35567a4ceb204252b7dfcd19b01dad2567793
     pull: if-not-exists
+    entrypoint:
+      - /busybox/sh
     environment:
       GHCR_USERNAME:
         from_secret: ghcr_username
@@ -291,6 +293,8 @@ steps:
   - name: release-companion-image
     image: gcr.io/go-containerregistry/crane@sha256:ba318977330d2a41fdd4af7536d35567a4ceb204252b7dfcd19b01dad2567793
     pull: if-not-exists
+    entrypoint:
+      - /busybox/sh
     environment:
       GHCR_USERNAME:
         from_secret: ghcr_username
@@ -314,3 +318,57 @@ trigger:
 volumes:
   - name: release-cargo-registry
     temp: {}
+
+---
+kind: pipeline
+type: docker
+name: release-v0.1.0-recovery
+
+platform:
+  os: linux
+  arch: amd64
+
+steps:
+  - name: validate-v0.1.0-authority
+    image: rust:1.95-bookworm
+    pull: if-not-exists
+    commands:
+      - sh bench/drone_release_recovery_plan.sh
+
+  - name: recover-v0.1.0-image
+    image: gcr.io/go-containerregistry/crane@sha256:ba318977330d2a41fdd4af7536d35567a4ceb204252b7dfcd19b01dad2567793
+    pull: if-not-exists
+    entrypoint:
+      - /busybox/sh
+    environment:
+      GHCR_USERNAME:
+        from_secret: ghcr_username
+      GHCR_TOKEN:
+        from_secret: ghcr_token
+    commands:
+      - export PATH=/ko-app:$PATH
+      - sh bench/drone_release_recovery_publish.sh lb
+    depends_on:
+      - validate-v0.1.0-authority
+
+  - name: recover-v0.1.0-companion-image
+    image: gcr.io/go-containerregistry/crane@sha256:ba318977330d2a41fdd4af7536d35567a4ceb204252b7dfcd19b01dad2567793
+    pull: if-not-exists
+    entrypoint:
+      - /busybox/sh
+    environment:
+      GHCR_USERNAME:
+        from_secret: ghcr_username
+      GHCR_TOKEN:
+        from_secret: ghcr_token
+    commands:
+      - export PATH=/ko-app:$PATH
+      - sh bench/drone_release_recovery_publish.sh companion
+    depends_on:
+      - validate-v0.1.0-authority
+
+trigger:
+  event:
+    - promote
+  target:
+    - release-v0.1.0

@@ -5,3 +5,4 @@ __pycache__/
 /.drone-publish-plan*
 .env
 /.drone-release-plan*
+/.drone-release-recovery-plan*
