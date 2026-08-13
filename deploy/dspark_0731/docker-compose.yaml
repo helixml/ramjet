@@ -147,7 +147,17 @@ services:
       KV_OFFLOADING_SIZE: ${KV_OFFLOADING_SIZE:-}
       # Qualified native KV publisher by default; keep A/B independently
       # overridable for rolling trials and event-off rollback.
-      EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_A---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}}'
+      #
+      # The model ships generation_config.json with top_p 1.0, and vLLM adopts
+      # it as the server-side default (engine boot logs the override). Helix
+      # does not send top_p, so agent traffic would otherwise sample the full
+      # tail, which the model authors report can emit a malformed tool call and
+      # poison the conversation. 0.95 is the recommended value and is what
+      # bench/agentbench.py already uses for its agentic profile. An explicit
+      # client top_p still wins; this is only a floor for callers that omit it.
+      # Overriding EXTRA_VLLM_ARGS_A drops both this and the KV publisher --
+      # copy them into any experiment value.
+      EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_A---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""} --override-generation-config {"top_p":0.95}}'
       VLLM_USE_B12X_FP8_GEMM: "0"
       VLLM_API_KEY: ${VLLM_API_KEY:-dspark-local}
 
@@ -204,6 +214,9 @@ services:
       MAX_NUM_BATCHED_TOKENS: ${MAX_NUM_BATCHED_TOKENS:-4096}
       BLOCK_SIZE: "256"
       KV_OFFLOADING_SIZE: ${KV_OFFLOADING_SIZE:-}
-      EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_B---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}}'
+      # See engine A: pins the recommended top_p 0.95 floor for callers that
+      # omit it. Overriding EXTRA_VLLM_ARGS_B drops both this and the KV
+      # publisher -- copy them into any experiment value.
+      EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_B---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""} --override-generation-config {"top_p":0.95}}'
       VLLM_USE_B12X_FP8_GEMM: "0"
       VLLM_API_KEY: ${VLLM_API_KEY:-dspark-local}
