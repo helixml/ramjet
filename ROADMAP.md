@@ -541,14 +541,15 @@ node06). The design rationale for each lives in DESIGN.md.
   lived index source and Compose runtime, then run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
 
-  A true offline public-stack harness now proves initial publication, live
-  store/remove, rolling handoff, LB owner restart, companion shutdown/socket
-  cleanup/restart, identity rollover, and leak-free teardown; two authenticated
-  slow readers also hold both supervisor slots while a third is rejected. Ten
-  repeated runs passed 20/20. At the captured 36,612-block / 9.37M-token shape,
-  the 6.04MB snapshot encoded in 11.5ms, authenticated wire encode/decode took
-  7.0/7.5ms, private rebuild took 22.4ms, total process wall was 0.15s, and peak
-  RSS was about 58MiB. This clears the sub-3s offline gate with wide margin.
+  The off-by-default library runtime now composes typed config, hardened secret
+  loading, bind-last safe socket publication, the bounded supervisor, producer,
+  shutdown drain, cleanup, readiness, and closed-label aggregate metrics. It
+  refuses missing sources and multi-source mode before filesystem mutation:
+  the current authenticated hello does not identify an engine, so a two-engine
+  executable would be ambiguous. The coordinator uses the stricter snapshot or
+  tail-idle duration as its one absolute session deadline until phase-specific
+  deadlines exist. Next add authenticated engine selection or one socket per
+  engine, then inject the concrete long-lived index sources.
 
   Deployment hardening is also part of the gate: distinct fixed LB/companion
   UIDs with one shared GID; a companion-owned non-LB-writable socket directory

@@ -133,7 +133,7 @@ cargo test --locked snapshot_consumer
 cargo test --locked --test snapshot_consumer_adversarial
 cargo test --locked snapshot_producer
 cargo test --locked snapshot_reconnect
-cargo test --locked --test snapshot_stack_e2e
+cargo test --locked companion_runtime
 cargo test --locked --test snapshot_digest_lifecycle
 ```
 
@@ -163,18 +163,19 @@ return owned state, observe cancellation, and never retain engine/global locks
 across serialization or socket writes. Tail delivery is bounded and applies
 backpressure; a dropped LB client must cancel source work immediately.
 
+`companion_runtime` is library-only and off by default. It must validate and
+load all state before binding, bind the public socket last, clear readiness and
+inode-check-clean the socket on every exit, and bound supervisor drain on
+shutdown. Until the authenticated hello carries an engine selector, fail closed
+unless exactly one source is configured; never guess which engine a client
+intended.
+
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
 Validate the trusted socket parent on every connect, use a fresh OS-random
 challenge under the bounded reuse ledger, and carry one absolute attempt
 deadline through connect and consumption. Shutdown drops the consumer future
 immediately; approximate serving is never owned by this path.
-
-Keep the true public-stack harness green: it composes safe socket publication,
-supervisor, producer, reconnect owner, consumer, actor, and digest index. Use
-`cargo run --release --locked --example snapshot_shape_bench` for the captured
-36,612-block authenticated wire/rebuild measurement; timings are observational
-and must not become flaky CI thresholds.
 
 ## node06 — the test/production box
 
