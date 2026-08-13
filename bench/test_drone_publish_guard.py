@@ -6,7 +6,8 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "bench" / "drone_publish_guard.sh"
+PLANNER = ROOT / "bench" / "drone_publish_plan.sh"
+GUARD = ROOT / "bench" / "drone_publish_guard.sh"
 
 
 class DronePublishGuardTest(unittest.TestCase):
@@ -33,24 +34,29 @@ class DronePublishGuardTest(unittest.TestCase):
             target.write_text(content)
         subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "-qm", "test"], cwd=self.root, check=True)
+        return self.head(self.root)
+
+    @staticmethod
+    def head(root):
         return subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=self.root,
+            cwd=root,
             check=True,
             capture_output=True,
             text=True,
         ).stdout.strip()
 
-    def run_guard(self, kind, before=None, after=None, *, cwd=None, environment=None):
-        environment = (environment or os.environ).copy()
-        environment.pop("DRONE_COMMIT_BEFORE", None)
-        environment.pop("DRONE_COMMIT_SHA", None)
+    def run_planner(self, before=None, after=None, *, cwd=None, event="push", env=None):
+        environment = (env or os.environ).copy()
+        for key in ("DRONE_BUILD_EVENT", "DRONE_COMMIT_BEFORE", "DRONE_COMMIT_SHA"):
+            environment.pop(key, None)
+        environment["DRONE_BUILD_EVENT"] = event
         if before is not None:
             environment["DRONE_COMMIT_BEFORE"] = before
         if after is not None:
             environment["DRONE_COMMIT_SHA"] = after
         return subprocess.run(
-            ["sh", str(SCRIPT), kind],
+            ["sh", str(PLANNER)],
             cwd=cwd or self.root,
             env=environment,
             check=False,
@@ -58,9 +64,24 @@ class DronePublishGuardTest(unittest.TestCase):
             text=True,
         )
 
-    def assert_matrix(self, before, after, expected):
+    def run_guard(self, kind, after, *, cwd=None):
+        environment = os.environ.copy()
+        environment["DRONE_COMMIT_SHA"] = after
+        return subprocess.run(
+            ["sh", str(GUARD), kind],
+            cwd=cwd or self.root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def assert_matrix(self, before, after, expected, *, cwd=None):
+        result = self.run_planner(before, after, cwd=cwd)
+        self.assertEqual(result.returncode, 0, result)
+        self.assertEqual(result.stdout.strip(), "publisher_plan=ready")
         for kind, should_publish in expected.items():
-            result = self.run_guard(kind, before, after)
+            result = self.run_guard(kind, after, cwd=cwd)
             self.assertEqual(result.returncode, 0 if should_publish else 3, result)
             self.assertEqual(
                 result.stdout.strip(),
@@ -84,88 +105,50 @@ class DronePublishGuardTest(unittest.TestCase):
             {"rust-deps": False, "lb": False, "companion": False},
         )
 
-    def test_source_change_publishes_both_app_images_only(self):
+    def test_source_manifest_and_image_specific_matrices(self):
         before = self.commit({"README.md": "base"})
-        after = self.commit({"src/router.rs": "source"})
+        source = self.commit({"src/router.rs": "source"})
         self.assert_matrix(
-            before,
-            after,
-            {"rust-deps": False, "lb": True, "companion": True},
+            before, source, {"rust-deps": False, "lb": True, "companion": True}
         )
-
-    def test_manifest_change_publishes_dependency_and_both_apps(self):
-        before = self.commit({"README.md": "base"})
-        after = self.commit({"Cargo.lock": "lock"})
+        manifest = self.commit({"Cargo.lock": "lock"})
         self.assert_matrix(
-            before,
-            after,
-            {"rust-deps": True, "lb": True, "companion": True},
+            source, manifest, {"rust-deps": True, "lb": True, "companion": True}
         )
-
-    def test_lb_only_inputs_do_not_publish_companion(self):
-        before = self.commit({"README.md": "base"})
-        after = self.commit({"compat/manifest.json": "{}", "Dockerfile": "lb"})
+        lb = self.commit({"compat/manifest.json": "{}", "Dockerfile": "lb"})
         self.assert_matrix(
-            before,
-            after,
-            {"rust-deps": False, "lb": True, "companion": False},
+            manifest, lb, {"rust-deps": False, "lb": True, "companion": False}
         )
-
-    def test_companion_dockerfile_is_companion_only(self):
-        before = self.commit({"README.md": "base"})
-        after = self.commit({"Dockerfile.companion": "companion"})
+        companion = self.commit({"Dockerfile.companion": "companion"})
         self.assert_matrix(
-            before,
-            after,
+            lb,
+            companion,
             {"rust-deps": False, "lb": False, "companion": True},
         )
 
-    def test_missing_invalid_unavailable_and_empty_ranges_fail_closed(self):
+    def test_missing_invalid_mismatched_and_empty_ranges_fail_closed(self):
         commit = self.commit({"README.md": "base"})
-        missing = self.run_guard("lb")
-        self.assertEqual(missing.returncode, 2)
-        self.assertEqual(missing.stderr.strip(), "publisher_guard=error reason=missing_revision")
-        invalid = self.run_guard("lb", "deadbeef", commit)
-        self.assertEqual(invalid.returncode, 2)
-        self.assertEqual(invalid.stderr.strip(), "publisher_guard=error reason=invalid_revision")
-        unavailable = self.run_guard("lb", commit, "f" * 40)
-        self.assertEqual(unavailable.returncode, 2)
-        self.assertEqual(
-            unavailable.stderr.strip(), "publisher_guard=error reason=unavailable_after"
+        cases = (
+            (None, None, "missing_revision"),
+            ("deadbeef", commit, "invalid_revision"),
+            (commit, "f" * 40, "head_mismatch"),
+            (commit, commit, "empty_changeset"),
         )
-        fetch_failed = self.run_guard("lb", "f" * 40, commit)
-        self.assertEqual(fetch_failed.returncode, 2)
-        self.assertEqual(
-            fetch_failed.stderr.strip(), "publisher_guard=error reason=fetch_failed"
-        )
-        empty = self.run_guard("lb", commit, commit)
-        self.assertEqual(empty.returncode, 2)
-        self.assertEqual(empty.stderr.strip(), "publisher_guard=error reason=empty_changeset")
+        for before, after, reason in cases:
+            result = self.run_planner(before, after)
+            self.assertEqual(result.returncode, 2, result)
+            self.assertEqual(result.stderr.strip(), f"publisher_plan=error reason={reason}")
 
-    def test_deleted_owned_file_still_publishes(self):
+    def test_deleted_and_unusual_owned_files_publish(self):
         before = self.commit({"src/removed.rs": "source"})
         os.remove(self.root / "src" / "removed.rs")
+        (self.root / "src" / "line\nbreak.rs").write_text("source")
         subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
-        subprocess.run(["git", "commit", "-qm", "delete"], cwd=self.root, check=True)
-        after = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=self.root,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        subprocess.run(["git", "commit", "-qm", "change"], cwd=self.root, check=True)
+        after = self.head(self.root)
         self.assert_matrix(before, after, {"lb": True, "companion": True})
 
-    def test_unusual_owned_filename_still_publishes(self):
-        before = self.commit({"README.md": "base"})
-        after = self.commit({"src/line\nbreak.rs": "source"})
-        self.assert_matrix(
-            before,
-            after,
-            {"rust-deps": False, "lb": True, "companion": True},
-        )
-
-    def test_shallow_clone_fetches_exact_predecessor_and_skips_deploy_change(self):
+    def test_shallow_clone_fetches_predecessor_and_builds_plan(self):
         upstream = self.root / "upstream"
         upstream.mkdir()
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=upstream, check=True)
@@ -180,74 +163,81 @@ class DronePublishGuardTest(unittest.TestCase):
         (upstream / "README.md").write_text("base")
         subprocess.run(["git", "add", "README.md"], cwd=upstream, check=True)
         subprocess.run(["git", "commit", "-qm", "base"], cwd=upstream, check=True)
-        before = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=upstream,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        before = self.head(upstream)
         (upstream / "deploy").mkdir()
         (upstream / "deploy" / "compose.yaml").write_text("deployment")
-        subprocess.run(["git", "add", "deploy/compose.yaml"], cwd=upstream, check=True)
+        subprocess.run(["git", "add", "deploy"], cwd=upstream, check=True)
         subprocess.run(["git", "commit", "-qm", "deploy"], cwd=upstream, check=True)
-        after = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=upstream,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-
+        after = self.head(upstream)
         shallow = self.root / "shallow"
         subprocess.run(
             ["git", "clone", "-q", "--depth=1", upstream.as_uri(), str(shallow)],
             check=True,
         )
-        self.assertNotEqual(
-            subprocess.run(
-                ["git", "cat-file", "-e", f"{before}^{{commit}}"],
-                cwd=shallow,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            ).returncode,
-            0,
+        self.assert_matrix(
+            before.upper(),
+            after.upper(),
+            {"rust-deps": False, "lb": False, "companion": False},
+            cwd=shallow,
         )
-        result = self.run_guard("lb", before.upper(), after.upper(), cwd=shallow)
-        self.assertEqual(result.returncode, 3, result)
-        self.assertEqual(result.stdout.strip(), "publisher_guard=skip kind=lb")
         subprocess.run(
             ["git", "cat-file", "-e", f"{before}^{{commit}}"], cwd=shallow, check=True
         )
         self.assertFalse((shallow / ".git" / "FETCH_HEAD").exists())
 
-    def test_invalid_revisions_never_reach_git_fetch(self):
-        commit = self.commit({"README.md": "base"})
-        fake_bin = self.root / "fake-bin"
-        fake_bin.mkdir()
-        marker = self.root / "fetch-called"
-        fake_git = fake_bin / "git"
-        fake_git.write_text(
-            "#!/bin/sh\n"
-            f"for arg in \"$@\"; do if [ \"$arg\" = fetch ]; then : > {marker}; fi; done\n"
-            "exec /usr/bin/git \"$@\"\n"
+    def test_planner_replaces_malicious_directory_and_symlink(self):
+        before = self.commit({"README.md": "base"})
+        after = self.commit({"deploy/compose.yaml": "deployment"})
+        plan = self.root / ".drone-publish-plan"
+        plan.mkdir()
+        (plan / "lb").write_text(after)
+        self.assert_matrix(
+            before,
+            after,
+            {"rust-deps": False, "lb": False, "companion": False},
         )
-        fake_git.chmod(0o755)
-        environment = os.environ.copy()
-        environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
-        for before, after in (
-            ("f" * 39, commit),
-            ("g" * 40, commit),
-            (commit, "A" * 41),
-        ):
-            result = self.run_guard(
-                "lb", before, after, environment=environment
-            )
-            self.assertEqual(result.returncode, 2, result)
-            self.assertEqual(
-                result.stderr.strip(), "publisher_guard=error reason=invalid_revision"
-            )
-        self.assertFalse(marker.exists())
+        target = self.root / "attacker-target"
+        target.mkdir()
+        (target / "lb").write_text(after)
+        for child in plan.iterdir():
+            child.unlink()
+        plan.rmdir()
+        plan.symlink_to(target, target_is_directory=True)
+        self.assert_matrix(
+            before,
+            after,
+            {"rust-deps": False, "lb": False, "companion": False},
+        )
+        self.assertFalse(plan.is_symlink())
+        self.assertEqual((target / "lb").read_text(), after)
+
+    def test_pull_request_does_not_create_or_replace_plan(self):
+        plan = self.root / ".drone-publish-plan"
+        plan.mkdir()
+        (plan / "sentinel").write_text("unchanged")
+        result = self.run_planner(event="pull_request")
+        self.assertEqual(result.returncode, 0, result)
+        self.assertEqual(result.stdout.strip(), "publisher_plan=skip reason=non_push")
+        self.assertEqual((plan / "sentinel").read_text(), "unchanged")
+
+    def test_guard_rejects_missing_symlinked_or_stale_plan(self):
+        commit = self.commit({"README.md": "base"})
+        missing = self.run_guard("lb", commit)
+        self.assertEqual(missing.returncode, 2)
+        self.assertEqual(missing.stderr.strip(), "publisher_guard=error reason=invalid_plan")
+        plan = self.root / ".drone-publish-plan"
+        plan.mkdir()
+        (plan / "lb").write_text("f" * 40)
+        stale = self.run_guard("lb", commit)
+        self.assertEqual(stale.returncode, 2)
+        self.assertEqual(stale.stderr.strip(), "publisher_guard=error reason=invalid_marker")
+        (plan / "lb").unlink()
+        target = self.root / "marker"
+        target.write_text(commit)
+        (plan / "lb").symlink_to(target)
+        linked = self.run_guard("lb", commit)
+        self.assertEqual(linked.returncode, 2)
+        self.assertEqual(linked.stderr.strip(), "publisher_guard=error reason=invalid_marker")
 
 
 if __name__ == "__main__":

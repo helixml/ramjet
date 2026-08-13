@@ -323,8 +323,9 @@ node06). The design rationale for each lives in DESIGN.md.
   lockfile, and dependency Dockerfile; both release builds inherit it explicitly
   and compile offline instead of trusting Docker 20.10 inline-cache import.
   Dependency inputs rebuild that image first. Because Drone 2.12 discards
-  unsupported path conditions, all three main-push steps use an exact-range,
-  fail-closed repository guard before Docker startup or registry login.
+  unsupported path conditions, `rust-fetch` creates an exact-range,
+  revision-bound publisher plan while Git is available; all three main-push
+  steps consume only their marker before Docker startup or registry login.
   CI/docs/bench/deploy-only changes execute only those cheap guards and perform
   zero image work. The Rust cutover is complete and the obsolete Go lane and
   packages are removed. Preserve the measured ~58–59s PR quality budget and

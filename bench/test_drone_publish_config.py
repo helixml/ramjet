@@ -8,9 +8,14 @@ DRONE = ROOT / ".drone.yml"
 
 
 class DronePublishConfigTest(unittest.TestCase):
-    def test_publishers_use_guard_and_no_unsupported_path_condition(self):
+    def test_rust_fetch_builds_plan_and_publishers_only_consume_it(self):
         text = DRONE.read_text()
         self.assertNotIn("paths:", text)
+        fetch = re.search(
+            r"(?ms)^  - name: rust-fetch\n(.*?)(?=^  - name: )", text
+        )
+        self.assertIsNotNone(fetch)
+        self.assertIn("cargo fetch --locked\n      - sh bench/drone_publish_plan.sh", fetch.group(1))
         for kind, step in (
             ("rust-deps", "publish-rust-deps-image"),
             ("lb", "publish-image"),
@@ -26,6 +31,7 @@ class DronePublishConfigTest(unittest.TestCase):
             self.assertIn('if [ "$status" -eq 3 ]; then exit 0; fi', body)
             self.assertIn('if [ "$status" -ne 0 ]; then exit "$status"; fi', body)
             self.assertIn("exec /bin/drone-docker", body)
+            self.assertNotIn("git ", body)
             self.assertRegex(body, r"(?ms)when:\n      event:\n        - push")
             self.assertNotIn("pull_request", body)
 
