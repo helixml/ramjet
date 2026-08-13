@@ -78,9 +78,25 @@ impl SnapshotDigestDeltaAdapter {
             let result = match event {
                 KvEvent::BlockStored(stored) => {
                     if self.accept_store(rank, stored) {
-                        index.store(stored).map(|blocks| {
-                            summary.stored_blocks = summary.stored_blocks.saturating_add(blocks);
-                        })
+                        match index.store(stored) {
+                            Ok(blocks) => {
+                                summary.stored_blocks =
+                                    summary.stored_blocks.saturating_add(blocks);
+                                Ok(())
+                            }
+                            // r34 may publish a short partial MLA block whose
+                            // internal parent is absent from the public event
+                            // stream. The raw exact inventory already treats
+                            // every absent-parent store as non-authoritative and
+                            // filters it. Preserve that no-overclaim contract in
+                            // the compact index instead of fencing the otherwise
+                            // complete generation.
+                            Err(DigestIndexError::ParentNotFound) => {
+                                summary.filtered_events = summary.filtered_events.saturating_add(1);
+                                Ok(())
+                            }
+                            Err(error) => Err(error),
+                        }
                     } else {
                         summary.filtered_events = summary.filtered_events.saturating_add(1);
                         Ok(())
@@ -216,6 +232,17 @@ mod tests {
         })
     }
 
+    fn store_with_block_size(
+        hash: u64,
+        parent: Option<u64>,
+        tokens: &[u32],
+        block_size: usize,
+    ) -> Value {
+        let mut event = store(hash, parent, tokens);
+        event["block_size"] = json!(block_size);
+        event
+    }
+
     fn remove(hash: u64) -> Value {
         json!({
             "type": "BlockRemoved",
@@ -294,6 +321,33 @@ mod tests {
         assert_eq!(index.find_longest(&[9, 9]).unwrap().token_ids, 0);
         assert_eq!(index.find_longest(&[8, 8]).unwrap().token_ids, 0);
         assert_eq!(index.find_longest(&[6, 6]).unwrap().token_ids, 2);
+    }
+
+    #[test]
+    fn r34_partial_mla_orphan_is_filtered_without_losing_the_generation() {
+        let mut index = index();
+        let canonical_tokens = (0..256).collect::<Vec<_>>();
+        let summary = adapter()
+            .apply(
+                &mut index,
+                &payload(vec![
+                    store_with_block_size(11, None, &canonical_tokens, 256),
+                    store_with_block_size(12, Some(999), &[300, 301, 302, 303], 4),
+                ]),
+            )
+            .unwrap();
+
+        assert_eq!(summary.stored_blocks, 1);
+        assert_eq!(summary.filtered_events, 1);
+        assert_eq!(index.stats().nodes, 1);
+        assert_eq!(
+            index.find_longest(&canonical_tokens).unwrap().token_ids,
+            canonical_tokens.len()
+        );
+        assert_eq!(
+            index.find_longest(&[300, 301, 302, 303]).unwrap().token_ids,
+            0
+        );
     }
 
     #[test]

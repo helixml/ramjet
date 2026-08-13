@@ -1169,7 +1169,7 @@ mod tests {
         let KvEvent::BlockStored(stored) = &mut invalid.batch.events[0] else {
             panic!("test batch must contain a store");
         };
-        stored.parent_block_hash = Some(ExternalBlockHash::Unsigned(999));
+        stored.block_size = 0;
         assert_eq!(
             source.apply_replay(&invalid),
             Err(CompanionIndexSourceError::Index)

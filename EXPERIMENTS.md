@@ -4825,3 +4825,50 @@ Compose mutation. Both engines remained healthy with zero restarts and ordinary
 2/2 approximate serving was unaffected. This replaces the previous “wait for a
 fresh generation” uncertainty with a concrete compact-index replay defect to
 diagnose before snapshot shadow mode can be enabled.
+
+## 2026-08-13 — r97 compact replay orphan parity and live B proof
+
+A read-only probe against fresh engine B reproduced the compact companion's
+`apply` failure without replaying long-lived A or changing either engine. In
+4.484s it received six contiguous batches at sequences 0–5 containing 28
+`BlockStored` events. The main MLA group contained six root hashes at canonical
+block size 256 and one observed parent, plus one four-token partial MLA store
+whose internal parent was absent. The probe recorded only bounded counts and
+shape classes; it did not print token IDs or hashes.
+
+The mismatch was local and conservative. `ExactKvInventory` already classifies
+an absent-parent store as a filtered unsupported partial/orphan and makes no
+residency claim. `SnapshotDigestDeltaAdapter` instead propagated
+`DigestIndexError::ParentNotFound`, fenced the otherwise complete generation,
+and published nothing. r97 now increments the compact adapter's filtered-event
+count for that one error class while retaining fatal treatment for malformed
+geometry, capacity, and other index failures. A unit test preserves the
+canonical root while proving the orphan cannot be found; an owner-level full
+replay test proves the source can commit at the final watermark with only the
+authoritative root published. The pre-existing fatal-source test now uses a
+zero block size, which is a genuinely inconsistent wire shape.
+
+The widened local gate passed formatting, strict all-target/all-feature
+Clippy, all 336 Rust unit tests and integration suites, all 202 Python tests,
+and the locked release build. The candidate companion image was 11,808,478
+bytes. A warm source edit rebuilt in 2.345s, transferred to node06 in 3.458s,
+and completed the build/transfer loop in 5.803s.
+
+Only `snapshot-companion-b` was replaced under the common deployment lock;
+both r34 engine identities, the LB, and companion A remained unchanged. An
+initial 86-token request correctly emitted no complete KV block and supplied no
+watermark. A direct B request with 3,684 prompt tokens and eight completion
+tokens then made the source authoritative within the next two-second sample,
+with 19 indexed blocks and zero invalid replays. Two later three-second samples
+remained ready and stable. A second fresh request with 2,485 prompt tokens
+produced one live apply and increased the index to 28 blocks while replay
+completion, watermark presence, and readiness all stayed one.
+
+This is the first real fresh-generation proof that the compact source can
+bootstrap and continue live ingestion on r34. The unpublished candidate was
+removed and companion B restored to the immutable production `123dd9d` image.
+Snapshot routing remained off throughout. The final qualification rollback
+returned the LB to its safe A-only topology and cleanly stopped B with exit code
+zero; A continued serving 1/1 with no restart. Publish and digest-pin r97 before
+the next dual-engine restore so the fresh B generation is not spent on the
+known-bad companion again.

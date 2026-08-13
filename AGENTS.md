@@ -512,9 +512,12 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   ```
 
 - Recreate only `ds4-loadbalancer` for router work. The engines retain their
-  KV caches and the interruption is about four seconds. Trigger one small
-  allocation on each engine after the roll so late-subscriber replay starts;
-  wait for both exact inventories to become trusted before an exact test.
+  KV caches and the interruption is about four seconds. Trigger one direct
+  allocation containing at least one complete canonical KV block on each
+  engine after the roll so a late subscriber receives a live watermark; on
+  the current r34 stack that means more than 256 actual prompt tokens. A tiny
+  completion-only request may emit no KV event and cannot start replay. Wait
+  for both exact inventories to become trusted before an exact test.
 - Do not trigger another full-history replay on long-lived A merely to profile
   the receiver. r33 already measured a 177.52s publisher gap while Rust spent
   only 2.12s decoding and 0.16s folding 5,500 batches. Use the exported replay
