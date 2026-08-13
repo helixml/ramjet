@@ -51,6 +51,8 @@ pub struct Metrics {
     pub exact_route_overlap: HistogramVec,
     pub exact_route_gain: HistogramVec,
     pub exact_route_residency_delta: HistogramVec,
+    pub exact_route_projected_balance: CounterVec,
+    pub exact_route_projected_residency_delta: HistogramVec,
     pub compat_attested: GaugeVec,
     pub compat_attestation_checks: CounterVec,
     pub kv_event_up: GaugeVec,
@@ -369,6 +371,28 @@ impl Metrics {
                 ],
                 &["endpoint"],
             )?,
+            exact_route_projected_balance: counter(
+                "ds4proxy_exact_route_projected_balance_total",
+                "Observation-only cold-balance decisions using exact residency plus load-equivalent in-flight pressure",
+                &["endpoint", "outcome"],
+            )?,
+            exact_route_projected_residency_delta: histogram(
+                "ds4proxy_exact_route_projected_residency_delta_tokens",
+                "Projected token-pressure delta for observation-only cold-balance candidates",
+                vec![
+                    0.0,
+                    32_768.0,
+                    65_536.0,
+                    131_072.0,
+                    262_144.0,
+                    524_288.0,
+                    1_048_576.0,
+                    2_097_152.0,
+                    4_194_304.0,
+                    8_388_608.0,
+                ],
+                &["endpoint"],
+            )?,
             compat_attested: gauge(
                 "ds4proxy_compat_attested",
                 "Whether an upstream matches the active exact-route compatibility manifest",
@@ -502,6 +526,17 @@ impl Metrics {
                     .with_label_values(&[endpoint, outcome]);
                 metrics.cache_ttft.with_label_values(&[endpoint, outcome]);
             }
+            for outcome in [
+                "kept_selected",
+                "would_balance",
+                "kept_delta_gate",
+                "kept_load_gate",
+                "fallback",
+            ] {
+                metrics
+                    .exact_route_projected_balance
+                    .with_label_values(&[endpoint, outcome]);
+            }
         }
         for collector in metrics.collectors() {
             registry.register(collector)?;
@@ -579,6 +614,8 @@ impl Metrics {
             Box::new(self.exact_route_overlap.clone()),
             Box::new(self.exact_route_gain.clone()),
             Box::new(self.exact_route_residency_delta.clone()),
+            Box::new(self.exact_route_projected_balance.clone()),
+            Box::new(self.exact_route_projected_residency_delta.clone()),
             Box::new(self.compat_attested.clone()),
             Box::new(self.compat_attestation_checks.clone()),
             Box::new(self.kv_event_up.clone()),
@@ -747,6 +784,7 @@ mod tests {
             "ds4proxy_tokenizer_shadow_total",
             "ds4proxy_exact_route_preroute_total",
             "ds4proxy_exact_route_placement_total",
+            "ds4proxy_exact_route_projected_balance_total",
             "ds4proxy_exact_route_canary_total",
             "ds4proxy_compat_attested",
             "ds4proxy_kv_event_trusted",
@@ -771,6 +809,25 @@ mod tests {
             r#"ds4proxy_cache_ttft_seconds_count{endpoint="chat",outcome="partial"} 0"#,
         ] {
             assert!(text.contains(expected), "missing zero series: {expected}");
+        }
+        assert_eq!(
+            text.lines()
+                .filter(|line| {
+                    line.starts_with("ds4proxy_exact_route_projected_balance_total{")
+                })
+                .count(),
+            5 * 5
+        );
+        for outcome in [
+            "kept_selected",
+            "would_balance",
+            "kept_delta_gate",
+            "kept_load_gate",
+            "fallback",
+        ] {
+            assert!(text.contains(&format!(
+                "ds4proxy_exact_route_projected_balance_total{{endpoint=\"chat\",outcome=\"{outcome}\"}} 0"
+            )));
         }
     }
 
