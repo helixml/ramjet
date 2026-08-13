@@ -3048,13 +3048,41 @@ explicit deadline, oversized/truncated framing, slow-build cancellation,
 two-session replacement, live store/remove after publication, and coordinated
 incarnation/key rollover cases before node06 shadowing.
 
-That adversarial matrix is now covered by nine public-API Unix-stream
-integration tests: absolute-deadline revocation after publication; oversized
-snapshot and tail prefixes rejected before body allocation/read; truncated
-snapshot and tail frames; abort during a 60,000-record, greater-than-8MiB
-private build; same-identity two-session replacement with stale-disconnect
-isolation; generation rollover and republish; authenticated vLLM-shaped live
-store/remove mutation; and content-safe error/debug/reason output. No runtime
-bug was found. The warm test body takes about 1.6 seconds; the intentionally
-large cancellation fixture peaks around 1.1–1.3GiB RSS, so keep it in the full
-gate rather than duplicating it across parallel local loops.
+## 2026-08-13 — issue #41 companion snapshot/tail producer
+
+The companion/server protocol half now fits directly behind the bounded Unix
+accept supervisor. It checks peer credentials and authenticates the fixed hello
+before source work, establishes bounded live-tail capture before starting the
+snapshot build, emits one authenticated length-framed snapshot without relying
+on EOF, and derives the companion-to-router tail key for the remaining stream.
+Tail message/delivery sequencing is dense while real engine watermarks may be
+sparse. Identity rollover sends an authenticated fencing control and ends the
+session.
+
+The engine-independent source interface returns owned snapshot work, exposes a
+bounded publisher with async backpressure plus non-blocking `try_send`, and
+receives cancellation. Split read/write halves detect client EOF while the
+snapshot or tail source is pending. One supervisor-provided absolute deadline
+also bounds slow writes; no engine or global lock is held across serialization
+or I/O. Seven real Unix tests cover the full snapshot/event/caught-up/live-
+event/disconnect sequence, bad hello and peer gating, immediate client-drop
+cancellation, queue/payload bounds, slow-reader backpressure, pending-build
+deadline, and identity rollover. Focused test runtime is 0.12 seconds.
+
+This remains an offline library seam. A concrete long-lived vLLM index source,
+outbound LB reconnect/challenge owner, runtime command, and shadow-only wiring
+are still required before the sandbox can use real images or node06 can run it.
+
+## 2026-08-13 — issue #41 adversarial LB consumer matrix
+
+Nine public-API Unix-stream integration tests now cover absolute-deadline
+revocation after publication; oversized snapshot and tail prefixes rejected
+before body allocation/read; truncated snapshot and tail frames; abort during a
+60,000-record, greater-than-8MiB private build; same-identity two-session
+replacement with stale-disconnect isolation; generation rollover and republish;
+authenticated vLLM-shaped live store/remove mutation; and content-safe
+error/debug/reason output. No runtime bug was found.
+
+The warm test body takes about 1.6 seconds. The intentionally large
+cancellation fixture peaks around 1.1–1.3GiB RSS, so keep it in the full gate
+rather than duplicating it across parallel local loops.

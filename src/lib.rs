@@ -22,6 +22,7 @@ pub mod snapshot_actor;
 pub mod snapshot_bootstrap;
 pub mod snapshot_consumer;
 pub mod snapshot_digest_delta;
+pub mod snapshot_producer;
 pub mod snapshot_secret_file;
 pub mod snapshot_session;
 pub mod snapshot_socket_path;

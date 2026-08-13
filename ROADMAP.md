@@ -503,8 +503,8 @@ node06). The design rationale for each lives in DESIGN.md.
   cleanup. A hard two-session actor keeps replacement state private, bounds
   tail queues, preserves same-identity publication during catch-up, revokes on
   identity change, and atomically publishes only a verifier-constructed opaque
-  generation after caught-up. Epochs make stale disconnects harmless. Next
-  The accept-loop supervisor and KV delta adapter are now complete: exactly two
+  generation after caught-up. Epochs make stale disconnects harmless. The
+  accept-loop supervisor and KV delta adapter are now complete: exactly two
   client tasks run independently under one absolute deadline, excess clients
   are closed immediately, shutdown drops stalled streams, and every exit frees
   its slot. Authenticated payloads decode under existing vLLM bounds, filter to
@@ -522,10 +522,16 @@ node06). The design rationale for each lives in DESIGN.md.
   while queuing authenticated tail frames, then publishes only on exact caught-
   up. One absolute deadline encloses the session, and timeout, abort, EOF, MAC
   failure, delivery gap, or stale generation synchronously fences its epoch and
-  revokes owned publication. Keep this separate from companion/server admission:
-  the remaining runtime seams are outbound reconnect plus challenge reuse
-  prevention and companion-side snapshot/tail production. Add the Compose
-  sandbox, then run at least
+  revokes owned publication. Keep this separate from companion/server admission.
+  That companion/server half is now an engine-neutral producer behind the
+  existing two-client supervisor: it authenticates the hello before source
+  work, subscribes live before snapshot construction, writes a bounded length-
+  framed snapshot without EOF, then signs dense-sequenced tail events while
+  preserving sparse real watermarks. Bounded queues apply backpressure; client
+  EOF, slow-write deadline, shutdown, source failure, or identity rollover
+  cancels source work and ends the session without holding engine locks across
+  serialization or I/O. Add the concrete long-lived index source, outbound
+  reconnect/challenge owner, and Compose runtime, then run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
 
   Deployment hardening is also part of the gate: distinct fixed LB/companion
