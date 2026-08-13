@@ -3407,3 +3407,33 @@ event causes zero reconnects, zero replay requests, and zero generation churn;
 the following clear restores readiness on the original connection. The full
 library suite passed 286/286 tests in 0.68 seconds. This is still library-only;
 node06, images, and production Compose were not changed.
+
+## 2026-08-13 — dual per-engine companion Compose/security harness
+
+The standalone offline companion contract now follows the runtime's deliberate
+one-source limit with one process and authority domain per engine. The explicit
+profile renders four fixture-only services: companion/client A and
+companion/client B. A normal render still selects zero. The two domains use
+different companion UIDs (12001/12003), host-tmpfs runtime directories, Unix
+socket paths, root-owned 32-byte session-secret inodes, fixture subpaths,
+healthchecks, and engine labels. The future LB fixtures retain UID 12002 and
+only the shared numeric GID 12000 crosses the domain boundary. Synthetic fixture
+directories are per-engine and read-only.
+
+The semantic validator rejects networking or ports, host IPC/PID namespaces,
+GPU/device access, privileged mode/capabilities, Docker socket or broad host
+mounts, writable client roots, implicit host-path creation, cross-engine
+runtime/secret visibility, peer socket names in commands or healthchecks, and
+service dependencies that would couple readiness. Its authority projection is
+keyed to each validated companion/client/socket tuple: with A failed and B
+healthy, only B remains authoritative; the reverse holds independently. It
+cannot substitute one engine's state through the other socket.
+
+Local Docker Compose 5.0.0 rendered the explicit profile and passed the
+validator; the default `config --services` output contained zero lines. Six
+GPU-free mutation tests passed in under 1ms. A real disposable `/run` tmpfs
+preflight passed exact UID/GID/mode/link/size/inode checks for both domains, and
+an intentionally aliased runtime directory failed closed before metadata
+validation. The disposable files and directories were removed afterward. This
+changes no production Compose, executable, image, or node06 state; reserved
+`.invalid` images keep the harness non-startable by default.

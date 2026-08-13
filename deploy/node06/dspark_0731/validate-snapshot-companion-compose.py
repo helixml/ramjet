@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render and semantically validate the offline companion Compose sandbox."""
+"""Render and semantically validate the dual offline companion sandbox."""
 
 from __future__ import annotations
 
@@ -8,44 +8,67 @@ import os
 import pathlib
 import subprocess
 import sys
+from typing import Any
 
 
 HERE = pathlib.Path(__file__).resolve().parent
 OVERLAY = HERE / "docker-compose.snapshot-companion-offline.yaml"
-SERVICE = "snapshot-companion-offline"
-CLIENT = "snapshot-lb-offline"
+PROFILE = "snapshot-companion-offline"
 RESERVED_COMPANION_IMAGE = "snapshot-companion.invalid/mini-dynamo:not-built"
 RESERVED_CLIENT_IMAGE = "snapshot-lb.invalid/mini-dynamo:not-built"
 
+DOMAINS: dict[str, dict[str, Any]] = {
+    "engine-a": {
+        "companion": "snapshot-companion-offline-a",
+        "client": "snapshot-lb-offline-a",
+        "companion_uid": "12001",
+        "runtime_source": "/run/mini-dynamo-snapshot-offline-a",
+        "runtime_target": "/run/mini-dynamo-snapshot-a",
+        "secret_source": "/run/secrets/mini-dynamo-snapshot-session-a",
+        "secret_target": "/run/secrets/snapshot-session-a",
+        "fixture_source": "/var/lib/mini-dynamo/snapshot-fixtures-a",
+        "socket": "/run/mini-dynamo-snapshot-a/companion-a.sock",
+    },
+    "engine-b": {
+        "companion": "snapshot-companion-offline-b",
+        "client": "snapshot-lb-offline-b",
+        "companion_uid": "12003",
+        "runtime_source": "/run/mini-dynamo-snapshot-offline-b",
+        "runtime_target": "/run/mini-dynamo-snapshot-b",
+        "secret_source": "/run/secrets/mini-dynamo-snapshot-session-b",
+        "secret_target": "/run/secrets/snapshot-session-b",
+        "fixture_source": "/var/lib/mini-dynamo/snapshot-fixtures-b",
+        "socket": "/run/mini-dynamo-snapshot-b/companion-b.sock",
+    },
+}
+
+
+class ValidationError(ValueError):
+    pass
+
 
 def fail(message: str) -> None:
-    raise SystemExit(f"snapshot companion compose validation failed: {message}")
+    raise ValidationError(message)
 
 
-def render() -> dict:
+def render(*, profile: bool) -> dict[str, Any]:
     environment = os.environ.copy()
     environment.update(
         {
-            "SNAPSHOT_RUNTIME_DIR": "/run/mini-dynamo-snapshot-offline",
-            "SNAPSHOT_SESSION_SECRET_FILE": "/run/secrets/mini-dynamo-snapshot-session",
-            "SNAPSHOT_FIXTURE_DIR": "/var/lib/mini-dynamo/snapshot-fixtures",
+            "SNAPSHOT_RUNTIME_DIR_A": DOMAINS["engine-a"]["runtime_source"],
+            "SNAPSHOT_RUNTIME_DIR_B": DOMAINS["engine-b"]["runtime_source"],
+            "SNAPSHOT_SESSION_SECRET_FILE_A": DOMAINS["engine-a"]["secret_source"],
+            "SNAPSHOT_SESSION_SECRET_FILE_B": DOMAINS["engine-b"]["secret_source"],
+            "SNAPSHOT_FIXTURE_DIR_A": DOMAINS["engine-a"]["fixture_source"],
+            "SNAPSHOT_FIXTURE_DIR_B": DOMAINS["engine-b"]["fixture_source"],
         }
     )
-    # Validate the Compose defaults even if the invoking shell happens to carry
-    # image overrides from another task.
     environment.pop("SNAPSHOT_COMPANION_IMAGE", None)
     environment.pop("SNAPSHOT_LB_IMAGE", None)
-    command = [
-        "docker",
-        "compose",
-        "-f",
-        str(OVERLAY),
-        "--profile",
-        "snapshot-companion-offline",
-        "config",
-        "--format",
-        "json",
-    ]
+    command = ["docker", "compose", "-f", str(OVERLAY)]
+    if profile:
+        command.extend(["--profile", PROFILE])
+    command.extend(["config", "--format", "json"])
     completed = subprocess.run(
         command,
         check=False,
@@ -58,105 +81,245 @@ def render() -> dict:
         fail("docker compose could not render the offline profile")
     try:
         return json.loads(completed.stdout)
-    except json.JSONDecodeError:
-        fail("docker compose did not produce JSON")
+    except json.JSONDecodeError as exc:
+        raise ValidationError("docker compose did not produce JSON") from exc
 
 
-def require_profile_off_by_default() -> None:
-    completed = subprocess.run(
-        [
-            "docker",
-            "compose",
-            "-f",
-            str(OVERLAY),
-            "config",
-            "--services",
-        ],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if completed.returncode != 0 or completed.stdout.strip():
-        fail("offline services are active without the explicit profile")
-
-
-def volume_by_target(service: dict, target: str) -> dict:
-    matches = [volume for volume in service.get("volumes", []) if volume.get("target") == target]
+def volume_by_target(service: dict[str, Any], target: str) -> dict[str, Any]:
+    matches = [
+        volume
+        for volume in service.get("volumes", [])
+        if volume.get("target") == target
+    ]
     if len(matches) != 1:
         fail(f"expected exactly one mount at {target}")
     return matches[0]
 
 
-def main() -> int:
-    require_profile_off_by_default()
-    document = render()
-    services = document.get("services", {})
-    companion = services.get(SERVICE)
-    load_balancer = services.get(CLIENT)
-    if companion is None or load_balancer is None:
-        fail("required services are absent")
-    if set(services) != {SERVICE, CLIENT}:
-        fail("offline file contains an unexpected service")
+def require_arg(command: list[str], expected: str, service: str) -> None:
+    if command.count(expected) != 1:
+        fail(f"{service} does not carry exactly one {expected!r} argument")
 
-    for name, service in services.items():
-        if service.get("profiles") != ["snapshot-companion-offline"]:
-            fail(f"{name} is not guarded by the offline profile")
-        if service.get("network_mode") != "none" or service.get("ports"):
-            fail(f"{name} has network or published port access")
-        if service.get("read_only") is not True:
-            fail(f"{name} root filesystem is writable")
-        if service.get("cap_drop") != ["ALL"]:
-            fail(f"{name} Linux capabilities are not fully dropped")
-        if "no-new-privileges:true" not in service.get("security_opt", []):
-            fail(f"{name} no-new-privileges is absent")
-        if service.get("healthcheck", {}).get("test", [None])[0] != "CMD":
-            fail(f"{name} exec-form healthcheck is absent")
-    if companion.get("user") != "12001:12000":
-        fail("companion UID/GID contract changed")
-    if load_balancer.get("user") != "12002:12000":
-        fail("LB fixture UID/GID contract changed")
-    if companion.get("pids_limit") != 128:
-        fail("PID limit changed")
-    if int(companion.get("mem_limit", 0)) != 512 * 1024 * 1024:
-        fail("memory limit changed")
+
+def validate_default(document: dict[str, Any]) -> None:
+    if document.get("services"):
+        fail("offline services are active without the explicit profile")
+
+
+def validate_sandbox(name: str, service: dict[str, Any]) -> None:
+    if service.get("profiles") != [PROFILE]:
+        fail(f"{name} is not guarded by the offline profile")
+    if service.get("network_mode") != "none" or service.get("ports") or service.get("expose"):
+        fail(f"{name} has network or published port access")
+    if service.get("ipc") != "private" or service.get("pid") == "host":
+        fail(f"{name} has host IPC or PID namespace access")
+    if service.get("read_only") is not True:
+        fail(f"{name} root filesystem is writable")
+    if service.get("privileged") is True:
+        fail(f"{name} is privileged")
+    if service.get("cap_drop") != ["ALL"]:
+        fail(f"{name} Linux capabilities are not fully dropped")
+    if "no-new-privileges:true" not in service.get("security_opt", []):
+        fail(f"{name} no-new-privileges is absent")
+    if any(service.get(key) for key in ("devices", "device_requests", "gpus")):
+        fail(f"{name} has GPU or host device access")
+    if service.get("depends_on") or service.get("links"):
+        fail(f"{name} health/lifecycle is coupled to another service")
+    if service.get("environment"):
+        fail(f"{name} claims a runtime environment contract")
+    health = service.get("healthcheck", {}).get("test", [])
+    if not health or health[0] != "CMD":
+        fail(f"{name} exec-form healthcheck is absent")
+    for volume in service.get("volumes", []):
+        source = str(volume.get("source", ""))
+        normalized_source = source.rstrip("/")
+        if normalized_source.endswith("/docker.sock"):
+            fail(f"{name} mounts the Docker socket")
+        if source in {"/", "/proc", "/sys", "/dev", "/run"}:
+            fail(f"{name} mounts a broad host path")
+        if volume.get("type") != "bind":
+            fail(f"{name} has a non-bind persistent mount")
+        if volume.get("bind", {}).get("create_host_path") is not False:
+            fail(f"{name} may create its host bind source")
+
+
+def validate_domain(
+    engine: str, domain: dict[str, Any], services: dict[str, dict[str, Any]]
+) -> None:
+    companion_name = domain["companion"]
+    client_name = domain["client"]
+    companion = services[companion_name]
+    client = services[client_name]
+
+    if companion.get("user") != f"{domain['companion_uid']}:12000":
+        fail(f"{companion_name} UID/GID contract changed")
+    if client.get("user") != "12002:12000":
+        fail(f"{client_name} UID/GID contract changed")
+    if companion.get("pids_limit") != 128 or int(
+        companion.get("mem_limit", 0)
+    ) != 512 * 1024 * 1024:
+        fail(f"{companion_name} resource bounds changed")
+    if client.get("pids_limit") != 64 or int(client.get("mem_limit", 0)) != 256 * 1024 * 1024:
+        fail(f"{client_name} resource bounds changed")
     if companion.get("image") != RESERVED_COMPANION_IMAGE:
-        fail("default companion image is not reserved under .invalid")
-    if load_balancer.get("image") != RESERVED_CLIENT_IMAGE:
-        fail("default LB fixture image is not reserved under .invalid")
-    if companion.get("environment") or load_balancer.get("environment"):
-        fail("fixture harness must not claim the production runtime environment contract")
-    if companion.get("command", [None])[0] != "snapshot-companion-fixture":
-        fail("companion command is not explicitly fixture-only")
-    if load_balancer.get("command", [None])[0] != "snapshot-client-fixture":
-        fail("LB command is not explicitly fixture-only")
+        fail(f"{companion_name} default image is not reserved under .invalid")
+    if client.get("image") != RESERVED_CLIENT_IMAGE:
+        fail(f"{client_name} default image is not reserved under .invalid")
 
-    runtime = volume_by_target(companion, "/run/mini-dynamo-snapshot")
-    secret = volume_by_target(companion, "/run/secrets/snapshot-session")
-    fixtures = volume_by_target(companion, "/fixtures")
-    lb_runtime = volume_by_target(load_balancer, "/run/mini-dynamo-snapshot")
-    lb_secret = volume_by_target(load_balancer, "/run/secrets/snapshot-session")
-    if runtime.get("type") != "bind" or runtime.get("read_only", False):
-        fail("companion runtime mount is not its sole writable bind")
-    if secret.get("type") != "bind" or secret.get("read_only") is not True:
-        fail("secret mount is not read-only")
-    if lb_secret.get("source") != secret.get("source") or lb_secret.get("read_only") is not True:
-        fail("LB fixture does not receive the same read-only session secret")
-    if fixtures.get("type") != "bind" or fixtures.get("read_only") is not True:
-        fail("offline fixture mount is not read-only")
-    if lb_runtime.get("source") != runtime.get("source") or lb_runtime.get("read_only") is not True:
-        fail("LB socket mount is not the same read-only runtime directory")
+    companion_command = companion.get("command", [])
+    client_command = client.get("command", [])
+    if companion_command[:1] != ["snapshot-companion-fixture"]:
+        fail(f"{companion_name} is not explicitly fixture-only")
+    if client_command[:1] != ["snapshot-client-fixture"]:
+        fail(f"{client_name} is not explicitly fixture-only")
+    shared_args = (
+        f"--engine-id={engine}",
+        f"--socket={domain['socket']}",
+        f"--secret={domain['secret_target']}",
+        "--fixtures=/fixtures",
+    )
+    for expected in shared_args:
+        require_arg(companion_command, expected, companion_name)
+        require_arg(client_command, expected, client_name)
+    require_arg(
+        companion_command, "--expected-client-uid=12002", companion_name
+    )
+    require_arg(
+        client_command,
+        f"--expected-peer-uid={domain['companion_uid']}",
+        client_name,
+    )
 
-    runtime_source = runtime.get("source")
-    holders = []
+    companion_runtime = volume_by_target(companion, domain["runtime_target"])
+    client_runtime = volume_by_target(client, domain["runtime_target"])
+    companion_secret = volume_by_target(companion, domain["secret_target"])
+    client_secret = volume_by_target(client, domain["secret_target"])
+    companion_fixtures = volume_by_target(companion, "/fixtures")
+    client_fixtures = volume_by_target(client, "/fixtures")
+    if len(companion.get("volumes", [])) != 3 or len(client.get("volumes", [])) != 3:
+        fail(f"{engine} authority pair has an unexpected mount")
+    if companion_runtime.get("source") != domain[
+        "runtime_source"
+    ] or companion_runtime.get("read_only", False):
+        fail(f"{companion_name} does not exclusively own its writable runtime")
+    if client_runtime.get("source") != domain[
+        "runtime_source"
+    ] or client_runtime.get("read_only") is not True:
+        fail(f"{client_name} does not receive its runtime read-only")
+    for secret in (companion_secret, client_secret):
+        if secret.get("source") != domain["secret_source"] or secret.get("read_only") is not True:
+            fail(f"{engine} session secret is not the exact shared read-only bind")
+    for fixtures in (companion_fixtures, client_fixtures):
+        if fixtures.get("source") != domain[
+            "fixture_source"
+        ] or fixtures.get("read_only") is not True:
+            fail(f"{engine} fixture bind is not exact/read-only")
+
+    expected_companion_health = [
+        "CMD",
+        "/mini-dynamo-snapshot-companion",
+        "healthcheck",
+        domain["socket"],
+    ]
+    expected_client_health = [
+        "CMD",
+        "/mini-dynamo",
+        "snapshot-client-healthcheck",
+        domain["socket"],
+    ]
+    if companion.get("healthcheck", {}).get("test") != expected_companion_health:
+        fail(f"{companion_name} healthcheck is not isolated to its own socket")
+    if client.get("healthcheck", {}).get("test") != expected_client_health:
+        fail(f"{client_name} healthcheck is not isolated to its own socket")
+
+    for name, service, role in (
+        (companion_name, companion, "companion"),
+        (client_name, client, "client"),
+    ):
+        labels = service.get("labels", {})
+        if labels.get("org.helixml.mini-dynamo.engine") != engine:
+            fail(f"{name} engine identity label changed")
+        if labels.get("org.helixml.mini-dynamo.role") != role:
+            fail(f"{name} role label changed")
+
+
+def validate_authority_isolation(services: dict[str, dict[str, Any]]) -> None:
+    runtime_sources = {domain["runtime_source"] for domain in DOMAINS.values()}
+    secret_sources = {domain["secret_source"] for domain in DOMAINS.values()}
+    fixture_sources = {domain["fixture_source"] for domain in DOMAINS.values()}
+    if any(
+        len(sources) != len(DOMAINS)
+        for sources in (runtime_sources, secret_sources, fixture_sources)
+    ):
+        fail("per-engine runtime, secret, or fixture source is shared")
+    for engine, domain in DOMAINS.items():
+        allowed = {domain["companion"], domain["client"]}
+        for source in (
+            domain["runtime_source"],
+            domain["secret_source"],
+            domain["fixture_source"],
+        ):
+            holders = {
+                name
+                for name, service in services.items()
+                for volume in service.get("volumes", [])
+                if volume.get("source") == source
+            }
+            if holders != allowed:
+                fail(f"{engine} authority source is visible outside its pair")
+        peer = "engine-b" if engine == "engine-a" else "engine-a"
+        peer_tokens = (
+            DOMAINS[peer]["socket"],
+            DOMAINS[peer]["secret_target"],
+            f"--engine-id={peer}",
+        )
+        for name in allowed:
+            flattened = "\0".join(services[name].get("command", []))
+            health = "\0".join(services[name].get("healthcheck", {}).get("test", []))
+            if any(token in flattened or token in health for token in peer_tokens):
+                fail(f"{name} can address the peer authority domain")
+
+
+def validate_profile(document: dict[str, Any]) -> None:
+    services = document.get("services", {})
+    expected = {
+        name
+        for domain in DOMAINS.values()
+        for name in (domain["companion"], domain["client"])
+    }
+    if set(services) != expected:
+        fail("offline profile does not contain exactly two isolated pairs")
     for name, service in services.items():
-        for volume in service.get("volumes", []):
-            if volume.get("source") == runtime_source:
-                holders.append(name)
-    if sorted(holders) != sorted([CLIENT, SERVICE]):
-        fail("runtime directory is shared with an unexpected service")
+        validate_sandbox(name, service)
+    for engine, domain in DOMAINS.items():
+        validate_domain(engine, domain, services)
+    validate_authority_isolation(services)
 
-    print("snapshot companion compose validation passed")
+
+def authority_status(
+    document: dict[str, Any], health: dict[str, bool]
+) -> dict[str, dict[str, Any]]:
+    """Project fixture health without allowing cross-engine substitution."""
+    validate_profile(document)
+    status = {}
+    for engine, domain in DOMAINS.items():
+        companion_ready = health.get(domain["companion"], False)
+        client_ready = health.get(domain["client"], False)
+        status[engine] = {
+            "socket": domain["socket"],
+            "authoritative": companion_ready and client_ready,
+        }
+    return status
+
+
+def main() -> int:
+    try:
+        validate_default(render(profile=False))
+        validate_profile(render(profile=True))
+    except ValidationError as exc:
+        print(f"snapshot companion compose validation failed: {exc}", file=sys.stderr)
+        return 1
+    print("snapshot companion compose validation passed: two isolated authority domains")
     return 0
 
 

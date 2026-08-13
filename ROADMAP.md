@@ -570,21 +570,29 @@ node06). The design rationale for each lives in DESIGN.md.
   or live gap is already beyond that bounded replay window, the same subscribed
   connection remains stably fenced and observe-only; ordinary subsequent events
   neither cause reconnect/generation churn nor restore authority, while a real
-  all-blocks clear establishes a safe new boundary. Next wire one
-  authenticated owner/socket per engine into an executable and run at least
-  100,000 revision-stable shadow comparisons before placement can consume it.
+  all-blocks clear establishes a safe new boundary. The standalone
+  offline Compose/security harness now models the current one-source runtime as
+  two isolated processes and authority domains: distinct companions, UIDs,
+  tmpfs directories, sockets, secrets, clients, and readiness checks per engine.
+  Its default profile renders zero services, and static fault projection proves
+  one failed pair cannot publish or substitute through its healthy peer. Next
+  wire one authenticated owner/socket per engine into an executable and run at
+  least 100,000 revision-stable shadow comparisons before placement can consume
+  it.
 
   The off-by-default library runtime now composes typed config, hardened secret
   loading, bind-last safe socket publication, the bounded supervisor, producer,
   shutdown drain, cleanup, readiness, and closed-label aggregate metrics. It
   refuses missing sources and multi-source mode before filesystem mutation:
-  the current authenticated hello does not identify an engine, so a two-engine
-  executable would be ambiguous. The coordinator delegates one absolute
+  the current authenticated hello does not identify an engine, so a multi-source
+  executable would be ambiguous. The offline deployment contract therefore
+  selects one process/socket/source per engine instead of multiplexing them.
+  The coordinator delegates one absolute
   snapshot-phase timeout and a resettable tail-idle/write timeout to the
   producer; the supervisor retains the two-client cap and immediate shutdown
-  cancellation without imposing a total lifetime on healthy progress. Next add
-  authenticated engine selection or one socket per engine, then inject the
-  completed process owner and its authenticated engine-incarnation watch.
+  cancellation without imposing a total lifetime on healthy progress. Next
+  inject the completed process owner and its authenticated engine-incarnation
+  watch into each isolated executable instance.
 
   A true offline public-stack harness now proves initial publication, live
   store/remove, rolling handoff, LB owner restart, companion shutdown/socket
@@ -604,8 +612,9 @@ node06). The design rationale for each lives in DESIGN.md.
   The existing operational ready gauge is true only when the socket is listening
   and the source is authoritative; either shutdown or a rebuild clears it.
 
-  Deployment hardening is also part of the gate: distinct fixed LB/companion
-  UIDs with one shared GID; a companion-owned non-LB-writable socket directory
+  Deployment hardening is also part of the gate. The offline dual-domain Compose
+  harness now enforces fixed LB UID 12002, companion UIDs 12001/12003, and shared
+  GID 12000; separate companion-owned non-LB-writable socket directories
   and mode-0660 socket; Linux `SO_PEERCRED` on both ends before protocol work;
   separate root-owned read-only secret files; read-only roots, all capabilities
   dropped, no-new-privileges, no GPU/host IPC/Docker socket/companion port, and

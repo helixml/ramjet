@@ -38,3 +38,36 @@ ssh node06 'cd /home/luke/inference/dspark_0731 && \
   docker compose up -d ds4-loadbalancer'
 ```
 
+## Offline dual-companion security harness
+
+`docker-compose.snapshot-companion-offline.yaml` is a standalone,
+profile-disabled fixture contract. It is not merged with production Compose
+and its reserved `.invalid` images cannot start by default. A normal render
+selects zero services; the explicit `snapshot-companion-offline` profile
+selects two independent pairs, one per engine.
+
+Each pair has its own companion UID, tmpfs runtime bind, Unix socket, 32-byte
+session secret, fixture path, client process, and healthcheck. Neither pair can
+mount, authenticate, probe, or name the other's socket. Both client fixtures
+use the future LB UID `12002`; engine A's companion uses UID `12001` and engine
+B's uses `12003`. Only the numeric GID `12000` is common; fixture directories
+are also per-engine and read-only.
+
+```bash
+SNAPSHOT_RUNTIME_DIR_A=/run/mini-dynamo-snapshot-offline-a \
+SNAPSHOT_RUNTIME_DIR_B=/run/mini-dynamo-snapshot-offline-b \
+SNAPSHOT_SESSION_SECRET_FILE_A=/run/secrets/mini-dynamo-snapshot-session-a \
+SNAPSHOT_SESSION_SECRET_FILE_B=/run/secrets/mini-dynamo-snapshot-session-b \
+  deploy/node06/dspark_0731/validate-snapshot-companion-host.sh
+
+python3 deploy/node06/dspark_0731/validate-snapshot-companion-compose.py
+```
+
+The host preflight requires distinct, symlink-free tmpfs directories owned
+`12001:12000` and `12003:12000` at mode `0750`, plus distinct root-owned secret
+inodes at `0:12000`, mode `0440`, one link, and exactly 32 bytes. The Compose
+validator rejects host networking/IPC/PID access, GPUs/devices, Docker socket
+mounts, broad host mounts, cross-engine authority mounts, service dependencies,
+writable client roots, or healthchecks that address the peer socket. This is a
+static/offline deployment gate; it does not claim that fixture executables or
+production wiring exist.
