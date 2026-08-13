@@ -486,6 +486,25 @@ node06). The design rationale for each lives in DESIGN.md.
   digest RSS grows 8.1MiB versus raw exact's 21.5MiB (37.7%). Next implement
   the authenticated UDS companion actor and lifecycle fence, then run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
+  The authenticated lifecycle must use a separate session-auth key (never the
+  block-digest key), a MACed client challenge before snapshot work, fixed
+  length framing authenticated before owned decode, exact independently
+  observed engine incarnation, monotonic real-event watermark/generation, and
+  a distinct contiguous companion delivery sequence for tail gap detection
+  because vLLM scheduler-step event sequences are legitimately sparse. The
+  decoded snapshot token and tail/caught-up frames must be opaque so ordinary
+  code cannot forge an authenticated state transition.
+
+  Deployment hardening is also part of the gate: distinct fixed LB/companion
+  UIDs with one shared GID; a companion-owned non-LB-writable socket directory
+  and mode-0660 socket; Linux `SO_PEERCRED` on both ends before protocol work;
+  separate root-owned read-only secret files; read-only roots, all capabilities
+  dropped, no-new-privileges, no GPU/host IPC/Docker socket/companion port, and
+  explicit PID/memory/file limits. Permit at most two clients for rolling LB
+  handoff and one in-flight cached snapshot per client. Approximate serving and
+  `/health` remain independent of companion/session readiness. Rollback first
+  disables snapshot placement and verifies approximate fallback, then removes
+  the companion and socket.
   Compare exact versus approximate decisions in telemetry before the router
   may consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.

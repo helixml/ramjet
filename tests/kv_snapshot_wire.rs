@@ -16,7 +16,7 @@ fn incarnation(engine_id: &str) -> EngineIncarnation {
 fn digest() -> DigestSpec {
     DigestSpec {
         algorithm: DigestAlgorithm::HmacSha256V1,
-        key_id: vec![0x22; 16],
+        key_id: vec![0x22; 32],
         digest_bytes: 32,
     }
 }
@@ -106,6 +106,15 @@ fn round_trips_versioned_snapshot() {
     let decoded = decode_snapshot(&frame, SnapshotLimits::default(), expected(&source)).unwrap();
     assert_eq!(decoded, source);
     assert_eq!(decoded.watermark, 42);
+}
+
+#[test]
+fn default_wire_capacity_matches_the_production_index() {
+    let limits = SnapshotLimits::default();
+    assert_eq!(limits.max_records, 131_072);
+    assert_eq!(limits.max_prefix_token_ids, 16_777_216);
+    assert_eq!(limits.max_frame_bytes, 32 * 1024 * 1024);
+    assert_eq!(limits.max_key_id_bytes, 32);
 }
 
 #[test]

@@ -2824,3 +2824,47 @@ smaller recoverable state with modest additional lookup CPU, not faster HTTP
 or prefix lookup. No node06 process, container, or engine was changed. Next is
 the authenticated companion session/tail lifecycle and a shadow-only gate of
 at least 100,000 revision-stable comparisons before any placement use.
+
+## 2026-08-13 — issue #41 authenticated snapshot exchange and tail fence
+
+The next GPU-free slice closes the replay/mix-and-match boundary without
+wiring any socket or serving behavior. A separate 32-byte session-auth key now
+authenticates a fixed-width client hello before a companion may do snapshot
+work. The response uses a fixed binary envelope; declared total, metadata, and
+payload lengths are checked against aligned 32MiB/131,072-record limits, then
+the exact borrowed prefix, named-MessagePack metadata, and snapshot bytes are
+HMAC-authenticated before any response field is deserialized or payload copied.
+This prevents attacker-controlled pre-auth owned-vector allocation. Response
+metadata binds the fresh challenge, independently observed exact engine
+incarnation, exact 32-byte block-digest key identity, monotonic real-event
+watermark, companion generation, checksum, type, direction, version, and
+lengths. The decoded snapshot is opaque and exposes read-only accessors; no
+ordinary caller can manufacture authenticated snapshot state.
+
+The lifecycle fence also separates the engine's sparse real-event watermark
+from the companion's dense authenticated delivery sequence. vLLM advances its
+sequence with scheduler steps but retains only event-producing steps, so strict
+`+1` on the real sequence would incorrectly fence healthy sparse streams.
+Instead the snapshot is delivery item zero; authenticated tail delivery must
+be dense while real watermarks need only increase. Opaque tail, caught-up, and
+identity frames have no public constructors until their authenticated decoder
+lands. Incarnation/key/generation changes are checked before duplicate
+handling and immediately revoke Ready; gaps, regressions, overflow, disconnect,
+cancellation, unsupported reset scope, or caught-up mismatch are terminal
+content-free fences.
+
+Eight exchange tests cover authenticated hello/round-trip, wrong keys,
+metadata/payload tamper, malicious u32/u64 lengths, stale floors, identity and
+challenge mixups, truncation/trailing bytes, version/type/direction, domain
+separation, and redaction. Eleven lifecycle tests cover sparse 1,000 -> 9,000
+-> 100,000 real watermarks, dense delivery gaps/duplicates, watermark
+regression, identity changes before duplicates, exact caught-up, resets,
+disconnect/overflow/cancellation, and sequence overflow. An integration test
+runs authenticated response -> bounded snapshot decode -> private digest-index
+build -> lifecycle CatchingUp transition. Strict all-target Clippy is green.
+
+This remains intentionally unwired. Production still requires UDS
+`SO_PEERCRED`, fixed distinct UIDs/shared GID/socket permissions, separate
+read-only secret files, authenticated tail/control decoding, absolute IO and
+bootstrap deadlines, bounded clients/queues, atomic tail catch-up/swap,
+metrics, and failure tests. No node06 process, container, or engine changed.

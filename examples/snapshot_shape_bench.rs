@@ -79,7 +79,7 @@ fn captured_shape() -> SnapshotBody {
         reset_scope: ResetScope::full_engine(),
         digest: DigestSpec {
             algorithm: DigestAlgorithm::HmacSha256V1,
-            key_id: vec![0x22; 16],
+            key_id: vec![0x22; 32],
             digest_bytes: 32,
         },
         capacity: SnapshotCapacity::default(),
