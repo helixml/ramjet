@@ -170,7 +170,10 @@ load all state before binding, bind the public socket last, clear readiness and
 inode-check-clean the socket on every exit, and bound supervisor drain on
 shutdown. Until the authenticated hello carries an engine selector, fail closed
 unless exactly one source is configured; never guess which engine a client
-intended.
+intended. Keep socket publication and exact-source authority separate in
+telemetry: operational `ready` is their conjunction, while `listening` and
+`source_ready` explain which side is missing. A bound socket alone must never
+claim exact readiness, and stopping the listener must clear operational ready.
 
 `companion_index_source` owns one long-lived per-engine digest index independently
 of LB sessions. Register a session before cloning its snapshot boundary, do

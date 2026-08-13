@@ -3189,6 +3189,14 @@ and two serialized starts at 22.99ms wall; 131,072 records measured 28.45ms and
 do not meet a sub-10ms ingestion pause target. Instrument clone duration before
 shadow and prefer immutable/COW generation ownership if that p99 is required.
 
+The runtime readiness surface now follows the exact source rather than socket
+publication. A conservative trait default reports unknown/not-ready; the
+concrete source exposes replay, building, ready, and fenced phases plus bounded
+watermark-presence, indexed-block, and active-session gauges. Runtime polling is
+25ms with missed ticks skipped. `listening` and `source_ready` remain distinct,
+while the existing operational `ready` is their conjunction and returns to zero
+when the listener exits even if the in-memory source remains authoritative.
+
 ## 2026-08-13 — Dynamo, Kimi-K3, and DwarfStar upstream refresh
 
 Primary-source refresh found Dynamo v1.3.1 as the newest stable release and

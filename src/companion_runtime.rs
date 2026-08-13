@@ -514,6 +514,7 @@ mod tests {
         let registry = Registry::new();
         let metrics = Arc::new(CompanionMetrics::new(&registry, &files.config()).unwrap());
         let engine = metrics.engine_slot(0).unwrap();
+        metrics.set_listening(engine, true);
         let source = Arc::new(MutableStatusSource {
             phase: AtomicUsize::new(0),
         });
@@ -543,6 +544,7 @@ mod tests {
             "ds4proxy_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"ready\"} 1"
         ));
         assert!(ready.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 1"));
+        assert!(ready.contains("ds4proxy_snapshot_companion_source_ready{engine=\"engine-0\"} 1"));
         assert!(
             ready.contains(
                 "ds4proxy_snapshot_companion_source_indexed_blocks{engine=\"engine-0\"} 42"

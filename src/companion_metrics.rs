@@ -309,6 +309,7 @@ pub struct CompanionMetrics {
     enabled: Gauge,
     listening: GaugeVec,
     ready: GaugeVec,
+    source_ready: GaugeVec,
     source_phase: GaugeVec,
     source_watermark_present: GaugeVec,
     source_indexed_blocks: GaugeVec,
@@ -363,7 +364,12 @@ impl CompanionMetrics {
             )?,
             ready: gauge(
                 "ds4proxy_snapshot_companion_ready",
-                "Whether the exact source is authoritative and ready to serve snapshots",
+                "Whether the companion is listening with an authoritative exact source",
+                &["engine"],
+            )?,
+            source_ready: gauge(
+                "ds4proxy_snapshot_companion_source_ready",
+                "Whether the exact source is authoritative and ready for snapshots",
                 &["engine"],
             )?,
             source_phase: gauge(
@@ -506,9 +512,14 @@ impl CompanionMetrics {
     }
 
     pub fn set_listening(&self, engine: CompanionEngineSlot, listening: bool) {
+        let engine = engine.label();
         self.listening
-            .with_label_values(&[engine.label()])
+            .with_label_values(&[engine])
             .set(f64::from(listening));
+        let source_ready = self.source_ready.with_label_values(&[engine]).get() != 0.0;
+        self.ready
+            .with_label_values(&[engine])
+            .set(f64::from(listening && source_ready));
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -518,9 +529,13 @@ impl CompanionMetrics {
         status: SnapshotProducerSourceStatus,
     ) {
         let engine = engine.label();
-        self.ready
+        self.source_ready
             .with_label_values(&[engine])
             .set(f64::from(status.ready));
+        let listening = self.listening.with_label_values(&[engine]).get() != 0.0;
+        self.ready
+            .with_label_values(&[engine])
+            .set(f64::from(listening && status.ready));
         self.source_watermark_present
             .with_label_values(&[engine])
             .set(f64::from(status.watermark_present));
@@ -698,6 +713,7 @@ impl CompanionMetrics {
             let engine_label = engine.label();
             self.listening.with_label_values(&[engine_label]);
             self.ready.with_label_values(&[engine_label]);
+            self.source_ready.with_label_values(&[engine_label]);
             self.source_watermark_present
                 .with_label_values(&[engine_label]);
             self.source_indexed_blocks
@@ -778,6 +794,7 @@ impl CompanionMetrics {
             Box::new(self.enabled.clone()),
             Box::new(self.listening.clone()),
             Box::new(self.ready.clone()),
+            Box::new(self.source_ready.clone()),
             Box::new(self.source_phase.clone()),
             Box::new(self.source_watermark_present.clone()),
             Box::new(self.source_indexed_blocks.clone()),
@@ -900,6 +917,7 @@ mod tests {
             "ds4proxy_snapshot_companion_enabled 1",
             "ds4proxy_snapshot_companion_listening{engine=\"engine-0\"} 0",
             "ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 0",
+            "ds4proxy_snapshot_companion_source_ready{engine=\"engine-0\"} 0",
             "ds4proxy_snapshot_companion_source_phase{engine=\"engine-1\",phase=\"fenced\"} 0",
             "ds4proxy_snapshot_companion_source_watermark_present{engine=\"engine-0\"} 0",
             "ds4proxy_snapshot_companion_source_indexed_blocks{engine=\"engine-0\"} 0",
@@ -969,28 +987,42 @@ mod tests {
         assert!(metrics.set_tail_queue_depth(engine, 2, 0).is_err());
         assert!(metrics.engine_slot(2).is_err());
 
-        let text = text(&registry);
-        assert!(text.contains("ds4proxy_snapshot_companion_listening{engine=\"engine-1\"} 1"));
-        assert!(text.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-1\"} 1"));
-        assert!(text.contains(
+        let before_stop = text(&registry);
+        assert!(
+            before_stop.contains("ds4proxy_snapshot_companion_listening{engine=\"engine-1\"} 1")
+        );
+        assert!(before_stop.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-1\"} 1"));
+        assert!(
+            before_stop.contains("ds4proxy_snapshot_companion_source_ready{engine=\"engine-1\"} 1")
+        );
+        assert!(before_stop.contains(
             "ds4proxy_snapshot_companion_source_phase{engine=\"engine-1\",phase=\"ready\"} 1"
         ));
         assert!(
-            text.contains(
+            before_stop.contains(
                 "ds4proxy_snapshot_companion_source_active_sessions{engine=\"engine-1\"} 2"
             )
         );
         assert_eq!(
-            text.lines()
+            before_stop
+                .lines()
                 .filter(|line| line.starts_with("ds4proxy_snapshot_companion_source_phase{"))
                 .count(),
             ENGINE_SLOTS.len() * source_phases().len()
         );
-        assert!(text.contains(
+
+        metrics.set_listening(engine, false);
+        let stopped = text(&registry);
+        assert!(stopped.contains("ds4proxy_snapshot_companion_listening{engine=\"engine-1\"} 0"));
+        assert!(stopped.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-1\"} 0"));
+        assert!(
+            stopped.contains("ds4proxy_snapshot_companion_source_ready{engine=\"engine-1\"} 1")
+        );
+        assert!(before_stop.contains(
             "ds4proxy_snapshot_companion_published_index_entries{engine=\"engine-1\"} 36612"
         ));
         assert!(
-            text.contains(
+            before_stop.contains(
                 "ds4proxy_snapshot_companion_published_tokens{engine=\"engine-1\"} 9216000"
             )
         );
@@ -1001,7 +1033,7 @@ mod tests {
             "snapshot-session",
         ] {
             assert!(
-                !text.contains(forbidden),
+                !before_stop.contains(forbidden),
                 "metric output leaked {forbidden}"
             );
         }
