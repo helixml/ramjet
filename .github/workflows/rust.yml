@@ -12,7 +12,9 @@ permissions:
 
 concurrency:
   group: rust-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # PRs and main publish only their newest commit. Immutable version-tag builds
+  # are never superseded and must run to completion.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
 
 jobs:
   check:
