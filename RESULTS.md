@@ -1,4 +1,4 @@
-# mini-dynamo benchmark results (2026-08-12)
+# mini-dynamo benchmark results (2026-08-13)
 
 Hardware: node06, 2× vLLM+DSpark TP4 instances (DeepSeek-V4-Flash-0731),
 8× RTX PRO 6000. Baseline = `ds4-loadbalancer:1.0.1` (static 4KB-key hash
@@ -8,13 +8,19 @@ Method: `bench/locality_bench.sh` + a concurrent-same-app harness.
 ## Current node06 production snapshot
 
 The historical router study below remains reproducible, but the production
-stack has since advanced to mini-dynamo rc7 and r34 engines with fixed K5,
+stack has since advanced to the mini-dynamo v0.1.0 Rust candidate and r34
+engines with fixed K5,
 A16 MoE kernels, NCCL PCIe P2P enabled, max-seqs 16, a 4,096 configured
 (4,032 effective) scheduler quantum, automatic KV sizing, and NUMA-local CPU
 placement. Current measured landmarks:
 
 | Gate | Result |
 |---|---:|
+| v0.1 candidate readiness | **2/2 healthy; zero LB/engine restarts** |
+| v0.1 cancellation, isolated A | **LB reservation +46ms; vLLM running +269ms** |
+| v0.1 locality, 3×4×2 | **82.5% cached prompt tokens; 24/24** |
+| v0.1 same-app c12/max256 | **452 tok/s; exact 6/6 split; 12/12** |
+| v0.1 direct TP4 c12/max256 under B production load | **794.5 tok/s; 12/12** |
 | box code c24/max256, rc7 | **1,820–1,844 tok/s**, 144/144 requests |
 | box code c24 best matched gate, rc6 | **1,891 tok/s**, 72/72 requests |
 | direct TP4 code c16/max256 | **1,130 tok/s**, 48/48 requests |
@@ -41,6 +47,19 @@ dynamic DSpark depth regressed five of six code/prose concurrency points by
 8–25%, lost 1.1% KV, and worsened the mixed tail. `EXPERIMENTS.md` is the
 append-only source for configurations, comparisons, and rollback decisions.
 
+The v0.1.0 candidate is commit `b0e0700`, deployed LB-only as immutable digest
+`sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1`.
+Its stable release surface is approximate prefix/load routing, health/failover,
+client cancellation, shims, and metrics; tokenizer, raw KV, exact-placement,
+and snapshot paths remain non-mutating shadow or off. The first c24 release
+cell overlapped a continuous 1,495-token Helix workflow on one TP4 pair and is
+excluded from regression comparison. The isolated other pair remained within
+3.4% of its matched c12 control, while locality, balanced serving, correctness,
+and cancellation gates passed. The sustained workload was retained as a real
+soak: the final sample had 206/206 successful chat requests, no upstream-error
+series, no warning/error logs, and zero container restarts. See the v0.1
+experiment entry for the exact contamination and acceptance evidence.
+
 The Rust KV-event path is still shadow-only, but its first real r34 feed is now
 qualified end to end. A B-only rolling canary replayed the publisher from
 sequence zero, filtered the engine's non-main masked geometries and two
@@ -65,7 +84,7 @@ matched c16/max512 runs had a 1,343.4 tok/s r19 median versus 1,362.1 for r12
 (-1.4%, within box noise); the matched long-prompt pair had identical 112,128
 cached tokens and overlapping warm latency.
 
-Public r22 is now the production LB with event publishers enabled on
+The earlier public r22 gate established production event publishers on
 container-only ports, manifest-attested exact routing, and the gated placement
 policy evaluated in non-mutating shadow mode. The LB-only promotion left both
 engine processes and KV caches intact. Both runtime identities attested and
