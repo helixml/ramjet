@@ -8,7 +8,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 VALIDATOR = (
     ROOT
     / "deploy"
-    / "node06"
     / "dspark_0731"
     / "validate-snapshot-companion-compose.py"
 )

@@ -22,7 +22,6 @@ cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
 cargo build --release --locked
-go test ./... && go vet ./... && test -z "$(gofmt -l .)"
 python3 bench/agentbench.py validate
 python3 -m unittest discover -s bench -p 'test_*.py'
 ```
@@ -47,12 +46,9 @@ TMPDIR=/home/karolis/.cache/mini-dynamo-tmp cargo test --locked
 ```
 
 Do not launch two Rust gates concurrently against that shared target; fan out
-Go and Python beside one Rust lane instead. Check both `df -h /tmp` and target
+Python and Compose beside one Rust lane instead. Check both `df -h /tmp` and target
 size before a cold build. Clean only build artifacts created by this project;
 unrelated `/tmp` worktrees and caches belong to other active tasks.
-
-Run the Go oracle in the inner loop only when changing a cross-language parity
-contract. It remains mandatory in the pre-push gate until the cutover is final.
 
 ### Fast image build and transfer
 
@@ -76,7 +72,7 @@ bench/build_transfer.sh rust-rNN-description-$(git rev-parse --short HEAD) --nod
 The cold first build still downloads the Rust base and compiles dependencies;
 judge the workflow by its warm edit/rebuild time. A dependency change is a
 legitimate one-time cold build. Drone fetches dependencies once, then fans
-Clippy and Rust tests into isolated target directories while Go, Python, and
+Clippy and Rust tests into isolated target directories while Python and
 Compose run beside them. Build #205 completed the full PR gate in 58s versus
 69s for the prior serial Rust lane. If a no-dependency change regresses that
 loop, inspect the step timings and cache/export path before accepting it.
@@ -96,9 +92,8 @@ artifact. If a non-Rust edit unexpectedly triggers an 18–20s relink, run
 do not paper over it with another target directory.
 
 The router is the interesting surface — `src/router.rs` contains the active
-Rust tests and Go-generated fingerprint goldens; `pkg/router/router_test.go`
-is the cutover oracle. Add a Rust test for every routing change and retain a
-cross-language golden wherever Go/Rust parity matters.
+Rust tests and frozen legacy fingerprint goldens. Add a Rust test for every
+routing change and retain a golden wherever compatibility matters.
 
 For compact-index work, keep the fast GPU-free correctness/performance loop
 separate from node06:
@@ -289,7 +284,7 @@ Layout on the box:
 - `/home/luke/inference/dspark_0731/` — the whole serving stack (compose:
   `ds4-loadbalancer` + `dspark-0731` + `dspark-0731-b`), plus `.env`
   (`VLLM_API_KEY=<caddy bearer>`, mode 0600) and the bench scripts.
-- `deploy/node06/dspark_0731/docker-compose.yaml` in this repository is the
+- `deploy/dspark_0731/docker-compose.yaml` in this repository is the
   canonical Compose source. The infra repository and node06 file are mirrors;
   edit here first and use `sync-compose.sh` to update the infra copy.
 - Ports (loopback): LB API `:8006`, LB metrics `:8007`, engines `:8012`/`:8013`.
@@ -359,8 +354,8 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
 
 ## Fast iteration rules
 
-- Run independent local gates together: Rust tests/Clippy, Go parity, and
-  Python benchmark tests do not depend on one another. Keep Cargo's shared
+- Run independent local gates together: Rust tests/Clippy and Python benchmark
+  tests do not depend on one another. Keep Cargo's shared
   `target/` and Docker BuildKit cache warm; do not clean either between runs.
 - Drone intentionally runs once per PR (and once after merge on `main`), not
   again for every feature-branch push. Its Rust lane omits a redundant release
@@ -655,7 +650,7 @@ caveats: EXPERIMENTS.md "rc5 privacy-bounded decision journal and replay".
 The repeatable end-to-end loop (each past run is written up in
 EXPERIMENTS.md — add yours there too):
 
-1. **Local**: run the Rust/Go gate plus `python3 bench/agentbench.py validate`
+1. **Local**: run the Rust gate plus `python3 bench/agentbench.py validate`
    and `python3 -m unittest discover -s bench -p 'test_*.py'`; add/extend a
    router test for any routing change.
 2. **Build + deploy candidate** on node06 (section above) with a fresh
@@ -682,7 +677,7 @@ EXPERIMENTS.md — add yours there too):
    update RESULTS.md if it changes a headline, and either promote the tag in
    the canonical mini-dynamo Compose (`LB_IMAGE` default) or note why not.
 8. **Mirror a promoted config**: validate the canonical Compose file, run
-   `deploy/node06/dspark_0731/sync-compose.sh ../infra`, and commit the infra
+   `deploy/dspark_0731/sync-compose.sh ../infra`, and commit the infra
    mirror. Never hand-edit the infra copy.
 9. **Watch after promote**: Grafana `ds4-flash-serving` for 10-15 min
    (5xx, TTFT p95, upstream split) — rollback is one `LB_IMAGE` flip.

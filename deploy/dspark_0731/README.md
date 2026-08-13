@@ -1,4 +1,4 @@
-# node06 DeepSeek V4 Flash stack
+# DeepSeek V4 Flash deployment
 
 This directory is the canonical source for node06's complete Docker Compose
 stack: the Rust mini-dynamo load balancer and both TP4 vLLM/DSpark engines.
@@ -12,9 +12,9 @@ Edit `docker-compose.yaml` here first. Keep secrets in node06's uncommitted
 ## Fast validation and mirroring
 
 ```bash
-docker compose -f deploy/node06/dspark_0731/docker-compose.yaml config --quiet
-deploy/node06/dspark_0731/sync-compose.sh --check ../infra
-deploy/node06/dspark_0731/sync-compose.sh ../infra
+docker compose -f deploy/dspark_0731/docker-compose.yaml config --quiet
+deploy/dspark_0731/sync-compose.sh --check ../infra
+deploy/dspark_0731/sync-compose.sh ../infra
 ```
 
 `--check` is read-only and exits nonzero if the infra mirror differs. The
@@ -24,7 +24,7 @@ operational README, benchmark helper, `.env`, containers, or engines.
 After the mini-dynamo and infra changes are merged, update node06 explicitly:
 
 ```bash
-scp deploy/node06/dspark_0731/docker-compose.yaml \
+scp deploy/dspark_0731/docker-compose.yaml \
   node06:/home/luke/inference/dspark_0731/docker-compose.yaml
 ssh node06 'cd /home/luke/inference/dspark_0731 && docker compose config --quiet'
 ```
@@ -58,9 +58,9 @@ SNAPSHOT_RUNTIME_DIR_A=/run/mini-dynamo-snapshot-offline-a \
 SNAPSHOT_RUNTIME_DIR_B=/run/mini-dynamo-snapshot-offline-b \
 SNAPSHOT_SESSION_SECRET_FILE_A=/run/secrets/mini-dynamo-snapshot-session-a \
 SNAPSHOT_SESSION_SECRET_FILE_B=/run/secrets/mini-dynamo-snapshot-session-b \
-  deploy/node06/dspark_0731/validate-snapshot-companion-host.sh
+  deploy/dspark_0731/validate-snapshot-companion-host.sh
 
-python3 deploy/node06/dspark_0731/validate-snapshot-companion-compose.py
+python3 deploy/dspark_0731/validate-snapshot-companion-compose.py
 ```
 
 The host preflight requires distinct, symlink-free tmpfs directories owned

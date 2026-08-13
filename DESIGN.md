@@ -34,8 +34,8 @@ The active implementation is Rust: `src/router.rs` (selection),
 `src/shims.rs` (request/metadata rewrites), `src/usage.rs` (response parsing),
 `src/metrics.rs` (Prometheus), `src/proxy.rs` (async data plane + probes), and
 `src/journal.rs`, and `src/tokenizer.rs` (bounded exact-token shadow adapter).
-The original Go packages remain temporarily as a parity oracle during the
-rolling cutover.
+The Rust cutover is complete; frozen legacy fingerprint vectors preserve the
+compatibility contract without retaining a second implementation.
 
 The Rust boundary is deliberate: one parsed request-preparation pass applies
 compatibility mutations and derives route fingerprints before feeding the async
@@ -87,7 +87,7 @@ making the warm/cold choice at the precise decision boundary depend on round-
 robin rotation. The request-count metric
 remains a literal count; only placement uses weighted load.
 
-Emergent behaviors (tested in `router_test.go`):
+Emergent behaviors (tested inline in `src/router.rs`):
 - conversation stickiness (deep overlap on every follow-up turn);
 - **template co-location** — sessions of one Helix app share the system
   prompt and share an engine's cache. The previous 4KB hash happened to do

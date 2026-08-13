@@ -25,7 +25,7 @@ from infernal_parser_probe import DEFAULT_CASES, load_cases
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 PARSER_CASE_COUNT = len(load_cases(DEFAULT_CASES))
 DEFAULT_ROOT = (
-    REPO_ROOT / "deploy/node06/dspark_0731/infernal-r5-candidate"
+    REPO_ROOT / "deploy/dspark_0731/infernal-r5-candidate"
 )
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")

@@ -12,8 +12,8 @@ requests remain on the other engine. See DESIGN.md for the full story and
 roadmap (NVIDIA Dynamo, Kimi K3/KDA, and DwarfStar are the acknowledged
 influences).
 
-The canonical node06 stack is
-`deploy/node06/dspark_0731/docker-compose.yaml`. Its adjacent README documents
+The canonical deployment stack is
+`deploy/dspark_0731/docker-compose.yaml`. Its adjacent README documents
 validation, the generated infra mirror, and safe LB-only deployment. The infra
 copy is operational convenience only; do not edit it independently.
 
@@ -226,20 +226,12 @@ to compare this rule with the legacy load-neutral equality behavior.
     python3 bench/agentbench.py validate
     python3 -m unittest discover -s bench -p 'test_*.py'
 
-The Go implementation remains in-tree as the cutover reference. Rust tests
-include Go-generated fingerprint goldens and live HTTP tests for sanitization,
-failover, route correlation, usage streaming, and model metadata rewriting.
-During the rewrite, keep both suites green:
-
-    go test ./... && go vet ./... && test -z "$(gofmt -l .)"
-
-GitHub Actions runs Rust format, strict Clippy, and tests with a pruned
-dependency cache. Drone independently adds the release build and keeps the Go
-parity oracle and GPU-free agent protocol suite green; its three language lanes
-run in parallel. The post-merge Docker build is the second release-mode proof,
-so GitHub does not duplicate a release link in the PR check. The image publisher
-runs only after the post-merge Rust gate succeeds
-and requires GHCR package write permission for this repository.
+The Rust cutover is complete. Frozen legacy fingerprint vectors and live HTTP
+tests cover sanitization, failover, route correlation, usage streaming, and
+model metadata rewriting. Drone is the only CI system: strict Rust lint/tests,
+the GPU-free agent protocol suite, and Compose validation run in parallel. The
+post-merge publishers build and push the LB and companion images only after the
+quality gate succeeds.
 
 Measure the request-preparation hot path before and after tokenizer work:
 
@@ -248,7 +240,6 @@ Measure the request-preparation hot path before and after tokenizer work:
     cargo run --release --locked --example exact_index_bench
     cargo run --release --locked --example kv_zmq_probe -- LIVE_ENDPOINT REPLAY_ENDPOINT [TOPIC]
     cargo run --release --locked --example local_tokenizer_probe -- /path/to/tokenizer.json
-    go test ./pkg/proxy -run '^$' -bench BenchmarkPrepareLongPrompt -benchmem
 
 See [ROADMAP.md](ROADMAP.md), [EXPERIMENTS.md](EXPERIMENTS.md), and
 [AGENTS.md](AGENTS.md) (node06 test/bench workflow).

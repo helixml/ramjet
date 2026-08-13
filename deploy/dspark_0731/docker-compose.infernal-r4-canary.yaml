@@ -1,4 +1,4 @@
-# One-engine Infernal Invocation r4 qualification overlay for node06.
+# One-engine Infernal Invocation r4 qualification overlay.
 # Keep the LB single-homed on A while B starts and passes direct gates:
 #   DS4_UPSTREAM=http://dspark-0731:8000 \
 #   DS4_KV_EVENT_LIVE_ENDPOINTS=tcp://dspark-0731:5557 \
