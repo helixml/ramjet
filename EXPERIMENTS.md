@@ -2639,3 +2639,65 @@ seconds because exact state remains fail-closed shadow telemetry, but this is
 not considered a scalable fix. The next recovery work must use a publisher
 snapshot/tree dump or another compact authoritative transfer rather than
 replaying roughly 9,500 scheduler steps through the live ROUTER protocol.
+
+## 2026-08-13 — r33 replay attribution and snapshot protocol decision
+
+A read-only production audit resolved the main uncertainty left by r32. A's
+successful startup reconstruction consumed 9,506 event-bearing batches and
+about 483MB of LB network input, then committed 19,517 resident blocks /
+4,996,352 token IDs. Across the eleven-minute observation the LB cgroup used
+only 6.45 CPU-seconds, peaked near 610MB, and showed zero throttling, OOM,
+memory pressure, or lingering socket queues. Docker events prove that the old
+LB had exited before its replacement started. Rust decode/index work, final
+inventory swap, host pressure, and overlapping consumers therefore cannot
+explain the minute-scale replay wall time.
+
+The pinned vLLM publisher services replay synchronously on its single Python
+publisher thread with one blocking ROUTER send per retained batch. It cannot
+publish live events while that loop runs and exposes no cancellation request.
+This makes publisher delivery / ZeroMQ backpressure the leading diagnosis.
+r33 adds privacy-safe replay profiles for total wall, request-to-first-frame,
+post-first-frame stream wall, receive wait, maximum receive gap, decode, fold,
+commit, wire/payload bytes, and requested/tail/message progress. Unlike the old
+success-only batch histogram, partial progress is retained under a timeout.
+The absolute deadline now begins at worker entry rather than after request
+send, so the configured limit cannot silently become connect timeout plus
+replay timeout. Unit tests cover delayed first frame, timed-out partial
+progress, fold time, tail accounting, stale-profile clearing, and timeout
+metric export. The strict local Rust gate passed 127 tests and all-feature
+Clippy; Go and 52 Python benchmark tests also passed. The release build took
+19.38s, Go gate 0.41s, and Python gate 0.13s.
+
+Primary-source protocol review found that bare vLLM has only PUB live events
+and bounded ROUTER replay from an eight-byte starting sequence through an end
+marker; it has no initial-sync snapshot. Dynamo's `LocalKvIndexer` provides the
+correct recovery shape: an event-range request can return an authoritative
+`TreeDump`, real-event watermark, and reset scope when requested history is too
+old. A direct wire implementation is not possible yet because Dynamo's tree
+dump contains block hashes while mini-dynamo's forward radix index is keyed by
+exact token slices. The selected incremental design is a long-lived per-engine
+companion that consumes the existing r34 stream, keeps a bounded memory-only
+block-digest index, and serves an atomic dump plus engine incarnation and
+watermark. An LB subscribes live before loading the dump, drains and validates
+the tail, then swaps atomically. This avoids engine restarts and removes LB
+recovery time from vLLM's growing scheduler-event ring. The first offline gate
+is the captured 36,612-block / 9.37M-token shape with a target below three
+seconds and bounded RSS, followed by shadow comparison against the raw-token
+index.
+
+The LB-only node06 roll then produced decisive phase data. One bounded direct
+seed per engine triggered late-subscriber recovery. B replayed 69 batches /
+3,793,913 payload bytes in 137ms: 101ms to first frame, 34ms decode, 0.84ms
+fold, and 0.04ms commit. A received 5,500 requested batches / 254,487,816
+payload bytes, spent only 2.12s decoding and 0.16s folding, then stopped
+receiving for one 177.52s maximum gap and failed closed at 180.04s. No tail
+batches arrived. Both engines remained restart-zero and serving health stayed
+2/2; B became exact-trusted and A remained correctly fenced in shadow mode.
+
+Verdict: stop tuning replay timeouts and do not issue another full-history
+probe against the production publisher. The measured 98.7% receive-wait share
+and 177.52s gap prove synchronous publisher/HOL behavior strongly enough that
+a no-op-fold replay would add production pressure without changing the design
+decision. Build the snapshot companion behind shadow/fail-closed gates;
+separately require a fixed Infernal successor to pass GPU-free DSML/parser and
+C128A stride gates before spending another engine warm start on issue #32.

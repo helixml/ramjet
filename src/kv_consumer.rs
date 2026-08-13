@@ -4,7 +4,10 @@
 //! Nothing in this module participates in route selection: it qualifies real
 //! event streams and recovery behavior before exact placement is enabled.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use parking_lot::RwLock;
 use tokio::{sync::broadcast, task::JoinHandle, time::sleep};
@@ -15,7 +18,9 @@ use crate::{
         ExactIndexLimits, FencedExactKvInventory, FullReplayStage, LiveBatchOutcome,
         ReplayBatchOutcome,
     },
-    kv_transport::{KvTransportConfig, LiveActivity, SequencedBatch, ZmqKvEventSource},
+    kv_transport::{
+        KvTransportConfig, LiveActivity, ReplayProfile, SequencedBatch, ZmqKvEventSource,
+    },
     kv_wire::KvWireLimits,
     metrics::Metrics,
 };
@@ -344,6 +349,11 @@ async fn replay_range(
         }
         result = source.replay(from, through) => result,
     };
+    let outcome = match &replayed {
+        Ok(_) => "complete",
+        Err(error) => error.reason(),
+    };
+    record_replay_profile(metrics, upstream, outcome, source.take_replay_profile());
     let replayed = match replayed {
         Ok(replayed) => replayed,
         Err(error) => return ReplayAttempt::Failed(error.reason()),
@@ -375,6 +385,11 @@ async fn replay_full_range(
             stage.ingest(batch.sequence, &batch.batch);
         }) => result,
     };
+    let outcome = match &replayed {
+        Ok(_) => "complete",
+        Err(error) => error.reason(),
+    };
+    record_replay_profile(metrics, upstream, outcome, source.take_replay_profile());
     let stage = match replayed {
         Ok(stage) => stage,
         Err(error) => return ReplayAttempt::Failed(error.reason()),
@@ -383,8 +398,73 @@ async fn replay_full_range(
         .kv_event_replay_batches
         .with_label_values(&[upstream])
         .observe(metric_usize(stage.batch_count()));
-    ReplayAttempt::Applied {
-        authoritative: ingest_full_replay(inventory, metrics, upstream, stage),
+    let commit_started = Instant::now();
+    let authoritative = ingest_full_replay(inventory, metrics, upstream, stage);
+    metrics
+        .kv_event_replay_duration
+        .with_label_values(&[
+            upstream,
+            "commit",
+            if authoritative { "trusted" } else { "fenced" },
+        ])
+        .observe(commit_started.elapsed().as_secs_f64());
+    ReplayAttempt::Applied { authoritative }
+}
+
+fn record_replay_profile(
+    metrics: &Metrics,
+    upstream: &str,
+    outcome: &'static str,
+    profile: Option<ReplayProfile>,
+) {
+    let Some(profile) = profile else {
+        return;
+    };
+    for (phase, duration) in [
+        ("total", profile.elapsed),
+        ("receive_wait", profile.receive_wait),
+        ("decode", profile.decode),
+        ("fold", profile.fold),
+        ("max_receive_gap", profile.max_receive_gap),
+    ] {
+        metrics
+            .kv_event_replay_duration
+            .with_label_values(&[upstream, phase, outcome])
+            .observe(duration.as_secs_f64());
+    }
+    if let Some(time_to_first_frame) = profile.time_to_first_frame {
+        metrics
+            .kv_event_replay_duration
+            .with_label_values(&[upstream, "time_to_first_frame", outcome])
+            .observe(time_to_first_frame.as_secs_f64());
+        metrics
+            .kv_event_replay_duration
+            .with_label_values(&[upstream, "stream_after_first", outcome])
+            .observe(
+                profile
+                    .elapsed
+                    .saturating_sub(time_to_first_frame)
+                    .as_secs_f64(),
+            );
+    }
+    for (kind, bytes) in [
+        ("wire", profile.wire_bytes),
+        ("payload", profile.payload_bytes),
+    ] {
+        metrics
+            .kv_event_replay_bytes
+            .with_label_values(&[upstream, kind, outcome])
+            .observe(metric_usize(bytes));
+    }
+    for (kind, batches) in [
+        ("messages", profile.messages),
+        ("requested", profile.requested_batches),
+        ("tail", profile.tail_batches),
+    ] {
+        metrics
+            .kv_event_replay_progress
+            .with_label_values(&[upstream, kind, outcome])
+            .observe(metric_usize(batches));
     }
 }
 
@@ -776,6 +856,43 @@ mod tests {
             assert!(text.contains(labels));
         }
         assert!(text.contains("ds4proxy_kv_event_clears_total"));
+    }
+
+    #[test]
+    fn replay_profile_metrics_preserve_failed_partial_progress() {
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry).unwrap();
+        record_replay_profile(
+            &metrics,
+            "engine",
+            "replay_timeout_undrained",
+            Some(ReplayProfile {
+                elapsed: Duration::from_secs(2),
+                time_to_first_frame: Some(Duration::from_millis(10)),
+                receive_wait: Duration::from_millis(1_900),
+                decode: Duration::from_millis(20),
+                fold: Duration::from_millis(30),
+                max_receive_gap: Duration::from_secs(1),
+                wire_bytes: 1_024,
+                payload_bytes: 900,
+                messages: 7,
+                requested_batches: 6,
+                tail_batches: 1,
+            }),
+        );
+        let text = prometheus::TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        for expected in [
+            r#"ds4proxy_kv_event_replay_duration_seconds_count{outcome="replay_timeout_undrained",phase="total",upstream="engine"} 1"#,
+            r#"ds4proxy_kv_event_replay_bytes_sum{kind="wire",outcome="replay_timeout_undrained",upstream="engine"} 1024"#,
+            r#"ds4proxy_kv_event_replay_progress_batches_sum{kind="requested",outcome="replay_timeout_undrained",upstream="engine"} 6"#,
+        ] {
+            assert!(
+                text.contains(expected),
+                "missing replay profile: {expected}"
+            );
+        }
     }
 
     #[test]
