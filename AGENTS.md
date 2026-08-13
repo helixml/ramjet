@@ -219,11 +219,18 @@ to the serving-image loop. Serve mode must preflight the session secret, digest
 secret, and authenticated incarnation file before any TCP bind, ZMQ connect, or
 UDS publication. Invalid attestation refreshes immediately remove authority;
 logs and metrics expose only closed reason labels. The container publishes no
-metrics port: loopback inside a bridge container is not host-scrapable. Add a
-separate, permission-isolated metrics UDS and Caddy/Prometheus wiring before a
-node06 rollout; never put Caddy in the snapshot/session authority group. The
-executable is not ready for node06 until the host-side attestation provisioner
-and production Compose wiring exist and pass the dual-domain validator.
+metrics port: loopback inside a bridge container is not host-scrapable. For
+production, select `DS4_SNAPSHOT_METRICS_SOCKET_PATH` and its dedicated
+non-root `DS4_SNAPSHOT_METRICS_GROUP_GID`; setting that socket together with
+`DS4_SNAPSHOT_METRICS_BIND` is an error. The metrics parent must be a distinct
+companion-owned, symlink-free, non-writable setgid directory whose group is
+different from the snapshot/session parent group. The publisher verifies that
+both authority directories are setgid and group-traversable, that the mode-0660
+metrics socket inherited the configured group, and removes only its own inode.
+Put Caddy/Prometheus in only that metrics group, never in the
+snapshot/session authority group. The executable is not ready for node06 until
+the host-side attestation provisioner and production Compose/Caddy wiring exist
+and pass the extended dual-domain validator.
 
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.

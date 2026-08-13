@@ -71,3 +71,18 @@ mounts, broad host mounts, cross-engine authority mounts, service dependencies,
 writable client roots, or healthchecks that address the peer socket. This is a
 static/offline deployment gate; it does not claim that fixture executables or
 production wiring exist.
+
+The standalone companion also supports a metrics-only Unix endpoint, but this
+offline Compose fixture deliberately does not enable it yet. Production-shaped
+wiring must set exactly `DS4_SNAPSHOT_METRICS_SOCKET_PATH` and
+`DS4_SNAPSHOT_METRICS_GROUP_GID` (not `DS4_SNAPSHOT_METRICS_BIND`), mount a
+different companion-owned parent from the snapshot socket, and prepare it as a
+symlink-free setgid directory that is not writable by group or other. The
+metrics group must differ from GID `12000`; only the scraper/Caddy identity may
+join it. The snapshot parent must also become setgid so its future socket cannot
+inherit the metrics group through the companion process. Startup verifies
+parent ownership, group separation and inheritance,
+publishes mode `0660` without replacing an existing pathname, and cleans only
+the inode it published. Add those mounts, the scraper route, and validator
+assertions together; a code-capable UDS alone is not permission to alter
+node06.

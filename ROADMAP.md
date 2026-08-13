@@ -606,10 +606,16 @@ node06). The design rationale for each lives in DESIGN.md.
   one failed pair cannot publish or substitute through its healthy peer. A
   dedicated off-by-default executable now composes exactly one authenticated
   incarnation watch, ZMQ owner, long-lived source, snapshot socket, and bounded
-  metrics endpoint. It is built separately from the LB so ordinary router edits
-  do not relink both binaries. Next add the host-side authenticated-attestation
-  provisioner and production-shaped Compose wiring, then run at least 100,000
-  revision-stable shadow comparisons before placement can consume it.
+  metrics endpoint. The endpoint may now be either loopback TCP or a mutually
+  exclusive metrics UDS. UDS startup requires a normalized path in a distinct
+  companion-owned setgid parent, a dedicated non-root group different from the
+  snapshot/session parent group, setgid isolation on both authority parents,
+  verified group inheritance, atomic no-replace publication, and inode-checked
+  cleanup. It is built separately from the LB so
+  ordinary router edits do not relink both binaries. Next add the host-side
+  authenticated-attestation provisioner and production-shaped Compose/Caddy
+  wiring for that metrics-only group, then run at least 100,000 revision-stable
+  shadow comparisons before placement can consume it.
 
   The off-by-default library runtime now composes typed config, hardened secret
   loading, bind-last safe socket publication, the bounded supervisor, producer,
@@ -655,7 +661,9 @@ node06). The design rationale for each lives in DESIGN.md.
   handoff and one in-flight cached snapshot per client. Approximate serving and
   `/health` remain independent of companion/session readiness. Rollback first
   disables snapshot placement and verifies approximate fallback, then removes
-  the companion and socket.
+  the companion and socket. Extend this validator with one distinct per-engine
+  metrics directory and a metrics-only scraper group before enabling the new
+  UDS in production; Caddy must never receive GID 12000.
   Compare exact versus approximate decisions in telemetry before the router
   may consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.

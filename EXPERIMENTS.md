@@ -3647,6 +3647,45 @@ The executable is intentionally not deployment-ready yet: a bounded host
 provisioner must derive and atomically write the authenticated incarnation from
 current engine metadata before either per-engine service can be enabled.
 
+## 2026-08-13 — issue #41 permission-isolated companion metrics UDS
+
+The standalone companion metrics server now has an explicit endpoint type:
+loopback TCP remains available for local use, while
+`DS4_SNAPSHOT_METRICS_SOCKET_PATH` selects a Unix listener only when a dedicated
+non-root `DS4_SNAPSHOT_METRICS_GROUP_GID` is also supplied. TCP and UDS settings
+are mutually exclusive. UDS configuration rejects non-normalized/oversized
+paths and any parent shared with the snapshot socket before filesystem work.
+
+Runtime validation goes further than path inequality. Both parents must be
+symlink-free, companion-owned, and non-writable by group or other. The metrics
+parent and snapshot parent must both be setgid and group-traversable, its
+configured group must differ from the snapshot/session parent's actual group,
+and the published mode-0660 metrics socket must inherit that group. Publication
+reuses the hardened unique-private
+bind plus hard-link no-replace protocol; shutdown removes only the same device
+and inode, so a replacement pathname is never unlinked. Protected session,
+digest, and attestation inputs still validate before either metrics endpoint is
+bound. Endpoint debug and typed errors expose no path, address, or group value.
+
+Focused tests cover TCP/UDS ambiguity, group requirements, parent separation,
+live HTTP metrics over UDS, inherited mode/group, graceful cleanup, rejection of
+the snapshot authority group, and preservation of a pre-existing target. The
+first shared-target compile plus focused config test took 26.36s after the
+module changed; the immediately warm two-test UDS loop took 0.82s. Because a
+parallel branch legitimately owned the canonical cache, the widened gate used
+an isolated disk-backed target: strict Clippy was green after a 53.96s cold
+dependency build and 6.70s incremental rerun, all 336 Rust tests passed in
+61.00s, and the cold thin-LTO release build took 115.21s. In parallel, the Go
+gate took 1.12s, 101 Python tests took 0.68s, and offline Compose validation took
+0.42s. This is a concurrency tradeoff, not a new normal inner-loop baseline;
+the final warmed focused test and strict Clippy took 8.81s and 3.48s. The final
+all-test rerun took 7.23s and the source-change thin-LTO relink took 34.63s in
+that isolated cache. No Compose, Caddy, node06 process, container, engine, or
+production route changed. The next deployment gate is to extend the offline
+dual-domain fixture and validator with
+per-engine metrics-only groups and scraper paths, alongside the still-missing
+host attestation provisioner.
+
 ## 2026-08-13 — Drone-only quality and release-cache iteration gate
 
 All CI tests moved from GitHub Actions into one Drone pipeline. Cargo fetches

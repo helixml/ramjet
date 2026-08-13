@@ -1,8 +1,10 @@
 //! Standalone, off-by-default single-engine snapshot companion composition.
 
 use std::{
-    env, fmt,
+    env, fmt, fs,
     net::{IpAddr, SocketAddr},
+    os::unix::fs::MetadataExt,
+    path::Path,
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -12,7 +14,7 @@ use axum::{Router, body::Body, http::Response, routing::get};
 use prometheus::{CounterVec, Encoder, Gauge, HistogramVec, Opts, Registry, TextEncoder};
 use thiserror::Error;
 use tokio::{
-    net::TcpListener,
+    net::{TcpListener, UnixListener},
     sync::watch,
     task::{JoinError, JoinHandle},
     time::{Instant, timeout_at},
@@ -44,12 +46,34 @@ use crate::{
     kv_wire::KvWireLimits,
     snapshot_producer::SnapshotProducerSource,
     snapshot_secret_file::{SnapshotSecretFileError, SnapshotSecretFilePolicy},
+    snapshot_socket_path::{
+        PublishedSocketPath, SnapshotSocketPathError, SocketParentPolicy, bind_and_publish,
+        validate_socket_parent,
+    },
     snapshot_supervisor::MAX_ACTIVE_SNAPSHOT_CLIENTS,
 };
 
 const MAX_PATH_BYTES: usize = 4_096;
+const MAX_METRICS_SOCKET_PATH_BYTES: usize = 64;
 const MAX_REPLAY_BATCHES: usize = 100_000;
 const MAX_BLOCK_SIZE: usize = 1_048_576;
+const SETGID_BIT: u32 = 0o2_000;
+const GROUP_EXECUTE_BIT: u32 = 0o010;
+
+#[derive(Clone, Eq, PartialEq)]
+enum CompanionMetricsEndpoint {
+    Loopback(SocketAddr),
+    Unix { path: PathBuf, group_gid: u32 },
+}
+
+impl fmt::Debug for CompanionMetricsEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Loopback(_) => "Loopback",
+            Self::Unix { .. } => "Unix",
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConfigAttentionKind {
@@ -73,7 +97,7 @@ pub struct SingleEngineCompanionConfig {
     pub snapshot: SnapshotCompanionConfig,
     digest_secret_path: Option<PathBuf>,
     attestation_path: Option<PathBuf>,
-    metrics_bind: SocketAddr,
+    metrics_endpoint: CompanionMetricsEndpoint,
     attestation_refresh: Duration,
     transport: Option<KvTransportConfig>,
     owner: CompanionIndexOwnerConfig,
@@ -93,7 +117,7 @@ impl fmt::Debug for SingleEngineCompanionConfig {
                 "attestation_path",
                 &self.attestation_path.as_ref().map(|_| "[REDACTED]"),
             )
-            .field("metrics_loopback", &self.metrics_bind.ip().is_loopback())
+            .field("metrics_endpoint", &self.metrics_endpoint)
             .field("attestation_refresh", &self.attestation_refresh)
             .field("transport_configured", &self.transport.is_some())
             .field("owner", &self.owner)
@@ -129,7 +153,9 @@ impl SingleEngineCompanionConfig {
                 snapshot,
                 digest_secret_path: None,
                 attestation_path: None,
-                metrics_bind: parse_loopback("127.0.0.1:9091")?,
+                metrics_endpoint: CompanionMetricsEndpoint::Loopback(parse_loopback(
+                    "127.0.0.1:9091",
+                )?),
                 attestation_refresh: Duration::from_secs(1),
                 transport: None,
                 owner: CompanionIndexOwnerConfig {
@@ -140,11 +166,7 @@ impl SingleEngineCompanionConfig {
                 group: None,
             });
         }
-        let metrics_bind = parse_loopback(
-            get("DS4_SNAPSHOT_METRICS_BIND")
-                .as_deref()
-                .unwrap_or("127.0.0.1:9091"),
-        )?;
+        let metrics_endpoint = metrics_endpoint(&mut get, &snapshot)?;
         let attestation_refresh = parse_duration(
             &mut get,
             "DS4_SNAPSHOT_ATTESTATION_REFRESH_MS",
@@ -264,7 +286,7 @@ impl SingleEngineCompanionConfig {
             snapshot,
             digest_secret_path: Some(digest_secret_path),
             attestation_path: Some(attestation_path),
-            metrics_bind,
+            metrics_endpoint,
             attestation_refresh,
             transport: Some(transport),
             owner,
@@ -328,6 +350,10 @@ pub enum SingleEngineCompanionError {
     Metrics(#[from] prometheus::Error),
     #[error("standalone companion metrics listener failed")]
     MetricsIo,
+    #[error("standalone companion metrics socket validation failed")]
+    MetricsSocket(#[from] SnapshotSocketPathError),
+    #[error("standalone companion metrics authority isolation failed")]
+    MetricsIsolation,
     #[error("standalone companion configuration is incomplete")]
     InvalidConfig,
     #[error("standalone companion task failed")]
@@ -347,6 +373,8 @@ impl SingleEngineCompanionError {
             Self::Runtime(error) => error.reason(),
             Self::Metrics(_) => "metrics",
             Self::MetricsIo => "metrics_io",
+            Self::MetricsSocket(error) => error.reason(),
+            Self::MetricsIsolation => "metrics_isolation",
             Self::InvalidConfig => "invalid_config",
             Self::TaskFailed => "task_failed",
             Self::ShutdownTimeout => "shutdown_timeout",
@@ -369,6 +397,14 @@ enum ServiceExit {
     Snapshot(Result<Result<SnapshotCompanionRunReport, SingleEngineCompanionError>, JoinError>),
     Metrics(Result<Result<(), SingleEngineCompanionError>, JoinError>),
     Watcher(Result<(), JoinError>),
+}
+
+enum BoundMetricsEndpoint {
+    Tcp(TcpListener),
+    Unix {
+        listener: UnixListener,
+        path_guard: PublishedSocketPath,
+    },
 }
 
 /// Run the isolated single-engine companion until shutdown.
@@ -442,25 +478,25 @@ pub async fn run_single_engine_companion(
     let (authority_tx, authority_rx) = watch::channel(Some(initial));
     let (internal_tx, internal_rx) = watch::channel(false);
 
-    let metrics_listener = TcpListener::bind(config.metrics_bind)
-        .await
-        .map_err(|_| SingleEngineCompanionError::MetricsIo)?;
+    let snapshot_socket_path = config
+        .snapshot
+        .socket_path
+        .as_deref()
+        .ok_or(SingleEngineCompanionError::InvalidConfig)?;
+    let companion_uid = config
+        .snapshot
+        .companion_uid
+        .ok_or(SingleEngineCompanionError::InvalidConfig)?;
+    let metrics_listener = bind_metrics_endpoint(
+        &config.metrics_endpoint,
+        snapshot_socket_path,
+        companion_uid,
+    )
+    .await?;
     let metrics_registry = Arc::clone(&registry);
-    let mut metrics_shutdown = internal_rx.clone();
+    let metrics_shutdown = internal_rx.clone();
     let mut metrics_task = tokio::spawn(async move {
-        axum::serve(
-            metrics_listener,
-            Router::new().route(
-                "/metrics",
-                get(move || {
-                    let registry = Arc::clone(&metrics_registry);
-                    async move { metrics_response(&registry) }
-                }),
-            ),
-        )
-        .with_graceful_shutdown(async move { wait_for_shutdown(&mut metrics_shutdown).await })
-        .await
-        .map_err(|_| SingleEngineCompanionError::MetricsIo)
+        serve_metrics_endpoint(metrics_listener, metrics_registry, metrics_shutdown).await
     });
     let mut owner_task = tokio::spawn(owner.run(authority_rx, internal_rx.clone()));
     let producer_source: Arc<dyn SnapshotProducerSource> = source;
@@ -673,6 +709,102 @@ const fn replay_outcome_label(outcome: CompanionIndexOwnerReplayOutcome) -> &'st
     }
 }
 
+async fn bind_metrics_endpoint(
+    endpoint: &CompanionMetricsEndpoint,
+    snapshot_socket_path: &Path,
+    companion_uid: u32,
+) -> Result<BoundMetricsEndpoint, SingleEngineCompanionError> {
+    match endpoint {
+        CompanionMetricsEndpoint::Loopback(address) => TcpListener::bind(address)
+            .await
+            .map(BoundMetricsEndpoint::Tcp)
+            .map_err(|_| SingleEngineCompanionError::MetricsIo),
+        CompanionMetricsEndpoint::Unix { path, group_gid } => {
+            let snapshot_parent = snapshot_socket_path
+                .parent()
+                .ok_or(SingleEngineCompanionError::MetricsIsolation)?;
+            let metrics_parent = path
+                .parent()
+                .ok_or(SingleEngineCompanionError::MetricsIsolation)?;
+            let policy = SocketParentPolicy {
+                owner_uid: companion_uid,
+            };
+            validate_socket_parent(snapshot_parent, policy)?;
+            validate_socket_parent(metrics_parent, policy)?;
+
+            let snapshot_metadata = fs::symlink_metadata(snapshot_parent)
+                .map_err(|_| SingleEngineCompanionError::MetricsIsolation)?;
+            let metrics_metadata = fs::symlink_metadata(metrics_parent)
+                .map_err(|_| SingleEngineCompanionError::MetricsIsolation)?;
+            let same_directory = snapshot_metadata.dev() == metrics_metadata.dev()
+                && snapshot_metadata.ino() == metrics_metadata.ino();
+            let snapshot_mode = snapshot_metadata.mode();
+            let metrics_mode = metrics_metadata.mode();
+            if same_directory
+                || *group_gid == 0
+                || snapshot_metadata.gid() == *group_gid
+                || metrics_metadata.gid() != *group_gid
+                || snapshot_mode & SETGID_BIT == 0
+                || snapshot_mode & GROUP_EXECUTE_BIT == 0
+                || metrics_mode & SETGID_BIT == 0
+                || metrics_mode & GROUP_EXECUTE_BIT == 0
+            {
+                return Err(SingleEngineCompanionError::MetricsIsolation);
+            }
+
+            let published = bind_and_publish(path, policy)?;
+            let socket_metadata = fs::symlink_metadata(path)
+                .map_err(|_| SingleEngineCompanionError::MetricsIsolation)?;
+            if socket_metadata.gid() != *group_gid {
+                return Err(SingleEngineCompanionError::MetricsIsolation);
+            }
+            let (listener, path_guard) = published.into_parts();
+            listener
+                .set_nonblocking(true)
+                .map_err(|_| SingleEngineCompanionError::MetricsIo)?;
+            let listener = UnixListener::from_std(listener)
+                .map_err(|_| SingleEngineCompanionError::MetricsIo)?;
+            Ok(BoundMetricsEndpoint::Unix {
+                listener,
+                path_guard,
+            })
+        }
+    }
+}
+
+async fn serve_metrics_endpoint(
+    endpoint: BoundMetricsEndpoint,
+    registry: Arc<Registry>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), SingleEngineCompanionError> {
+    let router = Router::new().route(
+        "/metrics",
+        get(move || {
+            let registry = Arc::clone(&registry);
+            async move { metrics_response(&registry) }
+        }),
+    );
+    match endpoint {
+        BoundMetricsEndpoint::Tcp(listener) => axum::serve(listener, router)
+            .with_graceful_shutdown(async move { wait_for_shutdown(&mut shutdown).await })
+            .await
+            .map_err(|_| SingleEngineCompanionError::MetricsIo),
+        BoundMetricsEndpoint::Unix {
+            listener,
+            mut path_guard,
+        } => {
+            let serve_result = axum::serve(listener, router)
+                .with_graceful_shutdown(async move { wait_for_shutdown(&mut shutdown).await })
+                .await
+                .map_err(|_| SingleEngineCompanionError::MetricsIo);
+            let cleanup_result = path_guard
+                .cleanup()
+                .map_err(|_| SingleEngineCompanionError::MetricsIo);
+            serve_result.and(cleanup_result.map(|_| ()))
+        }
+    }
+}
+
 fn metrics_response(registry: &Registry) -> Response<Body> {
     let mut output = Vec::new();
     let encoder = TextEncoder::new();
@@ -769,6 +901,92 @@ fn required_path(
     Ok(path)
 }
 
+fn metrics_endpoint(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    snapshot: &SnapshotCompanionConfig,
+) -> Result<CompanionMetricsEndpoint, SingleEngineCompanionConfigError> {
+    let tcp = get("DS4_SNAPSHOT_METRICS_BIND");
+    let unix = get("DS4_SNAPSHOT_METRICS_SOCKET_PATH");
+    let group_gid = get("DS4_SNAPSHOT_METRICS_GROUP_GID");
+    if tcp.is_some() && unix.is_some() {
+        return Err(invalid(
+            "DS4_SNAPSHOT_METRICS_SOCKET_PATH",
+            "exactly one TCP or Unix metrics endpoint",
+        ));
+    }
+    if let Some(raw) = unix {
+        let path = normalized_path(
+            &raw,
+            "DS4_SNAPSHOT_METRICS_SOCKET_PATH",
+            MAX_METRICS_SOCKET_PATH_BYTES,
+            "an absolute normalized Unix socket path",
+        )?;
+        let snapshot_path = snapshot
+            .socket_path
+            .as_deref()
+            .ok_or_else(|| invalid("DS4_SNAPSHOT_SOCKET_PATH", "a snapshot socket path"))?;
+        if path.parent() == snapshot_path.parent() {
+            return Err(invalid(
+                "DS4_SNAPSHOT_METRICS_SOCKET_PATH",
+                "a parent distinct from the snapshot authority directory",
+            ));
+        }
+        let group_gid = group_gid
+            .as_deref()
+            .ok_or_else(|| {
+                invalid(
+                    "DS4_SNAPSHOT_METRICS_GROUP_GID",
+                    "a dedicated non-root metrics group",
+                )
+            })?
+            .parse::<u32>()
+            .map_err(|_| {
+                invalid(
+                    "DS4_SNAPSHOT_METRICS_GROUP_GID",
+                    "a dedicated non-root metrics group",
+                )
+            })?;
+        if group_gid == 0 {
+            return Err(invalid(
+                "DS4_SNAPSHOT_METRICS_GROUP_GID",
+                "a dedicated non-root metrics group",
+            ));
+        }
+        Ok(CompanionMetricsEndpoint::Unix { path, group_gid })
+    } else {
+        if group_gid.is_some() {
+            return Err(invalid(
+                "DS4_SNAPSHOT_METRICS_GROUP_GID",
+                "only with a Unix metrics endpoint",
+            ));
+        }
+        Ok(CompanionMetricsEndpoint::Loopback(parse_loopback(
+            tcp.as_deref().unwrap_or("127.0.0.1:9091"),
+        )?))
+    }
+}
+
+fn normalized_path(
+    raw: &str,
+    key: &'static str,
+    maximum_bytes: usize,
+    reason: &'static str,
+) -> Result<PathBuf, SingleEngineCompanionConfigError> {
+    let path = PathBuf::from(raw);
+    if raw.is_empty()
+        || raw.len() > maximum_bytes
+        || !path.is_absolute()
+        || path.file_name().is_none()
+        || raw.ends_with('/')
+        || raw[1..]
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Err(invalid(key, reason));
+    }
+    Ok(path)
+}
+
 fn parse_loopback(raw: &str) -> Result<SocketAddr, SingleEngineCompanionConfigError> {
     let address = raw
         .parse::<SocketAddr>()
@@ -842,7 +1060,7 @@ mod tests {
     use std::{
         collections::HashMap,
         fs,
-        os::unix::fs::{MetadataExt, PermissionsExt},
+        os::unix::fs::{MetadataExt, PermissionsExt, chown},
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -853,7 +1071,10 @@ mod tests {
         },
         kv_snapshot::EngineIncarnation,
     };
-    use tokio::time::timeout;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        time::timeout,
+    };
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
     // Drone runs this suite as root. Keep its protected files root-owned while
@@ -1022,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_requires_one_engine_explicit_geometry_and_loopback_metrics() {
+    fn serve_requires_one_engine_explicit_geometry_and_unambiguous_metrics() {
         let files = TestFiles::new();
         let mut values = files.values();
         let config = load(&values);
@@ -1045,6 +1266,57 @@ mod tests {
         let mut values = files.values();
         values.insert("DS4_SNAPSHOT_METRICS_BIND", "0.0.0.0:9091".to_owned());
         assert!(SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()).is_err());
+
+        let metrics_path = files
+            .directory
+            .with_extension("metrics")
+            .join("metrics.sock");
+        let mut values = files.values();
+        values.remove("DS4_SNAPSHOT_METRICS_BIND");
+        values.insert(
+            "DS4_SNAPSHOT_METRICS_SOCKET_PATH",
+            metrics_path.to_string_lossy().into_owned(),
+        );
+        values.insert("DS4_SNAPSHOT_METRICS_GROUP_GID", "12004".to_owned());
+        assert!(matches!(
+            load(&values).metrics_endpoint,
+            CompanionMetricsEndpoint::Unix {
+                group_gid: 12004,
+                ..
+            }
+        ));
+
+        values.remove("DS4_SNAPSHOT_METRICS_GROUP_GID");
+        assert!(matches!(
+            SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()),
+            Err(SingleEngineCompanionConfigError::Invalid {
+                key: "DS4_SNAPSHOT_METRICS_GROUP_GID",
+                reason: "a dedicated non-root metrics group",
+            })
+        ));
+        values.insert("DS4_SNAPSHOT_METRICS_GROUP_GID", "12004".to_owned());
+        values.insert("DS4_SNAPSHOT_METRICS_BIND", "127.0.0.1:9091".to_owned());
+        assert!(matches!(
+            SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()),
+            Err(SingleEngineCompanionConfigError::Invalid {
+                key: "DS4_SNAPSHOT_METRICS_SOCKET_PATH",
+                reason: "exactly one TCP or Unix metrics endpoint",
+            })
+        ));
+
+        let mut values = files.values();
+        values.remove("DS4_SNAPSHOT_METRICS_BIND");
+        values.insert(
+            "DS4_SNAPSHOT_METRICS_SOCKET_PATH",
+            files
+                .directory
+                .join("metrics.sock")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        values.insert("DS4_SNAPSHOT_METRICS_GROUP_GID", "12004".to_owned());
+        assert!(SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()).is_err());
+
         let mut values = files.values();
         values.insert("DS4_SNAPSHOT_MAX_CLIENTS", "1".to_owned());
         assert!(matches!(
@@ -1054,6 +1326,128 @@ mod tests {
                 reason: "exactly two active clients",
             })
         ));
+    }
+
+    fn alternate_metrics_gid(current_gid: u32) -> Option<u32> {
+        if fs::metadata("/proc/self").ok()?.uid() == 0 {
+            return Some(12_004);
+        }
+        fs::read_to_string("/proc/self/status")
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("Groups:"))?
+            .split_whitespace()
+            .filter_map(|value| value.parse::<u32>().ok())
+            .find(|group| *group != current_gid && *group != 0)
+    }
+
+    #[tokio::test]
+    async fn permission_isolated_metrics_uds_serves_and_cleans_its_inode() {
+        let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let root = PathBuf::from("/tmp").join(format!("md-met-{}-{id}", std::process::id()));
+        let snapshot_parent = root.join("snapshot");
+        let metrics_parent = root.join("metrics");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&snapshot_parent).unwrap();
+        fs::create_dir(&metrics_parent).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&snapshot_parent, fs::Permissions::from_mode(0o2750)).unwrap();
+        let owner = fs::metadata(&snapshot_parent).unwrap().uid();
+        let snapshot_gid = fs::metadata(&snapshot_parent).unwrap().gid();
+        let Some(metrics_gid) = alternate_metrics_gid(snapshot_gid) else {
+            let _ = fs::remove_dir_all(&root);
+            return;
+        };
+        chown(&metrics_parent, None, Some(metrics_gid)).unwrap();
+        fs::set_permissions(&metrics_parent, fs::Permissions::from_mode(0o2750)).unwrap();
+
+        let metrics_path = metrics_parent.join("metrics.sock");
+        let endpoint = CompanionMetricsEndpoint::Unix {
+            path: metrics_path.clone(),
+            group_gid: metrics_gid,
+        };
+        fs::set_permissions(&snapshot_parent, fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(matches!(
+            bind_metrics_endpoint(&endpoint, &snapshot_parent.join("snapshot.sock"), owner).await,
+            Err(SingleEngineCompanionError::MetricsIsolation)
+        ));
+        assert!(!metrics_path.exists());
+        fs::set_permissions(&snapshot_parent, fs::Permissions::from_mode(0o2750)).unwrap();
+        let bound = bind_metrics_endpoint(&endpoint, &snapshot_parent.join("snapshot.sock"), owner)
+            .await
+            .unwrap();
+        let socket_metadata = fs::symlink_metadata(&metrics_path).unwrap();
+        assert_eq!(socket_metadata.gid(), metrics_gid);
+        assert_eq!(socket_metadata.mode() & 0o777, 0o660);
+
+        let registry = Arc::new(Registry::new());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server =
+            tokio::spawn(async move { serve_metrics_endpoint(bound, registry, shutdown_rx).await });
+        let mut client = tokio::net::UnixStream::connect(&metrics_path)
+            .await
+            .unwrap();
+        client
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        timeout(Duration::from_secs(1), client.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+
+        shutdown_tx.send(true).unwrap();
+        timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!metrics_path.exists());
+
+        let old = bind_metrics_endpoint(&endpoint, &snapshot_parent.join("snapshot.sock"), owner)
+            .await
+            .unwrap();
+        let old_inode = fs::symlink_metadata(&metrics_path).unwrap().ino();
+        fs::remove_file(&metrics_path).unwrap();
+        let replacement = std::os::unix::net::UnixListener::bind(&metrics_path).unwrap();
+        let replacement_inode = fs::symlink_metadata(&metrics_path).unwrap().ino();
+        assert_ne!(old_inode, replacement_inode);
+        drop(old);
+        assert_eq!(
+            fs::symlink_metadata(&metrics_path).unwrap().ino(),
+            replacement_inode
+        );
+        drop(replacement);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_uds_rejects_session_group_and_preserves_existing_target() {
+        let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let root = PathBuf::from("/tmp").join(format!("md-mrej-{}-{id}", std::process::id()));
+        let snapshot_parent = root.join("snapshot");
+        let metrics_parent = root.join("metrics");
+        fs::create_dir_all(&snapshot_parent).unwrap();
+        fs::create_dir(&metrics_parent).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&snapshot_parent, fs::Permissions::from_mode(0o2750)).unwrap();
+        fs::set_permissions(&metrics_parent, fs::Permissions::from_mode(0o2750)).unwrap();
+        let owner = fs::metadata(&snapshot_parent).unwrap().uid();
+        let shared_gid = fs::metadata(&snapshot_parent).unwrap().gid();
+        let metrics_path = metrics_parent.join("metrics.sock");
+        fs::write(&metrics_path, b"preserve").unwrap();
+        let endpoint = CompanionMetricsEndpoint::Unix {
+            path: metrics_path.clone(),
+            group_gid: shared_gid,
+        };
+        assert!(matches!(
+            bind_metrics_endpoint(&endpoint, &snapshot_parent.join("snapshot.sock"), owner,).await,
+            Err(SingleEngineCompanionError::MetricsIsolation)
+        ));
+        assert_eq!(fs::read(&metrics_path).unwrap(), b"preserve");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -1096,6 +1490,21 @@ mod tests {
         ] {
             assert!(!debug.contains(forbidden.as_ref()));
         }
+
+        let metrics_path = files
+            .directory
+            .with_extension("metrics")
+            .join("metrics.sock");
+        let mut values = files.values();
+        values.remove("DS4_SNAPSHOT_METRICS_BIND");
+        values.insert(
+            "DS4_SNAPSHOT_METRICS_SOCKET_PATH",
+            metrics_path.to_string_lossy().into_owned(),
+        );
+        values.insert("DS4_SNAPSHOT_METRICS_GROUP_GID", "12004".to_owned());
+        let debug = format!("{:?}", load(&values));
+        assert!(!debug.contains(metrics_path.to_string_lossy().as_ref()));
+        assert!(!debug.contains("12004"));
     }
 
     #[tokio::test]
