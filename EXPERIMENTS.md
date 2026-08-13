@@ -4143,6 +4143,28 @@ source digest is idempotent success, a different digest is a hard conflict, and
 only an explicit registry not-found result permits a copy. Ambiguous lookup
 failures remain closed.
 
+## 2026-08-13 — v0.1.0 tag publisher shell failure and bounded recovery
+
+The immutable `v0.1.0` tag correctly peeled to qualified commit
+`b0e070073d4266018d2f907ff35a7ee88adfdcd4`. Drone release build #266 passed
+clone, authority/version planning, Rust lint, all Rust tests, agent protocol,
+and Compose validation, then both four-second publisher steps ended with runner
+status 255. Their logs contained only the pinned Crane image pull. The image's
+entrypoint is `/ko-app/crane` and it provides `/busybox/sh`, not the `/bin/sh`
+that Drone attempted for commands, so neither authentication nor any registry
+read/write ran.
+
+Normal tag publishers now set `/busybox/sh` explicitly. A separate one-purpose
+Drone promotion recovery accepts only target `release-v0.1.0`; its validation
+step fetches and peels the existing tag, requires the exact qualified commit and
+the tag's Cargo version `0.1.0`, and emits revision/target/tag-bound private
+markers. Its two Crane steps reuse the ordinary label/digest validation and
+missing/same/conflict semantics to copy only `rust-b0e0700` to `v0.1.0` and
+`companion-rust-b0e0700` to `companion-v0.1.0`. It cannot build, run Docker or
+Kaniko, move a Git tag, update edge aliases, or overwrite a conflicting digest.
+This entry records the source correction and design only; no promotion or
+registry mutation was performed while preparing it.
+
 ## 2026-08-13 — v0.1.0 candidate publication and node06 acceptance
 
 The first public-release boundary is commit `b0e0700`. Stable v0.1 scope is the
@@ -4170,8 +4192,9 @@ the pinned registry client:
 Both application configs carry source
 `https://github.com/helixml/mini-dynamo`, semantic version `0.1.0`, and full
 revision `b0e070073d4266018d2f907ff35a7ee88adfdcd4`. Edge aliases resolved to
-the same SHA-tag digests. No release tag exists yet; tag promotion will copy
-these already-qualified manifests and reject any conflicting destination.
+the same SHA-tag digests. At qualification time no release tag existed; the
+subsequent immutable tag points to this exact commit, and promotion may only
+copy these already-qualified manifests while rejecting a conflicting destination.
 
 The LB-only node06 swap completed in 6.9s under the shared deployment lock.
 Both TP4 engines retained their containers and zero restart counts. Startup
