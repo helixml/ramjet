@@ -148,7 +148,8 @@ network access. It is not part of an ordinary `docker-compose.yaml` deploy.
 The two companions require the explicit `snapshot-companion` profile, and the
 short-lived root provisioners require the separate `snapshot-attestation`
 profile. Snapshot routing defaults to `off` even with the overlay; only an
-explicit `DS4_SNAPSHOT_ROUTE_MODE=shadow` can consume the inventories, and the
+explicit `DS4_SNAPSHOT_ROUTE_MODE=shadow` enables both the exact-router gate
+and snapshot authority in lockstep so the inventories can be consumed, and the
 pinned LB also enforces that compact inventories cannot select placement.
 
 Render the complete contract without starting it:
@@ -215,5 +216,6 @@ The overlay is an admission artifact, not a production enablement. Do not copy
 the Caddy snippet or start either profile until LB-side hot attestation refresh
 is merged, the current images are repinned, and the host validator passes on
 node06. The first rollout
-must keep `DS4_SNAPSHOT_ROUTE_MODE=off`; enable `shadow` only after both
+must keep `DS4_SNAPSHOT_ROUTE_MODE=off` (which also forces the exact-router
+gate off); enable `shadow` only after both
 companions are ready, then preserve ordinary approximate serving throughout.

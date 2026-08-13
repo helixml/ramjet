@@ -37,8 +37,23 @@ class SnapshotProductionComposeTest(unittest.TestCase):
         full = validator.render(companion=True, attestation=True, route_mode="shadow")
         validator.validate_documents(companion, full, route_mode="shadow")
         environment = companion["services"]["ds4-loadbalancer"]["environment"]
+        self.assertEqual(environment["DS4_EXACT_ROUTE_MODE"], "shadow")
         self.assertEqual(environment["DS4_SNAPSHOT_ROUTE_MODE"], "shadow")
         self.assertEqual(environment["DS4_KV_EVENT_MODE"], "off")
+
+    def test_off_render_disables_router_and_snapshot_exact_modes_together(self):
+        environment = self.companion["services"]["ds4-loadbalancer"]["environment"]
+        self.assertEqual(environment["DS4_EXACT_ROUTE_MODE"], "off")
+        self.assertEqual(environment["DS4_SNAPSHOT_ROUTE_MODE"], "off")
+        self.assertEqual(environment["DS4_KV_EVENT_MODE"], "off")
+
+    def test_router_and_snapshot_exact_modes_cannot_diverge(self):
+        document = validator.render(companion=True, attestation=False)
+        document["services"]["ds4-loadbalancer"]["environment"][
+            "DS4_EXACT_ROUTE_MODE"
+        ] = "shadow"
+        with self.assertRaisesRegex(validator.ValidationError, "DS4_EXACT_ROUTE_MODE"):
+            validator.validate_documents(document, self.full)
 
     def test_companion_profile_does_not_run_privileged_provisioners(self):
         services = self.companion["services"]
@@ -108,6 +123,18 @@ class SnapshotProductionComposeTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaises(validator.ValidationError):
+                validator.validate_caddy(candidate)
+
+            candidate.write_text(
+                original
+                + "\nhandle /metrics/extra {\n"
+                + "\treverse_proxy unix//run/mini-dynamo-snapshot-b/companion.sock\n"
+                + "}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                validator.ValidationError, "non-metrics upstream"
+            ):
                 validator.validate_caddy(candidate)
 
 

@@ -3996,7 +3996,7 @@ The semantic validator renders companion-only and companion+provisioner
 profiles and rejects cross-engine mounts, mutable images, raw/snapshot dual
 authority, TCP metrics, shared metrics/session groups, Docker sockets,
 GPU/device grants, broad mounts, incorrect identities, and implicit privileged
-provisioning. Seven focused Python tests exercise the real render plus negative
+provisioning. Ten focused Python tests exercise the real render plus negative
 mutations. The separate host preflight requires distinct symlink-free tmpfs
 parents, exact owner/group/mode contracts, 32-byte one-link secrets, bounded
 root-only metadata, provisioned attestations, and unique authority inodes.
@@ -4006,3 +4006,13 @@ directories, Caddy routes, containers, or node06 processes. Fixed-cardinality
 LB reconnect/readiness metrics and hot LB attestation refresh are now merged.
 Repin current images, pass host preflight, and first start with snapshot routing
 still off.
+
+Independent pre-merge review caught two production-contract gaps. First, the
+base Compose exact-shadow default survived the intended off-mode overlay and
+would have made the LB reject startup when both exact authorities were off.
+The overlay now derives both `DS4_EXACT_ROUTE_MODE` and snapshot authority from
+the same bounded `DS4_SNAPSHOT_ROUTE_MODE=off|shadow` control, with positive
+renders and a divergence rejection test. Second, the initial Caddy validator
+required both metrics sockets but did not reject an additional session-socket
+proxy. It now accepts exactly the two ordered metrics UDS upstreams and rejects
+every extra reverse proxy, including the peer session socket.

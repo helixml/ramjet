@@ -186,6 +186,7 @@ def validate_lb(service: dict[str, Any], route_mode: str) -> None:
     environment = service.get("environment", {})
     expected = {
         "DS4_KV_EVENT_MODE": "off",
+        "DS4_EXACT_ROUTE_MODE": route_mode,
         "DS4_SNAPSHOT_ROUTE_MODE": route_mode,
         "DS4_SNAPSHOT_ROUTE_COMPANION_UIDS": "12001,12003",
         "DS4_SNAPSHOT_ROUTE_GROUPS": "0:0,0:0",
@@ -300,11 +301,20 @@ def validate_caddy(path: pathlib.Path = CADDY) -> None:
         fail("Caddy snippet does not preserve session-group isolation")
     if "/run/secrets/" in text or "mini-dynamo-snapshot-a/companion.sock" in text:
         fail("Caddy snippet exposes snapshot authority")
+    expected_proxies: list[str] = []
     for index, domain in enumerate(DOMAINS.values()):
         route = f"handle /metrics/snapshot/{index}"
         upstream = f"reverse_proxy unix/{domain['caddy_path']}"
+        expected_proxies.append(upstream)
         if text.count(route) != 1 or text.count(upstream) != 1:
             fail("Caddy metrics routes are incomplete or ambiguous")
+    actual_proxies = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip().startswith("reverse_proxy")
+    ]
+    if actual_proxies != expected_proxies:
+        fail("Caddy snippet contains a non-metrics upstream")
     if text.count("rewrite * /metrics") != len(DOMAINS):
         fail("Caddy metrics routes do not rewrite to the companion endpoint")
 

@@ -88,6 +88,10 @@ services:
     environment:
       # Raw vLLM event consumers and companion snapshots are mutually exclusive.
       DS4_KV_EVENT_MODE: "off"
+      # One operator control keeps the router gate and its sole exact authority
+      # in lockstep: off-mode startup is valid, and shadow can never be enabled
+      # without the companion inventory that supplies it.
+      DS4_EXACT_ROUTE_MODE: ${DS4_SNAPSHOT_ROUTE_MODE:-off}
       DS4_SNAPSHOT_ROUTE_MODE: ${DS4_SNAPSHOT_ROUTE_MODE:-off}
       DS4_SNAPSHOT_ROUTE_SOCKET_PATHS: /run/mini-dynamo-snapshot-a/companion.sock,/run/mini-dynamo-snapshot-b/companion.sock
       DS4_SNAPSHOT_ROUTE_COMPANION_UIDS: "12001,12003"
