@@ -242,7 +242,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   the next boundary runs directly attributable without parsing upstream URL
   labels. Qualify that shadow signal, then repeat the 52/64 boundary three
   times before defining any 95%+ SLO.
-- 🔨 **Production-shaped DeepSeek-V4 agent/DSML gate (#10).** The versioned
+- ✅ **Production-shaped DeepSeek-V4 agent/DSML gate (#10).** The versioned
   synthetic v1 JSONL corpus and privacy-safe runner now cover stream/non-stream,
   automatic/required/parallel tool calls, split deltas and DSML leaks, every
   JSON argument class plus `arguments`/`input`, and retained reasoning/tool
@@ -270,8 +270,16 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   420/420 protocol-valid. At 0KiB, warm reuse reduced median TTFT p95 from
   1.49s to 0.84s at c8 and from 2.19s to 0.86s at c16; c1 showed no latency
   win, as expected for tiny serial prompts. The full deterministic iteration
-  is now about 85s from the three independently measured slices. Add sovereign
-  redacted trace-shape ingestion before closing the issue.
+  is now about 85s from the three independently measured slices. Sovereign
+  trace-shape ingestion is also complete: a strict numeric/enumerated schema,
+  private-file admission, synthetic nested prefixes, relative arrival replay,
+  bounded per-structure `/tokenize` calibration, and separate token-density
+  and protocol-validity gates are covered by 17 focused tests. A four-shape
+  node06 smoke reproduced all target prompt sizes within 10 tokens and split
+  2/2 across replicas; one stochastic auto-tool completion failed its typed-
+  argument oracle, which remains visible as model-quality evidence rather than
+  being retried away. No customer content or production-derived artifact was
+  used or retained.
 - 🔨 **Reproducible experiment journal + workload matrix.** Keep
   `EXPERIMENTS.md`; measure deterministic code, prose, shared-app, cold/warm
   prefill, and mixed prefill+decode separately. Never report speculative decode

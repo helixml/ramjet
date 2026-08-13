@@ -4480,3 +4480,40 @@ The LB, both TP4 engines, and both snapshot companions were healthy with zero
 restarts after qualification. Issue #10 now needs only the optional sovereign
 redacted trace-shape ingestion; this matrix does not justify a serving-policy
 change by itself.
+
+## 2026-08-13 — r80 sovereign trace-shape calibration
+
+The optional issue #10 trace lane now accepts only a strict versioned JSONL
+shape schema containing numeric and enumerated fields. Input must be an
+owner-only mode-0600 regular file directly below a mode-0700 directory. The
+runner creates all messages, tool schemas, nested shared prefixes, and salts
+synthetically; raw prompts, arguments, identifiers, credentials, token IDs,
+and customer fingerprints cannot enter the schema or output. Seventeen focused
+tests and all 185 benchmark tests passed locally, and Drone #294 passed the
+repository quality gate before #110 merged as `0102769`.
+
+The first four-shape synthetic node06 smoke proved why target lengths cannot be
+estimated from filler alone. All four responses were protocol-valid, but their
+authoritative prompt-usage deltas were +22, +407, +552, and +494 tokens, so
+only one passed the bounded density gate. No tolerance was widened. Instead,
+the runner now sends one small synthetic `/tokenize` probe per unique
+protocol/history/tool/reasoning structure before GPU execution. It caps the
+request at 30 seconds and the response at 1MiB, discards returned IDs in
+memory, and adjusts only repeated synthetic filler. Missing, malformed,
+oversized, or implausible calibration fails before inference; response usage
+remains the final authority.
+
+The corrected fresh-salt smoke calibrated four structural profiles with a
+maximum 541-token template overhead. All four target prompt shapes then passed:
+512/512, 4,610/4,608, 5,010/5,000, and 2,058/2,048 tokens. Routing split 2/2
+across the replicas and the run completed in 3.31s. Three requests were fully
+protocol-valid; the official-agentic auto-tool shape returned one structured
+call with the wrong typed argument, so protocol validity remained 3/4 rather
+than being retried until green. That failure is model-quality evidence and is
+reported separately from the now-correct 4/4 workload-shape reproduction.
+
+Only synthetic hand-authored shapes were used in this qualification; no
+production or customer trace was captured. After the run the released v0.1.0
+LB, both TP4 engines, and both snapshot companions were healthy with zero
+restarts. This closes the issue #10 implementation surface without changing a
+serving policy or restarting an engine.
