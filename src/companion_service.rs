@@ -44,6 +44,7 @@ use crate::{
     kv_wire::KvWireLimits,
     snapshot_producer::SnapshotProducerSource,
     snapshot_secret_file::{SnapshotSecretFileError, SnapshotSecretFilePolicy},
+    snapshot_supervisor::MAX_ACTIVE_SNAPSHOT_CLIENTS,
 };
 
 const MAX_PATH_BYTES: usize = 4_096;
@@ -185,6 +186,12 @@ impl SingleEngineCompanionConfig {
             return Err(invalid(
                 "DS4_SNAPSHOT_LIVE_ENDPOINTS",
                 "exactly one live/replay engine pair",
+            ));
+        }
+        if snapshot.max_clients != MAX_ACTIVE_SNAPSHOT_CLIENTS {
+            return Err(invalid(
+                "DS4_SNAPSHOT_MAX_CLIENTS",
+                "exactly two active clients",
             ));
         }
         let digest_secret_path = required_path(&mut get, "DS4_SNAPSHOT_DIGEST_SECRET_PATH")?;
@@ -849,6 +856,10 @@ mod tests {
     use tokio::time::timeout;
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
+    // Drone runs this suite as root. Keep its protected files root-owned while
+    // exercising the production contract with distinct non-root process UIDs.
+    const ROOT_CONTAINER_COMPANION_UID: u32 = 12_001;
+    const ROOT_CONTAINER_CLIENT_UID: u32 = 12_002;
 
     struct TestFiles {
         directory: PathBuf,
@@ -857,6 +868,8 @@ mod tests {
         digest: PathBuf,
         attestation: PathBuf,
         owner: u32,
+        companion_uid: u32,
+        client_uid: u32,
     }
 
     impl TestFiles {
@@ -869,6 +882,11 @@ mod tests {
             fs::create_dir(&directory).unwrap();
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
             let owner = fs::metadata(&directory).unwrap().uid();
+            let (companion_uid, client_uid) = if owner == 0 {
+                (ROOT_CONTAINER_COMPANION_UID, ROOT_CONTAINER_CLIENT_UID)
+            } else {
+                (owner, owner.saturating_add(1).max(1))
+            };
             let session = directory.join("session");
             let digest = directory.join("digest");
             for (path, byte) in [(&session, 0x31), (&digest, 0x51)] {
@@ -893,6 +911,8 @@ mod tests {
                 digest,
                 attestation,
                 owner,
+                companion_uid,
+                client_uid,
             }
         }
 
@@ -903,11 +923,8 @@ mod tests {
                     "DS4_SNAPSHOT_SOCKET_PATH",
                     self.socket.to_string_lossy().into_owned(),
                 ),
-                ("DS4_SNAPSHOT_COMPANION_UID", self.owner.to_string()),
-                (
-                    "DS4_SNAPSHOT_CLIENT_UID",
-                    self.owner.saturating_add(1).max(1).to_string(),
-                ),
+                ("DS4_SNAPSHOT_COMPANION_UID", self.companion_uid.to_string()),
+                ("DS4_SNAPSHOT_CLIENT_UID", self.client_uid.to_string()),
                 (
                     "DS4_SNAPSHOT_SECRET_PATH",
                     self.session.to_string_lossy().into_owned(),
@@ -1028,6 +1045,15 @@ mod tests {
         let mut values = files.values();
         values.insert("DS4_SNAPSHOT_METRICS_BIND", "0.0.0.0:9091".to_owned());
         assert!(SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()).is_err());
+        let mut values = files.values();
+        values.insert("DS4_SNAPSHOT_MAX_CLIENTS", "1".to_owned());
+        assert!(matches!(
+            SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()),
+            Err(SingleEngineCompanionConfigError::Invalid {
+                key: "DS4_SNAPSHOT_MAX_CLIENTS",
+                reason: "exactly two active clients",
+            })
+        ));
     }
 
     #[test]
