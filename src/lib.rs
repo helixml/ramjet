@@ -16,6 +16,7 @@ pub mod prepare;
 pub mod proxy;
 pub mod router;
 pub mod shims;
+pub mod snapshot_actor;
 pub mod snapshot_bootstrap;
 pub mod snapshot_secret_file;
 pub mod snapshot_session;
