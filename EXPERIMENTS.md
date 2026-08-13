@@ -4387,3 +4387,39 @@ serving-policy change: a correctness oracle must not create intermittent
 truncation and misclassify it as an engine regression. The full matrix resumes
 from the corrected corpus. LB, both engines, and both companions stayed healthy
 with zero restarts after the experiments.
+
+## 2026-08-13 — r74 corrected 256KiB agent matrix
+
+The corrected deterministic 256KiB c8/c16 cold-first/warm slice ran three
+times through the released v0.1.0 LB, using both TP4 replicas concurrently.
+All 180 requests were protocol-valid. Aggregate route counts stayed bounded:
+c8 cold-first 14/16, c8 warm 17/13, c16 cold-first 32/28, and c16 warm 33/27.
+The LB, both engines, and both snapshot companions remained healthy with zero
+restarts after the runs.
+
+| cell | TTFT p95 median (range) | output tok/s median (range) | tasks/GPU-hour median (range) | cache-hit median |
+| --- | ---: | ---: | ---: | ---: |
+| c8 cold-first | 8.365s (8.200-8.799) | 57.6 (48.1-98.5) | 285.4 (248.2-496.3) | 79.5% |
+| c8 warm | 1.563s (1.294-1.691) | 138.9 (134.3-317.2) | 692.2 (690.6-1,633.3) | 99.7% |
+| c16 cold-first | 8.920s (8.830-9.482) | 159.8 (151.0-166.9) | 824.8 (780.1-835.6) | 89.7% |
+| c16 warm | 2.138s (1.755-2.187) | 448.9 (416.5-461.3) | 2,207.6 (2,117.7-2,380.5) | 99.8% |
+
+At the median, reuse reduced TTFT p95 by 81.3% at c8 and 76.0% at c16;
+successful-task capacity was 2.43x and 2.68x the corresponding initial wave.
+Output throughput was 2.41x and 2.81x. The wide c8 throughput range remains
+visible rather than being averaged away.
+
+"Cold-first" is intentionally precise: each cell launches concurrent sessions
+with one shared 256KiB prefix and a fresh salt. The first request placed on an
+engine is cold, then its peers may reuse that prefix before the wave finishes;
+the 79.5%/89.7% cache rates therefore do not describe independently cold
+requests. Likewise, total-token throughput is dominated by cached prompt-token
+accounting and is not a compute-throughput claim. The meaningful result is the
+protocol pass plus the matched cold-first/warm TTFT, output-token, and
+successful-task comparison.
+
+End-to-end matrix wall times were 46.771s, 42.387s, and 35.017s (42.387s
+median), demonstrating a sub-minute iteration loop for this bounded two-pair
+slice. The remaining issue #10 work is the c1 and 0KiB three-run coverage plus
+sovereign redacted trace-shape ingestion; no serving-policy change is justified
+by this workload alone.

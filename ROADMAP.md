@@ -256,14 +256,17 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   node06 gates passed 5/5 deterministic c1 and 10/10 deterministic c8 cases; a
   five-run official-agentic auto+stream probe also passed 5/5 with no DSML leak. The matrix records image,
   model/config/tokenizer/router provenance, TTFT, mean ITL, throughput, cache,
-  protocol validity, and successful tasks/GPU-hour. Complete the 0/256KiB,
-  cold/warm, c1/c8/c16 matrix with three qualified runs and add sovereign
-  redacted trace-shape ingestion before closing the issue. The first bounded
-  c8/c16 run stopped correctly at a 256KiB/c8 typed-call failure caused by the
-  corpus's own 192-token ceiling; valid nested calls use up to 206 tokens. That
-  case now reserves 256 tokens and a live c8 control passed 8/8. Resume the
-  matrix from this corrected corpus rather than counting the truncated cell as
-  an engine-parser regression.
+  protocol validity, and successful tasks/GPU-hour. The corrected 256KiB
+  c8/c16 cold-first/warm matrix is now three-run qualified: all 180 requests
+  were protocol-valid, route splits stayed bounded across both TP4 pairs, and
+  median warm TTFT was 1.56s/2.14s versus 8.36s/8.92s in the corresponding
+  initial shared-prefix waves. Median matrix wall was 42.4s. The high
+  79.5%/89.7% first-wave cache rate is expected within each concurrent cell:
+  only the first placement on each replica is cold while peers share the same
+  prefix. Do not call it an independently-cold-request result or interpret
+  cached prompt accounting as compute throughput. Complete the remaining c1
+  and 0KiB three-run cells and add sovereign redacted trace-shape ingestion
+  before closing the issue.
 - 🔨 **Reproducible experiment journal + workload matrix.** Keep
   `EXPERIMENTS.md`; measure deterministic code, prose, shared-app, cold/warm
   prefill, and mixed prefill+decode separately. Never report speculative decode
