@@ -4517,3 +4517,53 @@ production or customer trace was captured. After the run the released v0.1.0
 LB, both TP4 engines, and both snapshot companions were healthy with zero
 restarts. This closes the issue #10 implementation surface without changing a
 serving policy or restarting an engine.
+
+## 2026-08-13 — r82–r84 reasoning-effort and output-budget matrix
+
+Issue #14's first bounded policy experiment reused the five-case qualified
+agent/DSML corpus rather than adding a content classifier to the proxy. #112
+added explicit benchmark-only low/high/max reasoning and output-cap overrides,
+fixed-cardinality finish outcomes, request latency, valid completion tokens per
+task, and total tokens spent per successful task. A Rust regression test proves
+that normal bounded caller `reasoning_effort`, `max_tokens`, and
+`max_completion_tokens` pass through unchanged. Local gates passed 331 Rust
+unit tests plus all integrations, strict Clippy, 188 Python tests, and a 0.41s
+warm release verification; Drone #300 passed before merge as `9e02ca7`.
+
+The initial node06 matrix ran 18 cells: deterministic and official-agentic
+sampling, low/high/max effort, 96/192/256 output tokens, three corpus repeats
+per cell, and concurrency five. It completed 270 requests in 88.43s with zero
+transport failures. Every 96-token cell was 9/15 protocol-valid. The typed and
+parallel required-tool cases consumed exactly 96 tokens and failed their
+structural oracle; the three simpler cases passed. This rejects a universal
+96-token cap without hiding the class-specific signal.
+
+Two more fresh-salt rounds repeated all 192/256 cells in 57.39s and 54.70s.
+Across the three rounds, 192 tokens passed only 256/270 requests: deterministic
+low 37/45, high 44/45, max 45/45; agentic low 43/45, high 43/45, max 44/45.
+The max/deterministic exception is not a promotion candidate: its median task
+rate was 1,376/GPU-hour versus 1,478 at 256, while valid completion cost moved
+only from 89.3 to 88.6 tokens/task. A cap that intermittently truncates the
+same fixed tool oracle cannot be the default.
+
+All six 256-token policy cells passed 45/45, 270/270 total. Official-agentic
+median successful tasks/GPU-hour were 1,625 low, 1,565 high, and 1,525 max;
+output throughput was effectively flat at 319.5, 317.3, and 318.3 tok/s.
+Median TTFT p95 was 1.250s, 1.109s, and 1.198s, respectively. Deterministic
+task-rate medians were 1,569/1,547/1,478, but the low cell ranged from 832 to
+2,008 and its TTFT p95 ranged from 0.926s to 4.406s. The overlapping ranges and
+small sample do not prove a reasoning-effort capacity win. High also used the
+fewest median agentic completion tokens per task (85.7 versus 88.5 low and
+94.3 max). Retain high as the default rather than optimizing noise.
+
+The three-round 192/256 slice routed 261/279 across the two replicas; including
+the 96 scout, all 630 requests split 311/319. No result had a missing/other
+route or transport error. The released LB, both TP4 engines, and both snapshot
+companions stayed healthy with zero restarts after the experiment.
+
+Decision: do not change mini-dynamo or the global serving policy. The useful
+next boundary is Helix-owned and explicit: shadow a small versioned step-class
+table, retain at least 256 tokens for typed/parallel tools, consider 96 only for
+the simple classes that passed, honor caller overrides, and require equal real
+workflow success before enforcement. No completion content, reasoning, or tool
+arguments were retained.

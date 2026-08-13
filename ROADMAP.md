@@ -218,6 +218,20 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   tokens while multiplying hash work; larger values are strictly coarser.
   Retain the default and treat the group layout/unit as compatibility identity
   to re-audit after engine upgrades.
+- 🔨 **Workload-aware reasoning and output budgets (#14).** The qualified
+  agent oracle now supports explicit, non-mutating low/high/max effort and
+  output-cap overrides, reports valid and total-spent completion tokens per
+  successful task, and keeps model protocol failures measurable while still
+  stopping on transport failure. Three fresh node06 rounds compared 192 and
+  256 tokens across deterministic and official-agentic sampling: 192 produced
+  only 256/270 protocol-valid tasks, while 256 passed 270/270. The initial
+  96-token scout passed only 54/90 because typed and parallel tool calls hit
+  the cap. At 256, low/high/max task-rate and throughput ranges overlapped, so
+  there is no evidence to replace the high-effort production default. Preserve
+  caller settings in mini-dynamo. Next, put a versioned shadow policy in Helix:
+  class simple text/auto-tool steps separately from structured or parallel
+  tool calls, retain 256 for the latter, and require real workflow success plus
+  a kill switch before enforcement.
 - 🔨 **Cache-efficiency SLO and working-set scorecard (#16).** The first Rust
   slice adds bounded `cold`/`partial`/`full`/`unknown` request counters and
   cache-outcome TTFT histograms from authoritative response usage, alongside
