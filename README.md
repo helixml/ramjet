@@ -423,6 +423,12 @@ provenance. On node06, `bench/node06_agent_metadata.sh` produces that
 provenance; `bench/agent_matrix.sh` runs deterministic/official-agentic,
 short/long-prefix, cold/warm, and c1/c8/c16 cells. Narrow its environment lists
 for development and reserve `AGENT_RUNS=3` for final qualification.
+`bench/agent_trace.py` optionally replays strictly numeric/enumerated sovereign
+trace shapes with relative bucketed arrivals and synthetic nested prefixes. It
+rejects any unknown/content-capable field and requires a private mode-0600 file
+under a mode-0700 directory. The schema, exporter rules, token-density gate,
+and retention contract are documented in
+[bench/agent_cases/README.md](bench/agent_cases/README.md#sovereign-trace-shape-replay).
 
 `bench/candidate_gate.py` turns engine qualification into a fail-fast,
 resumable state machine. It binds a five-case deterministic agent correctness

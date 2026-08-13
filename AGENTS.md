@@ -610,6 +610,19 @@ c1/c8/c16, and cold/warm passes. Narrow `AGENT_PROFILES`,
 `AGENT_RUNS=3` only for a final variance-qualified candidate. Run direct-engine
 A/B cells with the two-round crossover below to use both TP4 pairs at once.
 
+Optional sovereign workload replay uses `bench/agent_trace.py`, never raw API
+requests or logs. Validate the strict numeric/enumerated JSONL locally before
+any GPU call. The source must be mode `0600` beneath a mode `0700` parent;
+arrival offsets are relative 100ms buckets, and prefix groups must be densely
+renumbered. Unknown fields fail closed, including anything that could carry
+prompt text, IDs, credentials, tool payloads, URLs, or fingerprints. Follow the
+schema/export/retention contract in `bench/agent_cases/README.md`. Never commit
+the input or output, publish it as a CI artifact, print its lines, or move it
+outside the sovereign boundary. A replay is admissible only when every request
+passes both protocol validation and the response-usage prompt-token density
+gate; keep target/actual variance visible rather than widening tolerance to
+manufacture a pass.
+
 ### Long-prefill interference — `mixed_bench.py`
 
 For direct-engine scheduler trials, point `METRICS_URL` at the same engine.
