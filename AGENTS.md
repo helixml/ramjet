@@ -166,6 +166,38 @@ ssh node06
 export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head -1 | cut -d' ' -f2)
 ```
 
+## Fast iteration rules
+
+- Run independent local gates together: Rust tests/Clippy, Go parity, and
+  Python benchmark tests do not depend on one another. Keep Cargo's shared
+  `target/` and Docker BuildKit cache warm; do not clean either between runs.
+- Build the LB locally and stream it to node06 when the local amd64 Docker
+  cache is warm. A typical warm LB transfer is seconds and avoids consuming
+  node06's scarce 8-9GiB available host memory:
+
+  ```bash
+  docker build -t ghcr.io/helixml/mini-dynamo:<tag> .
+  docker save ghcr.io/helixml/mini-dynamo:<tag> | gzip -1 | \
+    ssh node06 'gunzip | docker load'
+  ```
+
+- Recreate only `ds4-loadbalancer` for router work. The engines retain their
+  KV caches and the interruption is about four seconds. Trigger one small
+  allocation on each engine after the roll so late-subscriber replay starts;
+  wait for both exact inventories to become trusted before an exact test.
+- For an engine candidate, stop at the first failed gate: source/fixture checks,
+  five-case correctness smoke, c8 scout, then the full matrix. A cached valid
+  candidate should reach the first decision in roughly 15-18 minutes, dominated
+  by engine startup.
+- Once a candidate passes correctness, run matched direct matrices on A and B
+  concurrently so two TP4 pairs finish in the slower engine's time. Production
+  must remain single-homed; discard a control interval if live traffic reaches
+  its engine-native counters. Pay for a two-round GPU crossover only when the
+  scout is close enough to a promotion threshold to justify both warm starts.
+- Long scripts must emit bounded progress and support resume. Capture identity,
+  restart count, JIT markers, and client/native token reconciliation per cell so
+  a failed late gate does not invalidate earlier clean cells.
+
 ### Cache locality — `locality_bench.sh BASE APPS SESSIONS TURNS`
 
 Simulates APPS apps (each a distinct ~18.5k-token system prompt) × SESSIONS

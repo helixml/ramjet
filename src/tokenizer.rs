@@ -13,8 +13,9 @@ use axum::body::Bytes;
 use dynamo_protocols::types::CreateChatCompletionRequest;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, TextInput, deepseek_formatter_for};
 use futures_util::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::{
     sync::{Semaphore, mpsc},
     time::Instant,
@@ -37,6 +38,8 @@ const REMOTE_BACKEND: &str = "remote";
 const LOCAL_BACKEND: &str = "fastokens";
 const MAX_RESPONSE_BYTES: usize = 16 << 20;
 const MAX_IDENTITY_BYTES: usize = 64 << 10;
+const CANARY_BPS_SCALE: usize = 10_000;
+const CANARY_DOMAIN: &[u8] = b"mini-dynamo exact placement canary v1\0";
 
 #[derive(Clone)]
 pub struct TokenizerObserver {
@@ -49,6 +52,8 @@ pub struct TokenizerObserver {
     pre_route: Option<PreRouteTokenizer>,
     attestation: Option<RuntimeAttestation>,
     exact_route_mode: ExactRouteMode,
+    exact_route_canary_bps: usize,
+    exact_route_canary_key: Option<Arc<[u8]>>,
     exact_placement: ExactPlacementPolicy,
 }
 
@@ -119,6 +124,37 @@ pub(crate) struct ExactTokens {
 pub(crate) struct PreRouteTokens {
     pub(crate) tokens: ExactTokens,
     attestation_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CanarySession<'a> {
+    Missing,
+    Invalid,
+    Valid(&'a [u8]),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CanaryAssignment {
+    NotApplicable,
+    Disabled,
+    Treatment,
+    Control,
+    MissingSession,
+    InvalidSession,
+}
+
+impl CanaryAssignment {
+    pub(crate) const fn label(self) -> Option<&'static str> {
+        match self {
+            Self::NotApplicable => None,
+            Self::Disabled => Some("disabled"),
+            Self::Treatment => Some("treatment"),
+            Self::Control => Some("control"),
+            Self::MissingSession => Some("missing_session"),
+            Self::InvalidSession => Some("invalid_session"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,6 +315,11 @@ impl TokenizerObserver {
             pre_route,
             attestation,
             exact_route_mode: config.exact_route_mode,
+            exact_route_canary_bps: config.exact_route_canary_bps,
+            exact_route_canary_key: config
+                .exact_route_canary_key
+                .as_ref()
+                .map(|key| Arc::from(key.as_bytes())),
             exact_placement: ExactPlacementPolicy {
                 min_gain_tokens: config.exact_route_min_gain_tokens,
                 max_load_delta: config.exact_route_max_load_delta,
@@ -390,6 +431,7 @@ impl TokenizerObserver {
         &self,
         endpoint: Endpoint,
         tokens: &PreRouteTokens,
+        assignment: CanaryAssignment,
         decision: &mut Decision,
     ) {
         let Some(attestation) = &self.attestation else {
@@ -400,8 +442,15 @@ impl TokenizerObserver {
             return;
         }
         let mode = match self.exact_route_mode {
-            ExactRouteMode::Placement => ExactPlacementMode::Placement,
-            ExactRouteMode::Shadow | ExactRouteMode::Off => ExactPlacementMode::Shadow,
+            ExactRouteMode::Placement if assignment == CanaryAssignment::Treatment => {
+                ExactPlacementMode::Placement
+            }
+            ExactRouteMode::Placement if assignment == CanaryAssignment::Control => {
+                ExactPlacementMode::Control
+            }
+            ExactRouteMode::Placement | ExactRouteMode::Shadow | ExactRouteMode::Off => {
+                ExactPlacementMode::Shadow
+            }
         };
         self.exact_shadow.route_pre_route(
             endpoint,
@@ -410,6 +459,27 @@ impl TokenizerObserver {
             self.exact_placement,
             mode,
         );
+    }
+
+    pub(crate) fn assign_canary(
+        &self,
+        endpoint: Endpoint,
+        eligible: bool,
+        session: CanarySession<'_>,
+    ) -> CanaryAssignment {
+        if self.exact_route_mode != ExactRouteMode::Placement || !eligible {
+            return CanaryAssignment::NotApplicable;
+        }
+        let assignment = exact_canary_assignment(
+            session,
+            self.exact_route_canary_key.as_deref(),
+            self.exact_route_canary_bps,
+        );
+        self.metrics
+            .exact_route_canary
+            .with_label_values(&[endpoint.label(), assignment.label().expect("applicable")])
+            .inc();
+        assignment
     }
 
     pub async fn attest_upstream(&self, upstream: usize, models_body: &[u8]) {
@@ -476,6 +546,69 @@ impl TokenizerObserver {
             .with_label_values(&[endpoint.label(), outcome])
             .inc();
     }
+}
+
+fn exact_canary_assignment(
+    session: CanarySession<'_>,
+    key: Option<&[u8]>,
+    canary_bps: usize,
+) -> CanaryAssignment {
+    if canary_bps == 0 {
+        return CanaryAssignment::Disabled;
+    }
+    match session {
+        CanarySession::Missing => CanaryAssignment::MissingSession,
+        CanarySession::Invalid => CanaryAssignment::InvalidSession,
+        CanarySession::Valid(session_id) => {
+            if exact_canary_enrolled(session_id, key, canary_bps) {
+                CanaryAssignment::Treatment
+            } else {
+                CanaryAssignment::Control
+            }
+        }
+    }
+}
+
+fn exact_canary_enrolled(session_id: &[u8], key: Option<&[u8]>, canary_bps: usize) -> bool {
+    let Some(key) = key else {
+        return false;
+    };
+    if canary_bps == 0 || session_id.is_empty() {
+        return false;
+    }
+    if canary_bps >= CANARY_BPS_SCALE {
+        return true;
+    }
+    let digest = hmac_sha256(key, &[CANARY_DOMAIN, session_id]);
+    let value = u64::from_be_bytes(digest[..8].try_into().expect("SHA-256 has eight bytes"));
+    u128::from(value) * (CANARY_BPS_SCALE as u128)
+        < (canary_bps as u128) * (u128::from(u64::MAX) + 1)
+}
+
+fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    const BLOCK_BYTES: usize = 64;
+    let mut normalized = [0_u8; BLOCK_BYTES];
+    if key.len() > BLOCK_BYTES {
+        normalized[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        normalized[..key.len()].copy_from_slice(key);
+    }
+    let mut inner_pad = [0x36_u8; BLOCK_BYTES];
+    let mut outer_pad = [0x5c_u8; BLOCK_BYTES];
+    for ((inner, outer), key_byte) in inner_pad.iter_mut().zip(&mut outer_pad).zip(normalized) {
+        *inner ^= key_byte;
+        *outer ^= key_byte;
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    for part in parts {
+        inner.update(part);
+    }
+    let inner_digest = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_digest);
+    outer.finalize().into()
 }
 
 fn validate_tokenizer_sha256(path: &str, expected: &str) -> anyhow::Result<()> {
@@ -1476,5 +1609,105 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn exact_canary_is_session_stable_bounded_and_keyed() {
+        let key = b"0123456789abcdef0123456789abcdef";
+        assert!(!exact_canary_enrolled(b"session-a", Some(key), 0));
+        assert!(!exact_canary_enrolled(b"session-a", None, 10_000));
+        assert!(!exact_canary_enrolled(b"", Some(key), 10_000));
+        assert!(exact_canary_enrolled(b"session-a", Some(key), 10_000));
+
+        let enrolled = exact_canary_enrolled(b"session-a", Some(key), 5_000);
+        for _ in 0..100 {
+            assert_eq!(
+                exact_canary_enrolled(b"session-a", Some(key), 5_000),
+                enrolled
+            );
+        }
+        let other_key = b"fedcba9876543210fedcba9876543210";
+        let changed = (0..100_u32).any(|session| {
+            let session = session.to_be_bytes();
+            exact_canary_enrolled(&session, Some(key), 5_000)
+                != exact_canary_enrolled(&session, Some(other_key), 5_000)
+        });
+        assert!(changed, "rotating the HMAC key must change some cohorts");
+
+        let admitted = (0..10_000_u32)
+            .filter(|session| exact_canary_enrolled(&session.to_be_bytes(), Some(key), 1_000))
+            .count();
+        assert!((850..=1_150).contains(&admitted), "admitted={admitted}");
+
+        let lower = (0..10_000_u32)
+            .filter(|session| exact_canary_enrolled(&session.to_be_bytes(), Some(key), 100))
+            .collect::<std::collections::HashSet<_>>();
+        let higher = (0..10_000_u32)
+            .filter(|session| exact_canary_enrolled(&session.to_be_bytes(), Some(key), 500))
+            .collect::<std::collections::HashSet<_>>();
+        assert!(lower.is_subset(&higher));
+    }
+
+    #[test]
+    fn exact_canary_assignment_has_an_instant_fail_closed_zero() {
+        let key = b"0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            exact_canary_assignment(CanarySession::Valid(b"session"), Some(key), 0),
+            CanaryAssignment::Disabled
+        );
+        assert_eq!(
+            exact_canary_assignment(CanarySession::Missing, Some(key), 10_000),
+            CanaryAssignment::MissingSession
+        );
+        assert_eq!(
+            exact_canary_assignment(CanarySession::Invalid, Some(key), 10_000),
+            CanaryAssignment::InvalidSession
+        );
+        assert_eq!(
+            exact_canary_assignment(CanarySession::Valid(b"session"), Some(key), 10_000),
+            CanaryAssignment::Treatment
+        );
+    }
+
+    #[test]
+    fn hmac_sha256_matches_the_standard_known_vector() {
+        let digest = hmac_sha256(b"key", &[b"The quick brown fox jumps over the lazy dog"]);
+        assert_eq!(
+            digest,
+            [
+                0xf7, 0xbc, 0x83, 0xf4, 0x30, 0x53, 0x84, 0x24, 0xb1, 0x32, 0x98, 0xe6, 0xaa, 0x6f,
+                0xb1, 0x43, 0xef, 0x4d, 0x59, 0xa1, 0x49, 0x46, 0x17, 0x59, 0x97, 0x47, 0x9d, 0xbc,
+                0x2d, 0x1a, 0x3c, 0xd8,
+            ]
+        );
+
+        let long_key = [0xaa; 131];
+        let digest = hmac_sha256(
+            &long_key,
+            &[b"Test Using Larger Than Block-Size Key - Hash Key First"],
+        );
+        assert_eq!(
+            digest,
+            [
+                0x60, 0xe4, 0x31, 0x59, 0x1e, 0xe0, 0xb6, 0x7f, 0x0d, 0x8a, 0x26, 0xaa, 0xcb, 0xf5,
+                0xb7, 0x7f, 0x8e, 0x0b, 0xc6, 0x21, 0x37, 0x28, 0xc5, 0x14, 0x05, 0x46, 0x04, 0x0f,
+                0x0e, 0xe3, 0x7f, 0x54,
+            ]
+        );
+    }
+
+    #[test]
+    fn exact_canary_domain_and_big_endian_threshold_are_golden() {
+        let key = b"0123456789abcdef0123456789abcdef";
+        let digest = hmac_sha256(key, &[CANARY_DOMAIN, b"session-a"]);
+        assert_eq!(
+            digest,
+            [
+                0xa9, 0xd2, 0xc4, 0x0e, 0x41, 0x5a, 0x52, 0xc6, 0x11, 0xf6, 0xc4, 0x3e, 0x8f, 0x35,
+                0xc0, 0x73, 0x62, 0x2b, 0xcb, 0x2d, 0xd9, 0x6e, 0x8b, 0x5d, 0x36, 0x3c, 0xab, 0x43,
+                0x58, 0xa3, 0x23, 0xd9,
+            ]
+        );
+        assert!(!exact_canary_enrolled(b"session-a", Some(key), 5_000));
     }
 }

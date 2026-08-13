@@ -24,7 +24,7 @@ use crate::{
     prepare::PreparedRequest,
     router::{Decision, LoadGuard, Router},
     shims::{self, Endpoint},
-    tokenizer::{ExactTokens, TokenizerObserver},
+    tokenizer::{CanarySession, ExactTokens, TokenizerObserver},
     usage::{Accumulator, feed_sse_chunk},
 };
 
@@ -212,6 +212,7 @@ impl Proxy {
     async fn serve(&self, request: Request<Body>) -> Response<Body> {
         let started = Instant::now();
         let (parts, inbound_body) = request.into_parts();
+        let canary_session_id = exact_canary_session(&parts.headers);
         let endpoint = shims::endpoint(parts.uri.path());
         let endpoint_label = endpoint.label();
         let Ok(raw_body) = to_bytes(inbound_body, MAX_REQUEST_BODY).await else {
@@ -221,6 +222,10 @@ impl Proxy {
             );
         };
         let prepare_tokenizer_body = self.inner.tokenizer.wants_payload(endpoint, raw_body.len());
+        let canary_assignment =
+            self.inner
+                .tokenizer
+                .assign_canary(endpoint, prepare_tokenizer_body, canary_session_id);
         let prepared = PreparedRequest::with_tokenizer(
             endpoint,
             &raw_body,
@@ -237,11 +242,15 @@ impl Proxy {
         } else {
             None
         };
-        let mut decision = prepared.route(&self.inner.router);
+        let approximate_decision = prepared.route(&self.inner.router);
+        let mut decision = approximate_decision.clone();
         if let Some(tokens) = &pre_route_tokens {
-            self.inner
-                .tokenizer
-                .route_pre_route(endpoint, tokens, &mut decision);
+            self.inner.tokenizer.route_pre_route(
+                endpoint,
+                tokens,
+                canary_assignment,
+                &mut decision,
+            );
         }
         let pre_route_tokens = pre_route_tokens.map(|tokens| tokens.tokens);
         let exact_route_snapshot =
@@ -261,10 +270,14 @@ impl Proxy {
         let inflight_guard = InflightGuard(GaugeHandle(self.inner.metrics.inflight.clone()));
 
         self.record_decision(&decision);
-        let journal_sequence =
-            self.inner
-                .journal
-                .start(endpoint_label, body.len(), &decision, &self.inner.config);
+        let journal_sequence = self.inner.journal.start(
+            endpoint_label,
+            body.len(),
+            &approximate_decision,
+            decision.candidate_state.first().map(|state| state.index),
+            &self.inner.config,
+            canary_assignment,
+        );
 
         let serving_candidates = decision
             .candidates
@@ -293,7 +306,9 @@ impl Proxy {
                 .iter()
                 .find(|state| state.index == candidate)
                 .map_or(decision.load_units, |state| state.request_load_units);
-            let load = self.acquire(candidate, units);
+            let Some(load) = self.acquire_if_healthy(candidate, units) else {
+                continue;
+            };
             match outbound.send().await {
                 Ok(response)
                     if matches!(
@@ -604,8 +619,8 @@ impl Proxy {
         }
     }
 
-    fn acquire(&self, upstream: usize, units: usize) -> RoutedLoad {
-        let guard = self.inner.router.acquire(upstream, units);
+    fn acquire_if_healthy(&self, upstream: usize, units: usize) -> Option<RoutedLoad> {
+        let guard = self.inner.router.acquire_if_healthy(upstream, units)?;
         let label = self.upstream_label(upstream);
         if let Some((inflight, load, _, _)) = self.inner.router.state(upstream) {
             self.inner
@@ -619,13 +634,13 @@ impl Proxy {
                 .with_label_values(&[&label])
                 .set(usize_to_f64(load));
         }
-        RoutedLoad {
+        Some(RoutedLoad {
             guard: Some(guard),
             router: Arc::clone(&self.inner.router),
             metrics: Arc::clone(&self.inner.metrics),
             upstream,
             label,
-        }
+        })
     }
 
     fn record_decision(&self, decision: &Decision) {
@@ -902,11 +917,22 @@ fn upstream_url(base: &Url, uri: &Uri) -> Url {
 fn filtered_headers(source: &HeaderMap) -> HeaderMap {
     let mut destination = HeaderMap::with_capacity(source.len());
     for (name, value) in source {
-        if !hop_header(name) {
+        if !hop_header(name) && name.as_str() != "x-session-id" {
             destination.append(name, value.clone());
         }
     }
     destination
+}
+
+fn exact_canary_session(headers: &HeaderMap) -> CanarySession<'_> {
+    let mut values = headers.get_all("x-session-id").iter();
+    let Some(session_id) = values.next().map(axum::http::HeaderValue::as_bytes) else {
+        return CanarySession::Missing;
+    };
+    if values.next().is_some() || !(1..=256).contains(&session_id.len()) {
+        return CanarySession::Invalid;
+    }
+    CanarySession::Valid(session_id)
 }
 
 fn copy_response_headers(destination: &mut HeaderMap, source: &HeaderMap) {
@@ -1089,10 +1115,31 @@ mod tests {
         source.insert("authorization", "Bearer okay".parse().unwrap());
         source.insert("connection", "close".parse().unwrap());
         source.insert("x-mini-dynamo-upstream", "secret".parse().unwrap());
+        source.insert("x-session-id", "private-session".parse().unwrap());
         let result = filtered_headers(&source);
         assert!(result.contains_key("authorization"));
         assert!(!result.contains_key("connection"));
         assert!(!result.contains_key("x-mini-dynamo-upstream"));
+        assert!(!result.contains_key("x-session-id"));
+    }
+
+    #[test]
+    fn exact_canary_session_requires_one_bounded_nonempty_header() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(exact_canary_session(&headers), CanarySession::Missing);
+        headers.insert("x-session-id", "session-a".parse().unwrap());
+        assert_eq!(
+            exact_canary_session(&headers),
+            CanarySession::Valid(b"session-a")
+        );
+        headers.append("x-session-id", "session-b".parse().unwrap());
+        assert_eq!(exact_canary_session(&headers), CanarySession::Invalid);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", "".parse().unwrap());
+        assert_eq!(exact_canary_session(&headers), CanarySession::Invalid);
+        headers.insert("x-session-id", "x".repeat(257).parse().unwrap());
+        assert_eq!(exact_canary_session(&headers), CanarySession::Invalid);
     }
 
     #[test]

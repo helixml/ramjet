@@ -2574,3 +2574,49 @@ timeout: the temporary 180-second value was diagnostic only and measured replay
 does not justify slowing failure detection. Exact placement remains shadow-only.
 Histories whose sequence zero has aged out still require a Dynamo-style
 snapshot/tree-dump recovery protocol.
+
+## 2026-08-13 — r32 session-stable exact-placement canary
+
+r32 replaces the global placement switch with deterministic HMAC-SHA256
+admission over one bounded `X-Session-ID`. The percentage is expressed in
+basis points, zero is an instant rollback, and missing, duplicate, empty, or
+oversized headers fail closed to shadow. The session header is removed before
+both initial and failover dispatch. The secret has a redacted `Debug`
+representation and its value is absent from logs, metrics, journals, and
+Compose. Cohort
+assignment happens at ingress before tokenization and inventory gates, avoiding
+success-biased denominators. A current-health check is now atomic with load
+reservation, closing the route-to-dispatch window for replicas already fenced
+by probes.
+
+Journal v4 records only a typed bounded cohort, the original approximate
+choice, and the actually served choice. Offline replay remains valid for
+approximate alpha/cap counterfactuals and can filter canary cohorts, while
+observed cache/TTFT attribution follows the served engine. Review caught both
+the pre-exact snapshot requirement and a previously free-form journal string
+before deployment. Local gates passed 126 Rust tests, 52 benchmark tests,
+strict all-feature Clippy, Go parity/vet/formatting, a locked release build,
+and Compose validation. HMAC coverage includes standard short- and long-key
+vectors plus a domain-separated cohort golden.
+
+The LB-only staging image was built locally and transferred in 3.9 seconds;
+no engine was recreated. With placement at 10,000 basis points, four fresh
+32,768-token forced-warm requests produced two `moved` and two `kept_agree`
+decisions. All four were served by warm A with 32,768 cached tokens. The
+negative control omitted `X-Session-ID`: telemetry recorded
+`missing_session` and `mode="shadow", outcome="would_move"`, while the request
+remained on cold B with zero cached tokens. Recreating only the LB with
+placement plus zero basis points recorded `disabled` and again preserved the
+approximate cold route. This proves both useful correction and the rollback
+path without admitting ordinary traffic.
+
+Repeated LB canaries also exposed a new replay-scale boundary. Long-lived A
+had reached sequence 9,485; its 9,426 event-bearing batch replay timed out
+undrained at 20 seconds, then recovered authoritatively inside a 60-second
+window at 20,335 resident blocks / 5,205,760 token IDs. B recovered to 871
+blocks / 222,976 token IDs. The timeout remains fail-closed and affects only
+shadow inventory restoration, so node06 now uses 60 seconds near the
+publisher's 10,000-step retention edge. Both engines remained healthy with
+restart count zero throughout. Production was returned to the public r31
+image in shadow mode, 2/2 healthy and 2/2 exact trusted; the next LB promotion
+can use r32 after its public package is available.

@@ -65,6 +65,10 @@ services:
       DS4_EXACT_ROUTE_MANIFEST_SHA256: ${DS4_EXACT_ROUTE_MANIFEST_SHA256:-4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa}
       DS4_EXACT_ROUTE_WORKERS: ${DS4_EXACT_ROUTE_WORKERS:-8}
       DS4_EXACT_ROUTE_TIMEOUT_MS: ${DS4_EXACT_ROUTE_TIMEOUT_MS:-250}
+      # Placement stays disabled by default. A nonzero percentage additionally
+      # requires a secret in the uncommitted node .env and one X-Session-ID.
+      DS4_EXACT_ROUTE_CANARY_BPS: ${DS4_EXACT_ROUTE_CANARY_BPS:-0}
+      DS4_EXACT_ROUTE_CANARY_KEY: ${DS4_EXACT_ROUTE_CANARY_KEY:-}
       # Native KV inventory remains observation-only. Shadow mode and the
       # matching per-engine r34 publishers are now the qualified defaults.
       DS4_KV_EVENT_MODE: ${DS4_KV_EVENT_MODE:-shadow}
@@ -76,7 +80,9 @@ services:
       # LB-only roll can safely consume the complete retained generation.
       DS4_KV_EVENT_REPLAY_LIMIT: ${DS4_KV_EVENT_REPLAY_LIMIT:-10000}
       DS4_KV_EVENT_REPLAY_TAIL_LIMIT: ${DS4_KV_EVENT_REPLAY_TAIL_LIMIT:-64}
-      DS4_KV_EVENT_TIMEOUT_MS: ${DS4_KV_EVENT_TIMEOUT_MS:-20000}
+      # A's 9,426-batch near-retention replay crossed 20s after the r32 canary;
+      # 60s remains fail-closed and recovered it without touching the engine.
+      DS4_KV_EVENT_TIMEOUT_MS: ${DS4_KV_EVENT_TIMEOUT_MS:-60000}
 
   dspark-0731:
     image: ${IMAGE_A:-${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}}

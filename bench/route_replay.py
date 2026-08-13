@@ -40,7 +40,7 @@ def records(lines):
             record = json.loads(line)
         except json.JSONDecodeError as error:
             raise ValueError(f"line {line_number}: invalid journal JSON: {error}") from error
-        if record.get("v") in (1, 2, 3) and record.get("event") in ("start", "finish"):
+        if record.get("v") in (1, 2, 3, 4) and record.get("event") in ("start", "finish"):
             yield record
 
 
@@ -88,8 +88,9 @@ def replay(starts, finishes, alphas, caps, tie_break=None):
     ]
 
     def was_warm(start):
+        served = start.get("served_chosen", start.get("chosen"))
         candidate = next(
-            (item for item in start["candidates"] if item["upstream"] == start.get("chosen")),
+            (item for item in start["candidates"] if item["upstream"] == served),
             None,
         )
         return candidate is not None and candidate["overlap_blocks"] > 0
@@ -151,6 +152,14 @@ def replay(starts, finishes, alphas, caps, tie_break=None):
                     "agreement_pct": round(100 * agreements / len(choices), 1) if choices else None,
                     "counterfactual_migrations": len(choices) - agreements,
                     "route_counts": route_counts,
+                    "exact_canary_counts": {
+                        str(cohort): sum(
+                            1 for record in starts if record.get("exact_canary", "legacy") == cohort
+                        )
+                        for cohort in sorted(
+                            {record.get("exact_canary", "legacy") for record in starts}
+                        )
+                    },
                     "mean_overlap_blocks": round(sum(overlaps) / len(overlaps), 2) if overlaps else None,
                     "mean_observed_load_units": round(sum(loads) / len(loads), 2) if loads else None,
                     "paired_finishes": len(paired),
@@ -186,6 +195,11 @@ def main(argv=None):
     parser.add_argument("--min-request-bytes", type=int, default=0)
     parser.add_argument("--max-request-bytes", type=int)
     parser.add_argument(
+        "--exact-canary",
+        choices=("disabled", "treatment", "control", "missing_session", "invalid_session", "legacy"),
+        help="only replay one bounded exact-canary cohort; legacy selects records without one",
+    )
+    parser.add_argument(
         "--tie-break",
         choices=("observed", "overlap", "load-neutral"),
         default="observed",
@@ -209,6 +223,10 @@ def main(argv=None):
         if (args.endpoint is None or record.get("endpoint") == args.endpoint)
         and record.get("request_bytes", 0) >= args.min_request_bytes
         and (args.max_request_bytes is None or record.get("request_bytes", 0) <= args.max_request_bytes)
+        and (
+            args.exact_canary is None
+            or record.get("exact_canary", "legacy") == args.exact_canary
+        )
     ]
     sequences = {record["seq"] for record in starts}
     finishes = {sequence: record for sequence, record in finishes.items() if sequence in sequences}
