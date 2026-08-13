@@ -337,7 +337,9 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   publishes inline BuildKit metadata in `rust-edge`; each fresh DinD imports
   that private image with `cache_from`. Do not replace this with `purge: false`
   (the daemon is ephemeral) or a new privileged plugin without proving the
-  runner permits it. Build #212 is the 113s cold seed control.
+  runner permits it. Build #212 is the 113s cold seed control; fresh-runner
+  documentation-only build #214 published in 14s and completed end to end in
+  72s. Treat a no-Rust publish materially above that as a cache regression.
   Node06 deploys should keep using the warm local `bench/build_transfer.sh`
   path because it reuses the development BuildKit cache.
 - Build the LB locally and stream it to node06 when the local amd64 Docker

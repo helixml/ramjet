@@ -3664,6 +3664,10 @@ failed before Dockerfile or GHCR work, and no broader runner trust was granted.
 The safe replacement keeps the allowed publisher, makes the Cargo dependency
 build an ordinary Docker layer, embeds inline BuildKit cache metadata in the
 private `rust-edge` image, and imports that image in the next fresh daemon.
-Drone #212 successfully seeded the cache in 113 seconds. The following
-documentation-only main build is the acceptance cell for a true fresh-runner
-cache hit; retain or revise the design based on that measured publisher time.
+Drone #212 successfully seeded the cache in 113 seconds. Documentation-only
+main build #214 then imported it in a fresh DinD, published in 14 seconds, and
+completed the entire pipeline in 72 seconds. Relative to #208's 100-second
+publisher and 171-second pipeline, that is an 86% publisher reduction and 58%
+end-to-end reduction for a non-Rust change. The measured PR quality loop remains
+58–66 seconds. Retain this design and treat a no-Rust publisher materially above
+14 seconds as a cache-regression investigation, not normal variance.
