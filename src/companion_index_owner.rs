@@ -433,6 +433,7 @@ async fn consume_connection(
     report: &mut CompanionIndexOwnerReport,
 ) -> Result<ConnectionExit, CompanionIndexOwnerError> {
     let mut ready = false;
+    let mut stable_observe_only = false;
     loop {
         let activity = tokio::select! {
             biased;
@@ -469,6 +470,15 @@ async fn consume_connection(
         };
 
         if !ready {
+            // Once a complete replay is structurally invalid, repeating the
+            // same request against the same engine generation cannot establish
+            // authority and only pressures the synchronous publisher. Keep the
+            // already-installed SUB connection, ignore ordinary events, and
+            // recover only from an authoritative all-blocks clear (or the
+            // incarnation-change branch above).
+            if stable_observe_only && !batch.batch.clears_all() {
+                continue;
+            }
             match bootstrap_from_live(
                 source,
                 fence,
@@ -483,9 +493,23 @@ async fn consume_connection(
             {
                 ReplayExit::Complete => {
                     ready = true;
+                    stable_observe_only = false;
                     observer.observe(CompanionIndexOwnerEvent::Ready);
                 }
-                ReplayExit::ObserveOnly => {}
+                ReplayExit::ObserveOnly => {
+                    stable_observe_only = true;
+                }
+                ReplayExit::Fenced(reason) => {
+                    rebuild(
+                        source,
+                        fence,
+                        Some(authority.clone()),
+                        reason,
+                        observer,
+                        report,
+                    )?;
+                    stable_observe_only = true;
+                }
                 ReplayExit::Shutdown => return Ok(ConnectionExit::Shutdown),
                 ReplayExit::AuthorityChanged(refreshed) => {
                     return Ok(ConnectionExit::AuthorityChanged(refreshed));
@@ -560,6 +584,19 @@ async fn consume_connection(
                     }
                     ReplayExit::ObserveOnly => {
                         ready = false;
+                        stable_observe_only = true;
+                    }
+                    ReplayExit::Fenced(reason) => {
+                        rebuild(
+                            source,
+                            fence,
+                            Some(authority.clone()),
+                            reason,
+                            observer,
+                            report,
+                        )?;
+                        ready = false;
+                        stable_observe_only = true;
                     }
                     ReplayExit::Shutdown => return Ok(ConnectionExit::Shutdown),
                     ReplayExit::AuthorityChanged(refreshed) => {
@@ -593,6 +630,7 @@ async fn consume_connection(
 enum ReplayExit {
     Complete,
     ObserveOnly,
+    Fenced(CompanionIndexOwnerRebuildReason),
     Shutdown,
     AuthorityChanged(Option<EngineIncarnation>),
     Retry(CompanionIndexOwnerRebuildReason),
@@ -703,7 +741,7 @@ async fn recover_full(
             CompanionIndexOwnerReplayKind::Full,
             CompanionIndexOwnerReplayOutcome::Invalid,
         );
-        return Ok(ReplayExit::Retry(
+        return Ok(ReplayExit::Fenced(
             CompanionIndexOwnerRebuildReason::ReplayInvalid,
         ));
     }
@@ -714,7 +752,7 @@ async fn recover_full(
             CompanionIndexOwnerReplayKind::Full,
             CompanionIndexOwnerReplayOutcome::Invalid,
         );
-        return Ok(ReplayExit::Retry(
+        return Ok(ReplayExit::Fenced(
             CompanionIndexOwnerRebuildReason::ReplayInvalid,
         ));
     }
@@ -1442,6 +1480,77 @@ mod tests {
         let report = task.await.unwrap().unwrap();
         assert_eq!(report.connections, 1);
         assert_eq!(report.rebuilds, 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_full_replay_stays_connected_and_does_not_repeat_until_clear() {
+        let source = source();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (activity_tx, activity_rx) = mpsc::unbounded_channel();
+        let transport = MockTransport {
+            activities: activity_rx,
+            // The live watermark is 2, but this replay stops at 1. Retrying
+            // the same structurally incomplete response cannot establish
+            // authority for this engine generation.
+            replays: VecDeque::from([ReplayPlan::Complete(vec![
+                batch(0, Some(10)),
+                batch(1, Some(11)),
+            ])]),
+            requests: Arc::clone(&requests),
+        };
+        let observer = Arc::new(RecordingObserver::default());
+        let (_authority_tx, authority_rx) = watch::channel(Some(incarnation("engine-a", 1)));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(
+            owner(
+                Arc::clone(&source),
+                vec![Box::new(transport)],
+                Arc::clone(&observer),
+            )
+            .run(authority_rx, shutdown_rx),
+        );
+
+        activity_tx
+            .send(Ok(LiveActivity::Batch(batch(2, None))))
+            .unwrap();
+        wait_until(|| {
+            observer.0.lock().unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    CompanionIndexOwnerEvent::Replay {
+                        outcome: CompanionIndexOwnerReplayOutcome::Invalid,
+                        ..
+                    }
+                )
+            })
+        })
+        .await;
+        assert!(!source.status().ready);
+
+        activity_tx
+            .send(Ok(LiveActivity::Batch(batch(3, Some(12)))))
+            .unwrap();
+        activity_tx
+            .send(Ok(LiveActivity::Batch(clear_batch(4))))
+            .unwrap();
+        wait_until(|| source.status().ready && source.status().watermark == Some(4)).await;
+        assert_eq!(source.status().indexed_blocks, 0);
+        assert_eq!(*requests.lock().unwrap(), [(0, 2)]);
+        assert_eq!(
+            observer
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| **event == CompanionIndexOwnerEvent::ConnectAttempt)
+                .count(),
+            1
+        );
+
+        shutdown_tx.send(true).unwrap();
+        let report = task.await.unwrap().unwrap();
+        assert_eq!(report.connections, 1);
+        assert_eq!(report.rebuilds, 2);
     }
 
     #[tokio::test]
