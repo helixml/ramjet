@@ -211,6 +211,16 @@ fenced observe-only mode. Do not reconnect on each subsequent event: only an
 authoritative all-blocks clear or an attested incarnation change may restore
 trust without a complete replay from zero.
 
+`mini-dynamo-snapshot-companion` is the standalone one-engine composition. It
+must remain a separate binary and `Dockerfile.companion`; build the ordinary LB
+with `--bin mini-dynamo` so companion changes do not add a second release relink
+to the serving-image loop. Serve mode must preflight the session secret, digest
+secret, and authenticated incarnation file before any TCP bind, ZMQ connect, or
+UDS publication. Invalid attestation refreshes immediately remove authority;
+logs and metrics expose only closed reason labels. The executable is not ready
+for node06 until the host-side attestation provisioner and production Compose
+wiring exist and pass the dual-domain validator.
+
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
 Validate the trusted socket parent on every connect, use a fresh OS-random
