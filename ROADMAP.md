@@ -4,7 +4,14 @@ Status legend: ✅ done · 🔨 in progress · ⬜ planned. Ordered by
 value-per-effort given the current deployment (2 vLLM+DSpark TP4 instances on
 node06). The design rationale for each lives in DESIGN.md.
 
-## Rust rewrite (v1.2)
+## v0.1.0 — first public Rust release
+
+The release boundary is the production-qualified proxy: locality/load routing,
+health-gated failover, immediate client-cancellation propagation, compatibility
+shims, usage/TTFT/cache metrics, privacy-bounded decision journals, and bounded
+tokenizer observation. Exact KV events, snapshot companions, and placement are
+experimental, off by default, and not release blockers. Session-incremental
+tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
 
 - ✅ **Parity routing kernel.** Rust 2024 implementation of typed config,
   canonical prompt preparation, chained fingerprints, bounded LRU indexes,
@@ -170,7 +177,7 @@ node06). The design rationale for each lives in DESIGN.md.
   placement policy, and transport independent so a future Dynamo/NIXL prefill
   pool does not require another proxy rewrite.
 
-## Shipped (v1.1)
+## Earlier internal prototype lineage
 
 - ✅ Overlap+load router (`score = prefixOverlapBlocks − alpha·loadUnits`),
   chain-fingerprint prefix index per upstream.

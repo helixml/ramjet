@@ -17,6 +17,23 @@ The canonical deployment stack is
 validation, the generated infra mirror, and safe LB-only deployment. The infra
 copy is operational convenience only; do not edit it independently.
 
+## Release status
+
+Version 0.1.0 is the first public Rust release. Its stable surface is the
+OpenAI-compatible proxy, approximate locality/load router, health-aware
+failover, client-disconnect cancellation, compatibility shims, and
+`ds4proxy_*` telemetry. Local/remote tokenization, raw KV-event indexing,
+snapshot companions, and exact placement remain explicitly experimental and
+off by default; ordinary serving never depends on them.
+
+Images are published publicly at `ghcr.io/helixml/mini-dynamo`. Deploy an
+immutable digest from the release notes, not a mutable edge tag. The LB image
+contains `/mini-dynamo`; the separately published companion image contains the
+off-by-default snapshot companion and attestation provisioner.
+
+See [CHANGELOG.md](CHANGELOG.md) for the qualified release surface and
+[RELEASE.md](RELEASE.md) for the fail-closed tag and deployment checklist.
+
 ## Run
 
     DS4_UPSTREAM=http://engine-a:8000,http://engine-b:8000 \

@@ -232,14 +232,14 @@ is the reference for the failure semantics below:
 
 | Source | Idea | Status |
 |---|---|---|
-| NVIDIA Dynamo | KV-aware routing (overlap + load) | **v1.1 (this repo)** |
-| NVIDIA Dynamo | conditional disaggregation (cold prefill placement) | **v1.1** (size-weighted load reservation) |
+| NVIDIA Dynamo | KV-aware routing (overlap + load) | **v0.1.0** |
+| NVIDIA Dynamo | conditional disaggregation (cold prefill placement) | **v0.1.0** (size-weighted load reservation) |
 | NVIDIA Dynamo | event gaps, replay, exact token-ID lookup, and `best_worker_id`-style counterfactuals | **r20 pre-route shadow**, placement still disabled |
 | [Kimi K3 / KDA](https://github.com/MoonshotAI/Kimi-K3/blob/main/k3_tech_report.pdf) | model-aware cache geometry; recurrent state remains reusable | research / benchmark |
 | Kimi K3 | primary/secondary affinity and request-class budgets | planned, scaled down to two engines |
-| DwarfStar/ds4 | per-request timings surfaced to ops | v1.0 (chat log line + histograms) |
-| DwarfStar/ds4 | decision traces and policy replay | **v1.1 rc5** (privacy-bounded static replay) |
-| SGLang router | radix-tree-approximate LB | v1.1 (chain fingerprints) |
+| DwarfStar/ds4 | per-request timings surfaced to ops | **v0.1.0** (logs + histograms) |
+| DwarfStar/ds4 | decision traces and policy replay | **v0.1.0** (privacy-bounded static replay) |
+| SGLang router | radix-tree-approximate LB | **v0.1.0** (chain fingerprints) |
 
 ## Roadmap
 

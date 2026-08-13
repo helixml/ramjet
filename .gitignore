@@ -3,3 +3,4 @@ mini-dynamo
 /target/
 __pycache__/
 /.drone-publish-plan*
+.env

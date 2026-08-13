@@ -136,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn log_startup(config: &Config) {
     tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
         upstreams = ?config.upstreams,
         affinity = ?config.affinity,
         alpha = config.route_alpha,

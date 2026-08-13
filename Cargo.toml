@@ -1,14 +1,24 @@
 [package]
 name = "mini-dynamo"
-version = "1.2.0-alpha.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Token- and KV-cache-aware inference router"
 license = "Apache-2.0"
 repository = "https://github.com/helixml/mini-dynamo"
 publish = false
-readme = false
-include = ["src/**", "examples/**", "compat/**", "Cargo.toml", "Cargo.lock"]
+readme = "README.md"
+include = [
+    "src/**",
+    "examples/**",
+    "compat/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "CHANGELOG.md",
+    "RELEASE.md",
+    "LICENSE",
+]
 
 [dependencies]
 anyhow = "1.0.104"
