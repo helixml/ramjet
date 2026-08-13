@@ -254,8 +254,16 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   delta, and retain the load gate. `/health` and `cachebench` now expose
   content-free before/after exact residency per opaque replica index, making
   the next boundary runs directly attributable without parsing upstream URL
-  labels. Qualify that shadow signal, then repeat the 52/64 boundary three
-  times before defining any 95%+ SLO.
+  labels. A second observation-only counterfactual now adds each replica's
+  exact residency to current-request-equivalent bounded in-flight pressure.
+  It distinguishes a genuinely less-loaded cache from a replica whose cold
+  prefill has not emitted KV events yet, without changing placement or
+  claiming that decode load will become resident KV. Its first node06 rollout
+  was serving-safe, but both long-lived publishers were beyond the bounded
+  replay window, so the 64-app result was correctly withheld while exact
+  authority was fenced. Repeat the 52/64 boundary three times only after both
+  inventories have an authenticated generation, compare raw and projected
+  outcomes against second-wave survival, and define no 95%+ SLO before then.
 - ✅ **Production-shaped DeepSeek-V4 agent/DSML gate (#10).** The versioned
   synthetic v1 JSONL corpus and privacy-safe runner now cover stream/non-stream,
   automatic/required/parallel tool calls, split deltas and DSML leaks, every

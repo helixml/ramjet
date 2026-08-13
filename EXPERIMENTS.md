@@ -4567,3 +4567,54 @@ table, retain at least 256 tokens for typed/parallel tools, consider 96 only for
 the simple classes that passed, honor caller overrides, and require equal real
 workflow success before enforcement. No completion content, reasoning, or tool
 arguments were retained.
+
+## 2026-08-13 — r86 projected cold-residency pressure
+
+The 64-app capacity cliff previously produced 35 exact all-zero decisions,
+four raw-residency delta gates, 26 load gates, and zero `would_balance`
+decisions. The load gate was doing useful queue isolation: by the time one
+cold prefill's resident blocks were visible, the nominally emptier replica was
+already processing its peer. Removing the gate would not distinguish reserved
+prefill work from genuinely available cache capacity.
+
+#114 adds a separate observation-only counterfactual. For an exact all-zero
+request it combines each replica's authoritative resident-token count with a
+conservative translation of bounded active load into current-request-
+equivalent token pressure. It retains the full-prompt delta and existing
+maximum-load gates and cannot mutate the selected route. The value is pressure,
+not predicted future KV: active load may include decode work that never becomes
+resident. Five bounded outcomes are exported for each fixed endpoint, and
+`cachebench.py` captures them alongside the original raw-residency decisions.
+No prompt, token vector, fingerprint, session, or upstream label is added.
+
+The complete local gate passed strict Clippy, 333 Rust unit tests plus every
+integration suite, 188 Python tests, the agent-corpus validator, and a warm
+release build. The Rust lane took 5.35s through tests and 0.15s for the already
+warm release verification; Python took 1.93s. Drone #304 passed before merge as
+`ddcb956`.
+
+The first image build had to pull and extract the dependency image into a cold
+BuildKit worker, so it took 109.166s rather than the normal warm edit/relink
+loop. The 14,467,850-byte runtime image transferred to node06 in 6.336s,
+115.502s total. This is a cache-warmth regression in the development workflow,
+not application build time; retain the populated builder before the next LB
+iteration.
+
+`rust-r86-projected-pressure-ddcb956` was deployed under the node06 LB lock.
+Only `ds4-loadbalancer` was recreated. It reported two healthy replicas, zero
+restarts, and all 25 projected counter series at zero. A normal chat smoke
+returned HTTP 200 with choices and authoritative usage in 181ms. Two direct
+2,135-prompt-token allocations then ran concurrently on the separate TP4 pairs
+in 0.385s and 0.371s; both returned HTTP 200. Both engines remained on the r34
+image with zero restarts.
+
+The intended 64-app measurement was not admissible after the LB restart. The
+two live consumers connected and received one batch each, but both publishers'
+long-lived sequences were beyond the bounded 8,192-batch replay window. They
+therefore remained `trusted=0` with `observe_only` batches, exactly as the
+startup fence requires. Approximate serving remained healthy; projected
+telemetry cannot evaluate without authoritative residency and emitted no
+misleading result. Run the fresh-salt 52/64 boundary only after both engines
+establish a new authoritative generation (or the production snapshot path is
+qualified), then compare raw residency, projected pressure, route split, and
+second-wave cold/partial/full survival before considering any placement change.
