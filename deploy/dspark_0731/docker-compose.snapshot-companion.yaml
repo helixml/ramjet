@@ -12,7 +12,7 @@
 
 x-snapshot-companion-production: &snapshot-companion-production
   profiles: [snapshot-companion]
-  image: ${SNAPSHOT_COMPANION_IMAGE:-ghcr.io/helixml/mini-dynamo:companion-rust-e20a928@sha256:b0d403ad6fe294c071662dab42af2c32310fce8ffefa6418f3cef6997ca9a89f}
+  image: ${SNAPSHOT_COMPANION_IMAGE:-ghcr.io/helixml/mini-dynamo:companion-rust-53359d5@sha256:0b031b592acf4c9eea788da8ae20920354f414774e83d08b28c922f1fdadcc03}
   restart: unless-stopped
   init: true
   ipc: private
@@ -55,7 +55,7 @@ x-snapshot-companion-production: &snapshot-companion-production
 
 x-snapshot-attestation-provisioner: &snapshot-attestation-provisioner
   profiles: [snapshot-attestation]
-  image: ${SNAPSHOT_COMPANION_IMAGE:-ghcr.io/helixml/mini-dynamo:companion-rust-e20a928@sha256:b0d403ad6fe294c071662dab42af2c32310fce8ffefa6418f3cef6997ca9a89f}
+  image: ${SNAPSHOT_COMPANION_IMAGE:-ghcr.io/helixml/mini-dynamo:companion-rust-53359d5@sha256:0b031b592acf4c9eea788da8ae20920354f414774e83d08b28c922f1fdadcc03}
   entrypoint: ["/mini-dynamo-attestation-provisioner"]
   restart: "no"
   user: "0:12000"
@@ -83,7 +83,7 @@ services:
   ds4-loadbalancer:
     # SO_PEERCRED is part of the session authority. Numeric identity avoids a
     # mutable passwd database and is required only when this overlay is used.
-    image: ${SNAPSHOT_LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-908e3dc@sha256:19da8eb3c7b0f42a84ef67aafe043f331ddacd9295f402b793fc87eced232d6b}
+    image: ${SNAPSHOT_LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-53359d5@sha256:ce108ce45cfdffc2ccb2869b3f526e714e010208c4fed196292911a7d836bd69}
     user: "12002:12000"
     environment:
       # Raw vLLM event consumers and companion snapshots are mutually exclusive.

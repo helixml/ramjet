@@ -19,6 +19,14 @@ COMPANION_PROFILE = "snapshot-companion"
 ATTESTATION_PROFILE = "snapshot-attestation"
 SESSION_GID = "12000"
 LB_UID = "12002"
+EXPECTED_LB_IMAGE = (
+    "ghcr.io/helixml/mini-dynamo:rust-53359d5@"
+    "sha256:ce108ce45cfdffc2ccb2869b3f526e714e010208c4fed196292911a7d836bd69"
+)
+EXPECTED_COMPANION_IMAGE = (
+    "ghcr.io/helixml/mini-dynamo:companion-rust-53359d5@"
+    "sha256:0b031b592acf4c9eea788da8ae20920354f414774e83d08b28c922f1fdadcc03"
+)
 
 DOMAINS: dict[str, dict[str, str]] = {
     "engine-a": {
@@ -173,7 +181,7 @@ def validate_lb(service: dict[str, Any], route_mode: str) -> None:
     if service.get("user") != f"{LB_UID}:{SESSION_GID}":
         fail("LB does not use the authenticated snapshot client identity")
     image = str(service.get("image", ""))
-    if "@sha256:" not in image or "rust-908e3dc" not in image:
+    if image != EXPECTED_LB_IMAGE:
         fail("LB image is not the immutable snapshot-shadow build")
     environment = service.get("environment", {})
     expected = {
@@ -217,7 +225,7 @@ def validate_companion(engine: str, domain: dict[str, str], service: dict[str, A
     if domain["metrics_gid"] == SESSION_GID:
         fail(f"{name} metrics and session groups are shared")
     image = str(service.get("image", ""))
-    if "@sha256:" not in image or image.endswith(":latest"):
+    if image != EXPECTED_COMPANION_IMAGE:
         fail(f"{name} image is not immutable")
     environment = service.get("environment", {})
     exact = {
@@ -269,7 +277,7 @@ def validate_provisioner(engine: str, domain: dict[str, str], service: dict[str,
     if service.get("entrypoint") != ["/mini-dynamo-attestation-provisioner"]:
         fail(f"{name} does not run the bounded provisioner")
     image = str(service.get("image", ""))
-    if "@sha256:" not in image or image.endswith(":latest"):
+    if image != EXPECTED_COMPANION_IMAGE:
         fail(f"{name} image is not immutable")
     environment = service.get("environment", {})
     if str(environment.get("DS4_SNAPSHOT_SECRET_OWNER_UID")) != "0" or str(
