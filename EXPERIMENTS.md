@@ -4132,3 +4132,13 @@ not change server state, and normal lint rejects explicit privilege. Main
 publishers now use a digest-pinned unprivileged Kaniko executor with the same
 fail-closed plan and a GHCR remote cache. The tag pipeline uses unprivileged
 `crane` manifest copies. A third blind retry was not attempted.
+
+Pre-merge review found that #256/#258 never published the referenced dependency
+image, so a source-only main build could have skipped its seed and failed both
+application builds. `Dockerfile.deps` now separates the locked registry fetch
+into its own reusable Kaniko layer, intentionally rotates the content key, and
+the merge diff selects dependency, LB, and companion publishers together. The
+same review closed a release immutability gap: an existing destination with the
+source digest is idempotent success, a different digest is a hard conflict, and
+only an explicit registry not-found result permits a copy. Ambiguous lookup
+failures remain closed.

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG RUST_DEPS_IMAGE=ghcr.io/helixml/mini-dynamo:rust-deps-sha256-3b4a156b301af9e116eecbd3cc0df2b5a38d43344d859ef40149499f45141cdf
+ARG RUST_DEPS_IMAGE=ghcr.io/helixml/mini-dynamo:rust-deps-sha256-7da447db3053012bff0f7070cfe7a354d74406e3919b2b9d0ec360371911078d
 ARG OCI_REVISION=unknown
 FROM ${RUST_DEPS_IMAGE} AS build
 WORKDIR /src

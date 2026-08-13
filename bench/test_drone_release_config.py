@@ -55,6 +55,9 @@ class DroneReleaseConfigTest(unittest.TestCase):
         self.assertIn('destination="ghcr.io/helixml/mini-dynamo:companion-$tag"', script)
         self.assertIn('crane copy "$source" "$destination"', script)
         self.assertIn('[ "$source_digest" = "$destination_digest" ]', script)
+        self.assertIn('release_publish=idempotent kind=$kind', script)
+        self.assertIn("fail destination_conflict", script)
+        self.assertIn("fail destination_lookup", script)
         for label in ("source_label_mismatch", "version_label_mismatch", "revision_label_mismatch"):
             self.assertIn(label, script)
 

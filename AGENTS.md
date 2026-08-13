@@ -95,7 +95,9 @@ by `.docker/rust-deps-key`. The dependency guard admits only `Cargo.toml`,
 `Cargo.lock`, `rust-toolchain.toml`, `Dockerfile.deps`, or its derived key. Both
 application publishers wait for that guard step, so a dependency change seeds
 the image before either app build. Source-only releases inherit the existing
-content-keyed image and compile offline. CI/docs/bench/deploy-only pushes still
+content-keyed image and compile offline. `Dockerfile.deps` keeps the locked
+registry fetch in a separate Kaniko-cacheable layer before compiling the seed,
+so a recipe-only rebuild can reuse downloads. CI/docs/bench/deploy-only pushes still
 instantiate three cheap guards on this server but must perform zero Docker or
 registry work.
 
@@ -440,6 +442,9 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   revision-bound markers; each publisher rechecks its marker and tag event
   without Git. The registry publisher verifies exact source/version/revision
   OCI labels, copies with `crane`, and requires destination digest equality.
+  An already-present destination is accepted only when its digest is identical;
+  a different digest is an immutable-tag conflict, and an ambiguous lookup
+  failure is never treated as absence.
   Cargo build metadata (`+...`) is rejected because it is not a valid Docker
   tag. Merge, build, deploy, and qualify the SHA-tagged images before creating
   the release tag. Confirm the qualified refs are

@@ -338,7 +338,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   version, waits for the same full quality gate, validates the existing
   SHA-tagged images' OCI identity, and digest-preservingly promotes them to
   immutable semver LB/companion tags—never rebuilding, updating edge aliases,
-  or creating PR/push artifacts. The Rust
+  overwriting a different existing digest, or creating PR/push artifacts. The Rust
   cutover is complete and the obsolete Go lane and
   packages are removed. Preserve the measured ~58–59s PR quality budget and
   investigate cache or scheduling regressions rather than adding duplicate CI

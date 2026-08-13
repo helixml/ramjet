@@ -101,6 +101,40 @@ class DroneReleaseTest(unittest.TestCase):
             text=True,
         )
 
+    def install_fake_crane(self):
+        sha = self.environment()["DRONE_COMMIT_SHA"]
+        crane = self.fake_bin / "crane"
+        crane.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$*\" >> crane-calls\n"
+            "case \"${1-}\" in\n"
+            "  auth) exit 0 ;;\n"
+            "  config) printf '%s\\n' '{\"config\":{\"Labels\":{"
+            f"\"org.opencontainers.image.source\":\"https://github.com/helixml/mini-dynamo\","
+            f"\"org.opencontainers.image.version\":\"1.2.0-alpha.1\","
+            f"\"org.opencontainers.image.revision\":\"{sha}\"}}}}' ;;\n"
+            "  digest)\n"
+            "    case \"$2\" in\n"
+            "      *:rust-*|*:companion-rust-*) printf '%s\\n' sha256:fixture ;;\n"
+            "      *:companion-*) marker=companion-copied ;;\n"
+            "      *) marker=lb-copied ;;\n"
+            "    esac\n"
+            "    if [ -z \"${marker-}\" ]; then exit 0; fi\n"
+            "    if [ -f \"$marker\" ]; then printf '%s\\n' sha256:fixture; exit 0; fi\n"
+            "    case \"${FAKE_DESTINATION_STATE-missing}\" in\n"
+            "      same) printf '%s\\n' sha256:fixture ;;\n"
+            "      different) printf '%s\\n' sha256:other ;;\n"
+            "      missing) echo MANIFEST_UNKNOWN >&2; exit 1 ;;\n"
+            "      error) echo registry_unavailable >&2; exit 1 ;;\n"
+            "    esac ;;\n"
+            "  copy)\n"
+            "    printf '%s\\n' \"$2 -> $3\" >> crane-copies\n"
+            "    case \"$3\" in *:companion-*) touch companion-copied ;; *) touch lb-copied ;; esac ;;\n"
+            "  *) exit 1 ;;\n"
+            "esac\n"
+        )
+        crane.chmod(0o755)
+
     def test_valid_prerelease_creates_revision_bound_publishers(self):
         environment = self.environment(DRONE_COMMIT_SHA=self.environment()["DRONE_COMMIT_SHA"].upper())
         result = self.run_script(PLANNER, environment=environment)
@@ -183,26 +217,20 @@ class DroneReleaseTest(unittest.TestCase):
         self.assertEqual(linked.returncode, 2)
         self.assertEqual(linked.stderr.strip(), "release_guard=error reason=invalid_marker")
 
-    def test_registry_publish_validates_labels_and_preserves_digest(self):
-        environment = self.environment(GHCR_USERNAME="fixture", GHCR_TOKEN="secret")
+    def prepared_publish_environment(self, destination_state):
+        environment = self.environment(
+            GHCR_USERNAME="fixture",
+            GHCR_TOKEN="secret",
+            FAKE_DESTINATION_STATE=destination_state,
+        )
         plan = self.run_script(PLANNER, environment=environment)
         self.assertEqual(plan.returncode, 0, plan)
+        self.install_fake_crane()
+        return environment
+
+    def test_registry_publish_copies_only_missing_destinations(self):
+        environment = self.prepared_publish_environment("missing")
         sha = environment["DRONE_COMMIT_SHA"]
-        crane = self.fake_bin / "crane"
-        crane.write_text(
-            "#!/bin/sh\n"
-            "case \"${1-}\" in\n"
-            "  auth) exit 0 ;;\n"
-            "  config) printf '%s\\n' '{\"config\":{\"Labels\":{"
-            f"\"org.opencontainers.image.source\":\"https://github.com/helixml/mini-dynamo\","
-            f"\"org.opencontainers.image.version\":\"1.2.0-alpha.1\","
-            f"\"org.opencontainers.image.revision\":\"{sha}\"}}}}' ;;\n"
-            "  digest) printf '%s\\n' sha256:fixture ;;\n"
-            "  copy) printf '%s\\n' \"$2 -> $3\" >> crane-copies ;;\n"
-            "  *) exit 1 ;;\n"
-            "esac\n"
-        )
-        crane.chmod(0o755)
         for kind in ("lb", "companion"):
             result = self.run_script(PUBLISH, kind, environment=environment)
             self.assertEqual(result.returncode, 0, result)
@@ -216,6 +244,35 @@ class DroneReleaseTest(unittest.TestCase):
             f":companion-rust-{short} -> ghcr.io/helixml/mini-dynamo:companion-v1.2.0-alpha.1",
             copies,
         )
+
+    def test_registry_publish_is_idempotent_for_the_same_destination_digest(self):
+        environment = self.prepared_publish_environment("same")
+        for kind in ("lb", "companion"):
+            result = self.run_script(PUBLISH, kind, environment=environment)
+            self.assertEqual(result.returncode, 0, result)
+            self.assertEqual(
+                result.stdout.strip(), f"release_publish=idempotent kind={kind}"
+            )
+        self.assertFalse((self.root / "crane-copies").exists())
+
+    def test_registry_publish_rejects_a_conflicting_destination_digest(self):
+        environment = self.prepared_publish_environment("different")
+        result = self.run_script(PUBLISH, "lb", environment=environment)
+        self.assertEqual(result.returncode, 2, result)
+        self.assertEqual(
+            result.stderr.strip(),
+            "release_publish=error reason=destination_conflict",
+        )
+        self.assertFalse((self.root / "crane-copies").exists())
+
+    def test_registry_publish_fails_closed_when_destination_lookup_is_ambiguous(self):
+        environment = self.prepared_publish_environment("error")
+        result = self.run_script(PUBLISH, "lb", environment=environment)
+        self.assertEqual(result.returncode, 2, result)
+        self.assertEqual(
+            result.stderr.strip(), "release_publish=error reason=destination_lookup"
+        )
+        self.assertFalse((self.root / "crane-copies").exists())
 
 
 if __name__ == "__main__":

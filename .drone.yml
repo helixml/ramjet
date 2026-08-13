@@ -99,7 +99,7 @@ steps:
         mkdir -p /kaniko/.docker
         printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" >/kaniko/.docker/config.json
         exec /kaniko/executor --context . --dockerfile Dockerfile.deps \
-          --destination ghcr.io/helixml/mini-dynamo:rust-deps-sha256-3b4a156b301af9e116eecbd3cc0df2b5a38d43344d859ef40149499f45141cdf \
+          --destination ghcr.io/helixml/mini-dynamo:rust-deps-sha256-7da447db3053012bff0f7070cfe7a354d74406e3919b2b9d0ec360371911078d \
           --cache=true --cache-repo=ghcr.io/helixml/mini-dynamo-build-cache \
           --cache-ttl=336h --snapshot-mode=redo --reproducible
     when:

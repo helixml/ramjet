@@ -38,6 +38,7 @@ case "$kind" in
     ;;
 esac
 
+source_digest=$(crane digest "$source" 2>/dev/null) || fail source_digest
 config=$(crane config "$source" 2>/dev/null) || fail source_missing
 compact=$(printf '%s' "$config" | tr -d '[:space:]')
 printf '%s' "$compact" | grep -Fq \
@@ -50,7 +51,19 @@ printf '%s' "$compact" | grep -Fq \
   "\"org.opencontainers.image.revision\":\"$sha\"" \
   || fail revision_label_mismatch
 
-source_digest=$(crane digest "$source" 2>/dev/null) || fail source_digest
+destination_result=
+if destination_result=$(crane digest "$destination" 2>&1); then
+  if [ "$destination_result" = "$source_digest" ]; then
+    echo "release_publish=idempotent kind=$kind"
+    exit 0
+  fi
+  fail destination_conflict
+fi
+case "$destination_result" in
+  *MANIFEST_UNKNOWN*|*NAME_UNKNOWN*|*"manifest unknown"*|*"404 Not Found"*|*"not found"*) ;;
+  *) fail destination_lookup ;;
+esac
+
 crane copy "$source" "$destination" >/dev/null 2>&1 || fail copy_failed
 destination_digest=$(crane digest "$destination" 2>/dev/null) || fail destination_digest
 [ "$source_digest" = "$destination_digest" ] || fail digest_mismatch

@@ -294,7 +294,9 @@ separate full-quality Drone release pipeline. It verifies the qualified
 exact revision, then copies those same manifests to `v1.2.0-alpha.1` and
 `companion-v1.2.0-alpha.1`. Source and destination digests must match. It does
 not rebuild images or update either edge tag. Tag, ref, checkout SHA, and Cargo
-package version must all agree before either registry copy can start.
+package version must all agree before either registry copy can start. Repeating
+the same promotion is idempotent; an existing tag with another digest fails
+closed and is never overwritten.
 
 Measure the request-preparation hot path before and after tokenizer work:
 
