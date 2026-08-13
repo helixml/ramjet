@@ -812,13 +812,36 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   seconds, and mandatory config-hash-verified rollback. r99 removes two false
   negatives before the full gate: it timestamps snapshot publication separately
   from the slower ordinary-health probe and makes `/health` report the selected
-  compact authority rather than the unused raw-event inventory. A production-
-  shaped candidate recovered both 36/173-block inventories and 2/2 serving in
-  2.150s with a clean immutable rollback. Publish and pin r99, then run the
-  five-cycle gate before capacity cells.
+  compact authority rather than the unused raw-event inventory. r101 corrected
+  the gate's final lifecycle assumption: a ready long-lived consumer owns one
+  active attempt and one active connection, not a completed zero-attempt state.
+  The pinned production gate then passed 5/5 with 0.862–1.138s publication,
+  1.138s nearest-rank p95, stable 36/173-block inventories, unchanged restart-
+  zero engines, and a 2.025s mandatory rollback. The recovery gate is complete.
+  The clean authenticated 52-app/529KiB capacity cell passed 104/104 with exact
+  zero-spread counter reconciliation, 48/56 placement, no preemptions, and
+  99.83% returning-wave cache hit after 51 intervening requests; returning TTFT
+  p95 was 1.493s versus 33.773s cold. The matched 64-app/33.06MiB cell also
+  reconciled exactly and passed 128/128, but a 56/72 route skew crossed one
+  replica's residency boundary: only 28/64 returns were partial, reuse hit fell
+  to 43.68%, and 36 cold returns reached 51.240s TTFT p95 while partial p95 was
+  0.890s. The authenticated capacity boundary is complete and shows that cold
+  first-touch balance, not only warm-prefix lookup, is material at this scale.
+  Sweep the conservative projected-balance load gate on captured real decisions
+  and collect at least 100,000 revision-stable shadow decisions before any
+  compact state can affect placement.
   Compare at least 100,000 exact versus approximate decisions before placement
   can consume this state; Dynamo's additional tree-dump recovery remains the
-  scale-out reference.
+  scale-out reference. The privacy-bounded route journal cannot satisfy this
+  gate because it intentionally excludes exact token IDs and inventory
+  revisions. Add an off-by-default, bounded in-process soak that captures real
+  attested token vectors plus the actual approximate decisions from the 52/64
+  source cells, then performs 100,000 marker-before/lookup/marker-after compact
+  comparisons without dispatching upstream. Cap source vectors/bytes and total
+  attempts, keep its counters separate from organic shadow metrics, require
+  zero trust/lookup/attestation failures and byte-identical decisions, and
+  report the unique source count prominently. This is a revision/concurrency
+  qualification, not 100,000 independent workload or performance samples.
 - ✅ **True TTFT instrumentation.** rc6's journal and Prometheus histogram
   time the first SSE response byte, which may be a role-only chunk. Journal v3
   code now records both first byte and first generated token/tool-call delta;

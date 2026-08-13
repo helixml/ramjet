@@ -4934,3 +4934,116 @@ Decision: publish and digest-pin r99, then use only the repository gate for the
 five-cycle sub-three-second qualification. Keep snapshot placement disabled
 afterward; a successful recovery gate admits the 100,000-decision shadow
 comparison, not production placement.
+
+## 2026-08-13 — r100/r101 five-cycle snapshot recovery qualification
+
+Drone #331 published the r99 LB as immutable
+`rust-81f648c@sha256:531f341b86506427e6fc2bd28fd1e689cb4f38767a15661e919ec726ab4526be`;
+the production overlay and semantic validator were pinned to that manifest.
+Only those two stale node06 files needed synchronization. The candidate image
+was pulled before measurement so registry transfer could not inflate recovery.
+The read-only admission audit passed in 2.74s with both companions stable and
+authoritative at 36/173 blocks, both engines and companions restart-zero, and
+an exactly reproducible baseline rollback hash.
+
+The first five-cycle apply stopped safely at iteration one after the 30-second
+deadline and restored the baseline in 2.033s. Direct metrics showed this was a
+gate defect rather than a recovery failure: both snapshot-ready gauges and both
+connections were one from about two seconds onward, but each reconnect owner's
+`attempts_active` gauge also remained one. That is the intended lifecycle—the
+attempt future owns the authenticated consumer until disconnect. The gate had
+incorrectly required zero. A production-shaped one-second diagnostic again
+proved both exact inventories and 2/2 serving at 2.073s, and SHA-256 comparison
+proved the local candidate and published image contained the identical Rust
+binary. r101 changed the gate to require exactly one attempt plus one connection
+and added negative tests for zero or multiple owners. Thirteen focused tests,
+all 204 Python tests, the agent corpus, and Drone #334 (60s) passed.
+
+The corrected immutable five-cycle gate passed every iteration. Process-start-
+to-publication samples were 0.862262s, 0.884060s, 1.117349s, 1.137929s, and
+0.880456s; nearest-rank p95 was 1.137929s against the 3.0s SLO. Compose-call-to-
+ready samples were 1.658–2.399s. Every recovery reconstructed exactly 36/173
+blocks and 9,216/44,288 logical tokens. Mandatory rollback passed in 2.024910s,
+restored the immutable `rust-b0e0700` baseline with snapshot mode off, and
+released the deployment lock. Both engine image/container/start identities
+were unchanged and restart counts remained zero; final ordinary health was 2/2.
+
+Decision: the issue #41 LB-only recovery acceptance gate is complete. Compact
+snapshots remain observation-only. Next run the authenticated 52/64-app capacity
+boundary and accumulate at least 100,000 revision-stable exact-versus-
+approximate shadow decisions before considering placement.
+
+## 2026-08-14 — r102/r103 cancellation proof and 52-app capacity boundary
+
+An interrupted SSH scout initially appeared to leave one request on each
+replica. Process inspection instead found the remote `cachebench.py`, its
+`time`, shell, and `tee` still alive in one validated process group: the local
+SSH client had gone away without terminating the remote benchmark clients.
+After sending `TERM` only to that group, the first poll found both LB inflight
+gauges and both vLLM running-request gauges at zero. This was a harness orphan,
+not evidence that mini-dynamo retained work after a client disconnect.
+
+The serving cancellation path already races every upstream response body with
+the downstream channel closing, drops the `reqwest::Response`, and releases the
+load and inflight guards. The existing silent-SSE regression passed 20/20, and
+the earlier r22 node06 close test measured 46ms to release LB state and 269ms
+to reach zero vLLM running requests. r102 extends the deterministic coverage to
+silent `application/json` responses and to cancellation before upstream
+response headers. Closing a real raw-TCP client against an Axum proxy released
+the pending upstream and load state in a 0.03s test. All new cases passed. The
+final full Rust gate passed 337 unit tests plus all integration
+suites in 15.05s including the test-binary rebuild. No production cancellation
+change was needed.
+
+The first 52-app snapshot-shadow capacity scout completed 104/104 requests but
+was observational only: two unrelated requests changed the LB/native counters.
+A second scout was stopped after 10/104 when post-engine-start B12X dense-GEMM
+disk-cache-miss compilation appeared in the engine log. After those shapes had
+warmed, r103 reran with a fresh salt, authenticated engine access, 52 distinct
+529KiB prefixes, two waves, concurrency two, and strict zero-tolerance
+reconciliation. It passed 104/104 in 711.81s with exact equality across response
+usage, LB counters, and the summed native engine counters for requests, prompt
+tokens, and cached tokens. There were no preemptions or new JIT/CUDA/NCCL/OOM/
+Xid/traceback/fatal markers, both engines and the LB remained restart-zero, and
+both compact inventories remained trusted.
+
+The cell exercised a 26.86MiB synthetic working set and 15,146,762 prompt
+tokens. The route split was 48/56. All 52 first-wave requests were cold; all 52
+returning requests, after a reuse distance of 51, were partial hits. Returning
+cache hit was 99.83% (7,561,216 cached tokens), overall hit was 49.92%, and
+returning TTFT p50/p95 was 0.980/1.493s versus cold 25.790/33.773s. The shadow
+policy recorded 50 exact/approximate agreements, one cold `would_balance`, and
+only conservative delta/load gates otherwise. This cleanly qualifies the
+52-app side of the capacity boundary and quantifies the high TTFT value of
+preserving a long shared prefix.
+
+The matched r104 64-app cell used the same 529KiB prefix, concurrency two,
+two-wave ordering, strict reconciliation, and a fresh salt. It passed 128/128
+in 1,801.80s with zero reconciliation spread across response usage, LB, and
+native engine request/prompt/cache counters. There were again zero preemptions,
+no forbidden engine markers, unchanged restart-zero process identities, idle
+2/2 serving afterward, and both compact inventories remained trusted. The
+route split was 56/72 across 18,642,276 prompt tokens and a 33.06MiB synthetic
+working set.
+
+This bracket found a sharp capacity cliff. All 64 first-wave requests were
+cold. After a reuse distance of 63, only 28/64 returning requests retained a
+partial prefix and 36/64 were fully cold. Returning-wave cache hit fell to
+43.68% and overall hit to 21.84%. Partial-hit TTFT p50/p95 stayed excellent at
+0.860/0.890s, but cold TTFT p50/p95 reached 33.527/51.240s; mean native queue
+time rose to 5.370s. The 52-app cell's 48/56 route split leaves roughly balanced
+per-engine state below capacity, while 64 apps split 56/72: the busier replica
+receives about 36 distinct 145.6K-token prefixes, crosses its roughly 5M-token
+resident boundary, and the ordered second-wave scan then thrashes. The exact
+shadow saw 27 agreements and no safe move; for cold state it retained 71
+projected choices, gated 25 on instantaneous load and three on less than one
+full-prompt residency delta, and proposed no balance move under the current
+zero-load-delta policy.
+
+Decision: the 52/64 authenticated boundary is complete. The box-wide capacity
+is close to 64 such prefixes only if first-touch placement is more even; a small
+28/36 skew converts one replica's whole returning scan from warm to cold. Do
+not infer that exact warm-prefix routing alone fixes this: the failing requests
+had already been evicted. Use the planned revision-stable soak to sweep the
+projected cold-balance load gate on the real captured decisions, then validate
+one conservative shadow policy before any canary. Exact placement remains off.

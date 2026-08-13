@@ -404,6 +404,14 @@ or below three seconds. The mode-0600 output is reserved before mutation and is
 never overwritten. Do not use `--apply` to manufacture authority by restarting
 or clearing an engine.
 
+Snapshot reconnect attempts are the long-lived consumer futures, not merely
+socket setup calls. An authoritative steady session therefore has exactly one
+active attempt and one active connection per engine until disconnect. The
+recovery gate must reject zero or multiple owners, but must not wait for the
+healthy attempt gauge to become zero; r101 proved that impossible invariant can
+turn five valid publications into a 30-second timeout. Keep a focused metric-
+shape regression whenever the reconnect lifecycle or gate changes.
+
 Compose automatically reads the deployment's `.env`, which supplies the private
 engine-probe token. Snapshot authority is additional environment, not a
 replacement env file: the gate injects it directly. For a manual diagnostic,
@@ -564,6 +572,13 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
 - Long scripts must emit bounded progress and support resume. Capture identity,
   restart count, JIT markers, and client/native token reconciliation per cell so
   a failed late gate does not invalidate earlier clean cells.
+- Treat the remote benchmark process as the client, not the local `ssh`
+  process. A lost local terminal can leave `ssh node06 '... | tee ...'` orphaned
+  with live HTTP sockets, which looks like failed proxy cancellation while it
+  continues consuming both TP4 pairs. Give every long remote cell a unique
+  salt/output path, record its PID/process group, and on interruption resolve
+  and terminate only that exact command before interpreting LB/vLLM inflight
+  gauges. Never use a broad `pkill` on the shared development box.
 
 ### Cache locality — `locality_bench.sh BASE APPS SESSIONS TURNS`
 
