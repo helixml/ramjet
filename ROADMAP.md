@@ -685,8 +685,14 @@ node06). The design rationale for each lives in DESIGN.md.
   direct raw-event and compact snapshot authority are mutually exclusive.
   Snapshot inventory is injected only into the exact counterfactual scorer,
   and configuration rejects placement mode, so approximate serving and
-  `/health` remain independent. Next add fixed-cardinality reconnect/readiness
-  metrics, hot attestation refresh, and production-shaped Compose wiring.
+  `/health` remain independent. The LB reconnect owners now export
+  pre-initialized, fixed-cardinality readiness, active-attempt, active-
+  connection, attempt-kind, and bounded terminal-outcome metrics. Engine
+  labels are configuration ordinals only, and `ready` follows authoritative
+  actor publication rather than a merely connected Unix socket. Cancellation,
+  timeout, reconnect, and rolling-overlap paths balance their gauges through a
+  drop guard. Next add hot attestation refresh and production-shaped Compose/
+  Caddy wiring.
   Compare at least 100,000 exact versus approximate decisions before placement
   can consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.

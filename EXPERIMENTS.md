@@ -3841,3 +3841,40 @@ Drone, the candidate-overlay tooling, documentation, validation commands, and
 the infra mirror helper now resolve the new location. This is a repository-only
 move: the existing node06 runtime and infra mirror paths are unchanged, and no
 container, process, route, secret, or GPU state changed.
+
+## 2026-08-13 — r58 LB snapshot reconnect/readiness telemetry
+
+The LB-side companion owners now export an operationally complete but bounded
+metric surface. `ds4proxy_snapshot_route_enabled` is always present, and every
+configured ordinal `engine-N` pre-creates readiness, active-attempt, active-
+connection, three attempt-kind, and six terminal-outcome series before a task
+starts. Labels are selected only from closed Rust enums and configuration
+ordinals; URLs, hosts, socket paths, peer identities, keys, protocol content,
+and free-form errors cannot enter the registry.
+
+Readiness is intentionally stricter than connectivity. The gauge becomes one
+only after the publication actor exposes an authoritative caught-up generation,
+and returns to zero synchronously when its owning future fences or is dropped.
+An attempt-local drop guard balances attempt and connection gauges across
+normal failure, timeout, explicit rolling overlap, and shutdown cancellation.
+The existing 2ms publication poll emits a metric update only on an epoch/
+readiness transition, so the new telemetry adds no steady per-tick Prometheus
+mutation. Approximate routing and `/health` remain independent, and snapshot
+placement remains prohibited.
+
+Focused tests exercise a connected timeout, publication-after-connection,
+synchronous shutdown fencing, balanced gauges, zero-series initialization in
+off mode, exact series cardinality, and absence of path/URL label material. The
+final local gate passed formatting, strict all-target/all-feature Clippy, 323
+library tests plus 38 integration/E2E tests (361 total), the release build,
+agent validation, and 105 Python tests. The first focused
+source compile/test was 11.14s; warm metric and route tests were 0.53s and
+0.20s, `cargo check` was 3.55s, final Clippy was 3.89s, the full Rust gate was
+16.01s, Python was 1.52s, and an unchanged release verification
+was 0.13s. After rebasing onto the Rust-only cutover, strict Clippy was 3.99s,
+all tests were 14.59s, Python was 0.59s, and the source release relink was
+52.30s while another isolated Rust worktree was compiling concurrently. That
+contended relink is recorded, not accepted as the warm-loop baseline. No
+node06, container, engine, Compose, Caddy, secret, route, or GPU state changed.
+Hot LB attestation refresh, production dual-domain Compose/Caddy wiring, and
+100,000 revision-stable shadow comparisons remain deployment gates.

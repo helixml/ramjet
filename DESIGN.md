@@ -195,6 +195,15 @@ is the reference for the failure semantics below:
   return. The task exposes controlled connection, generation, trust,
   batch-outcome, bounded filter-reason, replay, and resident-size metrics and
   shuts down with the proxy.
+- `src/snapshot_route.rs` owns the alternative compact companion consumers.
+  Each configured source receives only an ordinal `engine-N` telemetry slot.
+  `ds4proxy_snapshot_route_ready` follows the publication actor's authoritative
+  state, while active attempt/connection gauges are balanced by the reconnect
+  future's cancellation-safe drop guard. Attempt kinds and terminal outcomes
+  are closed enums with every series initialized before the task starts; no
+  endpoint, socket path, identity, secret, or free-form error becomes a label.
+  These metrics observe only the default-off exact shadow path and never gate
+  approximate serving or `/health`.
 - `src/exact_shadow.rs` connects those inventories only to telemetry. The r19
   post-response path snapshots each trusted
   generation plus a monotonic inventory revision and retains the router's load
