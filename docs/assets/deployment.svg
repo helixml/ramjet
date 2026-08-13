@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="440" viewBox="0 0 1000 440" role="img" aria-labelledby="title desc">
+  <title id="title">mini-dynamo deployment</title>
+  <desc id="desc">OpenAI clients send requests to mini-dynamo, which balances traffic across two GPU inference engines using prompt locality and live load. Prometheus reads health and routing metrics.</desc>
+  <defs>
+    <linearGradient id="router" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6d5dfc"/>
+      <stop offset="1" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="engine" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#123454"/>
+      <stop offset="1" stop-color="#16233f"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#071126" flood-opacity=".16"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0l10 5-10 5z" fill="#71809e"/>
+    </marker>
+    <style>
+      .label{font:600 20px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#13213c}
+      .small{font:500 14px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#69748c}
+      .inverse{fill:#fff}
+      .line{fill:none;stroke:#71809e;stroke-width:3;marker-end:url(#arrow)}
+      .chip{fill:#eaf0ff}
+      @media (prefers-color-scheme:dark){
+        .canvas{fill:#0b1120}.label{fill:#edf2ff}.small{fill:#aab6ce}.client{fill:#151f35;stroke:#33405e}.chip{fill:#182845}.metrics{fill:#121d32;stroke:#33405e}
+      }
+    </style>
+  </defs>
+
+  <rect class="canvas" width="1000" height="440" rx="28" fill="#f8faff"/>
+
+  <path class="line" d="M220 185H350"/>
+  <path class="line" d="M650 190C710 190 710 112 760 112"/>
+  <path class="line" d="M650 250C710 250 710 328 760 328"/>
+  <path d="M500 315v56H300" fill="none" stroke="#8b97ad" stroke-width="2.5" stroke-dasharray="7 7" marker-end="url(#arrow)"/>
+
+  <g filter="url(#shadow)">
+    <rect class="client" x="55" y="138" width="165" height="94" rx="18" fill="#fff" stroke="#d9e1ef" stroke-width="2"/>
+    <circle cx="90" cy="173" r="12" fill="#6d5dfc"/>
+    <circle cx="125" cy="173" r="12" fill="#8b7fff"/>
+    <circle cx="160" cy="173" r="12" fill="#aaa3ff"/>
+    <text class="label" x="137.5" y="210" text-anchor="middle">OpenAI clients</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="350" y="135" width="300" height="180" rx="26" fill="url(#router)"/>
+    <path d="M398 201h36l18-28 27 57 20-35h44" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="label inverse" x="500" y="265" text-anchor="middle" font-size="25">mini-dynamo</text>
+    <text class="small inverse" x="500" y="290" text-anchor="middle" opacity=".86">prefix locality + live load</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="760" y="50" width="190" height="125" rx="20" fill="url(#engine)"/>
+    <rect x="785" y="73" width="45" height="45" rx="9" fill="#23c483"/>
+    <path d="M795 83h25v25h-25zM801 77v6m13-6v6m-13 25v6m13-6v6m-25-25h6m-6 13h6m25-13h6m-6 13h6" fill="none" stroke="#fff" stroke-width="2"/>
+    <text class="label inverse" x="850" y="142" text-anchor="middle">Engine A</text>
+    <text class="small inverse" x="890" y="91" text-anchor="middle">GPU replica</text>
+    <text class="small inverse" x="890" y="112" text-anchor="middle">warm prefixes</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="760" y="265" width="190" height="125" rx="20" fill="url(#engine)"/>
+    <rect x="785" y="288" width="45" height="45" rx="9" fill="#36a4ff"/>
+    <path d="M795 298h25v25h-25zM801 292v6m13-6v6m-13 25v6m13-6v6m-25-25h6m-6 13h6m25-13h6m-6 13h6" fill="none" stroke="#fff" stroke-width="2"/>
+    <text class="label inverse" x="850" y="357" text-anchor="middle">Engine B</text>
+    <text class="small inverse" x="890" y="306" text-anchor="middle">GPU replica</text>
+    <text class="small inverse" x="890" y="327" text-anchor="middle">idle capacity</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect class="metrics" x="80" y="344" width="220" height="62" rx="16" fill="#fff" stroke="#d9e1ef" stroke-width="2"/>
+    <circle cx="111" cy="375" r="12" fill="#f59e0b"/>
+    <path d="M105 375h12M111 369v12" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+    <text class="label" x="135" y="372">Prometheus</text>
+    <text class="small" x="135" y="392">health · load · cache</text>
+  </g>
+
+  <g>
+    <rect class="chip" x="672" y="196" width="113" height="34" rx="17"/>
+    <text class="small" x="728.5" y="218" text-anchor="middle">best score</text>
+  </g>
+</svg>

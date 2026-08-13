@@ -1,0 +1,4 @@
+interface:
+  display_name: "Optimize a mini-dynamo node"
+  short_description: "Tune a GPU serving node with measured A/B tests"
+  default_prompt: "Use $optimize-mini-dynamo-node to benchmark and tune this mini-dynamo GPU node."
