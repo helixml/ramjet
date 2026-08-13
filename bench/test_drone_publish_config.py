@@ -22,6 +22,7 @@ class DronePublishConfigTest(unittest.TestCase):
         self.assertIn("cargo fetch --locked\n      - sh bench/drone_publish_plan.sh", fetch.group(1))
         for kind, step in (
             ("rust-deps", "publish-rust-deps-image"),
+            ("release-tools", "publish-release-tools-image"),
             ("lb", "publish-image"),
             ("companion", "publish-companion-image"),
         ):
@@ -44,8 +45,8 @@ class DronePublishConfigTest(unittest.TestCase):
 
     def test_kaniko_publishers_are_cached_and_revision_stamped(self):
         text = DRONE.read_text().split("\n---\n")[0]
-        self.assertEqual(text.count("--cache-repo=ghcr.io/helixml/mini-dynamo-build-cache"), 3)
-        self.assertEqual(text.count("--snapshot-mode=redo --reproducible"), 3)
+        self.assertEqual(text.count("--cache-repo=ghcr.io/helixml/mini-dynamo-build-cache"), 4)
+        self.assertEqual(text.count("--snapshot-mode=redo --reproducible"), 4)
         for step in ("publish-image", "publish-companion-image"):
             section = re.search(
                 rf"(?ms)^  - name: {step}\n(.*?)(?=^  - name: |^trigger:)", text
