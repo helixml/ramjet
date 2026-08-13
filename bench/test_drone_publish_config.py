@@ -8,6 +8,10 @@ DRONE = ROOT / ".drone.yml"
 
 
 class DronePublishConfigTest(unittest.TestCase):
+    def test_quality_builds_are_serialized_on_the_runner(self):
+        quality = DRONE.read_text().split("\n---\n")[0]
+        self.assertRegex(quality, r"(?m)^concurrency:\n  limit: 1$")
+
     def test_rust_fetch_builds_plan_and_publishers_only_consume_it(self):
         text = DRONE.read_text()
         self.assertNotIn("paths:", text)

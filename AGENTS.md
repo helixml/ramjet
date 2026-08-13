@@ -405,8 +405,12 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   Compose validation beside that one Rust lane because they do not consume its
   artifacts. Keep Cargo's shared target and Docker BuildKit cache warm; do not
   clean either between runs.
-- Drone intentionally runs once per PR (and once after merge on `main`), not
-  again for every feature-branch push. Its Rust lane omits a redundant release
+- Drone runs one pipeline for each PR revision and once after merge on `main`,
+  not again for the corresponding feature-branch push. The quality pipeline's
+  concurrency limit serializes superseded revisions: #260/#261 proved that two
+  simultaneous cold Rust lanes can starve deadline-sensitive transport tests.
+  Cancel a superseded running build when safe instead of letting the queue grow.
+  Its Rust lane omits a redundant release
   build: the local pre-push gate builds release, and Drone's post-merge main
   pipeline builds and publishes the release container to GHCR. The
   `publish-image` step reads `ghcr_username`/`ghcr_token` only on a main push;

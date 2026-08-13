@@ -7,6 +7,11 @@ platform:
   os: linux
   arch: amd64
 
+# Deadline-sensitive transport tests and their two Rust compilation lanes must
+# not compete with a superseded build of this same pipeline on one runner.
+concurrency:
+  limit: 1
+
 steps:
   # Fetch once into a pipeline-scoped volume, then compile Clippy and tests in
   # parallel. They use separate target directories because Cargo artifacts
