@@ -439,8 +439,10 @@ node06). The design rationale for each lives in DESIGN.md.
   both exact inventories became trusted without restarting either engine. The
   node06 replay limit is therefore aligned with the publisher's 10,000-step
   window. A later 9,426-batch near-retention replay exceeded 20 seconds but
-  recovered inside a 60-second fail-closed window, so node06 now uses 60
-  seconds while exact placement remains disabled by default. Add
+  recovered once inside a 60-second fail-closed window, but subsequent rolls
+  needed roughly three minutes. Node06 temporarily uses 180 seconds while
+  exact placement remains disabled by default; timeout stretching is not the
+  durable solution. Add
   Dynamo-style snapshot/tree-dump recovery for histories older than that.
   Compare exact versus approximate decisions in telemetry before the router
   may consume this state; Dynamo's additional tree-dump recovery remains the

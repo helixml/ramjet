@@ -27,7 +27,7 @@ services:
   # compat shims, /v1/models context-margin rewrite, Prometheus metrics
   # (:8007 -> Caddy :9105) and engine-native metrics passthrough.
   ds4-loadbalancer:
-    image: ${LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-r31-streaming-replay-99da044@sha256:5c560e5b8a56c8ff40f43b17baff33edb53eab5b4610d00292e26967ed2b750b}
+    image: ${LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-r32-exact-canary-4c63eed@sha256:77f287741188277825abddb9fa684e39fe54e91ca4bdbe86b17b8fb9e02ed0df}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:
@@ -80,9 +80,9 @@ services:
       # LB-only roll can safely consume the complete retained generation.
       DS4_KV_EVENT_REPLAY_LIMIT: ${DS4_KV_EVENT_REPLAY_LIMIT:-10000}
       DS4_KV_EVENT_REPLAY_TAIL_LIMIT: ${DS4_KV_EVENT_REPLAY_TAIL_LIMIT:-64}
-      # A's 9,426-batch near-retention replay crossed 20s after the r32 canary;
-      # 60s remains fail-closed and recovered it without touching the engine.
-      DS4_KV_EVENT_TIMEOUT_MS: ${DS4_KV_EVENT_TIMEOUT_MS:-60000}
+      # Near-retention A replays vary from seconds to roughly three minutes.
+      # This stays fail-closed; snapshot/tree-dump recovery is the real fix.
+      DS4_KV_EVENT_TIMEOUT_MS: ${DS4_KV_EVENT_TIMEOUT_MS:-180000}
 
   dspark-0731:
     image: ${IMAGE_A:-${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}}
