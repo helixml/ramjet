@@ -52,6 +52,8 @@ fetch_exact https://github.com/NVIDIA/nvbandwidth.git "$NVBANDWIDTH_SHA" \
   "$build_root/nvbandwidth"
 fetch_exact https://github.com/NVIDIA/nccl-tests.git "$NCCL_TESTS_SHA" \
   "$build_root/nccl-tests"
+python3 "$SCRIPT_DIR/verify_pinned_sources.py" \
+  "$build_root/nvbandwidth" "$build_root/nccl-tests"
 cp -- "$SCRIPT_DIR/Dockerfile.tools" "$build_root/Dockerfile"
 
 docker buildx build \

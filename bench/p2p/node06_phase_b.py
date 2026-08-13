@@ -8,8 +8,10 @@ explicit run flag plus an exact production-risk acknowledgement.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -21,7 +23,7 @@ import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 R34_IMAGE_ID = "sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b"
@@ -49,6 +51,12 @@ FULL_TESTS = BANDWIDTH_TESTS + ("device_to_device_latency_sm",)
 
 class GateError(RuntimeError):
     pass
+
+
+class DeferredSignal(BaseException):
+    def __init__(self, signum: int):
+        super().__init__(f"received signal {signum}")
+        self.signum = signum
 
 
 def run(
@@ -269,36 +277,119 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def validate_tools(directory: pathlib.Path) -> None:
-    manifest_path = directory / "manifest.json"
-    if manifest_path.is_symlink():
-        raise GateError("tool manifest may not be a symlink")
+def sha256_fd(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    while chunk := os.read(descriptor, 1024 * 1024):
+        digest.update(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return digest.hexdigest()
+
+
+def verified_fd(directory_fd: int, name: str, *, owner_uid: int) -> int:
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise GateError("tool manifest is absent or malformed") from exc
-    expected = {
-        "schema_version": 1,
-        "nvbandwidth_commit": NVBANDWIDTH_SHA,
-        "nccl_tests_commit": NCCL_TESTS_SHA,
-        "runtime_image": R34_REPO_DIGEST,
-        "cuda_architecture": "120",
-    }
-    for key, value in expected.items():
-        if manifest.get(key) != value:
-            raise GateError(f"tool manifest identity mismatch: {key}")
-    for name in ("nvbandwidth", "all_reduce_perf"):
-        path = directory / name
-        if path.is_symlink():
-            raise GateError(f"{name} may not be a symlink")
-        metadata = path.stat()
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o022:
-            raise GateError(f"{name} is absent or writable by group/world")
-        if metadata.st_mode & 0o111 == 0:
-            raise GateError(f"{name} is not executable")
-        recorded = manifest.get("binaries", {}).get(name, {}).get("sha256")
-        if recorded != sha256(path):
-            raise GateError(f"{name} digest mismatch")
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=directory_fd,
+        )
+    except OSError as exc:
+        raise GateError(f"verified tool file cannot be opened safely: {name}") from exc
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        os.close(descriptor)
+        raise GateError(f"verified tool file is not regular: {name}")
+    if metadata.st_uid != owner_uid or metadata.st_mode & 0o222:
+        os.close(descriptor)
+        raise GateError(f"verified tool file is not owner-locked: {name}")
+    return descriptor
+
+
+def copy_verified_fd(descriptor: int, destination: pathlib.Path, mode: int) -> None:
+    output = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+        mode,
+    )
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while chunk := os.read(descriptor, 1024 * 1024):
+            view = memoryview(chunk)
+            while view:
+                written = os.write(output, view)
+                view = view[written:]
+        os.fsync(output)
+    finally:
+        os.close(output)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+
+
+def validate_and_stage_tools(
+    directory: pathlib.Path,
+    expected_manifest_sha256: str,
+    stage: pathlib.Path,
+    *,
+    owner_uid: int = 0,
+) -> pathlib.Path:
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_sha256):
+        raise GateError("expected tool manifest SHA-256 must be 64 lowercase hex digits")
+    try:
+        directory_metadata = os.lstat(directory)
+    except OSError as exc:
+        raise GateError("verified tool directory is absent") from exc
+    if (
+        not stat.S_ISDIR(directory_metadata.st_mode)
+        or stat.S_ISLNK(directory_metadata.st_mode)
+        or directory_metadata.st_uid != owner_uid
+        or directory_metadata.st_mode & 0o222
+    ):
+        raise GateError("verified tool directory is not owner-locked")
+    directory_fd = os.open(
+        directory,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    descriptors: dict[str, int] = {}
+    try:
+        for name in ("manifest.json", "nvbandwidth", "all_reduce_perf"):
+            descriptors[name] = verified_fd(directory_fd, name, owner_uid=owner_uid)
+        manifest_fd = descriptors["manifest.json"]
+        if sha256_fd(manifest_fd) != expected_manifest_sha256:
+            raise GateError("tool manifest differs from the external expected SHA-256")
+        manifest_bytes = os.read(manifest_fd, 1024 * 1024)
+        if os.read(manifest_fd, 1):
+            raise GateError("tool manifest exceeds 1MiB")
+        try:
+            manifest = json.loads(manifest_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise GateError("tool manifest is malformed") from exc
+        expected = {
+            "schema_version": 1,
+            "nvbandwidth_commit": NVBANDWIDTH_SHA,
+            "nccl_tests_commit": NCCL_TESTS_SHA,
+            "runtime_image": R34_REPO_DIGEST,
+            "cuda_architecture": "120",
+        }
+        for key, value in expected.items():
+            if manifest.get(key) != value:
+                raise GateError(f"tool manifest identity mismatch: {key}")
+        for name in ("nvbandwidth", "all_reduce_perf"):
+            metadata = os.fstat(descriptors[name])
+            if metadata.st_mode & 0o111 == 0:
+                raise GateError(f"verified tool is not executable: {name}")
+            recorded = manifest.get("binaries", {}).get(name, {}).get("sha256")
+            if recorded != sha256_fd(descriptors[name]):
+                raise GateError(f"verified tool digest mismatch: {name}")
+
+        stage.mkdir(mode=0o700)
+        copy_verified_fd(manifest_fd, stage / "manifest.json", 0o444)
+        for name in ("nvbandwidth", "all_reduce_perf"):
+            copy_verified_fd(descriptors[name], stage / name, 0o555)
+        stage.chmod(0o555)
+        return stage
+    finally:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+        os.close(directory_fd)
 
 
 def prometheus_snapshot(port: int) -> dict[str, float]:
@@ -335,30 +426,223 @@ def health_json(port: int) -> dict[str, Any]:
         return json.loads(response.read(1024 * 1024))
 
 
-def compose_environment() -> tuple[dict[str, str], dict[str, Any], str]:
-    environment = os.environ.copy()
+@dataclass(frozen=True)
+class ComposeBaseline:
+    render_path: pathlib.Path
+    single_path: pathlib.Path
+    render_sha256: str
+    project_name: str
+    source_identities: dict[str, str]
+    runtime_spec: dict[str, Any]
+    service_hash: str
+    restore_service_hash: str
+
+
+def env_map(values: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in values:
+        if "=" not in item:
+            raise GateError("container image has an environment entry without a value")
+        key, value = item.split("=", 1)
+        if key in result:
+            raise GateError(f"container environment repeats {key}")
+        result[key] = value
+    return result
+
+
+def expected_service_env(service: dict[str, Any], image: str) -> dict[str, str]:
+    image_document = json.loads(run(["docker", "image", "inspect", image]))
+    if len(image_document) != 1:
+        raise GateError("rendered LB image identity is ambiguous")
+    result = env_map(image_document[0].get("Config", {}).get("Env") or [])
+    rendered = service.get("environment") or {}
+    if not isinstance(rendered, dict):
+        raise GateError("rendered LB environment is not a mapping")
+    for key, value in rendered.items():
+        result[str(key)] = "" if value is None else str(value)
+    return result
+
+
+def runtime_lb_spec(container: dict[str, Any]) -> dict[str, Any]:
+    config = container.get("Config") or {}
+    host = container.get("HostConfig") or {}
+    mounts = []
+    for mount in container.get("Mounts") or []:
+        mounts.append(
+            {
+                key: mount.get(key)
+                for key in ("Type", "Source", "Destination", "Mode", "RW", "Propagation")
+            }
+        )
+    return {
+        "image_id": container.get("Image"),
+        "config": {
+            "env": sorted(config.get("Env") or []),
+            "cmd": config.get("Cmd"),
+            "entrypoint": config.get("Entrypoint"),
+            "working_dir": config.get("WorkingDir"),
+            "user": config.get("User"),
+            "labels": {
+                key: value
+                for key, value in (config.get("Labels") or {}).items()
+                if key
+                not in {
+                    "com.docker.compose.config-hash",
+                    "com.docker.compose.project.config_files",
+                    "com.docker.compose.project.working_dir",
+                }
+            },
+        },
+        "host": {
+            key: host.get(key)
+            for key in (
+                "Binds",
+                "CapAdd",
+                "CapDrop",
+                "CpusetCpus",
+                "CpusetMems",
+                "DeviceRequests",
+                "IpcMode",
+                "Memory",
+                "NanoCpus",
+                "NetworkMode",
+                "PidsLimit",
+                "PortBindings",
+                "Privileged",
+                "ReadonlyRootfs",
+                "RestartPolicy",
+                "SecurityOpt",
+                "ShmSize",
+            )
+        },
+        "mounts": sorted(mounts, key=lambda mount: str(mount.get("Destination"))),
+    }
+
+
+def source_identities() -> dict[str, str]:
+    result = {}
+    for path in (COMPOSE_FILE, COMPOSE_DIR / ".env"):
+        metadata = os.lstat(path)
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise GateError(f"Compose source is not a regular non-symlink: {path.name}")
+        result[path.name] = sha256(path)
+    return result
+
+
+def render_compose(compose_file: pathlib.Path) -> tuple[str, dict[str, Any]]:
     output = run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "config", "--format", "json"],
-        env=environment,
+        ["docker", "compose", "-f", str(compose_file), "config", "--format", "json"]
     )
-    document = json.loads(output)
+    try:
+        document = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise GateError("Docker Compose rendered malformed JSON") from exc
+    return output, document
+
+
+def compose_service_hash(compose_file: pathlib.Path, project_name: str) -> str:
+    output = run(
+        [
+            "docker",
+            "compose",
+            "--project-name",
+            project_name,
+            "-f",
+            str(compose_file),
+            "config",
+            "--hash",
+            LB_CONTAINER,
+        ]
+    ).strip()
+    fields = output.split()
+    value = fields[-1] if fields else ""
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise GateError("Docker Compose did not emit a service config hash")
+    return value
+
+
+def validate_rendered_runtime(
+    document: dict[str, Any], current: dict[str, Any], service_hash: str
+) -> None:
     service = document.get("services", {}).get(LB_CONTAINER)
     if not service:
         raise GateError("Compose does not contain the load balancer")
-    current = docker_inspect(LB_CONTAINER)
     rendered_image = service.get("image")
     rendered_id = json.loads(run(["docker", "image", "inspect", rendered_image]))[0]["Id"]
     if current.get("Image") != rendered_id:
         raise GateError("running LB image differs from rendered Compose")
-    current_env = dict(
-        item.split("=", 1)
-        for item in current["Config"].get("Env", [])
-        if "=" in item
+    expected_env = expected_service_env(service, rendered_image)
+    current_env = env_map(current.get("Config", {}).get("Env") or [])
+    if current_env != expected_env:
+        raise GateError("running LB environment has missing or unexpected entries")
+    labels = current.get("Config", {}).get("Labels") or {}
+    if labels.get("com.docker.compose.config-hash") != service_hash:
+        raise GateError("running LB full Compose service hash differs from render")
+
+
+def capture_compose_baseline(result: pathlib.Path) -> ComposeBaseline:
+    identities = source_identities()
+    rendered_text, document = render_compose(COMPOSE_FILE)
+    project_name = str(document.get("name") or "")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project_name):
+        raise GateError("rendered Compose project name is absent or unsafe")
+    render_path = result / "compose-baseline.json"
+    write_private(render_path, rendered_text)
+    service_hash = compose_service_hash(COMPOSE_FILE, project_name)
+    restore_service_hash = compose_service_hash(render_path, project_name)
+    current = docker_inspect(LB_CONTAINER)
+    validate_rendered_runtime(document, current, service_hash)
+    runtime_spec = runtime_lb_spec(current)
+    write_private(
+        result / "compose-baseline-runtime.json",
+        json.dumps(runtime_spec, indent=2, sort_keys=True) + "\n",
     )
-    rendered_env = service.get("environment") or {}
-    if any(current_env.get(key) != str(value) for key, value in rendered_env.items()):
-        raise GateError("running LB environment differs from rendered Compose")
-    return environment, current, rendered_image
+
+    single_document = copy.deepcopy(document)
+    service = single_document["services"][LB_CONTAINER]
+    environment = service.setdefault("environment", {})
+    environment.update(
+        {
+            "DS4_UPSTREAM": "http://dspark-0731:8000",
+            "DS4_KV_EVENT_LIVE_ENDPOINTS": "tcp://dspark-0731:5557",
+            "DS4_KV_EVENT_REPLAY_ENDPOINTS": "tcp://dspark-0731:5558",
+        }
+    )
+    single_path = result / "compose-single-home.json"
+    write_private(single_path, json.dumps(single_document, indent=2) + "\n")
+    baseline = ComposeBaseline(
+        render_path=render_path,
+        single_path=single_path,
+        render_sha256=sha256(render_path),
+        project_name=project_name,
+        source_identities=identities,
+        runtime_spec=runtime_spec,
+        service_hash=service_hash,
+        restore_service_hash=restore_service_hash,
+    )
+    write_private(
+        result / "compose-baseline-identity.json",
+        json.dumps(
+            {
+                "render_sha256": baseline.render_sha256,
+                "service_hash": service_hash,
+                "restore_service_hash": restore_service_hash,
+                "sources": identities,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    reject_compose_drift(baseline)
+    return baseline
+
+
+def reject_compose_drift(baseline: ComposeBaseline) -> None:
+    if source_identities() != baseline.source_identities:
+        raise GateError("Compose or .env changed after immutable baseline capture")
+    if sha256(baseline.render_path) != baseline.render_sha256:
+        raise GateError("private immutable Compose baseline changed")
 
 
 def write_private(path: pathlib.Path, text: str) -> None:
@@ -367,21 +651,33 @@ def write_private(path: pathlib.Path, text: str) -> None:
         handle.write(text)
 
 
-def run_compose(environment: dict[str, str]) -> None:
+def run_compose(compose_file: pathlib.Path, project_name: str) -> None:
     run(
         [
             "docker",
             "compose",
+            "--project-name",
+            project_name,
             "-f",
-            str(COMPOSE_FILE),
+            str(compose_file),
             "up",
             "-d",
             "--no-deps",
             LB_CONTAINER,
         ],
-        env=environment,
         timeout=60,
     )
+
+
+def verify_restored_baseline(baseline: ComposeBaseline) -> None:
+    wait_for_health(2)
+    current = docker_inspect(LB_CONTAINER)
+    if runtime_lb_spec(current) != baseline.runtime_spec:
+        raise GateError("restored LB runtime spec differs from immutable baseline")
+    rendered_text = baseline.render_path.read_text(encoding="utf-8")
+    document = json.loads(rendered_text)
+    validate_rendered_runtime(document, current, baseline.restore_service_hash)
+    reject_compose_drift(baseline)
 
 
 def wait_for_health(expected_replicas: int, timeout: int = 30) -> None:
@@ -400,7 +696,9 @@ def wait_for_health(expected_replicas: int, timeout: int = 30) -> None:
     raise GateError(f"LB did not reach {expected_replicas}/{expected_replicas} health")
 
 
-def quiet_fence(seconds: int) -> tuple[dict[str, float], dict[str, float]]:
+def quiet_fence(
+    seconds: int, interrupted: Callable[[], int | None] = lambda: None
+) -> tuple[dict[str, float], dict[str, float]]:
     if seconds < MIN_QUIET_SECONDS:
         raise GateError("quiet fence may not be shorter than 60 seconds")
     start = prometheus_snapshot(8013)
@@ -408,7 +706,10 @@ def quiet_fence(seconds: int) -> tuple[dict[str, float], dict[str, float]]:
         raise GateError("target engine is not idle at quiet-fence start")
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        time.sleep(min(10, max(0.1, deadline - time.monotonic())))
+        signum = interrupted()
+        if signum is not None:
+            raise DeferredSignal(signum)
+        time.sleep(min(1, max(0.1, deadline - time.monotonic())))
         current = prometheus_snapshot(8013)
         if current["running"] or current["waiting"]:
             raise GateError("target engine received work during quiet fence")
@@ -422,11 +723,10 @@ def quiet_fence(seconds: int) -> tuple[dict[str, float], dict[str, float]]:
 def container_base(
     name: str, uuids: tuple[str, ...], tools: pathlib.Path
 ) -> list[str]:
-    gpu_request = '"device=' + ",".join(uuids) + '"'
+    gpu_request = "device=" + ",".join(uuids)
     return [
         "docker",
-        "run",
-        "--rm",
+        "create",
         "--name",
         name,
         "--label",
@@ -465,13 +765,27 @@ def run_benchmark(
     name: str,
     output: pathlib.Path,
     timeout: int,
+    interrupted: Callable[[], int | None] = lambda: None,
 ) -> None:
+    container_id = run(command, timeout=30).strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+        raise GateError(f"benchmark {name} create returned an invalid container ID")
     descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        process = subprocess.Popen(command, stdout=handle, stderr=subprocess.STDOUT, text=True)
-        deadline = time.monotonic() + timeout
-        try:
+    process: subprocess.Popen[str] | None = None
+    failure: BaseException | None = None
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            process = subprocess.Popen(
+                ["docker", "start", "--attach", container_id],
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            deadline = time.monotonic() + timeout
             while process.poll() is None:
+                signum = interrupted()
+                if signum is not None:
+                    raise DeferredSignal(signum)
                 if time.monotonic() >= deadline:
                     raise GateError(f"benchmark {name} exceeded {timeout}s")
                 health = health_json(8006)
@@ -483,20 +797,35 @@ def run_benchmark(
                 time.sleep(1)
             if process.returncode != 0:
                 raise GateError(f"benchmark {name} exited {process.returncode}")
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-                subprocess.run(
-                    ["docker", "rm", "-f", name],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+    except BaseException as exc:
+        failure = exc
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        try:
+            removed = subprocess.run(
+                ["docker", "rm", "-f", container_id],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GateError(
+                f"CRITICAL: failed to remove benchmark container {container_id}"
+            ) from exc
+        if removed.returncode != 0:
+            raise GateError(
+                f"CRITICAL: failed to remove benchmark container {container_id}"
+            )
+    if failure is not None:
+        raise failure
 
 
 def validate_nvbandwidth_output(
@@ -542,6 +871,61 @@ def validate_nvbandwidth_output(
                     )
 
 
+def expected_nccl_sizes() -> set[int]:
+    result = set()
+    value = 8 * 1024
+    while value <= 8 * 1024 * 1024:
+        result.add(value)
+        value *= 2
+    return result
+
+
+def validate_nccl_output(path: pathlib.Path) -> None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise GateError("NCCL output is absent or malformed") from exc
+    if not re.search(r"#\s+nThread\s+\d+\s+nGpus\s+4\b", text):
+        raise GateError("NCCL output does not prove four participating GPU ranks")
+    if re.search(r"\b(?:NCCL WARN|error|failed|abort|timeout)\b", text, re.I):
+        raise GateError("NCCL output contains a runtime failure marker")
+    if not re.search(r"#\s+Out of bounds values\s*:\s*0\s+OK\b", text):
+        raise GateError("NCCL output does not prove zero validation errors")
+    if re.search(r"\bvia\s+(?:SHM|NET)/", text):
+        raise GateError("NCCL output selected a fallback transport")
+    p2p_routes = re.findall(r"\bvia\s+P2P/[^\r\n]+", text)
+    if len(p2p_routes) < 4:
+        raise GateError("NCCL output does not prove the intended P2P transport")
+
+    observed: dict[int, int] = {}
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 13 or not fields[0].isdigit():
+            continue
+        try:
+            size = int(fields[0])
+            measurements = (
+                tuple(float(value) for value in fields[5:8]) + (int(fields[8]),),
+                tuple(float(value) for value in fields[9:12]) + (int(fields[12]),),
+            )
+        except ValueError:
+            continue
+        if size not in expected_nccl_sizes():
+            continue
+        for time_us, algbw, busbw, wrong in measurements:
+            if (
+                not all(
+                    math.isfinite(value) and value > 0
+                    for value in (time_us, algbw, busbw)
+                )
+                or wrong != 0
+            ):
+                raise GateError(f"NCCL emitted an invalid result row for {size} bytes")
+        observed[size] = observed.get(size, 0) + 1
+    if any(observed.get(size, 0) != 1 for size in expected_nccl_sizes()):
+        raise GateError("NCCL output omits expected in-place/out-of-place size rows")
+
+
 def capture_metadata(result: pathlib.Path, state: Preflight, tools: pathlib.Path) -> None:
     summary = {
         "schema_version": 1,
@@ -579,49 +963,56 @@ def capture_metadata(result: pathlib.Path, state: Preflight, tools: pathlib.Path
 
 
 def active_run(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
-    tools = args.tools_dir.resolve()
-    validate_tools(tools)
-    baseline_env, _, rendered_image = compose_environment()
-    wait_for_health(2)
+    if os.geteuid() != 0:
+        raise GateError("active mode must run as root for immutable tool ownership")
     result = pathlib.Path(tempfile.mkdtemp(prefix="mini-dynamo-p2p-phase-b.", dir="/tmp"))
     result.chmod(0o700)
     print(f"private active result directory: {result}", file=sys.stderr)
+    tools = validate_and_stage_tools(
+        args.tools_dir,
+        args.expected_tools_manifest_sha256,
+        result / "verified-tools",
+    )
+    baseline = capture_compose_baseline(result)
+    wait_for_health(2)
     capture_metadata(result, state, tools)
 
     restore_needed = False
-    interrupted = False
+    interrupted_signum: int | None = None
 
-    def mark_interrupted(_signum: int, _frame: Any) -> None:
-        nonlocal interrupted
-        interrupted = True
-        raise KeyboardInterrupt
+    def mark_interrupted(signum: int, _frame: Any) -> None:
+        nonlocal interrupted_signum
+        if interrupted_signum is None:
+            interrupted_signum = signum
+
+    def pending_signal() -> int | None:
+        return interrupted_signum
+
+    def propagate_pending_signal() -> None:
+        if interrupted_signum is not None:
+            raise DeferredSignal(interrupted_signum)
 
     old_handlers = {
         signum: signal.signal(signum, mark_interrupted)
         for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
     }
     try:
-        single_env = baseline_env.copy()
-        single_env.update(
-            {
-                "LB_IMAGE": rendered_image,
-                "DS4_UPSTREAM": "http://dspark-0731:8000",
-                "DS4_KV_EVENT_LIVE_ENDPOINTS": "tcp://dspark-0731:5557",
-                "DS4_KV_EVENT_REPLAY_ENDPOINTS": "tcp://dspark-0731:5558",
-            }
-        )
+        reject_compose_drift(baseline)
+        propagate_pending_signal()
         restore_needed = True
-        run_compose(single_env)
+        run_compose(baseline.single_path, baseline.project_name)
+        propagate_pending_signal()
         wait_for_health(1)
         current = docker_inspect(LB_CONTAINER)
-        current_env = dict(
-            item.split("=", 1)
-            for item in current["Config"].get("Env", [])
-            if "=" in item
+        single_document = json.loads(
+            baseline.single_path.read_text(encoding="utf-8")
         )
-        if current_env.get("DS4_UPSTREAM") != "http://dspark-0731:8000":
-            raise GateError("LB did not become single-homed on the control")
-        start, end = quiet_fence(args.quiet_seconds)
+        single_hash = compose_service_hash(
+            baseline.single_path, baseline.project_name
+        )
+        validate_rendered_runtime(single_document, current, single_hash)
+        propagate_pending_signal()
+        start, end = quiet_fence(args.quiet_seconds, pending_signal)
         write_private(
             result / "quiet-fence.json",
             json.dumps(
@@ -631,6 +1022,7 @@ def active_run(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
             + "\n",
         )
         state = preflight(active=True)
+        propagate_pending_signal()
 
         token = result.name.rsplit(".", 1)[-1]
         scout_name = f"md-p2p-scout-{token}"
@@ -654,6 +1046,7 @@ def active_run(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
             name=scout_name,
             output=result / "nvbandwidth-scout.json",
             timeout=60,
+            interrupted=pending_signal,
         )
         validate_nvbandwidth_output(
             result / "nvbandwidth-scout.json", BANDWIDTH_TESTS, 2
@@ -685,6 +1078,7 @@ def active_run(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
                     name=full_name,
                     output=result / f"nvbandwidth-full-{cycle}.json",
                     timeout=180,
+                    interrupted=pending_signal,
                 )
                 validate_nvbandwidth_output(
                     result / f"nvbandwidth-full-{cycle}.json", FULL_TESTS, 4
@@ -729,7 +1123,9 @@ def active_run(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
                 name=nccl_name,
                 output=result / "nccl-all-reduce.txt",
                 timeout=120,
+                interrupted=pending_signal,
             )
+            validate_nccl_output(result / "nccl-all-reduce.txt")
 
         final_target = prometheus_snapshot(8013)
         if final_target["running"] or final_target["waiting"]:
@@ -737,22 +1133,27 @@ def active_run(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
         for key in ("prompt_tokens", "generation_tokens", "requests"):
             if final_target[key] != end[key]:
                 raise GateError(f"target engine {key} changed during benchmark")
-        if interrupted:
-            raise GateError("run interrupted")
+        propagate_pending_signal()
         return result
     finally:
         restore_error: Exception | None = None
         if restore_needed:
             try:
-                run_compose(baseline_env)
-                wait_for_health(2)
-                compose_environment()
+                run_compose(baseline.render_path, baseline.project_name)
+                verify_restored_baseline(baseline)
+            except Exception as exc:
+                restore_error = exc
+        else:
+            try:
+                verify_restored_baseline(baseline)
             except Exception as exc:
                 restore_error = exc
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
         if restore_error is not None:
             raise GateError(f"CRITICAL: LB restoration failed: {restore_error}") from restore_error
+        if interrupted_signum is not None:
+            raise DeferredSignal(interrupted_signum)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -764,6 +1165,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--tools-dir", type=pathlib.Path, default=pathlib.Path("/tmp/mini-dynamo-p2p-tools")
     )
+    result.add_argument("--expected-tools-manifest-sha256")
     result.add_argument("--quiet-seconds", type=int, default=MIN_QUIET_SECONDS)
     result.add_argument("--cycles", type=int, choices=range(1, 4), default=1)
     result.add_argument("--print-plan", action="store_true")
@@ -797,6 +1199,14 @@ def main(argv: list[str] | None = None) -> int:
     if active and args.quiet_seconds < MIN_QUIET_SECONDS:
         print("active mode requires at least a 60-second quiet fence", file=sys.stderr)
         return 2
+    if active and not re.fullmatch(
+        r"[0-9a-f]{64}", args.expected_tools_manifest_sha256 or ""
+    ):
+        print(
+            "active mode requires --expected-tools-manifest-sha256 with 64 lowercase hex digits",
+            file=sys.stderr,
+        )
+        return 2
     try:
         state = preflight(active=active)
         summary = {
@@ -816,8 +1226,14 @@ def main(argv: list[str] | None = None) -> int:
         result = active_run(args, state)
         print(f"active prerequisite complete; private results: {result}")
         return 0
+    except DeferredSignal as exc:
+        print(
+            f"phase-B prerequisite restored then propagated signal {exc.signum}",
+            file=sys.stderr,
+        )
+        return 128 + exc.signum
     except KeyboardInterrupt:
-        print("phase-B prerequisite interrupted and failed closed", file=sys.stderr)
+        print("phase-B read-only preflight interrupted", file=sys.stderr)
         return 130
     except (GateError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
         print(f"phase-B prerequisite failed closed: {exc}", file=sys.stderr)

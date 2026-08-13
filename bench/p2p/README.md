@@ -28,8 +28,22 @@ bench/p2p/build_tools.sh /home/karolis/.cache/mini-dynamo-p2p-tools
 scp -r /home/karolis/.cache/mini-dynamo-p2p-tools node06:/tmp/
 ```
 
-Do not compile in a live engine container. Check the manifest and transferred
-hashes before considering active mode.
+Record the manifest digest from the development host through a separate trusted
+channel, then make the transferred tree root-owned and immutable. Do not copy a
+digest from node06's adjacent manifest and treat it as external evidence:
+
+```bash
+sha256sum /home/karolis/.cache/mini-dynamo-p2p-tools/manifest.json
+ssh node06 'chown -R root:root /tmp/mini-dynamo-p2p-tools && \
+  chmod 0555 /tmp/mini-dynamo-p2p-tools \
+    /tmp/mini-dynamo-p2p-tools/nvbandwidth \
+    /tmp/mini-dynamo-p2p-tools/all_reduce_perf && \
+  chmod 0444 /tmp/mini-dynamo-p2p-tools/manifest.json'
+```
+
+Do not compile in a live engine container. Active mode accepts only a
+root-owned, non-writable, non-symlink tree matching the external manifest hash,
+then copies verified file descriptors into a private root-owned staging tree.
 
 ## Read-only default
 
@@ -55,8 +69,9 @@ are never restarted.
 The minimal 1MiB/two-GPU scout requires both switches:
 
 ```bash
-python3 bench/p2p/node06_phase_b.py \
+sudo python3 bench/p2p/node06_phase_b.py \
   --run-gpu-scout \
+  --expected-tools-manifest-sha256 <trusted-development-host-sha256> \
   --acknowledge-production-risk I_ACKNOWLEDGE_NODE06_PRODUCTION_RISK
 ```
 
@@ -64,8 +79,9 @@ The complete 64MiB TP4 SM/CE/latency matrix plus NCCL control is separately
 explicit. Use three cycles only for the qualified before/after comparison:
 
 ```bash
-python3 bench/p2p/node06_phase_b.py \
+sudo python3 bench/p2p/node06_phase_b.py \
   --run-full-prerequisite --cycles 3 \
+  --expected-tools-manifest-sha256 <trusted-development-host-sha256> \
   --acknowledge-production-risk I_ACKNOWLEDGE_NODE06_PRODUCTION_RISK
 ```
 
@@ -73,15 +89,22 @@ Every tool container has `network=none`, private IPC, read-only root, all
 capabilities dropped, no-new-privileges, fixed CPU/NUMA/memory/PID limits, an
 ephemeral `/tmp`, only the read-only tool mount, and a 60/180/120-second
 scout/matrix/NCCL timeout. The harness polls control health during each run,
-terminates its uniquely named tool container on timeout/health loss/signal, and
-restores the previously rendered dual-engine LB in `finally`. It refuses active
-mode if the running LB differs from rendered Compose, preventing an accidental
-rollback of uncommitted runtime configuration.
+creates each tool container first, retains its exact ID, attaches separately,
+and unconditionally removes that ID on timeout, health loss, client failure, or
+signal. Signals are deferred while the immutable captured Compose render is
+restored and are propagated only after 2/2 health and the complete runtime spec
+match. The harness hashes Compose and `.env` before mutation, rejects source
+drift, captures the complete rendered baseline plus service config hash, and
+refuses active mode if the running LB has missing or unexpected environment or
+other relevant spec differences.
 
 Results live under a newly created mode-0700
-`/tmp/mini-dynamo-p2p-phase-b.*` directory; each file is mode 0600. They contain
-public topology/tool identities, counters, and benchmark output—never prompts,
-responses, API keys, or the LB environment.
+`/tmp/mini-dynamo-p2p-phase-b.*` directory; each file is mode 0600. Treat the
+entire directory as sensitive: the immutable Compose baseline intentionally
+contains the full rendered LB environment so restoration does not depend on a
+mutable `.env`. Other artifacts contain topology/tool identities, counters, and
+benchmark output, never prompts or responses. Do not copy, commit, or weaken
+permissions on the result directory.
 
 ## Interpretation and runtime
 
