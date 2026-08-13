@@ -32,12 +32,15 @@ pub struct SnapshotLimits {
 impl Default for SnapshotLimits {
     fn default() -> Self {
         Self {
-            max_frame_bytes: 64 * 1024 * 1024,
-            max_payload_bytes: 64 * 1024 * 1024,
+            max_frame_bytes: 32 * 1024 * 1024,
+            max_payload_bytes: 32 * 1024 * 1024,
             max_incarnation_component_bytes: 512,
-            max_key_id_bytes: 64,
+            max_key_id_bytes: SHA256_BYTES,
             max_groups: 4_096,
-            max_records: 1_048_576,
+            // Match the production digest/raw index node budget. Decoding a
+            // larger owned record vector cannot produce a usable index and is
+            // therefore rejected at the wire boundary.
+            max_records: 131_072,
             max_external_hash_bytes: 256,
             max_total_external_hash_bytes: 32 * 1024 * 1024,
             max_prefix_token_ids: 16_777_216,
@@ -433,7 +436,7 @@ fn validate_header(body: &SnapshotBody, limits: SnapshotLimits) -> Result<(), Sn
     validate_incarnation(&body.engine_incarnation, limits)?;
     if body.digest.algorithm != DigestAlgorithm::HmacSha256V1
         || usize::from(body.digest.digest_bytes) != SHA256_BYTES
-        || body.digest.key_id.is_empty()
+        || body.digest.key_id.len() != SHA256_BYTES
         || body.digest.key_id.len() > limits.max_key_id_bytes
     {
         return Err(SnapshotError::UnsupportedDigest);

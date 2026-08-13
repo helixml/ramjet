@@ -53,9 +53,9 @@ impl Default for SnapshotSessionLimits {
     fn default() -> Self {
         Self {
             max_hello_frame_bytes: HELLO_FRAME_BYTES,
-            max_response_frame_bytes: 64 * 1024 * 1024 + 4 * 1024,
+            max_response_frame_bytes: 32 * 1024 * 1024 + 4 * 1024,
             max_header_bytes: 4 * 1024,
-            max_snapshot_frame_bytes: 64 * 1024 * 1024,
+            max_snapshot_frame_bytes: 32 * 1024 * 1024,
             max_incarnation_component_bytes: 512,
         }
     }

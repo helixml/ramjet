@@ -111,6 +111,12 @@ companion merely because these local gates pass: authenticated UDS session,
 incarnation/watermark freshness, gap fencing, and atomic tail catch-up remain
 mandatory.
 
+Never interpret vLLM's event sequence as a dense counter. It advances with
+scheduler steps while only steps emitting KV events are retained. Snapshot
+tail transport therefore needs its own contiguous authenticated delivery
+sequence while preserving the last real-event sequence as the authoritative
+watermark. A numeric gap in real vLLM event sequences is not data loss.
+
 ## node06 — the test/production box
 
 node06 is a Tailscale host running two vLLM+DSpark TP4 instances behind this
