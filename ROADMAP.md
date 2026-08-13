@@ -470,6 +470,14 @@ node06). The design rationale for each lives in DESIGN.md.
   generation, gap, capacity, checksum, or compatibility mismatch. First prove
   a captured 36,612-block / 9.37M-token shape in under three seconds locally,
   then deploy shadow-only and compare decisions against the raw-token index.
+  Issue #41's first GPU-free prototype clears the transfer gate by a wide
+  margin: a versioned, bounded 36,612-record MessagePack snapshot is 5.71MB,
+  encodes in 10.3ms, decodes and validates in 10.8ms (8.3ms repeated), and
+  peaks at 27MiB standalone RSS. A separate digest radix prototype stores one
+  256-bit commitment per block, detects/poisons compact-key conflicts, and
+  traverses a 524,288-token chain in 1.36ms. Next move the digest index behind
+  the existing inventory interface, add raw-token/digest golden parity and a
+  full snapshot-to-index benchmark, then implement the UDS companion actor.
   Compare exact versus approximate decisions in telemetry before the router
   may consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.

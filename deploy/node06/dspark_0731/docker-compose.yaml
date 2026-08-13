@@ -75,13 +75,13 @@ services:
       DS4_KV_EVENT_LIVE_ENDPOINTS: ${DS4_KV_EVENT_LIVE_ENDPOINTS:-tcp://dspark-0731:5557,tcp://dspark-0731-b:5557}
       DS4_KV_EVENT_REPLAY_ENDPOINTS: ${DS4_KV_EVENT_REPLAY_ENDPOINTS:-tcp://dspark-0731:5558,tcp://dspark-0731-b:5558}
       DS4_KV_EVENT_TOPIC: "${DS4_KV_EVENT_TOPIC:-}"
-      # The publisher retains 10K scheduler steps. Full recovery streams into
-      # a scratch inventory and swaps only after end/cursor validation, so an
-      # LB-only roll can safely consume the complete retained generation.
+      # The publisher retains 10K scheduler steps, but near-retention replay
+      # can stall its synchronous publisher for minutes. Claim only the tested
+      # 8K recovery envelope; older generations remain fenced/observe-only.
       DS4_KV_EVENT_REPLAY_LIMIT: ${DS4_KV_EVENT_REPLAY_LIMIT:-8192}
       DS4_KV_EVENT_REPLAY_TAIL_LIMIT: ${DS4_KV_EVENT_REPLAY_TAIL_LIMIT:-64}
-      # Near-retention A replays vary from seconds to roughly three minutes.
-      # This stays fail-closed; snapshot/tree-dump recovery is the real fix.
+      # Valid in-envelope replay stays fail-closed at one total deadline;
+      # snapshot/tree-dump recovery replaces replay for older generations.
       DS4_KV_EVENT_TIMEOUT_MS: ${DS4_KV_EVENT_TIMEOUT_MS:-180000}
 
   dspark-0731:
