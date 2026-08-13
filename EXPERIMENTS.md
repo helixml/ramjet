@@ -4311,3 +4311,47 @@ were running with zero restarts after the audit. No identity, group, directory,
 secret, Caddy membership, container, route, image, engine, or GPU state changed.
 The helper must land and pass Drone before an operator applies it; the first
 companion deployment remains snapshot-routing-off and engine-restart-free.
+
+## 2026-08-13 — r71 node06 snapshot off-mode admission
+
+The qualified v0.1.0 LB and companion manifests were pinned in #104, then the
+production snapshot contract was exercised under the node06 deployment lock.
+The hardened helper created the fixed non-login UIDs/GIDs, six distinct setgid
+tmpfs directories, and four independent create-once secrets. Read-only setup
+validation and the production `pre-provision` gate passed. Fresh metadata was
+captured from both unchanged r34 engine processes and both authenticated
+attestations were published; the full host gate then passed.
+
+The first attestation attempts demonstrated two useful fail-closed edges. One
+metadata capture exceeded the default 30-second freshness bound while the
+companion image was pulled and was rejected as `stale_metadata`. A subsequent
+capture used an older node06 helper without the process-start field and was
+rejected as `malformed_metadata`. The current repository helper was installed,
+each engine was recaptured immediately before its one-shot provisioner, and the
+resulting root/session-group mode-0440 attestations passed full validation. No
+engine was restarted or otherwise changed.
+
+Both digest-pinned v0.1.0 companions started as UIDs 12001/12003 with zero
+restarts and became Docker-healthy in about five seconds. Their private metrics
+sockets reported listening and connected owner tasks, but both source phases
+were fenced with zero indexed blocks. This is the honest recovery boundary:
+both vLLM publishers have aged past a reconstructable sequence-zero generation,
+so a newly introduced long-lived consumer cannot infer current exact state.
+Snapshot shadow was not enabled and no engine was restarted to create a pass.
+
+The LB was then recreated with the protected mounts and UID 12002 while both
+snapshot and exact modes were explicitly off. Admission took 2.062s, `/health`
+remained 2/2, and an actual c1/max16 streamed completion succeeded at 131.4ms
+TTFT and 364.9 per-stream decode tok/s. Both engine container IDs, start times,
+and zero restart counts were unchanged. Since neither compact source was yet
+authoritative, the normal raw-event-shadow LB configuration was restored in
+2.282s rather than sacrificing useful observation telemetry; approximate
+routing remained the serving authority throughout.
+
+The two companions stay running to retain future live generations. The next
+issue #41 experiment starts only after each engine's next natural rollout makes
+its companion source authoritative: enable snapshot shadow, perform repeated
+LB-only restarts, require recovery p95 below three seconds, and then begin the
+100,000-decision exact-versus-approximate comparison. Caddy metrics membership
+and routes remain unapplied until that state is useful, so no Caddy restart or
+external traffic interruption occurred.
