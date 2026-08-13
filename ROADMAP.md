@@ -522,10 +522,16 @@ node06). The design rationale for each lives in DESIGN.md.
   while queuing authenticated tail frames, then publishes only on exact caught-
   up. One absolute deadline encloses the session, and timeout, abort, EOF, MAC
   failure, delivery gap, or stale generation synchronously fences its epoch and
-  revokes owned publication. Keep this separate from companion/server admission:
-  the remaining runtime seams are outbound reconnect plus challenge reuse
-  prevention and companion-side snapshot/tail production. Add the Compose
-  sandbox, then run at least
+  revokes owned publication. Keep this separate from companion/server admission.
+  The LB reconnect owner now revalidates the trusted socket parent on every
+  connection, generates OS-random 256-bit challenges under a bounded nonreuse
+  ledger, applies bounded half-to-full jittered exponential backoff, and carries
+  one absolute deadline through connect and consumption. Normal attempts are
+  serial; only an explicit capacity-one replacement command overlaps a second
+  session, preserves the old same-identity publication until the new epoch is
+  caught up, and drops the old future only after handoff. Shutdown cancels
+  promptly. The remaining runtime seam is companion-side snapshot/tail
+  production. Add the Compose sandbox, then run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
 
   Deployment hardening is also part of the gate: distinct fixed LB/companion

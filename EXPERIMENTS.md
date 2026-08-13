@@ -3047,3 +3047,27 @@ separate accepted-stream supervisor. The offline fault matrix must still add
 explicit deadline, oversized/truncated framing, slow-build cancellation,
 two-session replacement, live store/remove after publication, and coordinated
 incarnation/key rollover cases before node06 shadowing.
+
+## 2026-08-13 — issue #41 outbound reconnect and rolling handoff
+
+The LB now has a transport owner around the authenticated consumer. It
+revalidates the normalized, trusted-parent socket path before every Unix
+connect, generates 256-bit challenges from the OS random source, retries a
+collision at most sixteen times, and retains a bounded 65,536-entry FIFO reuse
+ledger. A process restart does not persist the ledger; 256-bit OS randomness is
+the freshness guarantee across restarts. One absolute deadline spans path
+validation, connect, and consumption. Failures use half-to-full jittered bounded
+exponential backoff, and shutdown drops the consumer future immediately.
+
+Normal reconnects are serial. A capacity-one explicit replacement command is
+the only path that overlaps two sessions: same-identity publication remains
+available while the new session catches up, then the owner observes a new
+published actor epoch and drops the old future. A failed replacement retains
+the old session. Seven focused tests cover connect failure/backoff/recovery,
+connected-session deadline, prompt shutdown, distinct challenges across
+reconnect, republish, explicit caught-up handoff, collision-ledger eviction,
+and jitter bounds. Focused test runtime is 0.04 seconds.
+
+This stays outside approximate serving and is not wired into proxy startup.
+The 2ms publication poll should eventually become an actor notification, and
+refreshed expected engine incarnation remains a control-plane responsibility.

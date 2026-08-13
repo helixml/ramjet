@@ -130,6 +130,7 @@ cargo test --locked snapshot_actor
 cargo test --locked snapshot_supervisor
 cargo test --locked snapshot_digest_delta
 cargo test --locked snapshot_consumer
+cargo test --locked snapshot_reconnect
 cargo test --locked --test snapshot_digest_lifecycle
 ```
 
@@ -152,6 +153,13 @@ over an already-connected stream; a future outbound reconnect owner supplies a
 fresh non-reused challenge and the single absolute deadline. Dropping that
 consumer future must synchronously fence its actor epoch and signal any bounded
 blocking snapshot build to cancel.
+
+`snapshot_reconnect` is the LB-side owner around that consumer. Normal attempts
+are serial; only an explicit bounded replacement may overlap a second session.
+Validate the trusted socket parent on every connect, use a fresh OS-random
+challenge under the bounded reuse ledger, and carry one absolute attempt
+deadline through connect and consumption. Shutdown drops the consumer future
+immediately; approximate serving is never owned by this path.
 
 ## node06 — the test/production box
 
