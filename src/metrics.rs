@@ -39,6 +39,7 @@ pub struct Metrics {
     pub exact_route_shadow: CounterVec,
     pub exact_route_preroute: CounterVec,
     pub exact_route_placement: CounterVec,
+    pub exact_route_canary: CounterVec,
     pub exact_route_preroute_duration: HistogramVec,
     pub exact_route_overlap: HistogramVec,
     pub exact_route_gain: HistogramVec,
@@ -303,6 +304,11 @@ impl Metrics {
                 "Exact placement policy decisions by mode, endpoint, and bounded outcome",
                 &["mode", "endpoint", "outcome"],
             )?,
+            exact_route_canary: counter(
+                "ds4proxy_exact_route_canary_total",
+                "Exact placement canary admissions by endpoint and bounded outcome",
+                &["endpoint", "outcome"],
+            )?,
             exact_route_preroute_duration: histogram(
                 "ds4proxy_exact_route_preroute_duration_seconds",
                 "Latency added by bounded pre-route tokenization and exact lookup",
@@ -465,6 +471,7 @@ impl Metrics {
             Box::new(self.exact_route_shadow.clone()),
             Box::new(self.exact_route_preroute.clone()),
             Box::new(self.exact_route_placement.clone()),
+            Box::new(self.exact_route_canary.clone()),
             Box::new(self.exact_route_preroute_duration.clone()),
             Box::new(self.exact_route_overlap.clone()),
             Box::new(self.exact_route_gain.clone()),
@@ -525,6 +532,10 @@ mod tests {
             .with_label_values(&["placement", "chat", "moved"])
             .inc();
         metrics
+            .exact_route_canary
+            .with_label_values(&["chat", "treatment"])
+            .inc();
+        metrics
             .compat_attested
             .with_label_values(&["upstream-0"])
             .set(1.0);
@@ -556,6 +567,7 @@ mod tests {
             "ds4proxy_tokenizer_shadow_total",
             "ds4proxy_exact_route_preroute_total",
             "ds4proxy_exact_route_placement_total",
+            "ds4proxy_exact_route_canary_total",
             "ds4proxy_compat_attested",
             "ds4proxy_kv_event_trusted",
             "ds4proxy_kv_event_blocks_total",

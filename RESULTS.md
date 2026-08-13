@@ -26,6 +26,7 @@ placement. Current measured landmarks:
 | r19 exact-score shadow | **15 agree / 3 cold / 1 forced move; 14,336-token miss detected** |
 | r20 attested pre-route shadow | **15 agree / 3 cold; forced miss found 36,096 warm tokens before mutation** |
 | r21 exact placement canary | **2 moves / 2 agrees; 32,768 cached tokens on all 4 forced-warm requests** |
+| r32 session-stable exact canary | **2/4 constructed misses corrected, 2/4 exact agreements; all reused 32,768 tokens** |
 | r21 production shadow policy | **71.6% locality; c12 566 tok/s; c16/max512 1,343 tok/s; 28/28 requests** |
 | r22 production client cancellation | **2.000s disconnect; LB load + vLLM running zero by 2.019s** |
 | r23 publisher-safe KV replay | **1,332/1,724 batches trusted first attempt; c16/max512 1,462.9 tok/s** |

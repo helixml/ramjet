@@ -46,12 +46,31 @@ class RouteReplayTest(unittest.TestCase):
         self.assertEqual(rows[0]["agreement_pct"], 100.0)
         self.assertEqual(rows[0]["counterfactual_migrations"], 0)
 
-    def test_v3_journal_records_are_accepted(self):
+    def test_v3_and_v4_journal_records_are_accepted(self):
         record = start()
         record["v"] = 3
         record["score_tie_break"] = "overlap"
-        parsed = list(records([__import__("json").dumps(record)]))
-        self.assertEqual(parsed, [record])
+        canary = {**record, "v": 4, "exact_canary": "treatment"}
+        parsed = list(records([__import__("json").dumps(record), __import__("json").dumps(canary)]))
+        self.assertEqual(parsed, [record, canary])
+
+    def test_v4_replays_approximate_choice_but_attributes_actual_warmth(self):
+        record = start(chosen=1, left=(40, 0), right=(0, 0))
+        record.update(v=4, exact_canary="treatment", served_chosen=0)
+        finish = {
+            "v": 4,
+            "event": "finish",
+            "seq": 1,
+            "result": "complete",
+            "ttft_ms": 100,
+            "prompt_tokens": 100,
+            "cached_tokens": 80,
+        }
+        row = replay([record], {1: finish}, [4], [32])[0]
+        self.assertEqual(row["agreement_pct"], 0.0)
+        self.assertEqual(row["exact_canary_counts"], {"treatment": 1})
+        self.assertEqual(row["observed_warm_complete"], 1)
+        self.assertEqual(row["observed_cold_complete"], 0)
 
     def test_finish_join_reports_observed_outcomes(self):
         record = start(chosen=0)

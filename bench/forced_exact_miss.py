@@ -7,6 +7,11 @@ different engine. It never prints the prompt or token IDs.
 
 Usage: forced_exact_miss.py PROXY_BASE WARM_ENGINE_BASE MODEL [ATTEMPTS]
 Set BENCH_TOKEN (or VLLM_API_KEY).
+Set BENCH_SESSION_ID to exercise an exact-placement canary cohort; the header
+is sent only through the proxy, never directly to an engine.
+Set BENCH_EXPECT_ROUTE to stop when that opaque proxy route is selected;
+without it, the historical shadow-mode behavior stops on any route other than
+zero.
 """
 
 import json
@@ -26,6 +31,8 @@ WARM_ENGINE = sys.argv[2].rstrip("/")
 MODEL = sys.argv[3]
 ATTEMPTS = int(sys.argv[4]) if len(sys.argv) == 5 else 4
 TOKEN = os.environ.get("BENCH_TOKEN") or os.environ.get("VLLM_API_KEY")
+SESSION_ID = os.environ.get("BENCH_SESSION_ID")
+EXPECTED_ROUTE = os.environ.get("BENCH_EXPECT_ROUTE")
 if not TOKEN:
     raise SystemExit("set BENCH_TOKEN or VLLM_API_KEY")
 
@@ -35,14 +42,17 @@ FILLER = (
 )
 
 
-def chat(base, payload):
+def chat(base, payload, session_id=None):
+    headers = {
+        "Authorization": "Bearer " + TOKEN,
+        "Content-Type": "application/json",
+    }
+    if session_id:
+        headers["X-Session-ID"] = session_id
     request = urllib.request.Request(
         base + "/v1/chat/completions",
         data=payload,
-        headers={
-            "Authorization": "Bearer " + TOKEN,
-            "Content-Type": "application/json",
-        },
+        headers=headers,
     )
     with urllib.request.urlopen(request, timeout=300) as response:
         route = response.headers.get("X-Mini-Dynamo-Upstream")
@@ -70,7 +80,7 @@ for attempt in range(ATTEMPTS):
     payload = json.dumps(body, separators=(",", ":")).encode()
     warm_status, _, warm_cached = chat(WARM_ENGINE, payload)
     time.sleep(0.25)
-    proxy_status, route, proxy_cached = chat(PROXY, payload)
+    proxy_status, route, proxy_cached = chat(PROXY, payload, SESSION_ID)
     result = {
         "attempt": attempt + 1,
         "request_bytes": len(payload),
@@ -81,8 +91,18 @@ for attempt in range(ATTEMPTS):
         "proxy_cached_tokens": proxy_cached,
     }
     results.append(result)
-    if route not in (None, "0"):
+    matched = (
+        route == EXPECTED_ROUTE
+        if EXPECTED_ROUTE is not None
+        else route not in (None, "0")
+    )
+    if matched:
         break
 
 print(json.dumps({"attempts": results}, sort_keys=True))
-raise SystemExit(0 if results[-1]["proxy_route"] not in (None, "0") else 1)
+matched = (
+    results[-1]["proxy_route"] == EXPECTED_ROUTE
+    if EXPECTED_ROUTE is not None
+    else results[-1]["proxy_route"] not in (None, "0")
+)
+raise SystemExit(0 if matched else 1)

@@ -8,10 +8,11 @@ use serde::Serialize;
 use crate::{
     config::Config,
     router::{CandidateState, Decision},
+    tokenizer::CanaryAssignment,
     usage::Accumulator,
 };
 
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 
 pub struct RouteJournal {
     enabled: bool,
@@ -28,6 +29,7 @@ pub struct StartRecord<'a> {
     request_bytes: usize,
     total_blocks: usize,
     chosen: Option<usize>,
+    served_chosen: Option<usize>,
     outcome: &'static str,
     rotation: usize,
     alpha: f64,
@@ -36,6 +38,8 @@ pub struct StartRecord<'a> {
     load_unit_bytes: usize,
     max_load_units: usize,
     score_tie_break: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exact_canary: Option<CanaryAssignment>,
     candidates: &'a [CandidateState],
 }
 
@@ -71,29 +75,41 @@ impl RouteJournal {
         }
     }
 
-    pub fn start(
+    pub(crate) fn start(
         &self,
         endpoint: &str,
         request_bytes: usize,
         decision: &Decision,
+        served_chosen: Option<usize>,
         config: &Config,
+        exact_canary: CanaryAssignment,
     ) -> Option<u64> {
         if !self.enabled || endpoint == "other" {
             return None;
         }
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        let record = Self::start_record(sequence, endpoint, request_bytes, decision, config);
+        let record = Self::start_record(
+            sequence,
+            endpoint,
+            request_bytes,
+            decision,
+            served_chosen,
+            config,
+            exact_canary,
+        );
         emit(&record);
         Some(sequence)
     }
 
     #[must_use]
-    pub fn start_record<'a>(
+    pub(crate) fn start_record<'a>(
         sequence: u64,
         endpoint: &'a str,
         request_bytes: usize,
         decision: &'a Decision,
+        served_chosen: Option<usize>,
         config: &Config,
+        exact_canary: CanaryAssignment,
     ) -> StartRecord<'a> {
         StartRecord {
             v: VERSION,
@@ -104,6 +120,7 @@ impl RouteJournal {
             request_bytes,
             total_blocks: decision.total_blocks,
             chosen: decision.candidate_state.first().map(|state| state.index),
+            served_chosen,
             outcome: decision.outcome.label(),
             rotation: decision.rotation,
             alpha: config.route_alpha,
@@ -112,6 +129,7 @@ impl RouteJournal {
             load_unit_bytes: config.route_load_unit_bytes,
             max_load_units: config.route_max_load_units,
             score_tie_break: "overlap",
+            exact_canary: (exact_canary != CanaryAssignment::NotApplicable).then_some(exact_canary),
             candidates: &decision.candidate_state,
         }
     }
@@ -204,7 +222,13 @@ mod tests {
             outcome: Outcome::Overlap,
         };
         let encoded = serde_json::to_string(&RouteJournal::start_record(
-            42, "chat", 1_555_943, &decision, &config,
+            42,
+            "chat",
+            1_555_943,
+            &decision,
+            Some(1),
+            &config,
+            CanaryAssignment::Treatment,
         ))
         .unwrap();
         for forbidden in ["secret-engine", "http://", "prompt", "fingerprint"] {
@@ -214,6 +238,8 @@ mod tests {
             );
         }
         assert!(encoded.contains("\"chosen\":1"));
-        assert!(encoded.contains("\"v\":3"));
+        assert!(encoded.contains("\"served_chosen\":1"));
+        assert!(encoded.contains("\"v\":4"));
+        assert!(encoded.contains("\"exact_canary\":\"treatment\""));
     }
 }

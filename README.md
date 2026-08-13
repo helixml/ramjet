@@ -47,7 +47,8 @@ DS4_TOKENIZER_QUEUE_CAPACITY (8), DS4_TOKENIZER_TIMEOUT_MS (2000),
 DS4_EXACT_ROUTE_MODE (off|shadow|placement), DS4_EXACT_ROUTE_MANIFEST_PATH,
 DS4_EXACT_ROUTE_MANIFEST_SHA256, DS4_EXACT_ROUTE_WORKERS (4),
 DS4_EXACT_ROUTE_TIMEOUT_MS (250), DS4_EXACT_ROUTE_MIN_GAIN_TOKENS (8192),
-DS4_EXACT_ROUTE_MAX_LOAD_DELTA (0),
+DS4_EXACT_ROUTE_MAX_LOAD_DELTA (0), DS4_EXACT_ROUTE_CANARY_BPS (0),
+DS4_EXACT_ROUTE_CANARY_KEY,
 DS4_KV_EVENT_MODE (off|shadow), DS4_KV_EVENT_LIVE_ENDPOINTS,
 DS4_KV_EVENT_REPLAY_ENDPOINTS, DS4_KV_EVENT_TOPIC (empty),
 DS4_KV_EVENT_REPLAY_LIMIT (1024), DS4_KV_EVENT_REPLAY_TAIL_LIMIT (64), and
@@ -159,16 +160,27 @@ drops only the observation. The live approximate route remains authoritative.
 after an engine/template update with `bench/tokenizer_manifest.py`; it never
 prints or persists raw token IDs.
 
-`DS4_EXACT_ROUTE_MODE=placement` is an explicit default-off canary mode. It may
-promote only one unique exact-score winner, requires at least
+`DS4_EXACT_ROUTE_MODE=placement` is an explicit default-off canary mode. A
+request is eligible to change placement only when its single, non-empty,
+bounded `X-Session-ID` is selected by the keyed
+`DS4_EXACT_ROUTE_CANARY_BPS` cohort (0 through 10,000 basis points). The HMAC
+key is required only above zero and is never logged, journaled, exposed in
+metrics, or forwarded upstream. Missing, duplicate, empty, or oversized
+session IDs fail closed to shadow routing. Keep the key fixed while changing
+the percentage so cohorts remain monotonic; set the percentage to zero before
+rotating it. Zero is the instant rollback and still permits exact shadow
+evaluation. An admitted treatment may promote only one unique exact-score
+winner, requires at least
 `DS4_EXACT_ROUTE_MIN_GAIN_TOKENS` additional cached tokens, and by default will
 not move to an engine with any more load than the approximate choice. All
 manifest attestation, tokenizer admission, event trust, inventory revision,
 health, CPU-permit, and timeout fences remain mandatory; any failure preserves
-the approximate route. `ds4proxy_exact_route_placement_total{mode="shadow"}`
+the approximate route. `ds4proxy_exact_route_canary_total` reports only
+bounded admission outcomes. `ds4proxy_exact_route_placement_total{mode="shadow"}`
 evaluates the same gain/load policy without changing placement, while
-`mode="placement"` distinguishes actual moves from gates and fail-closed
-fallbacks. Production remains in `shadow` until a representative
+`mode="control"` measures a valid non-treatment cohort and `mode="placement"`
+distinguishes actual moves from gates and fail-closed fallbacks. Production
+remains in `shadow` until a representative
 counterfactual distribution and isolated node06 canary justify promotion.
 
 Exact all-zero lookups also evaluate a separate cold-capacity counterfactual.

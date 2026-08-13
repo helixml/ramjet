@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, fmt};
 
 use thiserror::Error;
 use url::Url;
@@ -34,6 +34,8 @@ pub struct Config {
     pub exact_route_timeout_ms: usize,
     pub exact_route_min_gain_tokens: usize,
     pub exact_route_max_load_delta: usize,
+    pub exact_route_canary_bps: usize,
+    pub exact_route_canary_key: Option<SecretString>,
     pub kv_event_mode: KvEventMode,
     pub kv_event_sources: Vec<KvEventSourceConfig>,
     pub kv_event_replay_limit: usize,
@@ -108,6 +110,28 @@ struct ExactRouteSettings {
     timeout_ms: usize,
     min_gain_tokens: usize,
     max_load_delta: usize,
+    canary_bps: usize,
+    canary_key: Option<SecretString>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct SecretString(String);
+
+impl SecretString {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+
+    #[cfg(test)]
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -222,6 +246,8 @@ impl Config {
             exact_route_timeout_ms: exact_route.timeout_ms,
             exact_route_min_gain_tokens: exact_route.min_gain_tokens,
             exact_route_max_load_delta: exact_route.max_load_delta,
+            exact_route_canary_bps: exact_route.canary_bps,
+            exact_route_canary_key: exact_route.canary_key,
             kv_event_mode: kv_events.mode,
             kv_event_sources: kv_events.sources,
             kv_event_replay_limit: kv_events.replay_limit,
@@ -306,6 +332,7 @@ fn exact_route_settings(
             ));
         }
     }
+    let (canary_bps, canary_key) = exact_canary_settings(get, mode)?;
     Ok(ExactRouteSettings {
         mode,
         manifest_path,
@@ -319,7 +346,58 @@ fn exact_route_settings(
             0_usize,
             "a non-negative integer",
         )?,
+        canary_bps,
+        canary_key,
     })
+}
+
+fn exact_canary_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    mode: ExactRouteMode,
+) -> Result<(usize, Option<SecretString>), ConfigError> {
+    let canary_bps = parse(
+        get,
+        "DS4_EXACT_ROUTE_CANARY_BPS",
+        0_usize,
+        "an integer from 0 through 10000",
+    )?;
+    if canary_bps > 10_000 {
+        return Err(invalid(
+            "DS4_EXACT_ROUTE_CANARY_BPS",
+            canary_bps.to_string(),
+            "an integer from 0 through 10000",
+        ));
+    }
+    if mode != ExactRouteMode::Placement && canary_bps != 0 {
+        return Err(invalid(
+            "DS4_EXACT_ROUTE_CANARY_BPS",
+            canary_bps.to_string(),
+            "zero unless DS4_EXACT_ROUTE_MODE=placement",
+        ));
+    }
+    let canary_key = get("DS4_EXACT_ROUTE_CANARY_KEY")
+        .filter(|value| !value.is_empty())
+        .map(SecretString);
+    if mode == ExactRouteMode::Placement
+        && canary_bps != 0
+        && canary_key
+            .as_ref()
+            .is_none_or(|key| !(32..=256).contains(&key.as_bytes().len()))
+    {
+        return Err(invalid(
+            "DS4_EXACT_ROUTE_CANARY_KEY",
+            "<redacted>".to_owned(),
+            "a secret from 32 through 256 bytes when placement canary is nonzero",
+        ));
+    }
+    if mode != ExactRouteMode::Placement && canary_key.is_some() {
+        return Err(invalid(
+            "DS4_EXACT_ROUTE_CANARY_KEY",
+            "<redacted>".to_owned(),
+            "unset unless DS4_EXACT_ROUTE_MODE=placement",
+        ));
+    }
+    Ok((canary_bps, canary_key))
 }
 
 fn kv_event_settings(
@@ -580,6 +658,8 @@ mod tests {
         assert_eq!(config.exact_route_timeout_ms, 250);
         assert_eq!(config.exact_route_min_gain_tokens, 8_192);
         assert_eq!(config.exact_route_max_load_delta, 0);
+        assert_eq!(config.exact_route_canary_bps, 0);
+        assert!(config.exact_route_canary_key.is_none());
         assert_eq!(config.kv_event_mode, KvEventMode::Off);
         assert!(config.kv_event_sources.is_empty());
         assert_eq!(config.kv_event_replay_limit, 1_024);
@@ -725,11 +805,90 @@ mod tests {
             ),
             ("DS4_EXACT_ROUTE_MIN_GAIN_TOKENS", "16384"),
             ("DS4_EXACT_ROUTE_MAX_LOAD_DELTA", "1"),
+            ("DS4_EXACT_ROUTE_CANARY_BPS", "250"),
+            (
+                "DS4_EXACT_ROUTE_CANARY_KEY",
+                "0123456789abcdef0123456789abcdef",
+            ),
         ]);
         let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
         assert_eq!(config.exact_route_mode, ExactRouteMode::Placement);
         assert_eq!(config.exact_route_min_gain_tokens, 16_384);
         assert_eq!(config.exact_route_max_load_delta, 1);
+        assert_eq!(config.exact_route_canary_bps, 250);
+        assert_eq!(
+            config
+                .exact_route_canary_key
+                .as_ref()
+                .map(SecretString::expose),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("0123456789abcdef"));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn exact_route_placement_requires_a_bounded_explicit_canary() {
+        let mut values = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1"),
+            ("DS4_TOKENIZER_MODE", "local-shadow"),
+            ("DS4_TOKENIZER_PATH", "/models/tokenizer.json"),
+            (
+                "DS4_TOKENIZER_SHA256",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            ("DS4_KV_EVENT_MODE", "shadow"),
+            ("DS4_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557"),
+            ("DS4_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558"),
+            ("DS4_EXACT_ROUTE_MODE", "placement"),
+            ("DS4_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
+            (
+                "DS4_EXACT_ROUTE_MANIFEST_SHA256",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        ]);
+        let disabled = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(disabled.exact_route_canary_bps, 0);
+        assert!(disabled.exact_route_canary_key.is_none());
+        values.insert("DS4_EXACT_ROUTE_CANARY_BPS", "10001");
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_EXACT_ROUTE_CANARY_BPS",
+                ..
+            })
+        ));
+        values.insert("DS4_EXACT_ROUTE_CANARY_BPS", "100");
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_EXACT_ROUTE_CANARY_KEY",
+                value,
+                ..
+            }) if value == "<redacted>"
+        ));
+        values.insert("DS4_EXACT_ROUTE_CANARY_KEY", "too-short");
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_EXACT_ROUTE_CANARY_KEY",
+                value,
+                ..
+            }) if value == "<redacted>"
+        ));
+        values.insert("DS4_EXACT_ROUTE_CANARY_KEY", "x".repeat(32).leak());
+        assert!(Config::from_lookup(|key| values.get(key).map(ToString::to_string)).is_ok());
+        values.insert("DS4_EXACT_ROUTE_CANARY_KEY", "x".repeat(256).leak());
+        assert!(Config::from_lookup(|key| values.get(key).map(ToString::to_string)).is_ok());
+        values.insert("DS4_EXACT_ROUTE_CANARY_KEY", "x".repeat(257).leak());
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_EXACT_ROUTE_CANARY_KEY",
+                ..
+            })
+        ));
     }
 
     #[test]

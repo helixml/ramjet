@@ -37,6 +37,7 @@ pub struct ExactPlacementPolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExactPlacementMode {
     Shadow,
+    Control,
     Placement,
 }
 
@@ -44,6 +45,7 @@ impl ExactPlacementMode {
     const fn label(self) -> &'static str {
         match self {
             Self::Shadow => "shadow",
+            Self::Control => "control",
             Self::Placement => "placement",
         }
     }
@@ -976,21 +978,32 @@ mod tests {
         );
         let mut route = decision();
         let original = route.clone();
-        shadow.route_pre_route(
-            Endpoint::Chat,
-            &[1, 2, 3, 4],
-            &mut route,
-            ExactPlacementPolicy {
-                min_gain_tokens: 4,
-                max_load_delta: 0,
-            },
-            ExactPlacementMode::Shadow,
-        );
+        for mode in [ExactPlacementMode::Shadow, ExactPlacementMode::Control] {
+            shadow.route_pre_route(
+                Endpoint::Chat,
+                &[1, 2, 3, 4],
+                &mut route,
+                ExactPlacementPolicy {
+                    min_gain_tokens: 4,
+                    max_load_delta: 0,
+                },
+                mode,
+            );
+        }
         assert_eq!(route, original);
         assert!(
             (metrics
                 .exact_route_preroute
                 .with_label_values(&["chat", "would_move"])
+                .get()
+                - 2.0)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (metrics
+                .exact_route_placement
+                .with_label_values(&["shadow", "chat", "would_move"])
                 .get()
                 - 1.0)
                 .abs()
@@ -999,7 +1012,7 @@ mod tests {
         assert!(
             (metrics
                 .exact_route_placement
-                .with_label_values(&["shadow", "chat", "would_move"])
+                .with_label_values(&["control", "chat", "would_move"])
                 .get()
                 - 1.0)
                 .abs()

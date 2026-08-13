@@ -285,6 +285,31 @@ impl Router {
         }
     }
 
+    /// Atomically rechecks serving health while reserving load. This closes the
+    /// route-to-dispatch window where a probe may have already fenced a replica.
+    pub fn acquire_if_healthy(
+        self: &Arc<Self>,
+        upstream: usize,
+        units: usize,
+    ) -> Option<LoadGuard> {
+        let units = units.max(1);
+        {
+            let mut inner = self.inner.lock();
+            let state = inner.states.get_mut(upstream)?;
+            if !state.healthy {
+                return None;
+            }
+            state.inflight += 1;
+            state.load += units;
+        }
+        Some(LoadGuard {
+            router: Arc::clone(self),
+            upstream,
+            units,
+            released: false,
+        })
+    }
+
     pub fn set_healthy(&self, upstream: usize, healthy: bool) {
         if let Some(state) = self.inner.lock().states.get_mut(upstream) {
             state.healthy = healthy;
@@ -569,6 +594,25 @@ mod tests {
         router.set_healthy(winner, false);
         let decision = router.route(&body);
         assert_eq!(decision.candidates.last(), Some(&winner));
+    }
+
+    #[test]
+    fn dispatch_reservation_rechecks_current_health_atomically() {
+        let router = Arc::new(Router::new(config()));
+        let upstream = router.route(&chat("sys", "hello")).candidates[0];
+        router.set_healthy(upstream, false);
+        assert!(router.acquire_if_healthy(upstream, 4).is_none());
+        assert_eq!(
+            router.state(upstream).map(|state| (state.0, state.1)),
+            Some((0, 0))
+        );
+        router.set_healthy(upstream, true);
+        let guard = router.acquire_if_healthy(upstream, 4).expect("healthy");
+        assert_eq!(
+            router.state(upstream).map(|state| (state.0, state.1)),
+            Some((1, 4))
+        );
+        drop(guard);
     }
 
     #[test]

@@ -438,7 +438,9 @@ node06). The design rationale for each lives in DESIGN.md.
   seconds with 407MiB peak LB RSS and more than 8.2GiB host memory available;
   both exact inventories became trusted without restarting either engine. The
   node06 replay limit is therefore aligned with the publisher's 10,000-step
-  window while the 20-second fail-closed timeout remains unchanged. Add
+  window. A later 9,426-batch near-retention replay exceeded 20 seconds but
+  recovered inside a 60-second fail-closed window, so node06 now uses 60
+  seconds while exact placement remains disabled by default. Add
   Dynamo-style snapshot/tree-dump recovery for histories older than that.
   Compare exact versus approximate decisions in telemetry before the router
   may consume this state; Dynamo's additional tree-dump recovery remains the
@@ -449,8 +451,14 @@ node06). The design rationale for each lives in DESIGN.md.
   OpenAI and Anthropic shapes are unit-tested and replay does not mislabel
   legacy v1/v2 first-byte samples. rc7 is deployed after 144/144 c24 requests
   succeeded at 1,820–1,844 tok/s with balanced placement.
-- ⬜ **Pinned/session-hinted routing.** Accept a stable session routing hint and
-  mark long-lived orchestrator conversations so neither router migration nor
+- 🔨 **Pinned/session-hinted routing.** r32 accepts exactly one bounded
+  `X-Session-ID` and uses a secret-keyed, monotonic basis-point cohort for
+  exact placement. Zero is an instant rollback; missing/invalid hints fail
+  closed, the header is stripped upstream, and journal v4 retains only a typed
+  cohort plus separate approximate/served choices. Helix now propagates its
+  existing internal session ID into the inference request. Next, use the same
+  hint to mark long-lived orchestrator conversations so neither router
+  migration nor
   alpha pressure moves them off their warm engine (DwarfStar pinned-deep-trunk
   analogue). Follow Kimi K3's failure-bounded form: assign a deterministic
   primary plus a pre-assigned secondary, not an unbounded hard pin.
