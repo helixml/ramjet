@@ -238,7 +238,13 @@ node06). The design rationale for each lives in DESIGN.md.
   synthetic v1 JSONL corpus and privacy-safe runner now cover stream/non-stream,
   automatic/required/parallel tool calls, split deltas and DSML leaks, every
   JSON argument class plus `arguments`/`input`, and retained reasoning/tool
-  history. Eighteen GPU-free parser/schema tests run in Drone. The first
+  history. Eighteen GPU-free parser/schema tests run in Drone. Source-locked
+  response-shape fixtures now also cover forced-choice JSON fallback in
+  streaming and non-streaming responses plus `n=2` choice-local call IDs. The
+  harness keeps assembly state per choice, matching the OpenAI contract instead
+  of falsely treating identical IDs in different choices as duplicates. These
+  fixtures validate the northbound contract without a GPU; they do not
+  substitute for executing a candidate vLLM parser. The first
   node06 gates passed 5/5 deterministic c1 and 10/10 deterministic c8 cases; a
   five-run official-agentic auto+stream probe also passed 5/5 with no DSML leak. The matrix records image,
   model/config/tokenizer/router provenance, TTFT, mean ITL, throughput, cache,
@@ -650,6 +656,11 @@ node06). The design rationale for each lives in DESIGN.md.
   captured-shape starts pause the source lock for about 7.7/23.0ms; at the
   131,072-record maximum this is about 28.5/82.3ms. Instrument this before shadow
   and move to immutable/COW generations if ingestion p99 must stay below 10ms.
+  A captured-shape eviction replay has now exercised 3,840 apply calls and
+  2,442 removals per shape: apply p50/p95/p99 were 0.38/0.95/1.55us, with a
+  45.45us maximum and exact final inventory arithmetic. This clears the 10ms
+  gate by more than two orders of magnitude, so immutable/COW work remains
+  profile-triggered rather than roadmap-driven.
   Runtime telemetry now polls the source every 25ms and separately reports
   listening, exact authority, replay/building/ready/fenced phase, watermark
   presence, indexed blocks, and active sessions with fixed label cardinality.

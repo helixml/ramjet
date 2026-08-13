@@ -3747,3 +3747,39 @@ publisher and 171-second pipeline, that is an 86% publisher reduction and 58%
 end-to-end reduction for a non-Rust change. The measured PR quality loop remains
 58–66 seconds. Retain this design and treat a no-Rust publisher materially above
 14 seconds as a cache-regression investigation, not normal variance.
+
+## 2026-08-13 — r54 GPU-free correctness, eviction, and image iteration gates
+
+Three independent pre-deployment gates were integrated without touching
+node06. The agent response harness now has source-locked forced-choice JSON
+fallback fixtures for streaming and non-streaming output and an `n=2` case
+that proves tool-call assembly is isolated per choice. The complete Python
+suite passed 105 tests. This validates the northbound response shape and local
+assembly contract; it deliberately does not claim to execute a candidate
+vLLM parser.
+
+The captured companion eviction shape was replayed for 20 iterations: 3,840
+apply calls, 2,442 removals per shape (882 selected main-attention blocks and
+1,560 filtered non-main blocks), and the exact expected final inventory of
+2,574 blocks. Measured apply latency was 0.38us p50, 0.95us p95, 1.55us p99,
+and 45.45us maximum. This is a conservative no-subscriber upper bound on the
+source critical section and clears the 10ms optimization trigger by more than
+two orders of magnitude; immutable/COW index generations are not justified by
+the current profile.
+
+The companion image now carries both the default snapshot-companion entrypoint
+and the separately invoked attestation provisioner, so deployment does not
+need a third publisher. A cold local Docker build after adding the `chrono`
+dependency spent 58.25s on dependencies and 33.38s on the source/thin-LTO
+relink; an unchanged rebuild completed in 2.3s with every build layer cached.
+Container smoke proved default off mode exits successfully, while the
+provisioner fails closed with content-free `missing_setting` and
+`invalid_arguments` reasons. The integrated local gate passed 311 library
+tests plus 38 integration tests and strict all-target/all-feature Clippy.
+
+Drone's rolling edge tags are now path-gated to actual image inputs. Build
+#223 showed why: a docs-only publish completed quickly but replaced reusable
+intermediate metadata, so the next Rust build paid a 57s dependency rebuild.
+Markdown, benchmark, and deployment-only changes now finish after the quality
+gate and cannot rewrite either edge tag. The next source-changing main build
+is the registry-cache seed/acceptance measurement for this combined image.
