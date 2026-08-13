@@ -179,7 +179,7 @@ mod tests {
     use std::{
         collections::HashMap,
         fs,
-        os::unix::fs::{MetadataExt, PermissionsExt},
+        os::unix::fs::{MetadataExt, PermissionsExt, chown},
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -209,7 +209,12 @@ mod tests {
             let directory = std::env::temp_dir().join(format!("mdsr-{}-{id}", std::process::id()));
             fs::create_dir(&directory).unwrap();
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
-            let owner = fs::metadata(&directory).unwrap().uid();
+            let current_uid = fs::metadata(&directory).unwrap().uid();
+            let owner = if current_uid == 0 {
+                12_001
+            } else {
+                current_uid
+            };
             let session = directory.join("session");
             let digest = directory.join("digest");
             let attestation = directory.join("attestation");
@@ -218,6 +223,11 @@ mod tests {
             fs::write(&digest, [0x41; 32]).unwrap();
             for path in [&session, &digest] {
                 fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            if current_uid == 0 {
+                for path in [&directory, &session, &digest] {
+                    chown(path, Some(owner), None).unwrap();
+                }
             }
             let policy = SnapshotSecretFilePolicy {
                 expected_owner_uid: owner,
@@ -236,6 +246,9 @@ mod tests {
             .unwrap();
             fs::write(&attestation, encoded).unwrap();
             fs::set_permissions(&attestation, fs::Permissions::from_mode(0o600)).unwrap();
+            if current_uid == 0 {
+                chown(&attestation, Some(owner), None).unwrap();
+            }
             Self {
                 directory,
                 session,
