@@ -410,12 +410,15 @@ node06). The design rationale for each lives in DESIGN.md.
   rolled back. Do not test MBT8192, MTP0, offload, or custom all-reduce on this
   image. No successor is packaged yet. A fixed candidate must first pass the
   retained malformed-wrapper/orphan-invoke fixtures (upstream vLLM #49117 and
-  #51914 remain open). It should also carry or disprove vLLM #51318's C128A
-  FULL-graph row-stride fix: r4 composes a runtime-width change that is
-  plausibly exposed to the separately reported concurrent decode corruption,
-  although that does not explain node06's sequential parser failure. Run these
-  GPU-free gates before retesting from the retained JIT cache and immutable
-  one-engine overlay.
+  #51914 remain open). The immutable r4 tree definitely lacks vLLM #51318's
+  C128A FULL-graph capture-stable row stride: its active width depends on each
+  batch while capture uses `max_model_len`. The content-safe
+  `bench/infernal_c128a_preflight.py` gate now proves the exact r4 source
+  identity, rejects that layout for a candidate, and accepts only the fixed
+  preallocated-capacity stride. This separately reported concurrent-decode
+  corruption does not explain node06's sequential parser failure. Run the
+  source gate and retained parser fixtures before retesting from a new
+  revision-specific JIT cache and immutable one-engine overlay.
 
 - 🔨 **KV-event ground truth.** Subscribe to vLLM `kv_events` (block
   stored/removed) and replace the approximate LRU index with the engine's
@@ -551,8 +554,15 @@ node06). The design rationale for each lives in DESIGN.md.
   a slow or disconnected reader only loses its own subscription. Tail payloads
   are shared and each session has a 16MiB default / 64MiB maximum aggregate
   queued-byte budget in addition to its entry bound; overflow and rebuild use
-  prioritized out-of-band revocation so stale tail frames are not drained. Add the
-  process-level ZMQ/replay/reconnect/attestation driver, then run at least
+  prioritized out-of-band revocation so stale tail frames are not drained. The
+  library-only process owner now installs SUB before replay, streams full sparse
+  replay into generation-guarded private state, fences on transport or attested
+  incarnation loss, reconnects with bounded backoff, and cancels blocking
+  libzmq work on shutdown. A reconnect stays fenced until a fresh live watermark
+  defines the replay boundary; it never trusts the last pre-disconnect value.
+  Incremental gaps currently trigger a streamed full private rebuild rather
+  than retaining an adversarially large decoded replay vector. Next wire one
+  authenticated owner/socket per engine into an executable and run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
 
   The off-by-default library runtime now composes typed config, hardened secret
@@ -565,9 +575,7 @@ node06). The design rationale for each lives in DESIGN.md.
   producer; the supervisor retains the two-client cap and immediate shutdown
   cancellation without imposing a total lifetime on healthy progress. Next add
   authenticated engine selection or one socket per engine, then inject the
-  concrete source through a process-level driver that
-  owns `ZmqKvEventSource`, subscribe-before-replay, reconnects, complete sparse
-  replay, and authenticated engine-incarnation refresh.
+  completed process owner and its authenticated engine-incarnation watch.
 
   A true offline public-stack harness now proves initial publication, live
   store/remove, rolling handoff, LB owner restart, companion shutdown/socket

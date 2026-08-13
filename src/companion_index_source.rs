@@ -189,38 +189,28 @@ impl CompanionIndexSource {
         batch: &SequencedBatch,
     ) -> Result<DigestDeltaSummary, CompanionIndexSourceError> {
         let mut state = self.state.lock();
-        let replay = state
-            .replay
-            .as_ref()
-            .ok_or(CompanionIndexSourceError::InvalidReplay)?;
-        if replay
-            .last_sequence
-            .is_some_and(|previous| batch.sequence <= previous)
-        {
-            state.replay = None;
-            state.fenced = true;
+        apply_replay_locked(&self.delta, &mut state, batch)
+    }
+
+    /// Apply replay only while the caller still owns the expected companion
+    /// generation. This closes the cancellation race where an abandoned
+    /// blocking replay worker observes shutdown after a fresh rebuild started.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidReplay` without touching the current stage when the
+    /// generation changed, and otherwise has the same behavior as
+    /// [`Self::apply_replay`].
+    pub fn apply_replay_for_generation(
+        &self,
+        expected_generation: u64,
+        batch: &SequencedBatch,
+    ) -> Result<DigestDeltaSummary, CompanionIndexSourceError> {
+        let mut state = self.state.lock();
+        if state.identity.companion_generation != expected_generation {
             return Err(CompanionIndexSourceError::InvalidReplay);
         }
-        let result = self.delta.apply_batch(
-            &mut state
-                .replay
-                .as_mut()
-                .ok_or(CompanionIndexSourceError::InvalidReplay)?
-                .index,
-            &batch.batch,
-        );
-        let Ok(summary) = result else {
-            state.replay = None;
-            state.fenced = true;
-            return Err(CompanionIndexSourceError::Index);
-        };
-        let replay = state
-            .replay
-            .as_mut()
-            .ok_or(CompanionIndexSourceError::InvalidReplay)?;
-        replay.last_sequence = Some(batch.sequence);
-        state.fenced = false;
-        Ok(summary)
+        apply_replay_locked(&self.delta, &mut state, batch)
     }
 
     /// Atomically publish a completed replay through the exact `through`
@@ -302,7 +292,15 @@ impl CompanionIndexSource {
         &self,
         engine_incarnation: Option<EngineIncarnation>,
     ) -> Result<(), CompanionIndexSourceError> {
-        fence_locked(&mut self.state.lock(), engine_incarnation)
+        let mut state = self.state.lock();
+        // A live apply failure already fences sessions and creates a clean
+        // replay stage synchronously. A later transport-owner retry must not
+        // spend a second generation for the same authority loss. Explicit
+        // incarnation refreshes still always establish a new identity.
+        if engine_incarnation.is_none() && state.fenced && state.replay.is_some() {
+            return Ok(());
+        }
+        fence_locked(&mut state, engine_incarnation)
     }
 }
 
@@ -429,6 +427,45 @@ impl Drop for SourceBuildGuard {
         let mut state = self.state.lock();
         state.builds_in_progress = state.builds_in_progress.saturating_sub(1);
     }
+}
+
+fn apply_replay_locked(
+    delta: &SnapshotDigestDeltaAdapter,
+    state: &mut SourceState,
+    batch: &SequencedBatch,
+) -> Result<DigestDeltaSummary, CompanionIndexSourceError> {
+    let replay = state
+        .replay
+        .as_ref()
+        .ok_or(CompanionIndexSourceError::InvalidReplay)?;
+    if replay
+        .last_sequence
+        .is_some_and(|previous| batch.sequence <= previous)
+    {
+        state.replay = None;
+        state.fenced = true;
+        return Err(CompanionIndexSourceError::InvalidReplay);
+    }
+    let result = delta.apply_batch(
+        &mut state
+            .replay
+            .as_mut()
+            .ok_or(CompanionIndexSourceError::InvalidReplay)?
+            .index,
+        &batch.batch,
+    );
+    let Ok(summary) = result else {
+        state.replay = None;
+        state.fenced = true;
+        return Err(CompanionIndexSourceError::Index);
+    };
+    let replay = state
+        .replay
+        .as_mut()
+        .ok_or(CompanionIndexSourceError::InvalidReplay)?;
+    replay.last_sequence = Some(batch.sequence);
+    state.fenced = false;
+    Ok(summary)
 }
 
 fn map_build_error(error: &DigestIndexError) -> SnapshotProducerSourceError {
@@ -1110,6 +1147,19 @@ mod tests {
         source.finish_replay(20).unwrap();
         assert_eq!(source.status().phase, SnapshotProducerSourcePhase::Ready);
         assert!(source.status().ready);
+    }
+
+    #[test]
+    fn repeated_unattested_rebuild_is_idempotent_while_clean_stage_is_fenced() {
+        let source = source(1);
+        source.begin_rebuild(None).unwrap();
+        let generation = source.status().companion_generation;
+        source.begin_rebuild(None).unwrap();
+        assert_eq!(source.status().companion_generation, generation);
+        assert_eq!(source.status().phase, SnapshotProducerSourcePhase::Fenced);
+
+        source.begin_rebuild(Some(incarnation("engine-b"))).unwrap();
+        assert_eq!(source.status().companion_generation, generation + 1);
     }
 
     #[test]

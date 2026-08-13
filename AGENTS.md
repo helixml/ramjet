@@ -196,6 +196,17 @@ it must never stop or clear the index. Tail queues are bounded by both entries
 and bytes; payloads are shared `Bytes`, and overflow or a source fence must use
 the out-of-band revocation signal rather than drain stale FIFO events.
 
+`companion_index_owner` owns one subscribed ZMQ connection per engine. After
+startup, disconnect, or incarnation loss it must stay fenced until a fresh live
+batch supplies a current watermark; the last pre-disconnect watermark is never
+an authoritative recovery boundary. Subscribe first, then stream a complete
+replay from zero through that fresh watermark into private source state. Treat
+an incremental gap the same way until the source has a transactional bounded
+gap stage: do not retain `replay_limit * max_payload_bytes` decoded batches or
+publish a partially validated gap. Generation-guard every blocking replay fold,
+make repeated connect failures and already-created clean stages idempotent, and
+keep observer events closed and content-free.
+
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
 Validate the trusted socket parent on every connect, use a fresh OS-random
