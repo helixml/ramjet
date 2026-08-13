@@ -510,8 +510,15 @@ node06). The design rationale for each lives in DESIGN.md.
   its slot. Authenticated payloads decode under existing vLLM bounds, filter to
   the selected local-GPU main-attention group, and apply store/remove/clear to
   actor-owned digest state; any late batch error clears the private generation
-  before the actor fences it. Next wire the session handler and bounded CPU
-  cancellation, add metrics and the Compose sandbox, then run at least
+  before the actor fences it. Typed companion configuration now defaults off,
+  validates the fixed two-engine/two-client contract and every queue, deadline,
+  frame, and decoded-batch bound before startup, and redacts paths and endpoint
+  identities from debug output. Its pre-initialized Prometheus surface uses
+  only bounded engine slots and enums for session outcomes, capacity rejects,
+  build/apply/catch-up work, tail batches/events, fences/discards, and published
+  inventory size; arbitrary errors and protocol identity never become labels.
+  Next wire the session handler and bounded CPU cancellation, add the Compose
+  sandbox, then run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
 
   Deployment hardening is also part of the gate: distinct fixed LB/companion
