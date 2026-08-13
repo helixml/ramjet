@@ -483,17 +483,22 @@ node06). The design rationale for each lives in DESIGN.md.
   exact raw-index parity. At the matched 80,896-token shape it looks up in
   235us versus raw exact's 50.5us (4.66x); 524,288 tokens take 1.53ms; the
   complete 36,612-block snapshot builds an index in 13.1ms. At 15,168 blocks,
-  digest RSS grows 8.1MiB versus raw exact's 21.5MiB (37.7%). Next implement
-  the authenticated UDS companion actor and lifecycle fence, then run at least
-  100,000 revision-stable shadow comparisons before placement can consume it.
-  The authenticated lifecycle must use a separate session-auth key (never the
-  block-digest key), a MACed client challenge before snapshot work, fixed
-  length framing authenticated before owned decode, exact independently
-  observed engine incarnation, monotonic real-event watermark/generation, and
-  a distinct contiguous companion delivery sequence for tail gap detection
-  because vLLM scheduler-step event sequences are legitimately sparse. The
-  decoded snapshot token and tail/caught-up frames must be opaque so ordinary
-  code cannot forge an authenticated state transition.
+  digest RSS grows 8.1MiB versus raw exact's 21.5MiB (37.7%). The authenticated
+  exchange and lifecycle are now complete as transport-independent modules:
+  they use a separate session-auth key (never the block-digest key), authenticate
+  a client challenge before snapshot work, verify fixed framing before owned
+  decode, bind independently observed incarnation/watermark/generation/key ID,
+  and use a distinct dense delivery sequence because real vLLM event watermarks
+  are legitimately sparse. Snapshot and tail tokens are opaque to ordinary
+  callers. The real one-shot Unix transport additionally verifies Linux peer
+  UIDs on both ends before protocol bytes, shares one absolute deadline across
+  connect/production/I/O/decode, bounds reads with a max+1 sentinel, and drops
+  the producer future when the client disconnects. Tail frames derive ephemeral
+  session/generation/direction keys and bind lifecycle admission to the exact
+  authenticated payload; downstream decode/apply failure is terminal. Next
+  implement the listener/socket lifecycle, bounded companion actor, atomic
+  private-index swap, and metrics, then run at least 100,000 revision-stable
+  shadow comparisons before placement can consume it.
 
   Deployment hardening is also part of the gate: distinct fixed LB/companion
   UIDs with one shared GID; a companion-owned non-LB-writable socket directory

@@ -9,9 +9,9 @@
 //! them.
 //!
 //! [`TailSessionKey`] is not a third long-lived deployment secret. It is an
-//! ephemeral, direction-specific key that the transport must derive from the
-//! authenticated snapshot-session transcript. Transcript derivation and UDS
-//! peer authentication are deliberately outside this codec.
+//! ephemeral, direction-specific key derived here from the authenticated
+//! snapshot-session secret, challenge, generation, and direction. UDS peer
+//! authentication remains outside this codec.
 
 use std::fmt;
 
@@ -21,7 +21,9 @@ use thiserror::Error;
 
 use crate::{
     kv_snapshot::EngineIncarnation,
-    snapshot_session::{SNAPSHOT_DIGEST_KEY_ID_BYTES, SnapshotSessionChallenge},
+    snapshot_session::{
+        SNAPSHOT_DIGEST_KEY_ID_BYTES, SnapshotSessionChallenge, SnapshotSessionSecret,
+    },
     snapshot_tail::{
         AuthenticatedCaughtUpFrame, AuthenticatedIdentityFrame, AuthenticatedTailFrame,
         CaughtUpAction, IdentityAction, SnapshotTailFence, SnapshotTailFenceReason, TailAction,
@@ -35,6 +37,7 @@ const SHA256_BYTES: usize = 32;
 const SHA256_BLOCK_BYTES: usize = 64;
 const MAGIC: &[u8; 8] = b"MDTAIL01";
 const AUTH_DOMAIN: &[u8] = b"mini-dynamo/snapshot-tail/frame/auth/v1\0";
+const KEY_DERIVATION_DOMAIN: &[u8] = b"mini-dynamo/snapshot-tail/key-derivation/v1\0";
 const PREFIX_BYTES: usize = 96;
 const FRAME_OVERHEAD_BYTES: usize = PREFIX_BYTES + SHA256_BYTES;
 
@@ -106,11 +109,21 @@ impl Default for TailWireLimits {
 pub struct TailSessionKey([u8; TAIL_SESSION_KEY_BYTES]);
 
 impl TailSessionKey {
-    /// Wrap bytes already derived from the authenticated session transcript.
-    /// This function does not perform transcript derivation itself.
+    /// Derive an ephemeral direction-specific key from the authenticated
+    /// snapshot session, its fresh challenge, and companion generation.
     #[must_use]
-    pub const fn from_derived_bytes(bytes: [u8; TAIL_SESSION_KEY_BYTES]) -> Self {
-        Self(bytes)
+    pub fn derive(
+        secret: &SnapshotSessionSecret,
+        session_id: SnapshotSessionChallenge,
+        companion_generation: u64,
+        direction: TailDirection,
+    ) -> Self {
+        let generation = companion_generation.to_be_bytes();
+        let direction = [direction as u8];
+        Self(secret.derive_subkey(
+            KEY_DERIVATION_DOMAIN,
+            &[session_id.as_bytes(), &generation, &direction],
+        ))
     }
 }
 
@@ -407,8 +420,9 @@ impl VerifiedTailFrame {
 pub enum VerifiedTailAction {
     /// The lifecycle has admitted this exact payload. A downstream payload
     /// decode or index-apply error must immediately fence this bootstrap and
-    /// must never publish its partially updated index. A dedicated
-    /// `application_failed` fence reason/API is the next integration step.
+    /// must never publish its partially updated index. Call
+    /// [`SnapshotTailFence::application_failed`] before discarding the private
+    /// generation when either operation fails.
     Apply {
         delivery_sequence: u64,
         event_watermark: u64,
@@ -760,7 +774,12 @@ mod tests {
     }
 
     fn key() -> TailSessionKey {
-        TailSessionKey::from_derived_bytes(*b"snapshot-tail-derived-key-32-byt")
+        TailSessionKey::derive(
+            &SnapshotSessionSecret::new(*b"snapshot-session-secret-32-byte!"),
+            SESSION,
+            7,
+            TailDirection::CompanionToRouter,
+        )
     }
 
     fn frame() -> (Vec<u8>, EngineIncarnation, TailSessionKey) {
@@ -903,6 +922,22 @@ mod tests {
                 .to_string()
                 .contains("opaque")
         );
+    }
+
+    #[test]
+    fn derived_keys_are_session_generation_and_direction_bound() {
+        let secret = SnapshotSessionSecret::new(*b"snapshot-session-secret-32-byte!");
+        let baseline =
+            TailSessionKey::derive(&secret, SESSION, 7, TailDirection::CompanionToRouter);
+        let other_direction =
+            TailSessionKey::derive(&secret, SESSION, 7, TailDirection::RouterToCompanion);
+        let other_generation =
+            TailSessionKey::derive(&secret, SESSION, 8, TailDirection::CompanionToRouter);
+        let other_session =
+            TailSessionKey::derive(&secret, OTHER_SESSION, 7, TailDirection::CompanionToRouter);
+        assert_ne!(baseline.0, other_direction.0);
+        assert_ne!(baseline.0, other_generation.0);
+        assert_ne!(baseline.0, other_session.0);
     }
 
     #[test]

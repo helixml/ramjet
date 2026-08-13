@@ -96,6 +96,13 @@ impl SnapshotSessionSecret {
     pub const fn new(bytes: [u8; SNAPSHOT_SESSION_SECRET_BYTES]) -> Self {
         Self(bytes)
     }
+
+    /// Derive domain-separated ephemeral material without exposing the
+    /// long-lived session-auth secret. Protocol modules use this for
+    /// direction-specific keys bound to an authenticated transcript.
+    pub(crate) fn derive_subkey(&self, domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+        authenticate(self, domain, parts)
+    }
 }
 
 impl fmt::Debug for SnapshotSessionSecret {
@@ -134,7 +141,7 @@ pub struct SnapshotSessionExpectations<'a> {
     pub minimum_companion_generation: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct AuthenticatedSnapshot {
     engine_incarnation: EngineIncarnation,
     snapshot_watermark: u64,

@@ -40,6 +40,7 @@ pub enum SnapshotTailFenceReason {
     CaughtUpMismatch,
     Disconnected,
     Cancelled,
+    ApplicationFailed,
     UnexpectedState,
 }
 
@@ -60,6 +61,7 @@ impl SnapshotTailFenceReason {
             Self::CaughtUpMismatch => "caught_up_mismatch",
             Self::Disconnected => "disconnected",
             Self::Cancelled => "cancelled",
+            Self::ApplicationFailed => "application_failed",
             Self::UnexpectedState => "unexpected_state",
         }
     }
@@ -381,6 +383,13 @@ impl SnapshotTailFence {
 
     pub fn cancel(&mut self) {
         self.fence(SnapshotTailFenceReason::Cancelled);
+    }
+
+    /// Fence after an authenticated delta could not be decoded or applied to
+    /// the private index. Callers must never publish the partially caught-up
+    /// generation after this transition.
+    pub fn application_failed(&mut self) {
+        self.fence(SnapshotTailFenceReason::ApplicationFailed);
     }
 
     fn check_identity(
@@ -706,7 +715,7 @@ mod tests {
     #[test]
     fn disconnect_overflow_and_cancellation_are_terminal() {
         type FenceSignal = fn(&mut SnapshotTailFence);
-        let cases: [(FenceSignal, SnapshotTailFenceReason); 3] = [
+        let cases: [(FenceSignal, SnapshotTailFenceReason); 4] = [
             (
                 SnapshotTailFence::disconnected,
                 SnapshotTailFenceReason::Disconnected,
@@ -718,6 +727,10 @@ mod tests {
             (
                 SnapshotTailFence::cancel,
                 SnapshotTailFenceReason::Cancelled,
+            ),
+            (
+                SnapshotTailFence::application_failed,
+                SnapshotTailFenceReason::ApplicationFailed,
             ),
         ];
         for (signal, reason) in cases {
