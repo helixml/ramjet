@@ -256,3 +256,48 @@ first rollout
 must keep `DS4_SNAPSHOT_ROUTE_MODE=off` (which also forces the exact-router
 gate off); enable `shadow` only after both
 companions are ready, then preserve ordinary approximate serving throughout.
+
+### One-command readiness and LB-recovery gate
+
+Copy the repository-owned gate beside the node06 Compose files after updating
+it. Its default mode is read-only and is safe to run while either source is
+fenced:
+
+```bash
+scp bench/snapshot_recovery_gate.py \
+  node06:/home/luke/inference/dspark_0731/
+ssh node06 'cd /home/luke/inference/dspark_0731 && \
+  python3 snapshot_recovery_gate.py \
+    --output /tmp/snapshot-readiness-$(date +%s).json'
+```
+
+Exit code `0` means both sources are authoritative and stable; exit code `3`
+means at least one source is not ready and **nothing was recreated**. Any other
+nonzero code is a failed precondition. Each run first executes the host setup
+check, full host validator, semantic Compose validator, profile render,
+immutable-image check, current-container health check, and rollback-config hash
+comparison. It samples each metrics UDS twice so a reconnecting source cannot
+slip through as ready.
+
+Only after the read-only run returns `0`, run the explicit mutation mode:
+
+```bash
+ssh node06 'cd /home/luke/inference/dspark_0731 && \
+  python3 snapshot_recovery_gate.py --apply \
+    --output /tmp/snapshot-recovery-$(date +%s).json'
+```
+
+Apply mode owns `/run/lock/mini-dynamo-node06-deployment.lock` for the complete
+inspect/mutate/measure/rollback interval. It defaults to five LB-only shadow
+recreates, requires both LB snapshot inventories authoritative on every pass,
+checks that engine identities and restart counts never move, and applies the
+three-second nearest-rank p95 gate. Whether the timing gate passes or fails, it
+force-recreates the exact preflight base service and verifies its original
+Compose config hash, image, 2/2 health, and snapshot-off state before releasing
+the lock. It never starts, stops, clears, or restarts an engine or companion.
+
+The mode-`0600` JSON journal is reserved before mutation and contains only
+public image/config identities, bounded readiness state, aggregate block/token
+counts, timings, and rollback status. It never records commands, environment,
+credentials, socket paths, prompts, token IDs, responses, or logs. Use a fresh
+output path for every run; the gate never overwrites evidence.

@@ -786,9 +786,13 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   stable connection each, but correctly fenced because the current vLLM
   publishers already aged past a reconstructable sequence-zero generation.
   They remain running to retain the next natural engine generation; do not
-  restart an engine merely to manufacture readiness. Once both sources become
-  authoritative, run the LB-only shadow recovery gate and require p95 under
-  three seconds.
+  restart an engine merely to manufacture readiness. A repository-owned
+  qualification gate now turns the next natural generation into one bounded
+  command: read-only validation refuses fenced sources without mutation, while
+  explicit apply mode holds the common lock across five LB-only shadow
+  recreates, immutable-engine checks, nearest-rank p95 at or below three
+  seconds, and mandatory config-hash-verified rollback. Once both sources
+  become authoritative, run that gate before the capacity cells.
   Compare at least 100,000 exact versus approximate decisions before placement
   can consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.

@@ -384,6 +384,18 @@ verify interval. The Phase-B P2P harness also adds a unique ownership label and
 service hash; it will not restore over a container it no longer owns. Do not
 bypass either fence with a raw concurrent `docker compose up`.
 
+For the snapshot critical path, use `bench/snapshot_recovery_gate.py` instead
+of a hand-written sequence. Its default audit runs every production validator,
+proves that the current base LB config is exactly reproducible for rollback,
+samples both companion metrics sockets for stable source authority, and exits
+`3` without mutation while either source is fenced. `--apply` is admitted only
+after that audit passes; it holds the common deployment lock across five
+LB-only shadow recreates and the mandatory baseline rollback, checks immutable
+engine identity after each attempt, and requires nearest-rank recovery p95 at
+or below three seconds. The mode-0600 output is reserved before mutation and is
+never overwritten. Do not use `--apply` to manufacture authority by restarting
+or clearing an engine.
+
 ### Preflight engine flags before a rolling restart
 
 Do not discover an unsupported vLLM flag combination by restarting a resident
