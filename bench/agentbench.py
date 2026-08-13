@@ -34,6 +34,7 @@ REQUIRED_METADATA = (
     "router_version",
     "gpu_count",
 )
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "max", "xhigh")
 
 
 class CorpusError(ValueError):
@@ -376,6 +377,39 @@ def bounded_route_counts(records):
     return counts
 
 
+def bounded_finish_reason_counts(records):
+    """Count completion outcomes without accepting arbitrary engine labels."""
+    counts = {"stop": 0, "tool_calls": 0, "length": 0, "missing": 0, "other": 0}
+    for record in records:
+        reason = record.get("finish_reason")
+        if reason in ("stop", "tool_calls", "length"):
+            counts[reason] += 1
+        elif reason is None:
+            counts["missing"] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
+def apply_request_policy(case, reasoning_effort=None, max_output_tokens=None):
+    """Apply an explicit benchmark policy without mutating the corpus."""
+    selected = copy.deepcopy(case)
+    if reasoning_effort is not None:
+        selected["request"]["reasoning_effort"] = reasoning_effort
+    if max_output_tokens is not None:
+        selected["request"]["max_tokens"] = max_output_tokens
+    return selected
+
+
+def run_exit_status(records, report_protocol_failures=False):
+    """Permit measured protocol failures, never transport failures."""
+    if any("error" in record for record in records):
+        return 1
+    if report_protocol_failures:
+        return 0
+    return 0 if all(record.get("ok") for record in records) else 1
+
+
 def add_prefix(case, prefix_kib, salt):
     selected = copy.deepcopy(case)
     namespace = hashlib.blake2b(salt.encode("utf-8"), digest_size=16).hexdigest()
@@ -476,6 +510,8 @@ def execute_case(base, model, token, case, sampling, timeout, repetition=0):
         "prompt_tokens": prompt,
         "cached_tokens": cached,
         "completion_tokens": completion,
+        "reasoning_effort": body.get("reasoning_effort", "missing"),
+        "max_output_tokens": body.get("max_tokens"),
         "first_response_ms": round((first_response - started) * 1000, 1),
         "ttft_ms": round(ttft * 1000, 1) if ttft is not None else None,
         "mean_itl_ms": round(mean_itl * 1000, 2) if mean_itl is not None else None,
@@ -514,7 +550,14 @@ def command_run(args):
         missing = wanted - {case["id"] for case in cases}
         if missing:
             raise SystemExit("unknown cases: " + ", ".join(sorted(missing)))
-    cases = [add_prefix(case, args.prefix_kib, args.salt) for case in cases]
+    cases = [
+        apply_request_policy(
+            add_prefix(case, args.prefix_kib, args.salt),
+            args.reasoning_effort,
+            args.max_output_tokens,
+        )
+        for case in cases
+    ]
     metadata = load_metadata(args.metadata_json)
     sampling = (
         {"temperature": 0.0, "top_p": 1.0, "seed": args.seed}
@@ -568,22 +611,28 @@ def command_run(args):
             )
         )
     good = [record for record in records if record["ok"]]
+    transport_good = [record for record in records if "error" not in record]
     ttfts = [record["ttft_ms"] for record in records if record.get("ttft_ms") is not None]
     itls = [record["mean_itl_ms"] for record in records if record.get("mean_itl_ms") is not None]
     completion = sum(record.get("completion_tokens", 0) for record in records)
     prompt = sum(record.get("prompt_tokens", 0) for record in records)
     cached = sum(record.get("cached_tokens", 0) for record in records)
+    good_completion = sum(record.get("completion_tokens", 0) for record in good)
+    walls = [record["wall_ms"] for record in records if record.get("wall_ms") is not None]
     summary = {
         "type": "summary",
         "metadata": metadata,
         "label": args.label,
         "profile": args.profile,
         "sampling": sampling,
+        "reasoning_effort_override": args.reasoning_effort,
+        "max_output_tokens_override": args.max_output_tokens,
         "concurrency": args.concurrency,
         "repetitions": args.repetitions,
         "warmup": args.warmup,
         "prefix_kib": args.prefix_kib,
         "requests": len(records),
+        "transport_successful": len(transport_good),
         "protocol_valid": len(good),
         "protocol_valid_pct": round(100 * len(good) / len(records), 1) if records else 0,
         "ttft_ms_p95": percentile(ttfts, 0.95),
@@ -592,6 +641,20 @@ def command_run(args):
         "total_tok_s": round((prompt + completion) / elapsed, 1) if elapsed else None,
         "cache_hit_pct": round(100 * cached / prompt, 1) if prompt else None,
         "route_counts": bounded_route_counts(records),
+        "finish_reason_counts": bounded_finish_reason_counts(records),
+        "completion_tokens_total": completion,
+        "completion_tokens_per_request": (
+            round(completion / len(records), 1) if records else None
+        ),
+        "completion_tokens_per_successful_task": (
+            round(good_completion / len(good), 1) if good else None
+        ),
+        "completion_tokens_spent_per_successful_task": (
+            round(completion / len(good), 1) if good else None
+        ),
+        "successful_completion_tokens_total": good_completion,
+        "request_wall_ms_p50": percentile(walls, 0.50),
+        "request_wall_ms_p95": percentile(walls, 0.95),
         "successful_tasks_per_gpu_hour": (
             round(len(good) * 3600 / elapsed / int(metadata["gpu_count"]), 1)
             if elapsed and int(metadata["gpu_count"]) > 0
@@ -600,7 +663,7 @@ def command_run(args):
         "wall_seconds": round(elapsed, 3),
     }
     print(json.dumps(summary, sort_keys=True))
-    return 0 if len(good) == len(records) else 1
+    return run_exit_status(records, args.report_protocol_failures)
 
 
 def parser():
@@ -633,6 +696,13 @@ def parser():
         help="cache namespace input; use a fresh value for each cold/warm pair",
     )
     run.add_argument("--seed", type=int, default=7)
+    run.add_argument("--reasoning-effort", choices=REASONING_EFFORTS)
+    run.add_argument("--max-output-tokens", type=int)
+    run.add_argument(
+        "--report-protocol-failures",
+        action="store_true",
+        help="keep a policy-sweep cell running after model protocol failures; transport failures still fail",
+    )
     run.add_argument("--timeout", type=int, default=900)
     run.set_defaults(handler=command_run)
     return root
@@ -644,6 +714,9 @@ def main(argv=None):
         raise SystemExit("concurrency and repetitions must be positive")
     if getattr(args, "prefix_kib", 0) < 0:
         raise SystemExit("prefix-kib must be non-negative")
+    max_output_tokens = getattr(args, "max_output_tokens", None)
+    if max_output_tokens is not None and not 1 <= max_output_tokens <= 4096:
+        raise SystemExit("max-output-tokens must be between 1 and 4096")
     return args.handler(args)
 
 

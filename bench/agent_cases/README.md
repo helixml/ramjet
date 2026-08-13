@@ -46,6 +46,36 @@ The typed required-tool case deliberately reserves 256 output tokens. A live
 correctness budgets above measured valid output instead of treating benchmark-
 induced truncation as a frontend-parser failure.
 
+## Reasoning-effort and output-budget matrix
+
+Issue #14 uses this same fixed correctness oracle to compare explicit
+`reasoning_effort` and `max_tokens` policies. `agentbench.py` preserves the
+corpus's caller settings unless `--reasoning-effort` or
+`--max-output-tokens` is supplied. Each request record includes the effective
+bounded policy; summaries add valid and total-spent completion tokens per
+successful task, request-latency p50/p95, and fixed-cardinality finish-reason
+counts.
+
+Run the bounded low/high/max × 96/192/256 matrix with fresh namespaces:
+
+```bash
+bench/reasoning_matrix.sh http://127.0.0.1:8006 deepseek-v4-flash issue14-r1
+```
+
+Defaults run both deterministic and official-agentic sampling, three repeats
+of the five-case corpus per cell, and concurrency five. Narrow development runs
+with `REASONING_PROFILES`, `REASONING_EFFORTS`, `REASONING_OUTPUT_CAPS`,
+`REASONING_RUNS`, or `REASONING_CONCURRENCY`. `REASONING_START_CELL` resumes at
+a numbered cell after retaining the earlier JSONL. Progress goes to stderr and
+results to stdout. Policy cells deliberately report protocol failures without
+aborting later cells, but any transport failure still stops the matrix.
+
+A lower cap is promotable only if protocol validity and task completion remain
+equal to the control. Never infer quality from fewer completion tokens alone.
+mini-dynamo does not classify content or enforce this policy; it verifies
+pass-through and supplies evidence for the Helix control plane, where an
+explicit per-step policy and kill switch belong.
+
 ## Sovereign trace-shape replay
 
 `bench/agent_trace.py` accepts an optional content-free workload shape exported
