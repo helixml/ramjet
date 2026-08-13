@@ -248,7 +248,10 @@ def lb_snapshot_ready(metrics, engine_count=2):
             metrics, "ds4proxy_snapshot_route_connections_active", labels
         ) != 1:
             return False
-        if metric_value(metrics, "ds4proxy_snapshot_route_attempts_active", labels) != 0:
+        # An attempt owns the long-lived consumer future through disconnect.
+        # Ready therefore means one active attempt and one active connection,
+        # not a completed/zero attempt.
+        if metric_value(metrics, "ds4proxy_snapshot_route_attempts_active", labels) != 1:
             return False
     return True
 
