@@ -782,12 +782,13 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   pin the qualified v0.1.0 LB and companion manifests by SHA tag and digest.
   The node06 host setup, fresh per-engine attestations, full preflight, and
   restricted-identity off-mode LB start now pass without an engine restart.
-  Both long-lived companions are healthy but correctly fenced because the
-  current vLLM publishers already aged past a reconstructable sequence-zero
-  generation. They remain running to retain the next natural engine generation;
-  do not restart an engine merely to manufacture readiness. Once both sources
-  become authoritative, run the LB-only shadow recovery gate and require p95
-  under three seconds.
+  The `123dd9d` diagnostic companions are now deployed and healthy with one
+  stable connection each, but correctly fenced because the current vLLM
+  publishers already aged past a reconstructable sequence-zero generation.
+  They remain running to retain the next natural engine generation; do not
+  restart an engine merely to manufacture readiness. Once both sources become
+  authoritative, run the LB-only shadow recovery gate and require p95 under
+  three seconds.
   Compare at least 100,000 exact versus approximate decisions before placement
   can consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.
