@@ -4016,3 +4016,40 @@ renders and a divergence rejection test. Second, the initial Caddy validator
 required both metrics sockets but did not reject an additional session-socket
 proxy. It now accepts exactly the two ordered metrics UDS upstreams and rejects
 every extra reverse proxy, including the peer session socket.
+
+## 2026-08-13 — r61 Drone publisher path guard correction
+
+The real deployment-only main acceptance contradicted r60's final claim. Drone
+#245 changed only `.drone.yml`, operational documentation, one benchmark test,
+and `deploy/dspark_0731`; nevertheless all three publisher steps were compiled
+without a condition. The dependency image rebuilt for 138s, then the LB and
+companion publishers ran for 87s/84s. Drone 2.12.1's native condition schema
+does not include `paths`; lint accepted the unknown field but the server dropped
+it. Moving the field to a pipeline trigger would have repeated the same
+unsupported assumption.
+
+The corrected pipeline keeps main-push event guards for secret isolation and
+adds `bench/drone_publish_guard.sh` as the first command in each publisher
+container. The installed `plugins/docker` image already contains POSIX shell,
+Git 2.47.2, and `/bin/drone-docker`; it contains no Python and downloads
+nothing. The guard verifies both `DRONE_COMMIT_BEFORE` and the documented
+`DRONE_COMMIT_SHA` are available commit objects, verifies the range is nonempty,
+and queries it with explicit top-rooted Git pathspecs for each owned-input
+matrix. This avoids parsing filenames while retaining rename/delete coverage.
+Matching inputs `exec /bin/drone-docker`; nonmatches return a distinct
+skip status that the same command block maps to success before plugin startup.
+Missing revisions, diff errors, and empty ranges fail closed.
+The dependency guard remains a graph predecessor of both app publishers, so a
+manifest/toolchain/key change seeds the required content-addressed base first.
+
+Eight subprocess tests cover the #245-equivalent zero-publisher matrix, source
+fan-out, manifest fan-out and ordering inputs, LB-only and companion-only build
+inputs, deletions, an owned filename containing a newline, and every revision
+failure. Two structural tests reject any
+future unsupported `paths:` field and require each publisher to retain the
+guard/skip/error/exec wrapper, push-only condition, and dependency ordering.
+Against the actual #245 range, all three guards returned `skip`; none invokes
+Docker, uses registry credentials, or touches GHCR. The first main build after
+merge remains the real compiled-environment acceptance and should finish each
+publisher guard in the seconds class. No node06 process, container, image,
+route, engine, secret, or GPU state changed.

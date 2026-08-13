@@ -77,15 +77,21 @@ steps:
       - agent-protocol
       - deployment-compose
 
-  # Compile the locked dependency graph once per manifest/toolchain/dependency
-  # Dockerfile key. The content-addressed tag is then an explicit base image,
-  # not a best-effort BuildKit cache hint. Drone corrects dependencies around
-  # this conditionally skipped step for source-only pushes.
+  # Drone 2.12 silently discards `when.paths`, so every publisher has a
+  # fail-closed repository-side changeset guard. A nonmatching step exits before
+  # dockerd or registry login; an unavailable revision is an error, not publish.
   - name: publish-rust-deps-image
     image: plugins/docker
     pull: if-not-exists
     environment:
       DOCKER_BUILDKIT: "1"
+    commands:
+      - |
+        status=0
+        sh bench/drone_publish_guard.sh rust-deps || status=$?
+        if [ "$status" -eq 3 ]; then exit 0; fi
+        if [ "$status" -ne 0 ]; then exit "$status"; fi
+        exec /bin/drone-docker
     settings:
       registry: ghcr.io
       repo: ghcr.io/helixml/mini-dynamo
@@ -99,25 +105,25 @@ steps:
     when:
       event:
         - push
-      paths:
-        include:
-          - Cargo.toml
-          - Cargo.lock
-          - rust-toolchain.toml
-          - Dockerfile.deps
-          - .docker/rust-deps-key
     depends_on:
       - quality-complete
 
   # GHCR publishing lives here, not GitHub Actions. The push-event guard keeps
   # registry credentials out of pull-request builds. Both release images wait
-  # for a dependency seed when its inputs changed; otherwise Drone removes the
-  # skipped dependency from the graph.
+  # for the dependency guard; a dependency-input change seeds the required base
+  # before either app publisher starts.
   - name: publish-image
     image: plugins/docker
     pull: if-not-exists
     environment:
       DOCKER_BUILDKIT: "1"
+    commands:
+      - |
+        status=0
+        sh bench/drone_publish_guard.sh lb || status=$?
+        if [ "$status" -eq 3 ]; then exit 0; fi
+        if [ "$status" -ne 0 ]; then exit "$status"; fi
+        exec /bin/drone-docker
     settings:
       registry: ghcr.io
       repo: ghcr.io/helixml/mini-dynamo
@@ -131,14 +137,6 @@ steps:
     when:
       event:
         - push
-      paths:
-        include:
-          - Cargo.toml
-          - Cargo.lock
-          - rust-toolchain.toml
-          - Dockerfile
-          - compat/**
-          - src/**
     depends_on:
       - quality-complete
       - publish-rust-deps-image
@@ -151,6 +149,13 @@ steps:
     pull: if-not-exists
     environment:
       DOCKER_BUILDKIT: "1"
+    commands:
+      - |
+        status=0
+        sh bench/drone_publish_guard.sh companion || status=$?
+        if [ "$status" -eq 3 ]; then exit 0; fi
+        if [ "$status" -ne 0 ]; then exit "$status"; fi
+        exec /bin/drone-docker
     settings:
       registry: ghcr.io
       repo: ghcr.io/helixml/mini-dynamo
@@ -165,13 +170,6 @@ steps:
     when:
       event:
         - push
-      paths:
-        include:
-          - Cargo.toml
-          - Cargo.lock
-          - rust-toolchain.toml
-          - Dockerfile.companion
-          - src/**
     depends_on:
       - quality-complete
       - publish-rust-deps-image

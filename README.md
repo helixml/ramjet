@@ -262,6 +262,12 @@ same `main` build. To bootstrap that key locally before it exists in GHCR:
     docker build -f Dockerfile.deps -t "$deps_ref" .
     docker build --build-arg RUST_DEPS_IMAGE="$deps_ref" .
 
+This Drone server does not support path conditions. Each main-push publisher
+therefore runs `bench/drone_publish_guard.sh` against the exact
+`DRONE_COMMIT_BEFORE..DRONE_COMMIT_SHA` range before starting Docker or logging
+in to GHCR. CI/docs/benchmark/deployment-only changes finish all three guards
+without publishing. Missing revisions or an empty range fail closed.
+
 Measure the request-preparation hot path before and after tokenizer work:
 
     cargo run --release --locked --example preparation_bench
