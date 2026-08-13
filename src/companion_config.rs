@@ -4,9 +4,9 @@
 //! permissions, symlinks, and inode identity remain the responsibility of the
 //! hardened socket and secret-file modules at open/bind time.
 
-use std::env;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
+use std::{env, fmt};
 
 use thiserror::Error;
 use url::Url;
@@ -16,6 +16,13 @@ const MAX_SOURCES: usize = 2;
 const MAX_QUEUE_CAPACITY: usize = 65_536;
 const MAX_DEADLINE_MS: u64 = 15 * 60 * 1_000;
 const MAX_TOPIC_BYTES: usize = 256;
+const MAX_SOCKET_PATH_BYTES: usize = 64;
+const MAX_SECRET_PATH_BYTES: usize = 4_096;
+const MAX_ENDPOINT_BYTES: usize = 512;
+const MAX_SNAPSHOT_FRAME_BYTES: usize = 32 * 1024 * 1024;
+const MAX_TAIL_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const MAX_BATCH_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+const MAX_BATCH_EVENTS: usize = 4_096;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SnapshotCompanionMode {
@@ -24,13 +31,23 @@ pub enum SnapshotCompanionMode {
     Serve,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SnapshotCompanionSource {
     pub live_endpoint: String,
     pub replay_endpoint: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl fmt::Debug for SnapshotCompanionSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SnapshotCompanionSource")
+            .field("live_endpoint", &"[REDACTED]")
+            .field("replay_endpoint", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct SnapshotCompanionConfig {
     pub mode: SnapshotCompanionMode,
     pub socket_path: Option<PathBuf>,
@@ -43,8 +60,43 @@ pub struct SnapshotCompanionConfig {
     pub snapshot_deadline: Duration,
     pub tail_idle_deadline: Duration,
     pub shutdown_deadline: Duration,
+    pub max_snapshot_frame_bytes: usize,
+    pub max_tail_frame_bytes: usize,
+    pub max_batch_payload_bytes: usize,
+    pub max_batch_events: usize,
     pub event_topic: String,
     pub sources: Vec<SnapshotCompanionSource>,
+}
+
+impl fmt::Debug for SnapshotCompanionConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SnapshotCompanionConfig")
+            .field("mode", &self.mode)
+            .field(
+                "socket_path",
+                &self.socket_path.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("companion_uid", &self.companion_uid.map(|_| "[REDACTED]"))
+            .field("client_uid", &self.client_uid.map(|_| "[REDACTED]"))
+            .field(
+                "secret_path",
+                &self.secret_path.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("secret_owner_uid", &"[REDACTED]")
+            .field("max_clients", &self.max_clients)
+            .field("tail_queue_capacity", &self.tail_queue_capacity)
+            .field("snapshot_deadline", &self.snapshot_deadline)
+            .field("tail_idle_deadline", &self.tail_idle_deadline)
+            .field("shutdown_deadline", &self.shutdown_deadline)
+            .field("max_snapshot_frame_bytes", &self.max_snapshot_frame_bytes)
+            .field("max_tail_frame_bytes", &self.max_tail_frame_bytes)
+            .field("max_batch_payload_bytes", &self.max_batch_payload_bytes)
+            .field("max_batch_events", &self.max_batch_events)
+            .field("event_topic_bytes", &self.event_topic.len())
+            .field("source_count", &self.sources.len())
+            .finish()
+    }
 }
 
 impl SnapshotCompanionConfig {
@@ -65,6 +117,7 @@ impl SnapshotCompanionConfig {
     /// Returns [`SnapshotCompanionConfigError`] for an unknown mode, missing
     /// serve-mode setting, invalid path/UID/bound/deadline, unsafe credential
     /// relationship, malformed endpoint, or mismatched endpoint cardinality.
+    #[allow(clippy::too_many_lines)]
     pub fn from_lookup(
         mut get: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, SnapshotCompanionConfigError> {
@@ -89,6 +142,40 @@ impl SnapshotCompanionConfig {
         let tail_idle_deadline =
             duration_ms(&mut get, "DS4_SNAPSHOT_TAIL_IDLE_DEADLINE_MS", 30_000)?;
         let shutdown_deadline = duration_ms(&mut get, "DS4_SNAPSHOT_SHUTDOWN_DEADLINE_MS", 5_000)?;
+        let max_snapshot_frame_bytes = bounded_usize(
+            &mut get,
+            "DS4_SNAPSHOT_MAX_FRAME_BYTES",
+            MAX_SNAPSHOT_FRAME_BYTES,
+            1,
+            MAX_SNAPSHOT_FRAME_BYTES,
+        )?;
+        let max_tail_frame_bytes = bounded_usize(
+            &mut get,
+            "DS4_SNAPSHOT_MAX_TAIL_FRAME_BYTES",
+            8 * 1024 * 1024 + 4 * 1024,
+            1,
+            MAX_TAIL_FRAME_BYTES,
+        )?;
+        let max_batch_payload_bytes = bounded_usize(
+            &mut get,
+            "DS4_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES",
+            8 * 1024 * 1024,
+            1,
+            MAX_BATCH_PAYLOAD_BYTES,
+        )?;
+        let max_batch_events = bounded_usize(
+            &mut get,
+            "DS4_SNAPSHOT_MAX_BATCH_EVENTS",
+            MAX_BATCH_EVENTS,
+            1,
+            MAX_BATCH_EVENTS,
+        )?;
+        if max_batch_payload_bytes >= max_tail_frame_bytes {
+            return Err(invalid(
+                "DS4_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES",
+                "a positive byte bound smaller than the tail frame bound",
+            ));
+        }
         let secret_owner_uid =
             parse_u32(&mut get, "DS4_SNAPSHOT_SECRET_OWNER_UID", Some(0))?.unwrap_or(0);
 
@@ -105,13 +192,19 @@ impl SnapshotCompanionConfig {
                 snapshot_deadline,
                 tail_idle_deadline,
                 shutdown_deadline,
+                max_snapshot_frame_bytes,
+                max_tail_frame_bytes,
+                max_batch_payload_bytes,
+                max_batch_events,
                 event_topic: String::new(),
                 sources: Vec::new(),
             });
         }
 
-        let socket_path = required_path(&mut get, "DS4_SNAPSHOT_SOCKET_PATH")?;
-        let secret_path = required_path(&mut get, "DS4_SNAPSHOT_SECRET_PATH")?;
+        let socket_path =
+            required_path(&mut get, "DS4_SNAPSHOT_SOCKET_PATH", MAX_SOCKET_PATH_BYTES)?;
+        let secret_path =
+            required_path(&mut get, "DS4_SNAPSHOT_SECRET_PATH", MAX_SECRET_PATH_BYTES)?;
         if socket_path == secret_path {
             return Err(invalid(
                 "DS4_SNAPSHOT_SECRET_PATH",
@@ -160,6 +253,10 @@ impl SnapshotCompanionConfig {
             snapshot_deadline,
             tail_idle_deadline,
             shutdown_deadline,
+            max_snapshot_frame_bytes,
+            max_tail_frame_bytes,
+            max_batch_payload_bytes,
+            max_batch_events,
             event_topic,
             sources,
         })
@@ -198,6 +295,7 @@ impl SnapshotCompanionConfigError {
 fn required_path(
     get: &mut impl FnMut(&str) -> Option<String>,
     key: &'static str,
+    max_bytes: usize,
 ) -> Result<PathBuf, SnapshotCompanionConfigError> {
     let raw = get(key).filter(|value| !value.is_empty()).ok_or(
         SnapshotCompanionConfigError::Missing {
@@ -210,8 +308,9 @@ fn required_path(
         && raw[1..]
             .split('/')
             .all(|component| !component.is_empty() && !matches!(component, "." | ".."));
+    let within_limit = raw.len() <= max_bytes;
     let path = PathBuf::from(raw);
-    if !normalized_text || !valid_absolute_file_path(&path) {
+    if !within_limit || !normalized_text || !valid_absolute_file_path(&path) {
         return Err(invalid(key, "an absolute normalized file path"));
     }
     Ok(path)
@@ -301,16 +400,17 @@ fn endpoint_list(
             (!value.is_empty()).then_some(value)
         })
         .map(|value| {
-            let valid = Url::parse(value).ok().is_some_and(|url| {
-                url.scheme() == "tcp"
-                    && url.has_host()
-                    && url.port().is_some()
-                    && url.username().is_empty()
-                    && url.password().is_none()
-                    && matches!(url.path(), "" | "/")
-                    && url.query().is_none()
-                    && url.fragment().is_none()
-            });
+            let valid = value.len() <= MAX_ENDPOINT_BYTES
+                && Url::parse(value).ok().is_some_and(|url| {
+                    url.scheme() == "tcp"
+                        && url.has_host()
+                        && url.port().is_some()
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && matches!(url.path(), "" | "/")
+                        && url.query().is_none()
+                        && url.fragment().is_none()
+                });
             if valid {
                 Ok(value.to_owned())
             } else {
@@ -369,6 +469,10 @@ mod tests {
         assert_eq!(config.snapshot_deadline, Duration::from_secs(3));
         assert_eq!(config.tail_idle_deadline, Duration::from_secs(30));
         assert_eq!(config.shutdown_deadline, Duration::from_secs(5));
+        assert_eq!(config.max_snapshot_frame_bytes, 32 * 1024 * 1024);
+        assert_eq!(config.max_tail_frame_bytes, 8 * 1024 * 1024 + 4 * 1024);
+        assert_eq!(config.max_batch_payload_bytes, 8 * 1024 * 1024);
+        assert_eq!(config.max_batch_events, 4_096);
     }
 
     #[test]
@@ -417,6 +521,14 @@ mod tests {
                 }
             ));
         }
+
+        let too_long = format!("/run/{}.sock", "x".repeat(MAX_SOCKET_PATH_BYTES));
+        let mut values = configured();
+        values.insert(
+            "DS4_SNAPSHOT_SOCKET_PATH",
+            Box::leak(too_long.into_boxed_str()),
+        );
+        assert!(load(&values).is_err());
     }
 
     #[test]
@@ -442,9 +554,45 @@ mod tests {
             ("DS4_SNAPSHOT_DEADLINE_MS", "0"),
             ("DS4_SNAPSHOT_TAIL_IDLE_DEADLINE_MS", "900001"),
             ("DS4_SNAPSHOT_SHUTDOWN_DEADLINE_MS", "invalid"),
+            ("DS4_SNAPSHOT_MAX_FRAME_BYTES", "33554433"),
+            ("DS4_SNAPSHOT_MAX_TAIL_FRAME_BYTES", "16777217"),
+            ("DS4_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES", "16777217"),
+            ("DS4_SNAPSHOT_MAX_BATCH_EVENTS", "4097"),
         ] {
             let values = HashMap::from([(key, value)]);
             assert!(load(&values).is_err(), "accepted {key}={value}");
+        }
+    }
+
+    #[test]
+    fn decoded_batch_must_fit_inside_authenticated_tail_frame() {
+        let mut values = configured();
+        values.insert("DS4_SNAPSHOT_MAX_TAIL_FRAME_BYTES", "1024");
+        values.insert("DS4_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES", "1024");
+        assert!(matches!(
+            load(&values),
+            Err(SnapshotCompanionConfigError::Invalid {
+                key: "DS4_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn debug_redacts_paths_uids_topics_and_endpoints() {
+        let mut values = configured();
+        values.insert("DS4_SNAPSHOT_EVENT_TOPIC", "private-topic");
+        let config = load(&values).unwrap();
+        let debug = format!("{config:?}");
+        for forbidden in [
+            "/run/mini-dynamo/snapshot.sock",
+            "/run/secrets/snapshot-session",
+            "engine-a",
+            "private-topic",
+            "12001",
+            "12002",
+        ] {
+            assert!(!debug.contains(forbidden), "debug leaked {forbidden}");
         }
     }
 
@@ -466,5 +614,13 @@ mod tests {
             values.insert(key, value);
             assert!(load(&values).is_err(), "accepted invalid endpoint set");
         }
+
+        let oversized = format!("tcp://{}:5557", "a".repeat(MAX_ENDPOINT_BYTES));
+        let mut values = configured();
+        values.insert(
+            "DS4_SNAPSHOT_LIVE_ENDPOINTS",
+            Box::leak(oversized.into_boxed_str()),
+        );
+        assert!(load(&values).is_err());
     }
 }

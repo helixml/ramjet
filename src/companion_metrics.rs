@@ -69,21 +69,78 @@ impl CompanionSessionState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompanionSnapshotPhase {
-    Prepare,
+    Build,
     Encode,
     Transfer,
     CatchUp,
+    Apply,
+    CaughtUp,
 }
 
 impl CompanionSnapshotPhase {
-    const ALL: [Self; 4] = [Self::Prepare, Self::Encode, Self::Transfer, Self::CatchUp];
+    const ALL: [Self; 6] = [
+        Self::Build,
+        Self::Encode,
+        Self::Transfer,
+        Self::CatchUp,
+        Self::Apply,
+        Self::CaughtUp,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Prepare => "prepare",
+            Self::Build => "build",
             Self::Encode => "encode",
             Self::Transfer => "transfer",
             Self::CatchUp => "catch_up",
+            Self::Apply => "apply",
+            Self::CaughtUp => "caught_up",
+        }
+    }
+}
+
+/// Closed terminal result set. Each variant maps to a fixed outcome/reason
+/// pair, preventing callers from creating labels from arbitrary errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompanionSessionResult {
+    Completed,
+    RejectedCapacity,
+    RejectedAuthentication,
+    RejectedPeer,
+    FailedProtocol,
+    FailedTransport,
+    FailedIdentity,
+    FailedApplication,
+    Cancelled,
+    Timeout,
+}
+
+impl CompanionSessionResult {
+    const ALL: [Self; 10] = [
+        Self::Completed,
+        Self::RejectedCapacity,
+        Self::RejectedAuthentication,
+        Self::RejectedPeer,
+        Self::FailedProtocol,
+        Self::FailedTransport,
+        Self::FailedIdentity,
+        Self::FailedApplication,
+        Self::Cancelled,
+        Self::Timeout,
+    ];
+
+    const fn labels(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Completed => ("completed", "none"),
+            Self::RejectedCapacity => ("rejected", "capacity"),
+            Self::RejectedAuthentication => ("rejected", "authentication"),
+            Self::RejectedPeer => ("rejected", "peer"),
+            Self::FailedProtocol => ("failed", "protocol"),
+            Self::FailedTransport => ("failed", "transport"),
+            Self::FailedIdentity => ("failed", "identity"),
+            Self::FailedApplication => ("failed", "application"),
+            Self::Cancelled => ("failed", "cancelled"),
+            Self::Timeout => ("failed", "timeout"),
         }
     }
 }
@@ -143,6 +200,59 @@ pub enum CompanionTailOutcome {
     Rejected,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompanionDeltaEvent {
+    Stored,
+    Removed,
+    Cleared,
+    Filtered,
+}
+
+impl CompanionDeltaEvent {
+    const ALL: [Self; 4] = [Self::Stored, Self::Removed, Self::Cleared, Self::Filtered];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Stored => "stored",
+            Self::Removed => "removed",
+            Self::Cleared => "cleared",
+            Self::Filtered => "filtered",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompanionDiscardReason {
+    Superseded,
+    SnapshotFailed,
+    TailFailed,
+    BufferOverflow,
+    Disconnected,
+    Shutdown,
+}
+
+impl CompanionDiscardReason {
+    const ALL: [Self; 6] = [
+        Self::Superseded,
+        Self::SnapshotFailed,
+        Self::TailFailed,
+        Self::BufferOverflow,
+        Self::Disconnected,
+        Self::Shutdown,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Superseded => "superseded",
+            Self::SnapshotFailed => "snapshot_failed",
+            Self::TailFailed => "tail_failed",
+            Self::BufferOverflow => "buffer_overflow",
+            Self::Disconnected => "disconnected",
+            Self::Shutdown => "shutdown",
+        }
+    }
+}
+
 impl CompanionTailOutcome {
     const ALL: [Self; 4] = [Self::Applied, Self::Queued, Self::Duplicate, Self::Rejected];
 
@@ -198,15 +308,21 @@ pub struct CompanionMetrics {
     enabled: Gauge,
     ready: GaugeVec,
     sessions: GaugeVec,
+    session_results: CounterVec,
     tail_queue_depth: GaugeVec,
     published_generation: GaugeVec,
     published_index_entries: GaugeVec,
+    published_blocks: GaugeVec,
+    published_tokens: GaugeVec,
     last_publish_timestamp: GaugeVec,
     snapshots: CounterVec,
     snapshot_duration: HistogramVec,
     snapshot_bytes: HistogramVec,
     tail_frames: CounterVec,
+    tail_batches: CounterVec,
+    tail_events: CounterVec,
     fences: CounterVec,
+    discards: CounterVec,
     identity_changes: CounterVec,
 }
 
@@ -218,6 +334,7 @@ impl CompanionMetrics {
     /// Returns a Prometheus registration error for invalid or duplicate
     /// descriptors. Configuration cardinality is already validated by the
     /// typed config constructor.
+    #[allow(clippy::too_many_lines)]
     pub fn new(
         registry: &Registry,
         config: &SnapshotCompanionConfig,
@@ -243,6 +360,11 @@ impl CompanionMetrics {
                 "Snapshot companion sessions by bounded lifecycle state",
                 &["engine", "state"],
             )?,
+            session_results: counter(
+                "ds4proxy_snapshot_companion_sessions_total",
+                "Snapshot companion terminal sessions by bounded outcome and reason",
+                &["engine", "outcome", "reason"],
+            )?,
             tail_queue_depth: gauge(
                 "ds4proxy_snapshot_companion_tail_queue_depth",
                 "Authenticated tail frames queued by bounded engine and client slot",
@@ -256,6 +378,16 @@ impl CompanionMetrics {
             published_index_entries: gauge(
                 "ds4proxy_snapshot_companion_published_index_entries",
                 "Entries in the current published digest index",
+                &["engine"],
+            )?,
+            published_blocks: gauge(
+                "ds4proxy_snapshot_companion_published_blocks",
+                "Resident blocks in the published digest index",
+                &["engine"],
+            )?,
+            published_tokens: gauge(
+                "ds4proxy_snapshot_companion_published_tokens",
+                "Logical prefix tokens represented by the published digest index",
                 &["engine"],
             )?,
             last_publish_timestamp: gauge(
@@ -295,9 +427,24 @@ impl CompanionMetrics {
                 "Authenticated tail frames by bounded kind and outcome",
                 &["engine", "kind", "outcome"],
             )?,
+            tail_batches: counter(
+                "ds4proxy_snapshot_companion_tail_batches_total",
+                "Decoded tail batches by bounded outcome",
+                &["engine", "outcome"],
+            )?,
+            tail_events: counter(
+                "ds4proxy_snapshot_companion_tail_events_total",
+                "Decoded tail events by bounded semantic kind",
+                &["engine", "kind"],
+            )?,
             fences: counter(
                 "ds4proxy_snapshot_companion_fences_total",
                 "Snapshot lifecycle fences by bounded reason",
+                &["engine", "reason"],
+            )?,
+            discards: counter(
+                "ds4proxy_snapshot_companion_discards_total",
+                "Private or published generations discarded by bounded reason",
                 &["engine", "reason"],
             )?,
             identity_changes: counter(
@@ -345,6 +492,13 @@ impl CompanionMetrics {
             .set(count as f64);
     }
 
+    pub fn record_session(&self, engine: CompanionEngineSlot, result: CompanionSessionResult) {
+        let (outcome, reason) = result.labels();
+        self.session_results
+            .with_label_values(&[engine.label(), outcome, reason])
+            .inc();
+    }
+
     /// Update one of the two bounded per-client queue series.
     ///
     /// # Errors
@@ -371,6 +525,8 @@ impl CompanionMetrics {
         engine: CompanionEngineSlot,
         generation: u64,
         entries: usize,
+        blocks: usize,
+        tokens: usize,
         timestamp_seconds: f64,
     ) {
         let engine = engine.label();
@@ -380,6 +536,12 @@ impl CompanionMetrics {
         self.published_index_entries
             .with_label_values(&[engine])
             .set(entries as f64);
+        self.published_blocks
+            .with_label_values(&[engine])
+            .set(blocks as f64);
+        self.published_tokens
+            .with_label_values(&[engine])
+            .set(tokens as f64);
         self.last_publish_timestamp
             .with_label_values(&[engine])
             .set(timestamp_seconds);
@@ -422,9 +584,33 @@ impl CompanionMetrics {
             .inc();
     }
 
+    pub fn record_tail_batch(&self, engine: CompanionEngineSlot, outcome: CompanionTailOutcome) {
+        self.tail_batches
+            .with_label_values(&[engine.label(), outcome.label()])
+            .inc();
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    pub fn record_tail_events(
+        &self,
+        engine: CompanionEngineSlot,
+        kind: CompanionDeltaEvent,
+        count: usize,
+    ) {
+        self.tail_events
+            .with_label_values(&[engine.label(), kind.label()])
+            .inc_by(count as f64);
+    }
+
     pub fn record_fence(&self, engine: CompanionEngineSlot, reason: SnapshotTailFenceReason) {
         self.fences
             .with_label_values(&[engine.label(), fence_label(reason)])
+            .inc();
+    }
+
+    pub fn record_discard(&self, engine: CompanionEngineSlot, reason: CompanionDiscardReason) {
+        self.discards
+            .with_label_values(&[engine.label(), reason.label()])
             .inc();
     }
 
@@ -445,11 +631,18 @@ impl CompanionMetrics {
             self.published_generation.with_label_values(&[engine_label]);
             self.published_index_entries
                 .with_label_values(&[engine_label]);
+            self.published_blocks.with_label_values(&[engine_label]);
+            self.published_tokens.with_label_values(&[engine_label]);
             self.last_publish_timestamp
                 .with_label_values(&[engine_label]);
             for state in CompanionSessionState::ALL {
                 self.sessions
                     .with_label_values(&[engine_label, state.label()]);
+            }
+            for result in CompanionSessionResult::ALL {
+                let (outcome, reason) = result.labels();
+                self.session_results
+                    .with_label_values(&[engine_label, outcome, reason]);
             }
             for client_slot in ["client-0", "client-1"] {
                 self.tail_queue_depth
@@ -477,9 +670,21 @@ impl CompanionMetrics {
                     ]);
                 }
             }
+            for outcome in CompanionTailOutcome::ALL {
+                self.tail_batches
+                    .with_label_values(&[engine_label, outcome.label()]);
+            }
+            for kind in CompanionDeltaEvent::ALL {
+                self.tail_events
+                    .with_label_values(&[engine_label, kind.label()]);
+            }
             for reason in all_fence_reasons() {
                 self.fences
                     .with_label_values(&[engine_label, fence_label(reason)]);
+            }
+            for reason in CompanionDiscardReason::ALL {
+                self.discards
+                    .with_label_values(&[engine_label, reason.label()]);
             }
             for component in CompanionIdentityChange::ALL {
                 self.identity_changes
@@ -493,15 +698,21 @@ impl CompanionMetrics {
             Box::new(self.enabled.clone()),
             Box::new(self.ready.clone()),
             Box::new(self.sessions.clone()),
+            Box::new(self.session_results.clone()),
             Box::new(self.tail_queue_depth.clone()),
             Box::new(self.published_generation.clone()),
             Box::new(self.published_index_entries.clone()),
+            Box::new(self.published_blocks.clone()),
+            Box::new(self.published_tokens.clone()),
             Box::new(self.last_publish_timestamp.clone()),
             Box::new(self.snapshots.clone()),
             Box::new(self.snapshot_duration.clone()),
             Box::new(self.snapshot_bytes.clone()),
             Box::new(self.tail_frames.clone()),
+            Box::new(self.tail_batches.clone()),
+            Box::new(self.tail_events.clone()),
             Box::new(self.fences.clone()),
+            Box::new(self.discards.clone()),
             Box::new(self.identity_changes.clone()),
         ]
     }
@@ -584,11 +795,17 @@ mod tests {
             "ds4proxy_snapshot_companion_enabled 1",
             "ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 0",
             "ds4proxy_snapshot_companion_sessions{engine=\"engine-1\",state=\"catching_up\"} 0",
+            "ds4proxy_snapshot_companion_sessions_total{engine=\"engine-0\",outcome=\"rejected\",reason=\"authentication\"} 0",
             "ds4proxy_snapshot_companion_tail_queue_depth{client_slot=\"client-1\",engine=\"engine-0\"} 0",
             "ds4proxy_snapshot_companion_snapshots_total{engine=\"engine-0\",outcome=\"timeout\"} 0",
-            "ds4proxy_snapshot_companion_snapshot_duration_seconds_count{engine=\"engine-1\",outcome=\"success\",phase=\"prepare\"} 0",
+            "ds4proxy_snapshot_companion_snapshot_duration_seconds_count{engine=\"engine-1\",outcome=\"success\",phase=\"build\"} 0",
+            "ds4proxy_snapshot_companion_snapshot_duration_seconds_count{engine=\"engine-1\",outcome=\"success\",phase=\"apply\"} 0",
+            "ds4proxy_snapshot_companion_snapshot_duration_seconds_count{engine=\"engine-1\",outcome=\"success\",phase=\"caught_up\"} 0",
             "ds4proxy_snapshot_companion_tail_frames_total{engine=\"engine-0\",kind=\"caught_up\",outcome=\"queued\"} 0",
+            "ds4proxy_snapshot_companion_tail_batches_total{engine=\"engine-0\",outcome=\"applied\"} 0",
+            "ds4proxy_snapshot_companion_tail_events_total{engine=\"engine-0\",kind=\"stored\"} 0",
             "ds4proxy_snapshot_companion_fences_total{engine=\"engine-1\",reason=\"tail_gap\"} 0",
+            "ds4proxy_snapshot_companion_discards_total{engine=\"engine-1\",reason=\"superseded\"} 0",
             "ds4proxy_snapshot_companion_identity_changes_total{component=\"digest_key\",engine=\"engine-0\"} 0",
         ] {
             assert!(text.contains(expected), "missing series: {expected}");
@@ -615,6 +832,7 @@ mod tests {
         let engine = metrics.engine_slot(1).unwrap();
         metrics.set_ready(engine, true);
         metrics.set_session_state(engine, CompanionSessionState::Published, 1);
+        metrics.record_session(engine, CompanionSessionResult::Completed);
         metrics.set_tail_queue_depth(engine, 0, 4).unwrap();
         metrics.finish_snapshot(engine, CompanionOutcome::Success, 5_000_000);
         metrics.record_tail(
@@ -622,9 +840,12 @@ mod tests {
             CompanionTailKind::Event,
             CompanionTailOutcome::Applied,
         );
+        metrics.record_tail_batch(engine, CompanionTailOutcome::Applied);
+        metrics.record_tail_events(engine, CompanionDeltaEvent::Stored, 7);
         metrics.record_fence(engine, SnapshotTailFenceReason::TailGap);
+        metrics.record_discard(engine, CompanionDiscardReason::Superseded);
         metrics.record_identity_change(engine, CompanionIdentityChange::Generation);
-        metrics.published(engine, 8, 36_612, 123.0);
+        metrics.published(engine, 8, 36_612, 36_000, 9_216_000, 123.0);
         assert!(metrics.set_tail_queue_depth(engine, 2, 0).is_err());
         assert!(metrics.engine_slot(2).is_err());
 
@@ -633,5 +854,21 @@ mod tests {
         assert!(text.contains(
             "ds4proxy_snapshot_companion_published_index_entries{engine=\"engine-1\"} 36612"
         ));
+        assert!(
+            text.contains(
+                "ds4proxy_snapshot_companion_published_tokens{engine=\"engine-1\"} 9216000"
+            )
+        );
+        for forbidden in [
+            "/run/mini-dynamo/snapshot.sock",
+            "/run/secrets/snapshot-session",
+            "tcp://a:5557",
+            "snapshot-session",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "metric output leaked {forbidden}"
+            );
+        }
     }
 }
