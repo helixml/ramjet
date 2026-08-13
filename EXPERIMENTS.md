@@ -3297,3 +3297,27 @@ stability. The full integrated gate passed 284 library tests plus 31
 integration/E2E tests, strict Clippy, Go parity, 52 Python tests, the five-case
 agent corpus, and a 25.72s warm release build. This remains off-path: there is
 no CLI, Compose, runtime, or node06 change yet.
+
+## 2026-08-13 — Infernal r4 C128A source-lock preflight
+
+The immutable Infernal r4 vLLM source was reconstructed GPU-free from base
+`ce5f50f6d01b02336c4207f11277fd7bedacb4d6` and its locked integration patch.
+The computed tree exactly matched the public receipt's
+`3226eb7ff642702908f502a2402f9d083d16511c`. The relevant source blobs are now
+pinned by `bench/infernal_c128a_preflight.py`, together with the r4 image,
+Docker recipe, integration-patch, and vLLM #51318 head identities. Reports are
+limited to public hashes, booleans, and closed reason codes; source, paths, and
+request data are never emitted.
+
+The upstream #51318 patch does not apply verbatim because r4 PR 289 refactored
+the same batch-dependent expression into `get_c128a_active_topk_width`. Its
+semantic port is nevertheless one production assignment: use the already
+preallocated `self.c128a_max_compressed` row capacity and pass that same value
+to the build kernel. Against the reconstructed source, baseline mode accepted
+the exact r4 blobs, candidate mode rejected r4 with
+`layout_batch_dependent`, and candidate mode accepted the semantic port. The
+gate also proves that CUDA-graph capture selects `max_model_len` and that the
+capacity is allocated from `max_model_len`, so it fails closed if either side
+of the invariant moves. Nine focused unit tests passed in 0.004s. No image was
+built or pushed and node06 was not touched. A packaged successor still needs
+the retained parser fixtures before any GPU smoke.
