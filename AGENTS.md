@@ -404,6 +404,14 @@ or below three seconds. The mode-0600 output is reserved before mutation and is
 never overwritten. Do not use `--apply` to manufacture authority by restarting
 or clearing an engine.
 
+Snapshot reconnect attempts are the long-lived consumer futures, not merely
+socket setup calls. An authoritative steady session therefore has exactly one
+active attempt and one active connection per engine until disconnect. The
+recovery gate must reject zero or multiple owners, but must not wait for the
+healthy attempt gauge to become zero; r101 proved that impossible invariant can
+turn five valid publications into a 30-second timeout. Keep a focused metric-
+shape regression whenever the reconnect lifecycle or gate changes.
+
 Compose automatically reads the deployment's `.env`, which supplies the private
 engine-probe token. Snapshot authority is additional environment, not a
 replacement env file: the gate injects it directly. For a manual diagnostic,

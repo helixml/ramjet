@@ -812,10 +812,14 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   seconds, and mandatory config-hash-verified rollback. r99 removes two false
   negatives before the full gate: it timestamps snapshot publication separately
   from the slower ordinary-health probe and makes `/health` report the selected
-  compact authority rather than the unused raw-event inventory. A production-
-  shaped candidate recovered both 36/173-block inventories and 2/2 serving in
-  2.150s with a clean immutable rollback. Publish and pin r99, then run the
-  five-cycle gate before capacity cells.
+  compact authority rather than the unused raw-event inventory. r101 corrected
+  the gate's final lifecycle assumption: a ready long-lived consumer owns one
+  active attempt and one active connection, not a completed zero-attempt state.
+  The pinned production gate then passed 5/5 with 0.862–1.138s publication,
+  1.138s nearest-rank p95, stable 36/173-block inventories, unchanged restart-
+  zero engines, and a 2.025s mandatory rollback. The recovery gate is complete;
+  run the 52/64-app authenticated capacity boundary and at least 100,000
+  revision-stable shadow decisions before any compact state can affect placement.
   Compare at least 100,000 exact versus approximate decisions before placement
   can consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.

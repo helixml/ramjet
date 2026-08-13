@@ -4934,3 +4934,41 @@ Decision: publish and digest-pin r99, then use only the repository gate for the
 five-cycle sub-three-second qualification. Keep snapshot placement disabled
 afterward; a successful recovery gate admits the 100,000-decision shadow
 comparison, not production placement.
+
+## 2026-08-13 — r100/r101 five-cycle snapshot recovery qualification
+
+Drone #331 published the r99 LB as immutable
+`rust-81f648c@sha256:531f341b86506427e6fc2bd28fd1e689cb4f38767a15661e919ec726ab4526be`;
+the production overlay and semantic validator were pinned to that manifest.
+Only those two stale node06 files needed synchronization. The candidate image
+was pulled before measurement so registry transfer could not inflate recovery.
+The read-only admission audit passed in 2.74s with both companions stable and
+authoritative at 36/173 blocks, both engines and companions restart-zero, and
+an exactly reproducible baseline rollback hash.
+
+The first five-cycle apply stopped safely at iteration one after the 30-second
+deadline and restored the baseline in 2.033s. Direct metrics showed this was a
+gate defect rather than a recovery failure: both snapshot-ready gauges and both
+connections were one from about two seconds onward, but each reconnect owner's
+`attempts_active` gauge also remained one. That is the intended lifecycle—the
+attempt future owns the authenticated consumer until disconnect. The gate had
+incorrectly required zero. A production-shaped one-second diagnostic again
+proved both exact inventories and 2/2 serving at 2.073s, and SHA-256 comparison
+proved the local candidate and published image contained the identical Rust
+binary. r101 changed the gate to require exactly one attempt plus one connection
+and added negative tests for zero or multiple owners. Thirteen focused tests,
+all 204 Python tests, the agent corpus, and Drone #334 (60s) passed.
+
+The corrected immutable five-cycle gate passed every iteration. Process-start-
+to-publication samples were 0.862262s, 0.884060s, 1.117349s, 1.137929s, and
+0.880456s; nearest-rank p95 was 1.137929s against the 3.0s SLO. Compose-call-to-
+ready samples were 1.658–2.399s. Every recovery reconstructed exactly 36/173
+blocks and 9,216/44,288 logical tokens. Mandatory rollback passed in 2.024910s,
+restored the immutable `rust-b0e0700` baseline with snapshot mode off, and
+released the deployment lock. Both engine image/container/start identities
+were unchanged and restart counts remained zero; final ordinary health was 2/2.
+
+Decision: the issue #41 LB-only recovery acceptance gate is complete. Compact
+snapshots remain observation-only. Next run the authenticated 52/64-app capacity
+boundary and accumulate at least 100,000 revision-stable exact-versus-
+approximate shadow decisions before considering placement.
