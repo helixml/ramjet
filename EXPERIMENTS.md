@@ -3073,6 +3073,20 @@ This remains an offline library seam. A concrete long-lived vLLM index source,
 outbound LB reconnect/challenge owner, runtime command, and shadow-only wiring
 are still required before the sandbox can use real images or node06 can run it.
 
+## 2026-08-13 — issue #41 adversarial LB consumer matrix
+
+Nine public-API Unix-stream integration tests now cover absolute-deadline
+revocation after publication; oversized snapshot and tail prefixes rejected
+before body allocation/read; truncated snapshot and tail frames; abort during a
+60,000-record, greater-than-8MiB private build; same-identity two-session
+replacement with stale-disconnect isolation; generation rollover and republish;
+authenticated vLLM-shaped live store/remove mutation; and content-safe
+error/debug/reason output. No runtime bug was found.
+
+The warm test body takes about 1.6 seconds. The intentionally large
+cancellation fixture peaks around 1.1–1.3GiB RSS, so keep it in the full gate
+rather than duplicating it across parallel local loops.
+
 ## 2026-08-13 — issue #41 outbound reconnect and rolling handoff
 
 The LB now has a transport owner around the authenticated consumer. It
