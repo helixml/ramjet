@@ -43,7 +43,7 @@ struct Inner {
     client: reqwest::Client,
     metrics: Arc<Metrics>,
     router: Arc<Router>,
-    inventories: Arc<[SharedFencedInventory]>,
+    exact_inventories: Arc<[ExactRouteInventory]>,
     journal: RouteJournal,
     tokenizer: TokenizerObserver,
 }
@@ -128,7 +128,6 @@ impl Proxy {
             client,
             metrics,
             router,
-            Arc::clone(&inventories),
             inventories
                 .iter()
                 .cloned()
@@ -138,7 +137,7 @@ impl Proxy {
     }
 
     /// Builds the proxy with an independent exact-route inventory backend.
-    /// Raw direct inventories remain available for legacy health reporting.
+    /// Health and routing report the same selected direct or snapshot authority.
     ///
     /// # Errors
     ///
@@ -148,7 +147,6 @@ impl Proxy {
         client: reqwest::Client,
         metrics: Arc<Metrics>,
         router: Arc<Router>,
-        inventories: Arc<[SharedFencedInventory]>,
         exact_inventories: Arc<[ExactRouteInventory]>,
     ) -> anyhow::Result<Self> {
         let journal = RouteJournal::new(config.route_journal);
@@ -156,7 +154,7 @@ impl Proxy {
             &config,
             client.clone(),
             Arc::clone(&metrics),
-            exact_inventories,
+            Arc::clone(&exact_inventories),
         )?;
         Ok(Self {
             inner: Arc::new(Inner {
@@ -164,7 +162,7 @@ impl Proxy {
                 client,
                 metrics,
                 router,
-                inventories,
+                exact_inventories,
                 journal,
                 tokenizer,
             }),
@@ -189,15 +187,15 @@ impl Proxy {
             .filter_map(|index| {
                 proxy.inner.router.state(index).map(
                     |(inflight, load_units, approximate_index_entries, healthy)| {
-                        let exact_inventory = proxy.inner.inventories.get(index).map(|inventory| {
-                            let inventory = inventory.read();
-                            let stats = inventory.stats();
-                            ExactInventoryHealth {
-                                trusted: inventory.trusted(),
-                                resident_blocks: stats.external_hashes,
-                                resident_tokens: stats.token_ids,
-                            }
-                        });
+                        let exact_inventory =
+                            proxy.inner.exact_inventories.get(index).map(|inventory| {
+                                let status = inventory.status();
+                                ExactInventoryHealth {
+                                    trusted: status.trusted,
+                                    resident_blocks: status.resident_blocks,
+                                    resident_tokens: status.resident_tokens,
+                                }
+                            });
                         ReplicaHealth {
                             index,
                             healthy,

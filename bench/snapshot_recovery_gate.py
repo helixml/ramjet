@@ -99,6 +99,26 @@ class RecoverySample:
     resident_tokens: tuple[int, ...]
 
 
+@dataclasses.dataclass
+class SnapshotRecoveryProgress:
+    """Keep snapshot publication time independent from upstream probe readiness."""
+
+    ready_wall: float | None = None
+    ready_monotonic: float | None = None
+    inventories: tuple[tuple[int, ...], tuple[int, ...]] | None = None
+
+    def observe(self, *, snapshot_ready, inventories, wall, monotonic):
+        if snapshot_ready and self.ready_wall is None:
+            self.ready_wall = wall
+            self.ready_monotonic = monotonic
+        if inventories is not None:
+            self.inventories = inventories
+
+    @property
+    def complete(self):
+        return self.ready_wall is not None and self.inventories is not None
+
+
 class UnixHTTPConnection(http.client.HTTPConnection):
     def __init__(self, socket_path, timeout):
         super().__init__("localhost", timeout=timeout)
@@ -604,6 +624,7 @@ class NodeRuntime:
         )
         deadline = started_monotonic + self.args.attempt_timeout_seconds
         last_error = None
+        progress = SnapshotRecoveryProgress()
         while time.monotonic() < deadline:
             try:
                 current = self.inspect((LB_CONTAINER,))[0]
@@ -615,22 +636,39 @@ class NodeRuntime:
                 ):
                     raise GateError("shadow_identity_pending", "shadow LB identity is pending")
                 metrics = self._fetch_url(self.args.metrics_url)
+                progress.observe(
+                    snapshot_ready=lb_snapshot_ready(metrics),
+                    inventories=None,
+                    wall=time.time(),
+                    monotonic=time.monotonic(),
+                )
                 health = self._fetch_url(self.args.health_url, expect_json=True)
                 inventories = validate_health(health, require_exact=True)
-                if not lb_snapshot_ready(metrics) or inventories is None:
+                progress.observe(
+                    snapshot_ready=False,
+                    inventories=inventories,
+                    wall=time.time(),
+                    monotonic=time.monotonic(),
+                )
+                if not progress.complete:
                     raise GateError("snapshot_recovery_pending", "snapshot publication is pending")
                 self._engine_identities_unchanged(baseline)
-                ready_wall = time.time()
-                recovery = max(0.0, ready_wall - parse_timestamp(current.started_at))
+                assert progress.ready_wall is not None
+                assert progress.ready_monotonic is not None
+                assert progress.inventories is not None
+                recovery = max(
+                    0.0,
+                    progress.ready_wall - parse_timestamp(current.started_at),
+                )
                 self._last_lb_id = current.container_id
                 return RecoverySample(
                     iteration=iteration,
                     recovery_seconds=round(recovery, 6),
                     recreate_to_ready_seconds=round(
-                        time.monotonic() - started_monotonic, 6
+                        progress.ready_monotonic - started_monotonic, 6
                     ),
-                    resident_blocks=inventories[0],
-                    resident_tokens=inventories[1],
+                    resident_blocks=progress.inventories[0],
+                    resident_tokens=progress.inventories[1],
                 )
             except GateError as error:
                 last_error = error
@@ -862,7 +900,9 @@ def parser():
     root.add_argument("--apply", action="store_true")
     root.add_argument("--iterations", type=int, default=5)
     root.add_argument("--recovery-slo-seconds", type=float, default=3.0)
-    root.add_argument("--attempt-timeout-seconds", type=float, default=10.0)
+    # Snapshot recovery is timed independently from ordinary upstream health.
+    # Keep the outer attempt long enough to observe the 15-second probe loop.
+    root.add_argument("--attempt-timeout-seconds", type=float, default=30.0)
     root.add_argument("--stability-seconds", type=float, default=1.0)
     root.add_argument("--poll-interval-ms", type=int, default=20)
     root.add_argument("--http-timeout-seconds", type=float, default=1.0)

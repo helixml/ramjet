@@ -29,6 +29,13 @@ pub(crate) struct ExactInventoryLookup {
     pub resident_tokens: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ExactInventoryStatus {
+    pub trusted: bool,
+    pub resident_blocks: usize,
+    pub resident_tokens: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExactInventoryLookupError {
     Untrusted,
@@ -57,6 +64,34 @@ impl ExactRouteInventory {
     #[must_use]
     pub fn ready(&self) -> bool {
         self.marker().is_some()
+    }
+
+    /// Return content-free health for whichever exact backend routing uses.
+    #[must_use]
+    pub(crate) fn status(&self) -> ExactInventoryStatus {
+        match self {
+            Self::Direct(inventory) => {
+                let inventory = inventory.read();
+                let stats = inventory.stats();
+                ExactInventoryStatus {
+                    trusted: inventory.trusted(),
+                    resident_blocks: stats.external_hashes,
+                    resident_tokens: stats.token_ids,
+                }
+            }
+            Self::Snapshot(publication) => {
+                let publication = publication.lock();
+                let Some(index) = publication.published_index() else {
+                    return ExactInventoryStatus::default();
+                };
+                let stats = index.stats();
+                ExactInventoryStatus {
+                    trusted: publication.published_marker().is_some(),
+                    resident_blocks: stats.external_hashes,
+                    resident_tokens: stats.logical_token_ids,
+                }
+            }
+        }
     }
 
     pub(crate) fn marker(&self) -> Option<ExactInventoryMarker> {
@@ -148,6 +183,7 @@ mod tests {
         for inventory in [direct, snapshot] {
             assert!(!inventory.ready());
             assert_eq!(inventory.marker(), None);
+            assert!(!inventory.status().trusted);
             assert_eq!(
                 inventory.lookup(&[1, 2, 3]),
                 Err(ExactInventoryLookupError::Untrusted)
