@@ -1,80 +1,97 @@
-# Offline-only security contract for the future snapshot companion executable.
+# Offline-only security contract for two independent per-engine companions.
 #
 # This standalone file is never merged with the canonical production project.
-# Both services additionally require the explicit `snapshot-companion-offline`
-# profile and have no network namespace or published ports.
-# The default image uses the reserved `.invalid` TLD because the repository does
-# not yet build either fixture-harness executable; an operator must provide
-# independently pinned fixture images before this can start. The commands below
-# are deliberately not the production DS4 runtime/config contract.
+# Every service requires the explicit `snapshot-companion-offline` profile.
+# Reserved `.invalid` images and fixture-only commands make accidental startup
+# impossible until independently pinned harness images are supplied.
 #
-# SNAPSHOT_RUNTIME_DIR is a bind source that must already reside on host tmpfs
-# (normally `/run`). It is not a Compose `tmpfs` mount because the Unix socket
-# must be shared across the two isolated containers. Per-container `/tmp` below
-# is a separate private Compose tmpfs.
+# Each engine has its own host-tmpfs runtime directory, Unix socket, root-owned
+# 32-byte session secret, companion service, and client fixture. No service
+# mounts the other engine's authority or fixture domain. The clients model two independent
+# LB owner tasks; failure or readiness loss in one pair cannot publish, inspect,
+# or authenticate the peer socket.
 #
-# Before use, validate the host-side tmpfs directory and exact 32-byte secret:
-#   SNAPSHOT_RUNTIME_DIR=/run/mini-dynamo-snapshot-offline \
-#   SNAPSHOT_SESSION_SECRET_FILE=/run/secrets/mini-dynamo-snapshot-session \
+# Host preflight:
+#   SNAPSHOT_RUNTIME_DIR_A=/run/mini-dynamo-snapshot-offline-a \
+#   SNAPSHOT_RUNTIME_DIR_B=/run/mini-dynamo-snapshot-offline-b \
+#   SNAPSHOT_SESSION_SECRET_FILE_A=/run/secrets/mini-dynamo-snapshot-session-a \
+#   SNAPSHOT_SESSION_SECRET_FILE_B=/run/secrets/mini-dynamo-snapshot-session-b \
 #     ./validate-snapshot-companion-host.sh
 #
-# Render only (does not start anything):
+# Render only (starts nothing):
 #   docker compose -f docker-compose.snapshot-companion-offline.yaml \
 #     --profile snapshot-companion-offline config --quiet
 
+x-snapshot-sandbox: &snapshot-sandbox
+  profiles: [snapshot-companion-offline]
+  restart: "no"
+  init: true
+  network_mode: none
+  ipc: private
+  read_only: true
+  privileged: false
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  ulimits:
+    nofile:
+      soft: 1024
+      hard: 1024
+    nproc:
+      soft: 128
+      hard: 128
+  labels:
+    org.helixml.mini-dynamo.scope: offline-non-production
+
+x-snapshot-client: &snapshot-client
+  <<: *snapshot-sandbox
+  image: ${SNAPSHOT_LB_IMAGE:-snapshot-lb.invalid/mini-dynamo:not-built}
+  user: "12002:12000"
+  pids_limit: 64
+  cpus: 0.5
+  mem_limit: 256m
+  mem_reservation: 64m
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=0700
+
+x-snapshot-companion: &snapshot-companion
+  <<: *snapshot-sandbox
+  image: ${SNAPSHOT_COMPANION_IMAGE:-snapshot-companion.invalid/mini-dynamo:not-built}
+  pids_limit: 128
+  cpus: 1.0
+  mem_limit: 512m
+  mem_reservation: 128m
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700
+
 services:
-  # Isolated fixture client standing in for future LB snapshot wiring. It is a
-  # distinct service name and cannot recreate the production ds4-loadbalancer.
-  snapshot-lb-offline:
-    profiles: [snapshot-companion-offline]
-    image: ${SNAPSHOT_LB_IMAGE:-snapshot-lb.invalid/mini-dynamo:not-built}
-    container_name: snapshot-lb-offline
+  snapshot-lb-offline-a:
+    <<: *snapshot-client
+    container_name: snapshot-lb-offline-a
     command:
       [
         "snapshot-client-fixture",
-        "--socket=/run/mini-dynamo-snapshot/companion.sock",
-        "--secret=/run/secrets/snapshot-session",
+        "--engine-id=engine-a",
+        "--socket=/run/mini-dynamo-snapshot-a/companion-a.sock",
+        "--secret=/run/secrets/snapshot-session-a",
         "--fixtures=/fixtures",
         "--expected-peer-uid=12001",
       ]
-    restart: "no"
-    init: true
-    user: "12002:12000"
-    network_mode: none
-    read_only: true
-    cap_drop: [ALL]
-    security_opt:
-      - no-new-privileges:true
-    pids_limit: 64
-    cpus: 0.5
-    mem_limit: 256m
-    mem_reservation: 64m
-    ulimits:
-      nofile:
-        soft: 512
-        hard: 512
-      nproc:
-        soft: 64
-        hard: 64
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=0700
     volumes:
-      # Read-only is sufficient for connect(2); the client cannot create or
-      # replace entries in the companion-owned runtime directory.
       - type: bind
-        source: ${SNAPSHOT_RUNTIME_DIR:-/run/mini-dynamo-snapshot-offline}
-        target: /run/mini-dynamo-snapshot
+        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/mini-dynamo-snapshot-offline-a.invalid}
+        target: /run/mini-dynamo-snapshot-a
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_SESSION_SECRET_FILE:-/run/secrets/mini-dynamo-snapshot-session.invalid}
-        target: /run/secrets/snapshot-session
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-session-a.invalid}
+        target: /run/secrets/snapshot-session-a
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_FIXTURE_DIR:-./snapshot-fixtures.invalid}
+        source: ${SNAPSHOT_FIXTURE_DIR_A:-./snapshot-fixtures-a.invalid}
         target: /fixtures
         read_only: true
         bind:
@@ -85,7 +102,7 @@ services:
           "CMD",
           "/mini-dynamo",
           "snapshot-client-healthcheck",
-          "/run/mini-dynamo-snapshot/companion.sock",
+          "/run/mini-dynamo-snapshot-a/companion-a.sock",
         ]
       interval: 5s
       timeout: 2s
@@ -93,16 +110,19 @@ services:
       start_period: 10s
     labels:
       org.helixml.mini-dynamo.scope: offline-non-production
+      org.helixml.mini-dynamo.engine: engine-a
+      org.helixml.mini-dynamo.role: client
 
-  snapshot-companion-offline:
-    profiles: [snapshot-companion-offline]
-    image: ${SNAPSHOT_COMPANION_IMAGE:-snapshot-companion.invalid/mini-dynamo:not-built}
-    container_name: snapshot-companion-offline
+  snapshot-companion-offline-a:
+    <<: *snapshot-companion
+    container_name: snapshot-companion-offline-a
+    user: "12001:12000"
     command:
       [
         "snapshot-companion-fixture",
-        "--socket=/run/mini-dynamo-snapshot/companion.sock",
-        "--secret=/run/secrets/snapshot-session",
+        "--engine-id=engine-a",
+        "--socket=/run/mini-dynamo-snapshot-a/companion-a.sock",
+        "--secret=/run/secrets/snapshot-session-a",
         "--fixtures=/fixtures",
         "--expected-client-uid=12002",
         "--max-clients=2",
@@ -111,47 +131,20 @@ services:
         "--tail-idle-deadline-ms=30000",
         "--shutdown-deadline-ms=5000",
       ]
-    restart: "no"
-    init: true
-    user: "12001:12000"
-    network_mode: none
-    read_only: true
-    cap_drop: [ALL]
-    security_opt:
-      - no-new-privileges:true
-    pids_limit: 128
-    cpus: 1.0
-    mem_limit: 512m
-    mem_reservation: 128m
-    ulimits:
-      nofile:
-        soft: 1024
-        hard: 1024
-      nproc:
-        soft: 128
-        hard: 128
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700
     volumes:
-      # This bind source must be hosted on `/run` tmpfs. The host validator
-      # requires UID 12001, GID 12000, mode 0750, and a symlink-free path.
       - type: bind
-        source: ${SNAPSHOT_RUNTIME_DIR:-/run/mini-dynamo-snapshot-offline}
-        target: /run/mini-dynamo-snapshot
+        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/mini-dynamo-snapshot-offline-a.invalid}
+        target: /run/mini-dynamo-snapshot-a
         bind:
           create_host_path: false
-      # Root-owned, shared-group-readable, immutable session key. The hardened
-      # Rust loader additionally checks ancestors, inode/link identity and size.
       - type: bind
-        source: ${SNAPSHOT_SESSION_SECRET_FILE:-/run/secrets/mini-dynamo-snapshot-session.invalid}
-        target: /run/secrets/snapshot-session
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-session-a.invalid}
+        target: /run/secrets/snapshot-session-a
         read_only: true
         bind:
           create_host_path: false
-      # Offline captured fixtures replace all engine/network access. The future
-      # binary must refuse non-fixture mode while network_mode is none.
       - type: bind
-        source: ${SNAPSHOT_FIXTURE_DIR:-./snapshot-fixtures.invalid}
+        source: ${SNAPSHOT_FIXTURE_DIR_A:-./snapshot-fixtures-a.invalid}
         target: /fixtures
         read_only: true
         bind:
@@ -162,7 +155,7 @@ services:
           "CMD",
           "/mini-dynamo-snapshot-companion",
           "healthcheck",
-          "/run/mini-dynamo-snapshot/companion.sock",
+          "/run/mini-dynamo-snapshot-a/companion-a.sock",
         ]
       interval: 5s
       timeout: 2s
@@ -170,3 +163,106 @@ services:
       start_period: 10s
     labels:
       org.helixml.mini-dynamo.scope: offline-non-production
+      org.helixml.mini-dynamo.engine: engine-a
+      org.helixml.mini-dynamo.role: companion
+
+  snapshot-lb-offline-b:
+    <<: *snapshot-client
+    container_name: snapshot-lb-offline-b
+    command:
+      [
+        "snapshot-client-fixture",
+        "--engine-id=engine-b",
+        "--socket=/run/mini-dynamo-snapshot-b/companion-b.sock",
+        "--secret=/run/secrets/snapshot-session-b",
+        "--fixtures=/fixtures",
+        "--expected-peer-uid=12003",
+      ]
+    volumes:
+      - type: bind
+        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/mini-dynamo-snapshot-offline-b.invalid}
+        target: /run/mini-dynamo-snapshot-b
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-session-b.invalid}
+        target: /run/secrets/snapshot-session-b
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_FIXTURE_DIR_B:-./snapshot-fixtures-b.invalid}
+        target: /fixtures
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/mini-dynamo",
+          "snapshot-client-healthcheck",
+          "/run/mini-dynamo-snapshot-b/companion-b.sock",
+        ]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 10s
+    labels:
+      org.helixml.mini-dynamo.scope: offline-non-production
+      org.helixml.mini-dynamo.engine: engine-b
+      org.helixml.mini-dynamo.role: client
+
+  snapshot-companion-offline-b:
+    <<: *snapshot-companion
+    container_name: snapshot-companion-offline-b
+    user: "12003:12000"
+    command:
+      [
+        "snapshot-companion-fixture",
+        "--engine-id=engine-b",
+        "--socket=/run/mini-dynamo-snapshot-b/companion-b.sock",
+        "--secret=/run/secrets/snapshot-session-b",
+        "--fixtures=/fixtures",
+        "--expected-client-uid=12002",
+        "--max-clients=2",
+        "--tail-queue-capacity=1024",
+        "--snapshot-deadline-ms=3000",
+        "--tail-idle-deadline-ms=30000",
+        "--shutdown-deadline-ms=5000",
+      ]
+    volumes:
+      - type: bind
+        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/mini-dynamo-snapshot-offline-b.invalid}
+        target: /run/mini-dynamo-snapshot-b
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-session-b.invalid}
+        target: /run/secrets/snapshot-session-b
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_FIXTURE_DIR_B:-./snapshot-fixtures-b.invalid}
+        target: /fixtures
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/mini-dynamo-snapshot-companion",
+          "healthcheck",
+          "/run/mini-dynamo-snapshot-b/companion-b.sock",
+        ]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 10s
+    labels:
+      org.helixml.mini-dynamo.scope: offline-non-production
+      org.helixml.mini-dynamo.engine: engine-b
+      org.helixml.mini-dynamo.role: companion
