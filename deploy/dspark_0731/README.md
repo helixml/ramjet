@@ -38,6 +38,14 @@ ssh node06 'cd /home/luke/inference/dspark_0731 && \
   docker compose up -d ds4-loadbalancer'
 ```
 
+`docker-compose.k5-block-canary.yaml` is a reproducible negative experiment,
+not a production recommendation. It changes only engine B from the r34
+K5/probabilistic/standard default to K5/probabilistic/block while production is
+single-homed on A. Always merge it with the base file explicitly; restore B by
+starting that named service from the base file alone. The block candidate failed
+the agent-protocol gate recorded in `EXPERIMENTS.md` and must not be joined to
+the load balancer.
+
 ## Offline dual-companion security harness
 
 `docker-compose.snapshot-companion-offline.yaml` is a standalone,

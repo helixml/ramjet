@@ -9,6 +9,17 @@ model=${2:?usage: agent_matrix.sh BASE MODEL LABEL [ENGINE_CONTAINER ...]}
 label=${3:?usage: agent_matrix.sh BASE MODEL LABEL [ENGINE_CONTAINER ...]}
 shift 3
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+metrics_args=()
+if [[ -n ${AGENT_ENGINE_METRICS:-} ]]; then
+  metrics_args+=(--engine-metrics "$AGENT_ENGINE_METRICS")
+fi
+if [[ ${AGENT_REQUIRE_RECONCILED_SPECULATION:-0} == 1 ]]; then
+  if [[ ${#metrics_args[@]} == 0 ]]; then
+    echo "AGENT_REQUIRE_RECONCILED_SPECULATION=1 requires AGENT_ENGINE_METRICS" >&2
+    exit 2
+  fi
+  metrics_args+=(--require-reconciled-speculation)
+fi
 metadata=$(mktemp /tmp/mini-dynamo-agent-metadata.XXXXXX.json)
 trap 'rm -f "$metadata"' EXIT
 matrix_started_ms=$(date +%s%3N)
@@ -28,12 +39,14 @@ for profile in "${profiles[@]}"; do
         --metadata-json "$metadata" --profile "$profile" \
         --label "${label}-cold-p${prefix_kib}-c${concurrency}" \
         --prefix-kib "$prefix_kib" --salt "$salt" \
-        --concurrency "$concurrency" --repetitions "$repetitions"
+        --concurrency "$concurrency" --repetitions "$repetitions" \
+        "${metrics_args[@]}"
       python3 "$script_dir/agentbench.py" run "$base" "$model" \
         --metadata-json "$metadata" --profile "$profile" \
         --label "${label}-warm-p${prefix_kib}-c${concurrency}" \
         --prefix-kib "$prefix_kib" --salt "$salt" --warmup \
-        --concurrency "$concurrency" --repetitions "$repetitions"
+        --concurrency "$concurrency" --repetitions "$repetitions" \
+        "${metrics_args[@]}"
     done
   done
 done

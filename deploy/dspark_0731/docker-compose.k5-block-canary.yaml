@@ -1,0 +1,12 @@
+# One-engine DSpark K5 block-rejection qualification overlay.
+# Keep the LB single-homed on A while B starts and passes direct correctness and
+# performance gates. The base Compose is the one-command K5-standard rollback:
+#
+#   docker compose -f docker-compose.yaml \
+#     -f docker-compose.k5-block-canary.yaml up -d --no-deps dspark-0731-b
+#   docker compose -f docker-compose.yaml up -d --no-deps dspark-0731-b
+services:
+  dspark-0731-b:
+    environment:
+      DRAFT_SAMPLE_METHOD: probabilistic
+      REJECTION_SAMPLE_METHOD: block

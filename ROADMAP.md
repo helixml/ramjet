@@ -317,6 +317,17 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   before its 204-request performance matrix.
 - ✅ **node06 DSpark depth sweep (K5 vs K7).** K5 passed 10/10 gates and beat
   K7 by 6.5% on code and 12.2% on prose at c8; promoted in the infra compose.
+- ✅ **DSpark K3–K5 and rejection-mode gate (retain K5/standard).** The pinned
+  DeepSeek-V4-Flash checkpoint declares `dspark_block_size=5`; r34's own engine
+  configuration rejects K3/K4 because depth below that geometry produces
+  incorrect or garbled output. K5/block passed an initial clean 5/5 smoke, but
+  emitted 267 runtime compile/warmup markers during its matrix and then failed
+  an agentic c8 structural warmup in round three. Its two complete rounds were
+  280/280 measured-valid and counter-reconciled, yet their observational median
+  was only 157.1 output tok/s versus 321.0 for matched K5/standard. Higher draft
+  acceptance did not become useful work. Retain probabilistic drafting with
+  standard rejection; the block overlay remains only as a reproducible negative
+  canary.
 - ✅ **DSpark dynamic-depth/capacity gate (retain fixed K5).** r34's supported
   default regressed code c1/c8/c16 by 22.8%/9.5%/8.9% and prose c1/c8 by
   24.7%/7.9%; only prose c16 improved 2.5%. Mixed decode fell 1.8% and p95
@@ -783,10 +794,14 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   The node06 host setup, fresh per-engine attestations, full preflight, and
   restricted-identity off-mode LB start now pass without an engine restart.
   The `123dd9d` diagnostic companions are now deployed and healthy with one
-  stable connection each, but correctly fenced because the current vLLM
-  publishers already aged past a reconstructable sequence-zero generation.
-  They remain running to retain the next natural engine generation; do not
-  restart an engine merely to manufacture readiness. A repository-owned
+  stable connection each. A remains correctly fenced because its vLLM
+  publisher aged past a reconstructable sequence-zero generation. A naturally
+  justified B rollback supplied a fresh attested generation; its one bounded
+  replay reached the compact index but failed closed at `apply`, published zero
+  blocks, and then stayed observe-only without reconnect churn. Diagnose that
+  concrete replay/index incompatibility before the next B engine candidate;
+  do not restart either healthy engine merely to repeat identical history. A
+  repository-owned
   qualification gate now turns the next natural generation into one bounded
   command: read-only validation refuses fenced sources without mutation, while
   explicit apply mode holds the common lock across five LB-only shadow
