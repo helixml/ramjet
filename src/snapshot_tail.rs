@@ -244,7 +244,7 @@ impl SnapshotTailFence {
     /// Validate session-authenticated snapshot metadata before committing its
     /// records to a private catch-up index. The decoded snapshot's reset scope
     /// is supplied separately because it is part of the snapshot body.
-    pub fn accept_snapshot(
+    pub(crate) fn accept_snapshot(
         &mut self,
         snapshot: &AuthenticatedSnapshot,
         reset_scope: ResetScope,
