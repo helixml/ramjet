@@ -4053,3 +4053,25 @@ Docker, uses registry credentials, or touches GHCR. The first main build after
 merge remains the real compiled-environment acceptance and should finish each
 publisher guard in the seconds class. No node06 process, container, image,
 route, engine, secret, or GPU state changed.
+
+## 2026-08-13 — r62 Drone shallow predecessor recovery
+
+The first r61 main acceptance, Drone #247, failed safely before Docker startup:
+the server's shallow clone contained `DRONE_COMMIT_SHA` but not
+`DRONE_COMMIT_BEFORE`, so all downstream publishers were blocked by the
+dependency guard's `unavailable_revision` result. The guard now requires both
+environment values to be exact 40-character hexadecimal object IDs before any
+Git operation. It still requires the after commit locally, but if the validated
+predecessor is absent it performs one quiet, noninteractive exact-object fetch
+from `origin` with depth one, no tags, no submodule recursion, and no
+`FETCH_HEAD` write, then revalidates the commit object. Fetch and validation
+errors remain closed.
+
+A real local `file://` shallow clone proves that an uppercase predecessor and
+after SHA recover the missing predecessor and correctly skip a deployment-only
+range. A PATH-wrapped Git regression proves malformed, short, non-hex, and
+oversized revisions never reach `git fetch`; unavailable after objects and a
+failed exact predecessor fetch also remain errors. No node06 state changed.
+An additional real GitHub `--depth=1` clone of `fc4aa91` fetched predecessor
+`fa6cd2f` by exact object ID in 0.8s, left no `FETCH_HEAD`, and returned skip for
+the r61 CI/docs/bench-only dependency publisher range.

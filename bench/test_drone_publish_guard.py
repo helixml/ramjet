@@ -41,8 +41,8 @@ class DronePublishGuardTest(unittest.TestCase):
             text=True,
         ).stdout.strip()
 
-    def run_guard(self, kind, before=None, after=None):
-        environment = os.environ.copy()
+    def run_guard(self, kind, before=None, after=None, *, cwd=None, environment=None):
+        environment = (environment or os.environ).copy()
         environment.pop("DRONE_COMMIT_BEFORE", None)
         environment.pop("DRONE_COMMIT_SHA", None)
         if before is not None:
@@ -51,7 +51,7 @@ class DronePublishGuardTest(unittest.TestCase):
             environment["DRONE_COMMIT_SHA"] = after
         return subprocess.run(
             ["sh", str(SCRIPT), kind],
-            cwd=self.root,
+            cwd=cwd or self.root,
             env=environment,
             check=False,
             capture_output=True,
@@ -120,15 +120,23 @@ class DronePublishGuardTest(unittest.TestCase):
             {"rust-deps": False, "lb": False, "companion": True},
         )
 
-    def test_missing_unavailable_and_empty_ranges_fail_closed(self):
+    def test_missing_invalid_unavailable_and_empty_ranges_fail_closed(self):
         commit = self.commit({"README.md": "base"})
         missing = self.run_guard("lb")
         self.assertEqual(missing.returncode, 2)
         self.assertEqual(missing.stderr.strip(), "publisher_guard=error reason=missing_revision")
-        unavailable = self.run_guard("lb", "deadbeef", commit)
+        invalid = self.run_guard("lb", "deadbeef", commit)
+        self.assertEqual(invalid.returncode, 2)
+        self.assertEqual(invalid.stderr.strip(), "publisher_guard=error reason=invalid_revision")
+        unavailable = self.run_guard("lb", commit, "f" * 40)
         self.assertEqual(unavailable.returncode, 2)
         self.assertEqual(
-            unavailable.stderr.strip(), "publisher_guard=error reason=unavailable_revision"
+            unavailable.stderr.strip(), "publisher_guard=error reason=unavailable_after"
+        )
+        fetch_failed = self.run_guard("lb", "f" * 40, commit)
+        self.assertEqual(fetch_failed.returncode, 2)
+        self.assertEqual(
+            fetch_failed.stderr.strip(), "publisher_guard=error reason=fetch_failed"
         )
         empty = self.run_guard("lb", commit, commit)
         self.assertEqual(empty.returncode, 2)
@@ -156,6 +164,90 @@ class DronePublishGuardTest(unittest.TestCase):
             after,
             {"rust-deps": False, "lb": True, "companion": True},
         )
+
+    def test_shallow_clone_fetches_exact_predecessor_and_skips_deploy_change(self):
+        upstream = self.root / "upstream"
+        upstream.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=upstream, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "ci@example.invalid"],
+            cwd=upstream,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "CI test"], cwd=upstream, check=True
+        )
+        (upstream / "README.md").write_text("base")
+        subprocess.run(["git", "add", "README.md"], cwd=upstream, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=upstream, check=True)
+        before = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=upstream,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        (upstream / "deploy").mkdir()
+        (upstream / "deploy" / "compose.yaml").write_text("deployment")
+        subprocess.run(["git", "add", "deploy/compose.yaml"], cwd=upstream, check=True)
+        subprocess.run(["git", "commit", "-qm", "deploy"], cwd=upstream, check=True)
+        after = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=upstream,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        shallow = self.root / "shallow"
+        subprocess.run(
+            ["git", "clone", "-q", "--depth=1", upstream.as_uri(), str(shallow)],
+            check=True,
+        )
+        self.assertNotEqual(
+            subprocess.run(
+                ["git", "cat-file", "-e", f"{before}^{{commit}}"],
+                cwd=shallow,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode,
+            0,
+        )
+        result = self.run_guard("lb", before.upper(), after.upper(), cwd=shallow)
+        self.assertEqual(result.returncode, 3, result)
+        self.assertEqual(result.stdout.strip(), "publisher_guard=skip kind=lb")
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{before}^{{commit}}"], cwd=shallow, check=True
+        )
+        self.assertFalse((shallow / ".git" / "FETCH_HEAD").exists())
+
+    def test_invalid_revisions_never_reach_git_fetch(self):
+        commit = self.commit({"README.md": "base"})
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        marker = self.root / "fetch-called"
+        fake_git = fake_bin / "git"
+        fake_git.write_text(
+            "#!/bin/sh\n"
+            f"for arg in \"$@\"; do if [ \"$arg\" = fetch ]; then : > {marker}; fi; done\n"
+            "exec /usr/bin/git \"$@\"\n"
+        )
+        fake_git.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+        for before, after in (
+            ("f" * 39, commit),
+            ("g" * 40, commit),
+            (commit, "A" * 41),
+        ):
+            result = self.run_guard(
+                "lb", before, after, environment=environment
+            )
+            self.assertEqual(result.returncode, 2, result)
+            self.assertEqual(
+                result.stderr.strip(), "publisher_guard=error reason=invalid_revision"
+            )
+        self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

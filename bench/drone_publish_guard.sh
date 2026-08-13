@@ -21,10 +21,37 @@ if [ -z "$before" ] || [ -z "$after" ]; then
   echo "publisher_guard=error reason=missing_revision" >&2
   exit 2
 fi
-if ! git cat-file -e "${before}^{commit}" 2>/dev/null \
-  || ! git cat-file -e "${after}^{commit}" 2>/dev/null; then
-  echo "publisher_guard=error reason=unavailable_revision" >&2
+
+is_full_sha() {
+  [ "${#1}" -eq 40 ] || return 1
+  case "$1" in
+    *[!0-9a-fA-F]*) return 1 ;;
+  esac
+}
+
+# Validate before invoking Git so an attacker-controlled revision can never be
+# interpreted as an option or refspec.
+if ! is_full_sha "$before" || ! is_full_sha "$after"; then
+  echo "publisher_guard=error reason=invalid_revision" >&2
   exit 2
+fi
+if ! git cat-file -e "${after}^{commit}" 2>/dev/null; then
+  echo "publisher_guard=error reason=unavailable_after" >&2
+  exit 2
+fi
+if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+  # Drone's clone is shallow. Fetch only the already-validated exact predecessor
+  # commit, without tags, history, submodules, or a persistent FETCH_HEAD.
+  if ! GIT_TERMINAL_PROMPT=0 git -c credential.interactive=never fetch --quiet \
+    --no-tags --no-recurse-submodules --no-write-fetch-head --depth=1 \
+    origin "$before" >/dev/null 2>&1; then
+    echo "publisher_guard=error reason=fetch_failed" >&2
+    exit 2
+  fi
+  if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+    echo "publisher_guard=error reason=unavailable_before" >&2
+    exit 2
+  fi
 fi
 
 diff_status=0
