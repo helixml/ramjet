@@ -37,6 +37,9 @@ const HELLO_PREFIX_BYTES: usize = 8 + 2 + 1 + 1 + 4 + SNAPSHOT_SESSION_CHALLENGE
 const HELLO_FRAME_BYTES: usize = HELLO_PREFIX_BYTES + SHA256_BYTES;
 const RESPONSE_PREFIX_BYTES: usize = 8 + 2 + 1 + 1 + 8 + 4 + 8 + SNAPSHOT_SESSION_CHALLENGE_BYTES;
 const RESPONSE_OVERHEAD_BYTES: usize = RESPONSE_PREFIX_BYTES + SHA256_BYTES;
+/// Bytes required to validate the fixed response identity and declared total
+/// before allocating the rest of a stream frame.
+pub const SNAPSHOT_RESPONSE_LENGTH_PREFIX_BYTES: usize = 20;
 const HELLO_AUTH_DOMAIN: &[u8] = b"mini-dynamo/snapshot-session/client-hello/auth/v1\0";
 const RESPONSE_AUTH_DOMAIN: &[u8] = b"mini-dynamo/snapshot-session/server-response/auth/v1\0";
 
@@ -491,6 +494,35 @@ pub fn decode_authenticated_snapshot(
         companion_generation: metadata.companion_generation,
         snapshot_frame: snapshot_bytes.to_vec(),
     })
+}
+
+/// Validate the fixed response prefix and return its bounded declared length.
+///
+/// Stream transports use this before allocating or reading the remainder of a
+/// response. Full length consistency, authentication, and payload bounds are
+/// still enforced by [`decode_authenticated_snapshot`].
+///
+/// # Errors
+///
+/// Returns [`SnapshotSessionError`] for a truncated or invalid prefix, or a
+/// declared length outside the configured response bound.
+pub fn authenticated_snapshot_frame_length(
+    prefix: &[u8],
+    limits: SnapshotSessionLimits,
+) -> Result<usize, SnapshotSessionError> {
+    if prefix.len() != SNAPSHOT_RESPONSE_LENGTH_PREFIX_BYTES {
+        return Err(SnapshotSessionError::InvalidFrameLength);
+    }
+    validate_fixed_header(prefix, SNAPSHOT_RESPONSE_TYPE, SERVER_TO_CLIENT)?;
+    let declared_total = usize::try_from(read_u64(prefix, 12)?)
+        .map_err(|_| SnapshotSessionError::ResponseFrameTooLarge)?;
+    if declared_total < RESPONSE_OVERHEAD_BYTES {
+        return Err(SnapshotSessionError::InvalidFrameLength);
+    }
+    if declared_total > limits.max_response_frame_bytes {
+        return Err(SnapshotSessionError::ResponseFrameTooLarge);
+    }
+    Ok(declared_total)
 }
 
 fn validate_fixed_header(

@@ -40,6 +40,9 @@ const AUTH_DOMAIN: &[u8] = b"mini-dynamo/snapshot-tail/frame/auth/v1\0";
 const KEY_DERIVATION_DOMAIN: &[u8] = b"mini-dynamo/snapshot-tail/key-derivation/v1\0";
 const PREFIX_BYTES: usize = 96;
 const FRAME_OVERHEAD_BYTES: usize = PREFIX_BYTES + SHA256_BYTES;
+/// Bytes required to validate the fixed tail identity and declared total
+/// before allocating the rest of a stream frame.
+pub const TAIL_FRAME_LENGTH_PREFIX_BYTES: usize = 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -607,6 +610,38 @@ pub fn encode_tail_frame(
     let authenticator = authenticate(key, &frame);
     frame.extend_from_slice(&authenticator);
     Ok(frame)
+}
+
+/// Validate the fixed tail prefix and return its bounded declared length.
+///
+/// Full field consistency, authentication, and metadata/payload bounds remain
+/// the responsibility of [`TailFrameDecoder::decode`].
+///
+/// # Errors
+///
+/// Returns [`TailWireError`] for a truncated or invalid prefix, or a declared
+/// length outside the configured tail-frame bound.
+pub fn tail_frame_length(prefix: &[u8], limits: TailWireLimits) -> Result<usize, TailWireError> {
+    if prefix.len() != TAIL_FRAME_LENGTH_PREFIX_BYTES {
+        return Err(TailWireError::InvalidFrameLength);
+    }
+    if prefix.get(..8) != Some(MAGIC.as_slice()) {
+        return Err(TailWireError::InvalidMagic);
+    }
+    if read_u16(prefix, 8)? != SNAPSHOT_TAIL_SCHEMA_VERSION {
+        return Err(TailWireError::UnsupportedSchema);
+    }
+    TailFrameType::try_from(prefix[10])?;
+    TailDirection::try_from(prefix[11])?;
+    let declared_total =
+        usize::try_from(read_u64(prefix, 12)?).map_err(|_| TailWireError::FrameTooLarge)?;
+    if declared_total < FRAME_OVERHEAD_BYTES {
+        return Err(TailWireError::InvalidFrameLength);
+    }
+    if declared_total > limits.max_frame_bytes {
+        return Err(TailWireError::FrameTooLarge);
+    }
+    Ok(declared_total)
 }
 
 fn validate_kind_fields(
