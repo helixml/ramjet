@@ -264,11 +264,12 @@ same `main` build. To bootstrap that key locally before it exists in GHCR:
 
 This Drone server does not support path conditions. Each main-push publisher
 therefore runs `bench/drone_publish_guard.sh` against the exact
-`DRONE_COMMIT_BEFORE..DRONE_COMMIT_SHA` range before starting Docker or logging
-in to GHCR. CI/docs/benchmark/deployment-only changes finish all three guards
-without publishing. The guard validates exact 40-hex revisions and fetches only
-a missing shallow-clone predecessor by object ID and depth one. Invalid,
-unfetchable, or empty ranges fail closed.
+push plan before starting Docker or logging in to GHCR. The Git-capable
+`rust-fetch` step generates that plan atomically from the exact
+`DRONE_COMMIT_BEFORE..DRONE_COMMIT_SHA` range; publisher containers consume only
+revision-bound marker files because their command workspace may not expose
+`.git`. CI/docs/benchmark/deployment-only changes create no markers and publish
+nothing. Invalid, unfetchable, mismatched, or empty ranges fail closed.
 
 Measure the request-preparation hot path before and after tokenizer work:
 

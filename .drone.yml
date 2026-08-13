@@ -16,6 +16,7 @@ steps:
     pull: if-not-exists
     commands:
       - cargo fetch --locked
+      - sh bench/drone_publish_plan.sh
     volumes:
       - name: cargo-registry
         path: /usr/local/cargo/registry

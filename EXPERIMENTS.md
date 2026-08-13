@@ -4075,3 +4075,24 @@ failed exact predecessor fetch also remain errors. No node06 state changed.
 An additional real GitHub `--depth=1` clone of `fc4aa91` fetched predecessor
 `fa6cd2f` by exact object ID in 0.8s, left no `FETCH_HEAD`, and returned skip for
 the r61 CI/docs/bench-only dependency publisher range.
+
+## 2026-08-13 — r63 workspace-independent Drone publisher plan
+
+Drone #249 showed that even after the clone step checked out `b652abd`, the
+`plugins/docker` command workspace did not expose that revision as a usable Git
+object and the guard failed safely with `unavailable_after`. Git decisions now
+happen once in the ordinary `rust-fetch` step after Cargo fetch. The planner
+verifies workspace HEAD against the exact after SHA, recovers only a missing
+exact predecessor in a shallow clone, evaluates all three pathspec sets, and
+atomically replaces a private `.drone-publish-plan` directory. Publisher
+containers perform no Git operations: they require a regular, non-symlinked
+plan and revision-bound marker, skip on an absent marker, or fail closed on
+unsafe/stale state before starting Docker.
+
+Tests cover the full publisher matrix, real shallow-clone recovery, pull-request
+inertness, replacement of a malicious directory and directory symlink without
+touching its target, stale and symlinked markers, unusual filenames, deletes,
+and revision/range failures. No node06 state changed.
+A real GitHub depth-one clone of `b652abd` recovered predecessor `fc4aa91`,
+published the empty-marker plan in 0.85s, left no `FETCH_HEAD`, and all three
+publisher consumers returned skip.

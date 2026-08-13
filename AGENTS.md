@@ -78,16 +78,17 @@ Compose run beside them. Build #205 completed the full PR gate in 58s versus
 loop, inspect the step timings and cache/export path before accepting it.
 
 Drone 2.12 silently drops unsupported `when.paths` fields. Do not use them.
-Every GHCR step must call `bench/drone_publish_guard.sh` before starting the
-Docker plugin. The guard validates both revisions as exact 40-hex object names,
-requires `DRONE_COMMIT_SHA` locally, and, because Drone clones shallowly,
-fetches a missing `DRONE_COMMIT_BEFORE` by that exact object ID with depth one,
-no tags, no recursion, no credential prompt, and no `FETCH_HEAD` write. It then
-diffs that exact push range and returns publish/skip/error using only closed
-reason labels. A skip exits the
+After `cargo fetch`, the normal Rust step runs `bench/drone_publish_plan.sh`
+while `.git` is usable. On pushes it validates exact 40-hex revisions, verifies
+workspace HEAD equals `DRONE_COMMIT_SHA`, fetches a missing shallow predecessor
+by exact object ID, and atomically replaces `.drone-publish-plan` with private
+per-image markers. On pull requests it does no planning. Every GHCR step calls
+`bench/drone_publish_guard.sh`, which requires only its revision-bound marker
+and never Git, before starting the Docker plugin. A missing marker skips the
 step successfully before `/bin/drone-docker`, dockerd, or registry login; a
-missing/invalid/unfetchable revision or empty changeset fails closed. Keep its path matrix and
-`.drone.yml` wrapper tests current whenever image inputs change.
+missing/invalid/unfetchable revision, unsafe marker, or empty changeset fails
+closed. Keep the path matrix and pipeline wrapper tests current whenever image
+inputs change.
 
 The expensive locked Cargo graph lives in the public, source-free image named
 by `.docker/rust-deps-key`. The dependency guard admits only `Cargo.toml`,
