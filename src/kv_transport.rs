@@ -884,8 +884,14 @@ mod tests {
         assert_eq!(profile.requested_batches, 1);
         assert_eq!(profile.payload_bytes, EMPTY_BATCH.len());
         assert!(profile.time_to_first_frame.is_some());
-        assert!(profile.receive_wait >= Duration::from_millis(150));
-        assert!(profile.max_receive_gap >= Duration::from_millis(150));
+        // Socket setup and executor scheduling share the same absolute replay
+        // deadline. Under a loaded CI runner they can legitimately consume
+        // most of it before the receive loop starts, so receive-only telemetry
+        // has no deterministic lower bound. The end-to-end assertions above
+        // are the timeout contract; these assertions cover telemetry shape.
+        assert!(profile.receive_wait > Duration::ZERO);
+        assert!(profile.max_receive_gap > Duration::ZERO);
+        assert!(profile.max_receive_gap <= profile.receive_wait);
         server.await.unwrap();
     }
 
