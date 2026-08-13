@@ -3158,6 +3158,12 @@ while breadth-first export and MessagePack encoding run off-lock. Live batches
 reuse the already-qualified bounded vLLM payload for authenticated tails. The
 source supports at most two subscribers, drops only a slow or cancelled
 subscriber, and leaves the long-lived index running when an LB disconnects.
+Payloads are shared `Bytes`; every session now has both an entry bound and an
+aggregate queued-byte semaphore (16MiB default, 64MiB maximum), plus at most one
+separately frame-bounded in-flight payload. Byte overflow and rebuild signal
+out-of-band cancellation that the producer prioritizes over queued events and
+socket writes. Concrete Unix tests prove both paths close within 250ms without
+draining a queued stale frame, and reservation permits return on dequeue/drop.
 
 Replay disorder, digest-index failure, transport authority loss, rebuild, or an
 attested engine-incarnation change fences all sessions, clears authority, and
@@ -3173,3 +3179,12 @@ This remains offline. The next seam is a process-level owner that constructs
 and live ingestion across reconnects, and refreshes the authenticated engine
 incarnation. It is not yet a CLI command, Compose source, shadow consumer, or
 node06 deployment.
+
+The remaining atomic `DigestKvIndex` clone is synchronous under the source lock.
+Ten release repetitions measured a 36,612-record single clone at 7.66ms median
+and two serialized starts at 22.99ms wall; 131,072 records measured 28.45ms and
+82.27ms. Real authenticated one/two-session captured-shape paths measured
+38.96/50.94ms median with roughly 58/83-89MiB peak RSS; maximum-shape paths took
+140.94/192.67ms and roughly 196/286-312MiB. These clear the 3s recovery gate but
+do not meet a sub-10ms ingestion pause target. Instrument clone duration before
+shadow and prefer immutable/COW generation ownership if that p99 is required.

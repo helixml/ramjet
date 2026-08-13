@@ -435,9 +435,15 @@ fn fence_locked(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
+    use std::{sync::atomic::Ordering, time::Duration};
 
     use bytes::Bytes;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::UnixStream,
+        task::JoinHandle,
+        time::{Instant, timeout},
+    };
 
     use super::*;
     use crate::{
@@ -446,10 +452,20 @@ mod tests {
             DigestAlgorithm, DigestSpec, ResetScope, SnapshotExpectations, decode_snapshot,
         },
         kv_wire::{BlockStored, ExternalBlockHash, KvEvent, KvEventBatch},
-        snapshot_producer::{ProducerTailEvent, test_tail_channel},
+        snapshot_producer::{
+            ProducerTailEvent, SnapshotProducer, SnapshotProducerConfig, SnapshotProducerError,
+            SnapshotProducerSourceError, test_tail_channel,
+        },
+        snapshot_session::{
+            SNAPSHOT_RESPONSE_LENGTH_PREFIX_BYTES, SnapshotSessionChallenge, SnapshotSessionLimits,
+            SnapshotSessionSecret, authenticated_snapshot_frame_length, encode_client_hello,
+        },
+        snapshot_tail_wire::{TAIL_FRAME_LENGTH_PREFIX_BYTES, TailWireLimits, tail_frame_length},
     };
 
     const SECRET: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
+    const SESSION_SECRET: [u8; 32] = *b"snapshot-session-secret-32-byte!";
+    const CHALLENGE: SnapshotSessionChallenge = SnapshotSessionChallenge::new([0x51; 32]);
 
     fn incarnation(name: &str) -> EngineIncarnation {
         EngineIncarnation {
@@ -564,6 +580,88 @@ mod tests {
         }
     }
 
+    async fn read_frame(
+        stream: &mut UnixStream,
+        prefix_bytes: usize,
+        frame_length: impl FnOnce(&[u8]) -> usize,
+    ) {
+        let mut frame = vec![0_u8; prefix_bytes];
+        stream.read_exact(&mut frame).await.unwrap();
+        let total = frame_length(&frame);
+        frame.resize(total, 0);
+        stream.read_exact(&mut frame[prefix_bytes..]).await.unwrap();
+    }
+
+    async fn start_concrete_handler(
+        source: Arc<CompanionIndexSource>,
+    ) -> (UnixStream, JoinHandle<Result<(), SnapshotProducerError>>) {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let uid = server.peer_cred().unwrap().uid();
+        let producer = SnapshotProducer::new(
+            SnapshotProducerConfig {
+                expected_peer_uid: uid,
+                session_limits: SnapshotSessionLimits::default(),
+                tail_limits: TailWireLimits::default(),
+                tail_queue_capacity: 4,
+                tail_queue_max_bytes: 8 * 1024 * 1024,
+            },
+            Arc::new(SnapshotSessionSecret::new(SESSION_SECRET)),
+            source,
+        )
+        .unwrap();
+        let task = tokio::spawn(async move {
+            producer
+                .handle(server, Instant::now() + Duration::from_secs(2))
+                .await
+        });
+        let hello = encode_client_hello(
+            CHALLENGE,
+            &SnapshotSessionSecret::new(SESSION_SECRET),
+            SnapshotSessionLimits::default(),
+        )
+        .unwrap();
+        client.write_all(&hello).await.unwrap();
+        read_frame(
+            &mut client,
+            SNAPSHOT_RESPONSE_LENGTH_PREFIX_BYTES,
+            |prefix| {
+                authenticated_snapshot_frame_length(prefix, SnapshotSessionLimits::default())
+                    .unwrap()
+            },
+        )
+        .await;
+        read_frame(&mut client, TAIL_FRAME_LENGTH_PREFIX_BYTES, |prefix| {
+            tail_frame_length(prefix, TailWireLimits::default()).unwrap()
+        })
+        .await;
+        (client, task)
+    }
+
+    async fn assert_prompt_revocation(
+        mut client: UnixStream,
+        task: JoinHandle<Result<(), SnapshotProducerError>>,
+    ) {
+        let result = timeout(Duration::from_millis(250), task)
+            .await
+            .expect("source revocation must stop the handler promptly")
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(SnapshotProducerError::Source(
+                SnapshotProducerSourceError::Cancelled
+            ))
+        ));
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            timeout(Duration::from_millis(250), client.read(&mut byte))
+                .await
+                .expect("revoked peer must observe prompt connection close")
+                .unwrap(),
+            0,
+            "queued stale tail data was drained before revocation"
+        );
+    }
+
     #[tokio::test]
     async fn session_is_registered_before_snapshot_build_and_tail_is_ordered() {
         let source = source(2);
@@ -651,6 +749,70 @@ mod tests {
         assert_eq!(status.active_sessions, 0);
         assert_eq!(status.watermark, Some(12));
         assert_eq!(status.indexed_blocks, 2);
+    }
+
+    #[tokio::test]
+    async fn queue_byte_overflow_revokes_before_stale_tail_is_drained() {
+        let source = source(1);
+        source.apply_replay(&empty_batch(10)).unwrap();
+        source.finish_replay(10).unwrap();
+        let (client, task) = start_concrete_handler(Arc::clone(&source)).await;
+
+        let mut first = store_batch(11, 71, &[1, 2]);
+        first.payload = Bytes::from(vec![0x11; 7 * 1024 * 1024]);
+        source.apply_live(&first).unwrap();
+        tokio::task::yield_now().await;
+        let mut second = store_batch(12, 72, &[3, 4]);
+        second.payload = Bytes::from(vec![0x12; 7 * 1024 * 1024]);
+        source.apply_live(&second).unwrap();
+        let mut third = store_batch(13, 73, &[5, 6]);
+        third.payload = Bytes::from(vec![0x13; 7 * 1024 * 1024]);
+        source.apply_live(&third).unwrap();
+
+        let result = timeout(Duration::from_millis(250), task)
+            .await
+            .expect("byte overflow must stop a blocked writer promptly")
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(SnapshotProducerError::Source(
+                SnapshotProducerSourceError::Cancelled
+            ))
+        ));
+        let mut client = client;
+        let mut received = Vec::new();
+        timeout(
+            Duration::from_millis(250),
+            client.read_to_end(&mut received),
+        )
+        .await
+        .expect("revoked peer must close promptly")
+        .unwrap();
+        assert!(
+            !received.windows(64).any(|window| window == [0x12; 64]),
+            "queued stale tail payload was drained after byte-budget revocation"
+        );
+        let status = source.status();
+        assert!(status.ready);
+        assert_eq!(status.watermark, Some(13));
+        assert_eq!(status.active_sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn rebuild_revokes_handler_before_queued_tail_is_drained() {
+        let source = source(1);
+        source.apply_replay(&empty_batch(10)).unwrap();
+        source.finish_replay(10).unwrap();
+        let (client, task) = start_concrete_handler(Arc::clone(&source)).await;
+
+        source.apply_live(&store_batch(11, 71, &[1, 2])).unwrap();
+        source.begin_rebuild(None).unwrap();
+
+        assert_prompt_revocation(client, task).await;
+        let status = source.status();
+        assert!(!status.ready);
+        assert_eq!(status.watermark, None);
+        assert_eq!(status.active_sessions, 0);
     }
 
     #[tokio::test]

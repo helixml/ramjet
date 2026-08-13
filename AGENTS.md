@@ -180,7 +180,9 @@ transport owner loses authority, the index fails, or attested incarnation
 changes. vLLM event watermarks are sparse: accept strictly increasing forward
 jumps here and let the process-level replay fence distinguish omitted scheduler
 steps from lost event batches. A client disconnect removes only that subscriber;
-it must never stop or clear the index.
+it must never stop or clear the index. Tail queues are bounded by both entries
+and bytes; payloads are shared `Bytes`, and overflow or a source fence must use
+the out-of-band revocation signal rather than drain stale FIFO events.
 
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
