@@ -176,14 +176,18 @@ pub fn load_snapshot_control_file(
 
     let opened_len = usize::try_from(opened.len()).unwrap_or(max_bytes);
     let mut bytes = Vec::with_capacity(max_bytes.min(opened_len).saturating_add(1));
-    file.by_ref()
+    let read_result = file
+        .by_ref()
         .take(
             u64::try_from(max_bytes)
                 .unwrap_or(u64::MAX)
                 .saturating_add(1),
         )
-        .read_to_end(&mut bytes)
-        .map_err(|_| SnapshotSecretFileError::ReadFailed)?;
+        .read_to_end(&mut bytes);
+    if read_result.is_err() {
+        bytes.fill(0);
+        return Err(SnapshotSecretFileError::ReadFailed);
+    }
     if bytes.is_empty() || bytes.len() > max_bytes {
         bytes.fill(0);
         return Err(SnapshotSecretFileError::InvalidLength);

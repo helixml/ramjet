@@ -169,6 +169,7 @@ pub async fn watch_authenticated_engine_incarnation(
 ) {
     let mut ticker = tokio::time::interval(refresh);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_failure = None;
     loop {
         tokio::select! {
             biased;
@@ -176,9 +177,16 @@ pub async fn watch_authenticated_engine_incarnation(
             _ = ticker.tick() => {
                 let refreshed = load_authenticated_engine_incarnation(path, policy, &secret);
                 let next = match refreshed {
-                    Ok(incarnation) => Some(incarnation),
+                    Ok(incarnation) => {
+                        last_failure = None;
+                        Some(incarnation)
+                    }
                     Err(error) => {
-                        tracing::warn!(reason = error.reason(), "engine incarnation authority unavailable");
+                        let reason = error.reason();
+                        if last_failure != Some(reason) {
+                            tracing::warn!(reason, "engine incarnation authority unavailable");
+                            last_failure = Some(reason);
+                        }
                         None
                     }
                 };

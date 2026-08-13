@@ -123,6 +123,22 @@ impl SingleEngineCompanionConfig {
         mut get: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, SingleEngineCompanionConfigError> {
         let snapshot = SnapshotCompanionConfig::from_lookup(&mut get)?;
+        if snapshot.mode == SnapshotCompanionMode::Off {
+            return Ok(Self {
+                snapshot,
+                digest_secret_path: None,
+                attestation_path: None,
+                metrics_bind: parse_loopback("127.0.0.1:9091")?,
+                attestation_refresh: Duration::from_secs(1),
+                transport: None,
+                owner: CompanionIndexOwnerConfig {
+                    replay_limit: 10_000,
+                    reconnect_min: Duration::from_millis(250),
+                    reconnect_max: Duration::from_secs(5),
+                },
+                group: None,
+            });
+        }
         let metrics_bind = parse_loopback(
             get("DS4_SNAPSHOT_METRICS_BIND")
                 .as_deref()
@@ -164,18 +180,6 @@ impl SingleEngineCompanionConfig {
                 "DS4_SNAPSHOT_RECONNECT_MAX_MS",
                 "at least the reconnect minimum",
             ));
-        }
-        if snapshot.mode == SnapshotCompanionMode::Off {
-            return Ok(Self {
-                snapshot,
-                digest_secret_path: None,
-                attestation_path: None,
-                metrics_bind,
-                attestation_refresh,
-                transport: None,
-                owner,
-                group: None,
-            });
         }
         if snapshot.sources.len() != 1 {
             return Err(invalid(
@@ -303,6 +307,8 @@ impl SingleEngineCompanionConfigError {
 
 #[derive(Debug, Error)]
 pub enum SingleEngineCompanionError {
+    #[error("standalone companion session secret validation failed")]
+    SessionSecret(#[from] SnapshotSecretFileError),
     #[error("standalone companion protected input failed")]
     Attestation(#[from] CompanionAttestationError),
     #[error("standalone companion source initialization failed")]
@@ -327,6 +333,7 @@ impl SingleEngineCompanionError {
     #[must_use]
     pub const fn reason(&self) -> &'static str {
         match self {
+            Self::SessionSecret(error) => error.reason(),
             Self::Attestation(error) => error.reason(),
             Self::Source(_) => "source",
             Self::Owner(error) => error.reason(),
@@ -390,6 +397,19 @@ pub async fn run_single_engine_companion(
     let policy = SnapshotSecretFilePolicy {
         expected_owner_uid: config.snapshot.secret_owner_uid,
     };
+    // Preflight every protected input before binding metrics, connecting to the
+    // engine, or publishing the UDS. The snapshot runtime reopens this file at
+    // publication time, closing the validation/use race rather than trusting
+    // this first check.
+    let session_path = config
+        .snapshot
+        .secret_path
+        .as_deref()
+        .ok_or(SingleEngineCompanionError::InvalidConfig)?;
+    drop(crate::snapshot_secret_file::load_snapshot_session_secret(
+        session_path,
+        policy,
+    )?);
     let digest_secret = load_companion_digest_secret(digest_path, policy)?;
     let initial = load_authenticated_engine_incarnation(attestation_path, policy, &digest_secret)?;
     let source = Arc::new(CompanionIndexSource::new(
@@ -477,10 +497,16 @@ pub async fn run_single_engine_companion(
 
     match exit {
         ServiceExit::Shutdown => {
-            let owner = await_task(&mut owner_task, deadline).await??;
-            let snapshot = await_task(&mut snapshot_task, deadline).await??;
-            await_task(&mut metrics_task, deadline).await??;
-            await_task(&mut watcher_task, deadline).await?;
+            let (owner, snapshot, metrics, watcher) = tokio::join!(
+                await_task(&mut owner_task, deadline),
+                await_task(&mut snapshot_task, deadline),
+                await_task(&mut metrics_task, deadline),
+                await_task(&mut watcher_task, deadline),
+            );
+            let owner = owner??;
+            let snapshot = snapshot??;
+            metrics??;
+            watcher?;
             Ok(SingleEngineCompanionReport::Stopped { owner, snapshot })
         }
         ServiceExit::Owner(result) => {
@@ -675,9 +701,14 @@ async fn finish_remaining<A, B, C>(
     third: &mut JoinHandle<C>,
     deadline: Instant,
 ) -> Result<(), SingleEngineCompanionError> {
-    let _ = await_task(first, deadline).await?;
-    let _ = await_task(second, deadline).await?;
-    let _ = await_task(third, deadline).await?;
+    let (first, second, third) = tokio::join!(
+        await_task(first, deadline),
+        await_task(second, deadline),
+        await_task(third, deadline),
+    );
+    let _ = first?;
+    let _ = second?;
+    let _ = third?;
     Ok(())
 }
 
@@ -798,10 +829,6 @@ fn parse_u32(
 const fn invalid(key: &'static str, reason: &'static str) -> SingleEngineCompanionConfigError {
     SingleEngineCompanionConfigError::Invalid { key, reason }
 }
-
-// Keep the imported error type visible in this composition boundary's public
-// documentation: both session and digest paths use exactly this file policy.
-const _: Option<SnapshotSecretFileError> = None;
 
 #[cfg(test)]
 mod tests {
@@ -933,7 +960,13 @@ mod tests {
 
     #[test]
     fn off_is_the_default_and_requires_no_files_or_engine() {
-        let config = SingleEngineCompanionConfig::from_lookup(|_| None).unwrap();
+        let config = SingleEngineCompanionConfig::from_lookup(|key| match key {
+            // Standalone-only settings are not parsed while disabled.
+            "DS4_SNAPSHOT_METRICS_BIND" => Some("not-an-address".to_owned()),
+            "DS4_SNAPSHOT_RECONNECT_MIN_MS" => Some("not-a-duration".to_owned()),
+            _ => None,
+        })
+        .unwrap();
         assert!(!config.enabled());
         assert!(config.digest_secret_path.is_none());
         assert!(config.attestation_path.is_none());
@@ -1048,6 +1081,21 @@ mod tests {
         assert!(matches!(
             run_single_engine_companion(config, shutdown_rx).await,
             Err(SingleEngineCompanionError::Attestation(_))
+        ));
+        assert!(!files.socket.exists());
+    }
+
+    #[tokio::test]
+    async fn unsafe_session_secret_fails_before_socket_publication() {
+        let files = TestFiles::new();
+        fs::set_permissions(&files.session, fs::Permissions::from_mode(0o622)).unwrap();
+        let config = load(&files.values());
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        assert!(matches!(
+            run_single_engine_companion(config, shutdown_rx).await,
+            Err(SingleEngineCompanionError::SessionSecret(
+                SnapshotSecretFileError::UnsafePermissions
+            ))
         ));
         assert!(!files.socket.exists());
     }
