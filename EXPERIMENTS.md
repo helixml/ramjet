@@ -2701,3 +2701,11 @@ a no-op-fold replay would add production pressure without changing the design
 decision. Build the snapshot companion behind shadow/fail-closed gates;
 separately require a fixed Infernal successor to pass GPU-free DSML/parser and
 C128A stride gates before spending another engine warm start on issue #32.
+
+PR #40 merged as `afdd3ed`. The byte-identical node-qualified image was
+published as `ghcr.io/helixml/mini-dynamo:rust-r33-replay-profile-afdd3ed` at
+`sha256:26f7a30fb5523be5b8fdecc251545a33580eb9b4fb8c66eba4b512de7a32052f`.
+The canonical and infra-mirror Compose defaults are pinned to that digest.
+The already-running local candidate has the same manifest and was deliberately
+not recreated after publication: doing so would trigger another synchronous
+full-history replay against A without changing serving bytes or policy.
