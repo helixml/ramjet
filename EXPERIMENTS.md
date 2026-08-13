@@ -3254,10 +3254,46 @@ client disconnect, a blocked multi-megabyte tail write, byte-overflow
 revocation, and shutdown cancellation. This is library-only; no node06 or
 Compose state changed.
 
-The integrated local gate passed 274 library tests plus 31 integration tests and all
-doc-test targets in 25.56s, strict all-target/all-feature Clippy in 4.67s, Go
+The integrated local gate passed 274 library tests plus 31 integration tests
+and all doc-test targets in 25.56s, strict all-target/all-feature Clippy in 4.67s, Go
 test/vet/format parity in 1.17s, and 52 Python protocol tests plus corpus
 validation in 0.22s. The first release build took 67.03s because this isolated
 disk-backed worktree had a cold release target; after keeping Tokio's paused-
 time support dev-only, the narrower production-feature rebuild took 33.97s.
 The focused warm producer suite took 5.9s including its crate rebuild.
+
+## 2026-08-13 — r43 process-level per-engine KV owner
+
+The library-only owner now constructs a fresh subscribed transport per engine,
+uses the first live batch as the authoritative replay watermark, streams sparse
+full replay directly into generation-guarded private digest state, and then
+applies buffered/new live batches. Transport disconnect, replay/apply failure,
+task abort, explicit authority loss, and an attested incarnation change fence
+the source and every snapshot session before retry. Reconnect uses bounded
+backoff; repeated connection failures do not churn an already-fenced source.
+Observer events expose only closed reasons and bounded replay profiles.
+
+Independent integration review rejected two initially green behaviors. First,
+replaying only through the last pre-disconnect watermark could miss events
+published before the new SUB socket existed and falsely restore authority. A
+silent reconnect now remains fenced until a fresh live watermark arrives.
+Second, incremental replay returned a `Vec<SequencedBatch>` whose theoretical
+retention was `replay_limit * max_payload_bytes`. Until the source has a
+transactional bounded gap stage, every detected gap now fences immediately and
+streams a full private replay through the triggering live watermark. Existing
+SUB delivery remains installed, while the replay ROUTER's bounded post-watermark
+tail is folded into the same private generation before publication; later SUB
+delivery deduplicates against that final watermark. This closes the interval in
+which libzmq is draining and the async SUB receiver is not polled. A third guard
+makes an already-created clean replay stage idempotent so a source apply failure
+and its owner retry spend only one companion generation.
+
+Focused tests use both injected transports and real TCP ZMQ. They cover sparse
+startup/full replay, a live gap/full rebuild, live delivery buffered during
+replay, disconnect remaining fenced without a new watermark, reconnect replay,
+authority loss/refresh, stalled replay cancellation, task-abort fencing,
+stale blocking-worker generation rejection, and connection-failure generation
+stability. The full integrated gate passed 284 library tests plus 31
+integration/E2E tests, strict Clippy, Go parity, 52 Python tests, the five-case
+agent corpus, and a 25.72s warm release build. This remains off-path: there is
+no CLI, Compose, runtime, or node06 change yet.

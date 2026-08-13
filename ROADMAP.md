@@ -551,8 +551,15 @@ node06). The design rationale for each lives in DESIGN.md.
   a slow or disconnected reader only loses its own subscription. Tail payloads
   are shared and each session has a 16MiB default / 64MiB maximum aggregate
   queued-byte budget in addition to its entry bound; overflow and rebuild use
-  prioritized out-of-band revocation so stale tail frames are not drained. Add the
-  process-level ZMQ/replay/reconnect/attestation driver, then run at least
+  prioritized out-of-band revocation so stale tail frames are not drained. The
+  library-only process owner now installs SUB before replay, streams full sparse
+  replay into generation-guarded private state, fences on transport or attested
+  incarnation loss, reconnects with bounded backoff, and cancels blocking
+  libzmq work on shutdown. A reconnect stays fenced until a fresh live watermark
+  defines the replay boundary; it never trusts the last pre-disconnect value.
+  Incremental gaps currently trigger a streamed full private rebuild rather
+  than retaining an adversarially large decoded replay vector. Next wire one
+  authenticated owner/socket per engine into an executable and run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
 
   The off-by-default library runtime now composes typed config, hardened secret
@@ -565,9 +572,7 @@ node06). The design rationale for each lives in DESIGN.md.
   producer; the supervisor retains the two-client cap and immediate shutdown
   cancellation without imposing a total lifetime on healthy progress. Next add
   authenticated engine selection or one socket per engine, then inject the
-  concrete source through a process-level driver that
-  owns `ZmqKvEventSource`, subscribe-before-replay, reconnects, complete sparse
-  replay, and authenticated engine-incarnation refresh.
+  completed process owner and its authenticated engine-incarnation watch.
 
   A true offline public-stack harness now proves initial publication, live
   store/remove, rolling handoff, LB owner restart, companion shutdown/socket

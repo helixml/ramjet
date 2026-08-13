@@ -263,6 +263,48 @@ impl ZmqKvEventSource {
         T: Send + 'static,
         F: FnMut(&mut T, SequencedBatch) + Send + 'static,
     {
+        self.replay_fold_mode(from, through, accumulator, fold, false)
+            .await
+    }
+
+    /// Stream both the requested replay range and bounded post-range tail
+    /// batches received before the explicit end marker.
+    ///
+    /// This is the safe handoff for a caller that subscribed live before
+    /// replay: replay tail closes the interval while the SUB receiver is not
+    /// being polled, and later SUB duplicates are sequence-fenced.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same bounded transport and validation errors as
+    /// [`Self::replay_fold`].
+    pub async fn replay_fold_with_tail<T, F>(
+        &mut self,
+        from: u64,
+        through: u64,
+        accumulator: T,
+        fold: F,
+    ) -> Result<T, KvTransportError>
+    where
+        T: Send + 'static,
+        F: FnMut(&mut T, SequencedBatch) + Send + 'static,
+    {
+        self.replay_fold_mode(from, through, accumulator, fold, true)
+            .await
+    }
+
+    async fn replay_fold_mode<T, F>(
+        &mut self,
+        from: u64,
+        through: u64,
+        accumulator: T,
+        fold: F,
+        fold_tail: bool,
+    ) -> Result<T, KvTransportError>
+    where
+        T: Send + 'static,
+        F: FnMut(&mut T, SequencedBatch) + Send + 'static,
+    {
         self.last_replay_profile = None;
         let expected_count = through
             .checked_sub(from)
@@ -301,6 +343,7 @@ impl ZmqKvEventSource {
                 limits,
                 accumulator,
                 fold,
+                fold_tail,
                 &worker_alive,
             )
         })
@@ -324,6 +367,7 @@ fn blocking_replay_exchange<T, F>(
     limits: KvWireLimits,
     mut accumulator: T,
     mut fold: F,
+    fold_tail: bool,
     replay_alive: &Weak<()>,
 ) -> (Result<T, KvTransportError>, ReplayProfile)
 where
@@ -365,6 +409,7 @@ where
             return Err(KvTransportError::ReplayTimeoutUndrained);
         }
         let mut last_requested = None;
+        let mut last_tail = None;
         let mut completed_requested_range = false;
         let mut messages = 0_usize;
         let mut validation_error = None;
@@ -452,7 +497,17 @@ where
                         continue;
                     }
                     if batch.sequence > through && completed_requested_range {
+                        if last_tail.is_some_and(|last| batch.sequence <= last) {
+                            validation_error.get_or_insert(KvTransportError::InvalidReplay);
+                            continue;
+                        }
+                        last_tail = Some(batch.sequence);
                         profile.tail_batches = profile.tail_batches.saturating_add(1);
+                        if fold_tail {
+                            let fold_started = Instant::now();
+                            fold(&mut accumulator, batch);
+                            profile.fold = profile.fold.saturating_add(fold_started.elapsed());
+                        }
                         continue;
                     }
                     if batch.sequence < from

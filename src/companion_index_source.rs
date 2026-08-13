@@ -292,7 +292,15 @@ impl CompanionIndexSource {
         &self,
         engine_incarnation: Option<EngineIncarnation>,
     ) -> Result<(), CompanionIndexSourceError> {
-        fence_locked(&mut self.state.lock(), engine_incarnation)
+        let mut state = self.state.lock();
+        // A live apply failure already fences sessions and creates a clean
+        // replay stage synchronously. A later transport-owner retry must not
+        // spend a second generation for the same authority loss. Explicit
+        // incarnation refreshes still always establish a new identity.
+        if engine_incarnation.is_none() && state.fenced && state.replay.is_some() {
+            return Ok(());
+        }
+        fence_locked(&mut state, engine_incarnation)
     }
 }
 
@@ -1139,6 +1147,19 @@ mod tests {
         source.finish_replay(20).unwrap();
         assert_eq!(source.status().phase, SnapshotProducerSourcePhase::Ready);
         assert!(source.status().ready);
+    }
+
+    #[test]
+    fn repeated_unattested_rebuild_is_idempotent_while_clean_stage_is_fenced() {
+        let source = source(1);
+        source.begin_rebuild(None).unwrap();
+        let generation = source.status().companion_generation;
+        source.begin_rebuild(None).unwrap();
+        assert_eq!(source.status().companion_generation, generation);
+        assert_eq!(source.status().phase, SnapshotProducerSourcePhase::Fenced);
+
+        source.begin_rebuild(Some(incarnation("engine-b"))).unwrap();
+        assert_eq!(source.status().companion_generation, generation + 1);
     }
 
     #[test]

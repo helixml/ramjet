@@ -29,12 +29,6 @@ use crate::{
 pub trait CompanionKvEventTransport: Send {
     fn recv_live_activity(&mut self) -> BoxFuture<'_, Result<LiveActivity, KvTransportError>>;
 
-    fn replay(
-        &mut self,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'_, Result<Vec<SequencedBatch>, KvTransportError>>;
-
     /// Stream a full replay directly into the source's private rebuild stage.
     /// Implementations retain only sparse sequence metadata, never the raw
     /// decoded replay corpus.
@@ -52,25 +46,17 @@ impl CompanionKvEventTransport for ZmqKvEventSource {
         Box::pin(ZmqKvEventSource::recv_live_activity(self))
     }
 
-    fn replay(
-        &mut self,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'_, Result<Vec<SequencedBatch>, KvTransportError>> {
-        Box::pin(ZmqKvEventSource::replay(self, from, through))
-    }
-
     fn replay_full(
         &mut self,
         through: u64,
         source: Arc<CompanionIndexSource>,
     ) -> BoxFuture<'_, Result<CompanionFullReplay, KvTransportError>> {
         Box::pin(async move {
-            ZmqKvEventSource::replay_fold(
+            ZmqKvEventSource::replay_fold_with_tail(
                 self,
                 0,
                 through,
-                CompanionFullReplay::new(source),
+                CompanionFullReplay::new(source, through),
                 |replay, batch| replay.apply(&batch),
             )
             .await
@@ -85,6 +71,8 @@ impl CompanionKvEventTransport for ZmqKvEventSource {
 /// Content-free result of streaming a replay into private source state.
 pub struct CompanionFullReplay {
     sequences: Vec<u64>,
+    tail: Vec<(u64, bool)>,
+    requested_through: u64,
     establishes_boundary: bool,
     apply_error: Option<CompanionIndexSourceError>,
     expected_generation: u64,
@@ -93,10 +81,12 @@ pub struct CompanionFullReplay {
 
 impl CompanionFullReplay {
     #[must_use]
-    pub fn new(source: Arc<CompanionIndexSource>) -> Self {
+    pub fn new(source: Arc<CompanionIndexSource>, requested_through: u64) -> Self {
         let expected_generation = source.status().companion_generation;
         Self {
             sequences: Vec::new(),
+            tail: Vec::new(),
+            requested_through,
             establishes_boundary: false,
             apply_error: None,
             expected_generation,
@@ -105,8 +95,12 @@ impl CompanionFullReplay {
     }
 
     pub fn apply(&mut self, batch: &SequencedBatch) {
-        self.sequences.push(batch.sequence);
-        self.establishes_boundary |= batch.batch.clears_all();
+        if batch.sequence <= self.requested_through {
+            self.sequences.push(batch.sequence);
+            self.establishes_boundary |= batch.batch.clears_all();
+        } else {
+            self.tail.push((batch.sequence, batch.batch.clears_all()));
+        }
         if self.apply_error.is_none()
             && let Err(error) = self
                 .source
@@ -164,7 +158,6 @@ pub enum CompanionIndexOwnerRebuildReason {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompanionIndexOwnerReplayKind {
     Full,
-    Gap,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -309,7 +302,6 @@ impl CompanionIndexOwner {
         let mut fence = KvEventFence::new(self.config.replay_limit);
         let mut current_authority = engine_authority.borrow_and_update().clone();
         let mut backoff = self.config.reconnect_min;
-        let mut full_replay_through = None;
         rebuild(
             &self.source,
             &mut fence,
@@ -329,7 +321,6 @@ impl CompanionIndexOwner {
             if current_authority.as_ref() != Some(&authority) {
                 // A watermark belongs only to the incarnation that produced
                 // it; never carry reconnect recovery across authority change.
-                full_replay_through = None;
                 rebuild(
                     &self.source,
                     &mut fence,
@@ -376,7 +367,6 @@ impl CompanionIndexOwner {
                 &mut shutdown,
                 &self.observer,
                 &mut report,
-                full_replay_through.take(),
             )
             .await?
             {
@@ -387,7 +377,6 @@ impl CompanionIndexOwner {
                     current_authority = refreshed;
                 }
                 ConnectionExit::Retry { reason, was_ready } => {
-                    full_replay_through = recovery_through(&self.source, &fence);
                     rebuild(
                         &self.source,
                         &mut fence,
@@ -442,44 +431,8 @@ async fn consume_connection(
     shutdown: &mut watch::Receiver<bool>,
     observer: &Arc<dyn CompanionIndexOwnerObserver>,
     report: &mut CompanionIndexOwnerReport,
-    full_replay_through: Option<u64>,
 ) -> Result<ConnectionExit, CompanionIndexOwnerError> {
     let mut ready = false;
-    if let Some(through) = full_replay_through {
-        if !fence.prepare_full_replay(through) {
-            return Ok(ConnectionExit::Retry {
-                reason: CompanionIndexOwnerRebuildReason::ReplayTooLarge,
-                was_ready: false,
-            });
-        }
-        match recover_full(
-            Arc::clone(source),
-            fence,
-            transport,
-            through,
-            engine_authority,
-            shutdown,
-            observer,
-            report,
-        )
-        .await?
-        {
-            ReplayExit::Complete => {
-                ready = true;
-                observer.observe(CompanionIndexOwnerEvent::Ready);
-            }
-            ReplayExit::Shutdown => return Ok(ConnectionExit::Shutdown),
-            ReplayExit::AuthorityChanged(refreshed) => {
-                return Ok(ConnectionExit::AuthorityChanged(refreshed));
-            }
-            ReplayExit::Retry(reason) => {
-                return Ok(ConnectionExit::Retry {
-                    reason,
-                    was_ready: false,
-                });
-            }
-        }
-    }
     loop {
         let activity = tokio::select! {
             biased;
@@ -560,12 +513,30 @@ async fn consume_connection(
             IngestAction::Duplicate => {
                 observer.observe(CompanionIndexOwnerEvent::LiveDuplicate);
             }
-            IngestAction::Replay { from, through } => {
-                match recover_gap(
+            IngestAction::Replay { through, .. } => {
+                // An incremental gap cannot be applied transactionally by the
+                // current source, and retaining up to replay_limit decoded
+                // payloads could consume replay_limit * max_payload_bytes.
+                // Fence immediately and stream one full private rebuild while
+                // this already-subscribed connection buffers newer live data.
+                rebuild(
                     source,
                     fence,
+                    None,
+                    CompanionIndexOwnerRebuildReason::Replay,
+                    observer,
+                    report,
+                )?;
+                if !fence.prepare_full_replay(through) {
+                    return Ok(ConnectionExit::Retry {
+                        reason: CompanionIndexOwnerRebuildReason::ReplayTooLarge,
+                        was_ready: true,
+                    });
+                }
+                match recover_full(
+                    Arc::clone(source),
+                    fence,
                     transport,
-                    from,
                     through,
                     engine_authority,
                     shutdown,
@@ -574,7 +545,9 @@ async fn consume_connection(
                 )
                 .await?
                 {
-                    ReplayExit::Complete => {}
+                    ReplayExit::Complete => {
+                        observer.observe(CompanionIndexOwnerEvent::Ready);
+                    }
                     ReplayExit::Shutdown => return Ok(ConnectionExit::Shutdown),
                     ReplayExit::AuthorityChanged(refreshed) => {
                         return Ok(ConnectionExit::AuthorityChanged(refreshed));
@@ -711,7 +684,22 @@ async fn recover_full(
             CompanionIndexOwnerRebuildReason::ReplayInvalid,
         ));
     }
-    if source.finish_replay(through).is_err() {
+    if !accept_replay_tail(fence, &replayed.tail) {
+        record_replay(
+            transport,
+            observer,
+            CompanionIndexOwnerReplayKind::Full,
+            CompanionIndexOwnerReplayOutcome::Invalid,
+        );
+        return Ok(ReplayExit::Retry(
+            CompanionIndexOwnerRebuildReason::ReplayInvalid,
+        ));
+    }
+    let final_watermark = replayed
+        .tail
+        .last()
+        .map_or(through, |(sequence, _)| *sequence);
+    if source.finish_replay(final_watermark).is_err() {
         record_replay(
             transport,
             observer,
@@ -720,9 +708,10 @@ async fn recover_full(
         );
         return Ok(ReplayExit::Retry(CompanionIndexOwnerRebuildReason::Apply));
     }
-    report.replay_batches = report
-        .replay_batches
-        .saturating_add(u64::try_from(replayed.sequences.len()).unwrap_or(u64::MAX));
+    report.replay_batches = report.replay_batches.saturating_add(
+        u64::try_from(replayed.sequences.len().saturating_add(replayed.tail.len()))
+            .unwrap_or(u64::MAX),
+    );
     record_replay(
         transport,
         observer,
@@ -732,97 +721,18 @@ async fn recover_full(
     Ok(ReplayExit::Complete)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn recover_gap(
-    source: &CompanionIndexSource,
-    fence: &mut KvEventFence,
-    transport: &mut dyn CompanionKvEventTransport,
-    from: u64,
-    through: u64,
-    engine_authority: &mut watch::Receiver<Option<EngineIncarnation>>,
-    shutdown: &mut watch::Receiver<bool>,
-    observer: &Arc<dyn CompanionIndexOwnerObserver>,
-    report: &mut CompanionIndexOwnerReport,
-) -> Result<ReplayExit, CompanionIndexOwnerError> {
-    let replayed =
-        match await_replay_or_control(transport, from, through, engine_authority, shutdown).await {
-            ReplayControl::Batches(batches) => batches,
-            ReplayControl::Failed => {
-                record_replay(
-                    transport,
-                    observer,
-                    CompanionIndexOwnerReplayKind::Gap,
-                    CompanionIndexOwnerReplayOutcome::TransportFailed,
-                );
-                return Ok(ReplayExit::Retry(CompanionIndexOwnerRebuildReason::Replay));
-            }
-            ReplayControl::Shutdown => {
-                record_replay(
-                    transport,
-                    observer,
-                    CompanionIndexOwnerReplayKind::Gap,
-                    CompanionIndexOwnerReplayOutcome::Cancelled,
-                );
-                return Ok(ReplayExit::Shutdown);
-            }
-            ReplayControl::AuthorityChanged(refreshed) => {
-                record_replay(
-                    transport,
-                    observer,
-                    CompanionIndexOwnerReplayKind::Gap,
-                    CompanionIndexOwnerReplayOutcome::Cancelled,
-                );
-                fence_refreshed_authority(source, fence, refreshed.clone(), observer, report)?;
-                return Ok(ReplayExit::AuthorityChanged(refreshed));
-            }
-        };
-    let sequences = replayed
-        .iter()
-        .map(|batch| batch.sequence)
-        .collect::<Vec<_>>();
-    if fence.accept_replay(
-        &sequences,
-        replayed.iter().any(|batch| batch.batch.clears_all()),
-    ) == ReplayAction::Invalid
-    {
-        record_replay(
-            transport,
-            observer,
-            CompanionIndexOwnerReplayKind::Gap,
-            CompanionIndexOwnerReplayOutcome::Invalid,
-        );
-        return Ok(ReplayExit::Retry(
-            CompanionIndexOwnerRebuildReason::ReplayInvalid,
-        ));
-    }
-    for batch in &replayed {
-        if source.apply_live(batch).is_err() {
-            record_replay(
-                transport,
-                observer,
-                CompanionIndexOwnerReplayKind::Gap,
-                CompanionIndexOwnerReplayOutcome::Invalid,
-            );
-            return Ok(ReplayExit::Retry(CompanionIndexOwnerRebuildReason::Apply));
+fn accept_replay_tail(fence: &mut KvEventFence, tail: &[(u64, bool)]) -> bool {
+    let mut pending = Vec::new();
+    for (sequence, clears_all) in tail {
+        match fence.ingest(*sequence, *clears_all) {
+            IngestAction::Apply | IngestAction::ResetAndApply => pending.clear(),
+            IngestAction::Replay { .. } => pending.push(*sequence),
+            IngestAction::Duplicate
+            | IngestAction::ObserveOnly
+            | IngestAction::UnrecoverableGap => return false,
         }
     }
-    report.replay_batches = report
-        .replay_batches
-        .saturating_add(u64::try_from(replayed.len()).unwrap_or(u64::MAX));
-    record_replay(
-        transport,
-        observer,
-        CompanionIndexOwnerReplayKind::Gap,
-        CompanionIndexOwnerReplayOutcome::Complete,
-    );
-    Ok(ReplayExit::Complete)
-}
-
-enum ReplayControl {
-    Batches(Vec<SequencedBatch>),
-    Failed,
-    Shutdown,
-    AuthorityChanged(Option<EngineIncarnation>),
+    pending.is_empty() || fence.accept_replay(&pending, false) == ReplayAction::Recovered
 }
 
 enum FullReplayControl {
@@ -830,30 +740,6 @@ enum FullReplayControl {
     Failed,
     Shutdown,
     AuthorityChanged(Option<EngineIncarnation>),
-}
-
-async fn await_replay_or_control(
-    transport: &mut dyn CompanionKvEventTransport,
-    from: u64,
-    through: u64,
-    engine_authority: &mut watch::Receiver<Option<EngineIncarnation>>,
-    shutdown: &mut watch::Receiver<bool>,
-) -> ReplayControl {
-    tokio::select! {
-        biased;
-        () = wait_for_shutdown(shutdown) => ReplayControl::Shutdown,
-        changed = engine_authority.changed() => {
-            if changed.is_err() {
-                ReplayControl::AuthorityChanged(None)
-            } else {
-                ReplayControl::AuthorityChanged(engine_authority.borrow_and_update().clone())
-            }
-        }
-        result = transport.replay(from, through) => match result {
-            Ok(batches) => ReplayControl::Batches(batches),
-            Err(_) => ReplayControl::Failed,
-        }
-    }
 }
 
 async fn await_full_replay_or_control(
@@ -1009,14 +895,6 @@ fn next_backoff(current: Duration, maximum: Duration) -> Duration {
     current.saturating_mul(2).min(maximum)
 }
 
-fn recovery_through(source: &CompanionIndexSource, fence: &KvEventFence) -> Option<u64> {
-    let fenced = fence.next_sequence().and_then(|next| next.checked_sub(1));
-    match (source.status().watermark, fenced) {
-        (Some(source), Some(fenced)) => Some(source.max(fenced)),
-        (source, fenced) => source.or(fenced),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1139,23 +1017,6 @@ mod tests {
             })
         }
 
-        fn replay(
-            &mut self,
-            from: u64,
-            through: u64,
-        ) -> BoxFuture<'_, Result<Vec<SequencedBatch>, KvTransportError>> {
-            let plan = self.replay_plan(from, through);
-            Box::pin(async move {
-                match plan {
-                    ReplayPlan::Complete(batches) => Ok(batches),
-                    ReplayPlan::Pending(cancelled) => {
-                        let _witness = CancelWitness(cancelled);
-                        future::pending().await
-                    }
-                }
-            })
-        }
-
         fn replay_full(
             &mut self,
             through: u64,
@@ -1165,7 +1026,7 @@ mod tests {
             Box::pin(async move {
                 match plan {
                     ReplayPlan::Complete(batches) => {
-                        let mut replay = CompanionFullReplay::new(source);
+                        let mut replay = CompanionFullReplay::new(source, through);
                         for batch in batches {
                             replay.apply(&batch);
                         }
@@ -1243,7 +1104,7 @@ mod tests {
     #[test]
     fn abandoned_full_replay_cannot_mutate_a_new_generation() {
         let source = source();
-        let mut abandoned = CompanionFullReplay::new(Arc::clone(&source));
+        let mut abandoned = CompanionFullReplay::new(Arc::clone(&source), 0);
         source.begin_rebuild(None).unwrap();
         abandoned.apply(&batch(0, Some(10)));
         assert_eq!(
@@ -1254,6 +1115,17 @@ mod tests {
         source.apply_replay(&batch(0, Some(20))).unwrap();
         source.finish_replay(0).unwrap();
         assert_eq!(source.status().indexed_blocks, 1);
+    }
+
+    #[test]
+    fn sparse_replay_tail_advances_fence_without_treating_scheduler_noops_as_loss() {
+        let mut fence = KvEventFence::new(16);
+        assert_eq!(fence.ingest(0, false), IngestAction::Apply);
+        assert!(accept_replay_tail(&mut fence, &[(3, false), (5, false)]));
+        assert!(fence.trusted());
+        assert_eq!(fence.next_sequence(), Some(6));
+        assert!(!accept_replay_tail(&mut fence, &[(7, false), (6, false)]));
+        assert!(!fence.trusted());
     }
 
     fn zmq_message(frames: Vec<Bytes>) -> ZmqMessage {
@@ -1289,7 +1161,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribes_then_builds_sparse_full_replay_and_recovers_sparse_gap() {
+    async fn subscribes_then_streams_sparse_full_rebuild_for_a_live_gap() {
         let source = source();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let (activity_tx, activity_rx) = mpsc::unbounded_channel();
@@ -1297,7 +1169,7 @@ mod tests {
             activities: activity_rx,
             replays: VecDeque::from([
                 ReplayPlan::Complete(vec![batch(0, Some(10)), batch(2, None), batch(4, None)]),
-                ReplayPlan::Complete(vec![batch(5, Some(11)), batch(7, None)]),
+                ReplayPlan::Complete(vec![batch(0, Some(10)), batch(5, Some(11)), batch(7, None)]),
             ]),
             requests: Arc::clone(&requests),
         };
@@ -1323,12 +1195,12 @@ mod tests {
             .unwrap();
         wait_until(|| source.status().watermark == Some(7)).await;
         assert_eq!(source.status().indexed_blocks, 2);
-        assert_eq!(*requests.lock().unwrap(), [(0, 4), (5, 7)]);
+        assert_eq!(*requests.lock().unwrap(), [(0, 4), (0, 7)]);
 
         shutdown_tx.send(true).unwrap();
         let report = task.await.unwrap().unwrap();
         assert_eq!(report.connections, 1);
-        assert_eq!(report.replay_batches, 5);
+        assert_eq!(report.replay_batches, 6);
         assert!(!source.status().ready);
         assert!(
             observer
@@ -1386,7 +1258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_disconnect_fences_before_a_fresh_subscribed_connection() {
+    async fn transport_disconnect_stays_fenced_until_fresh_live_watermark_replay() {
         let source = source();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let (first_tx, first_rx) = mpsc::unbounded_channel();
@@ -1399,7 +1271,10 @@ mod tests {
             }),
             Box::new(MockTransport {
                 activities: second_rx,
-                replays: VecDeque::from([ReplayPlan::Complete(vec![batch(0, Some(20))])]),
+                replays: VecDeque::from([ReplayPlan::Complete(vec![
+                    batch(0, Some(20)),
+                    batch(1, None),
+                ])]),
                 requests,
             }),
         ];
@@ -1418,13 +1293,49 @@ mod tests {
         first_tx.send(Ok(LiveActivity::Disconnected)).unwrap();
         wait_until(|| source.status().companion_generation > generation).await;
 
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!source.status().ready);
+        assert_eq!(source.status().watermark, None);
+
+        second_tx
+            .send(Ok(LiveActivity::Batch(batch(1, None))))
+            .unwrap();
         wait_until(|| source.status().ready).await;
-        assert_eq!(source.status().watermark, Some(0));
+        assert_eq!(source.status().watermark, Some(1));
         assert_eq!(source.status().indexed_blocks, 1);
 
         shutdown_tx.send(true).unwrap();
         task.await.unwrap().unwrap();
         drop(second_tx);
+    }
+
+    #[tokio::test]
+    async fn repeated_connect_failures_do_not_churn_an_already_fenced_generation() {
+        let source = source();
+        let observer = Arc::new(RecordingObserver::default());
+        let (_authority_tx, authority_rx) = watch::channel(Some(incarnation("engine-a", 1)));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(
+            owner(Arc::clone(&source), Vec::new(), Arc::clone(&observer))
+                .run(authority_rx, shutdown_rx),
+        );
+
+        wait_until(|| {
+            observer
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| **event == CompanionIndexOwnerEvent::ConnectAttempt)
+                .count()
+                >= 3
+        })
+        .await;
+        assert_eq!(source.status().companion_generation, 2);
+        assert!(!source.status().ready);
+
+        shutdown_tx.send(true).unwrap();
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -1550,13 +1461,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(first_request.get(2).unwrap().as_ref(), 0_u64.to_be_bytes());
+        // The SUB socket is already installed while the independent libzmq
+        // worker drains replay. This post-watermark event must remain queued
+        // and apply immediately after the replay publishes watermark 4.
+        publisher
+            .send(zmq_message(vec![
+                Bytes::from_static(b"kv"),
+                Bytes::copy_from_slice(&5_u64.to_be_bytes()),
+                Bytes::from_static(EMPTY_BATCH),
+            ]))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
         send_replay(
             &mut replay_server,
             first_request.get(0).unwrap().clone(),
-            &[0, 2, 4],
+            &[0, 2, 4, 5],
         )
         .await;
-        wait_until(|| source.status().ready && source.status().watermark == Some(4)).await;
+        wait_until(|| source.status().ready && source.status().watermark == Some(5)).await;
 
         publisher
             .send(zmq_message(vec![
@@ -1570,11 +1493,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(second_request.get(2).unwrap().as_ref(), 5_u64.to_be_bytes());
+        assert_eq!(second_request.get(2).unwrap().as_ref(), 0_u64.to_be_bytes());
         send_replay(
             &mut replay_server,
             second_request.get(0).unwrap().clone(),
-            &[5, 7],
+            &[6, 7],
         )
         .await;
         wait_until(|| source.status().watermark == Some(7)).await;
