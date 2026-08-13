@@ -6,13 +6,10 @@ set -eu
 kind=${1-}
 tag=${2-}
 sha=${3-}
-result=${4-release_publish}
-
-case "$kind" in lb|companion) ;; *) echo "$result=error reason=invalid_publisher" >&2; exit 2 ;; esac
-case "$result" in release_publish|release_recovery_publish) ;; *) exit 2 ;; esac
+case "$kind" in lb|companion) ;; *) echo "release_publish=error reason=invalid_publisher" >&2; exit 2 ;; esac
 
 fail() {
-  echo "$result=error reason=$1" >&2
+  echo "release_publish=error reason=$1" >&2
   exit 2
 }
 
@@ -56,7 +53,7 @@ printf '%s' "$compact" | grep -Fq \
 destination_result=
 if destination_result=$(crane digest "$destination" 2>&1); then
   if [ "$destination_result" = "$source_digest" ]; then
-    echo "$result=idempotent kind=$kind"
+    echo "release_publish=idempotent kind=$kind"
     exit 0
   fi
   fail destination_conflict
@@ -69,4 +66,4 @@ esac
 crane copy "$source" "$destination" >/dev/null 2>&1 || fail copy_failed
 destination_digest=$(crane digest "$destination" 2>/dev/null) || fail destination_digest
 [ "$source_digest" = "$destination_digest" ] || fail digest_mismatch
-echo "$result=complete kind=$kind"
+echo "release_publish=complete kind=$kind"

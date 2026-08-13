@@ -479,16 +479,12 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   consumers and the sole guarded Kaniko publisher to the Dockerfile hash. Never
   point release steps directly at an unknown third-party shell layout. After
   main publishes a new tools content tag, independently verify `/bin/sh`, Crane,
-  and CA roots, then pin every tag/recovery consumer as `tag@sha256:digest`; the
+  and CA roots, then pin both normal tag consumers as `tag@sha256:digest`; the
   publisher destination itself remains tag-only. A digest-pin-only follow-up
   must select zero image publishers.
-  The narrowly scoped
-  `release-v0.1.0-recovery` promote pipeline is the only recovery: it accepts
-  target `release-v0.1.0`, fetches and peels the existing immutable tag to
-  `b0e070073d4266018d2f907ff35a7ee88adfdcd4`, checks that tag's Cargo version,
-  and copies only the two qualified `b0e0700` manifests. Do not generalize it,
-  move the tag, overwrite a destination, or run it after both destinations are
-  verified; remove the recovery document after the v0.1.0 release is complete.
+  The one-purpose `release-v0.1.0-recovery` promote pipeline was removed after
+  successful build #274. Do not restore a promote trigger or version-specific
+  recovery script; future releases use only the normal immutable tag pipeline.
 - Build the LB locally and stream it to node06 when the local amd64 Docker
   cache is warm. A typical warm LB transfer is seconds and avoids consuming
   node06's scarce 8-9GiB available host memory:

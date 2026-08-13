@@ -64,49 +64,24 @@ class DroneReleaseConfigTest(unittest.TestCase):
         self.assertIn('destination="ghcr.io/helixml/mini-dynamo:companion-$tag"', script)
         self.assertIn('crane copy "$source" "$destination"', script)
         self.assertIn('[ "$source_digest" = "$destination_digest" ]', script)
-        self.assertIn('$result=idempotent kind=$kind', script)
+        self.assertIn('release_publish=idempotent kind=$kind', script)
         self.assertIn("fail destination_conflict", script)
         self.assertIn("fail destination_lookup", script)
         for label in ("source_label_mismatch", "version_label_mismatch", "revision_label_mismatch"):
             self.assertIn(label, script)
 
-    def test_v010_recovery_is_exact_promote_only_and_build_free(self):
-        recovery = self.pipeline("release-v0.1.0-recovery")
-        self.assertRegex(
-            recovery,
-            r"(?ms)trigger:\n  event:\n    - promote\n  target:\n    - release-v0\.1\.0",
-        )
-        for forbidden in (
-            "- push",
-            "- pull_request",
-            "- tag",
-            "/kaniko/executor",
-            "plugins/docker",
-            "cargo build",
-            "docker build",
-            "rust-edge",
+    def test_no_one_time_promote_recovery_surface_remains(self):
+        text = DRONE.read_text()
+        self.assertNotIn("- promote", text)
+        self.assertNotIn("release-v0.1.0-recovery", text)
+        self.assertNotIn("drone_release_recovery", text)
+        for name in (
+            "drone_release_recovery_plan.sh",
+            "drone_release_recovery_guard.sh",
+            "drone_release_recovery_publish.sh",
+            "test_drone_release_recovery.py",
         ):
-            self.assertNotIn(forbidden, recovery)
-        self.assertIn("sh bench/drone_release_recovery_plan.sh", recovery)
-        for step, kind in (
-            ("recover-v0.1.0-image", "lb"),
-            ("recover-v0.1.0-companion-image", "companion"),
-        ):
-            section = re.search(
-                rf"(?ms)^  - name: {re.escape(step)}\n(.*?)(?=^  - name: |^trigger:)",
-                recovery,
-            )
-            self.assertIsNotNone(section, step)
-            body = section.group(1)
-            self.assertRegex(
-                body,
-                r"image: ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]{64}@sha256:[0-9a-f]{64}",
-            )
-            self.assertIn(f"sh bench/drone_release_recovery_publish.sh {kind}", body)
-            self.assertRegex(
-                body,
-                r"(?ms)depends_on:\n      - validate-v0\.1\.0-authority",
-            )
+            self.assertFalse((ROOT / "bench" / name).exists(), name)
 
     def test_runtime_images_declare_exact_oci_identity_labels(self):
         for name in ("Dockerfile", "Dockerfile.companion"):

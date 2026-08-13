@@ -4187,10 +4187,31 @@ step took 24s and produced
 An independent pull of that exact tag and digest ran `/bin/sh`, resolved
 `/usr/local/bin/crane`, reported Crane revision
 `7b32099eb119a9fdd715d84ef18c088cbe434c7f`, and found the Alpine CA bundle.
-All four normal/recovery consumers are now pinned to that digest while the sole
-publisher destination remains its content tag. This digest-only change is not
-an image input and must select zero publishers. No second recovery promotion
-was attempted before that pin reached a green main build.
+All four then-active normal/recovery consumers were pinned to that digest while
+the sole publisher destination remained its content tag. This digest-only
+change is not an image input and had to select zero publishers. No second
+recovery promotion was attempted before that pin reached a green main build.
+
+Main build #273 then passed in 61s: clone 2s, dependency planning 6s, Clippy
+33s, Rust tests 50s, agent protocol and Compose 3s each. The dependency, tools,
+LB, and companion publisher guards all explicitly skipped in 0-1s, proving the
+digest-only merge performed no image or registry work. The single final command
+`drone build promote helixml/mini-dynamo 273 release-v0.1.0` created recovery
+build #274, which passed in 10s: clone 2s, immutable tag/commit/version authority
+validation 1s, and concurrent LB/companion Crane copies 6s each. Its logs contain
+no Kaniko, Docker daemon, Docker build, Cargo build, or edge update.
+
+Independent registry reads confirmed `v0.1.0` equals qualified `rust-b0e0700`
+at `sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1`,
+and `companion-v0.1.0` equals `companion-rust-b0e0700` at
+`sha256:4af08be5c011ac56d1bde2463e525c1d57d9ddd21391a3565ec55183566d9f95`.
+Both retain source `https://github.com/helixml/mini-dynamo`, version `0.1.0`,
+and revision `b0e070073d4266018d2f907ff35a7ee88adfdcd4`. The GitHub release was
+subsequently verified by the release owner. With recovery complete, the
+one-purpose promote pipeline, its scripts/tests, and plan ignore are removed;
+the permanent normal tag pipeline keeps its two digest-pinned release-tools
+consumers. There is no remaining Drone promote trigger or version-specific
+recovery authority.
 
 ## 2026-08-13 — v0.1.0 candidate publication and node06 acceptance
 
