@@ -3470,3 +3470,31 @@ Verdict: the immutable source/build input is ready for an explicitly authorized
 local image build. It remains unqualified for node06 until a built digest passes
 the existing runtime source, corruption smoke, deterministic agent, and c8 scout
 boundaries.
+
+## 2026-08-13 — Infernal r5 embedded-index build preflight fix
+
+The first real thin-overlay build on node06 failed closed in 7.14 seconds
+before producing an image or allocating a GPU. The r4 source checkout's six
+candidate blobs exactly matched its staged index, but Docker layer extraction
+left their Git stat-cache entries stale. `git diff-files` therefore reported
+them modified with an unknown worktree object, and `git apply --index` refused
+the otherwise valid full-index patch with `does not match index`.
+
+The recipe now refreshes the index stat cache for exactly the six allowlisted
+paths after verifying the base tree and patch digest, then retains the stronger
+`apply --index` behavior and exact candidate-tree check. A disposable container
+against the immutable r4 digest proved all six refreshes, applications, and the
+resulting `0eb3d442...` tree. The focused contract test locks the refresh list to
+the manifest allowlist. No production container, Compose service, or GPU state
+changed during the rejected build.
+
+After the refresh fix, the same node06 build completed in 16.25 seconds and
+produced the local immutable image ID
+`sha256:1f3a54246d5ecdb1bae53360b89881b629921b557c44e739c0034b373fa21d26`.
+Its labels report base digest `21f048...`, candidate tree `0eb3d442...`, parser
+identity `29c4307b...`, patch `603673eb...`, and the expected revision-specific
+cache fingerprint. A separate network-isolated, no-GPU container rechecked the
+Git tree and imported `vllm.parser.deepseek_v4` from the staged source path.
+Root remained at 58GB free / 85% used, and the LB plus both r34 engines retained
+their prior uptime. The image is local-only and still must pass the corruption
+smoke and deterministic agent gate before B may serve a measured request.
