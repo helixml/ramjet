@@ -4872,3 +4872,65 @@ returned the LB to its safe A-only topology and cleanly stopped B with exit code
 zero; A continued serving 1/1 with no restart. Publish and digest-pin r97 before
 the next dual-engine restore so the fresh B generation is not spent on the
 known-bad companion again.
+
+## 2026-08-13 — r98 dual compact authority and canonical engine restore
+
+The r97 companion fix was merged and published as immutable manifest
+`companion-rust-979ff7b@sha256:5cc99e33308d4cd707c0fa77629b830870ec27d05b7381320a3d948132f476f2`,
+then pinned and deployed on both snapshot domains. The companions remained
+healthy with zero restarts. Restoring engine B initially exposed an unrelated
+operational defect: its container still carried a stale campaign Compose label,
+Triton MoE selection, and `VLLM_USE_B12X_FP8_GEMM=1`; auto-NUMA then restarted
+the process repeatedly. The canonical base did not contain those settings.
+Churn was stopped, the current metadata helper and render were synced, and B was
+recreated only after its rendered config hash matched the canonical service.
+
+The subsequent top-p safety default rollout recreated B and then A under the
+common lock. B took 582s end to end (569s to readiness) and A took 576s (565s
+to readiness); both finished with zero restarts, fresh protected metadata and
+attestation, and no LB topology gap beyond the intended rolling single-home
+interval. The deterministic five-case agent smoke passed 5/5, split 3/2 across
+the replicas, measured 1.397s TTFT p95 and 86.5 output tok/s. Both corrected
+companions bootstrapped the fresh generations and remained authoritative with
+zero invalid replay events. The stable read-only audit reported 36 blocks /
+9,216 tokens on A and 173 blocks / 44,288 tokens on B while normal approximate
+serving remained 2/2.
+
+Decision: treat running-container Compose labels and rendered config hashes as
+part of every engine preflight. A repository file alone is not evidence of the
+active service configuration. The long iteration in this experiment was the
+two unavoidable model loads; stale-override detection itself should stay a
+sub-second inspection before paying either load again.
+
+## 2026-08-13 — r99 selected exact health and snapshot recovery proof
+
+The first snapshot recovery attempt exposed two gate false negatives without
+touching either engine. First, recovery timing waited for ordinary upstream
+health even though both authenticated snapshots were already published. The
+gate now records the first snapshot-ready wall/monotonic timestamps separately,
+then allows the normal 15-second health loop to complete inside a 30-second
+outer attempt. Second, `/health` still read the unused raw KV-event inventories
+while routing selected compact snapshot inventories. The Rust proxy now obtains
+content-free trust/block/token status from the same `ExactRouteInventory`
+backend used by routing, for both direct and snapshot modes.
+
+Formatting, strict all-target/all-feature Clippy, all 336 Rust tests, and all
+203 Python tests passed. The 14,467,718-byte candidate LB took 34.14s for its
+release link, 40.646s to build, 5.687s to transfer to node06, and 46.333s for
+the complete edit-to-host loop. No engine or companion was recreated.
+
+One manual trial accidentally supplied `.env.snapshot` as Compose's sole
+`--env-file`. That correctly connected both snapshots but hid `.env`'s private
+engine-probe token, producing authoritative exact fields beside a false 0/2
+serving result. It was rolled back and normal 2/2 serving was verified. The
+correct production-shaped trial exported the snapshot authority variables while
+preserving Compose's default `.env`. Both snapshot route-ready gauges, 2/2
+upstream health, and exact inventories of 36/173 blocks were established at
+2.150s; the candidate had zero restarts. Its unconditional rollback restored
+the pinned `rust-b0e0700@sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1`
+LB with 2/2 health and released the common lock.
+
+Decision: publish and digest-pin r99, then use only the repository gate for the
+five-cycle sub-three-second qualification. Keep snapshot placement disabled
+afterward; a successful recovery gate admits the 100,000-decision shadow
+comparison, not production placement.

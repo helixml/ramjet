@@ -384,6 +384,14 @@ verify interval. The Phase-B P2P harness also adds a unique ownership label and
 service hash; it will not restore over a container it no longer owns. Do not
 bypass either fence with a raw concurrent `docker compose up`.
 
+Before attributing a running engine to the canonical Compose file, inspect its
+`com.docker.compose.project.config_files` label and compare its rendered service
+hash with the canonical render. A stale campaign override can survive in the
+container even after the repository copy is corrected; r98's engine-B restart
+loop came from an old Triton/FP8-GEMM campaign override, not from the canonical
+base. Stop the loop first, preflight the base render, and recreate through the
+common lock rather than debugging flags that are not in the active config.
+
 For the snapshot critical path, use `bench/snapshot_recovery_gate.py` instead
 of a hand-written sequence. Its default audit runs every production validator,
 proves that the current base LB config is exactly reproducible for rollback,
@@ -395,6 +403,15 @@ engine identity after each attempt, and requires nearest-rank recovery p95 at
 or below three seconds. The mode-0600 output is reserved before mutation and is
 never overwritten. Do not use `--apply` to manufacture authority by restarting
 or clearing an engine.
+
+Compose automatically reads the deployment's `.env`, which supplies the private
+engine-probe token. Snapshot authority is additional environment, not a
+replacement env file: the gate injects it directly. For a manual diagnostic,
+source/export `.env.snapshot` while leaving Compose's default `.env` loading
+intact; never pass `.env.snapshot` as the sole `--env-file`. That mistake makes
+authoritative snapshot inventories look like a 0/2 serving failure because
+probes fall back to the public default token. Every manual shadow recreate must
+install an unconditional baseline rollback trap before the mutation.
 
 ### Preflight engine flags before a rolling restart
 

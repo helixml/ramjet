@@ -191,6 +191,26 @@ class SnapshotRecoveryGateTest(unittest.TestCase):
         self.assertIsNone(gate.validate_health(payload, True))
         self.assertIsNotNone(gate.validate_health(payload, False))
 
+    def test_snapshot_recovery_timestamp_does_not_wait_for_health_probe(self):
+        progress = gate.SnapshotRecoveryProgress()
+        progress.observe(
+            snapshot_ready=True,
+            inventories=None,
+            wall=10.5,
+            monotonic=2.5,
+        )
+        self.assertFalse(progress.complete)
+        progress.observe(
+            snapshot_ready=True,
+            inventories=((10, 20), (2560, 5120)),
+            wall=25.0,
+            monotonic=17.0,
+        )
+        self.assertTrue(progress.complete)
+        self.assertEqual(progress.ready_wall, 10.5)
+        self.assertEqual(progress.ready_monotonic, 2.5)
+        self.assertEqual(progress.inventories, ((10, 20), (2560, 5120)))
+
     def test_audit_refuses_to_mutate_when_a_companion_is_fenced(self):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "audit.json"

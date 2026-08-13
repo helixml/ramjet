@@ -68,7 +68,6 @@ async fn main() -> anyhow::Result<()> {
         client,
         metrics.clone(),
         routing,
-        kv_consumers.inventories(),
         exact_inventories,
     )
     .context("initialize mini-dynamo proxy")?;

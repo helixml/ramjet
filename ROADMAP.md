@@ -720,10 +720,10 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   authority immediately. The completed one-shot host provisioner now generates
   that manifest from current protected engine metadata without exposing either
   digest key or identity. Both node06 domains now pass the production host and
-  Compose validators and run as separate attested services. Because they joined
-  already-long-lived engine generations after the bounded replay window, both
-  sources remain fenced until an authoritative clear or incarnation change;
-  do not restart a healthy engine merely to manufacture readiness.
+  Compose validators and run as separate attested services. The independently
+  justified r98 canonical engine rolls supplied fresh attestations; both compact
+  sources now bootstrap, retain live authority, and expose bounded resident
+  inventories without restarting an engine for the snapshot experiment.
 
   A true offline public-stack harness now proves initial publication, live
   store/remove, rolling handoff, LB owner restart, companion shutdown/socket
@@ -756,7 +756,9 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   dropped, no-new-privileges, no GPU/host IPC/Docker socket/companion port, and
   explicit PID/memory/file limits. Permit at most two clients for rolling LB
   handoff and one in-flight cached snapshot per client. Approximate serving and
-  `/health` remain independent of companion/session readiness. Rollback first
+  overall `/health` readiness remain independent of companion/session readiness,
+  while the content-free exact-inventory fields report the same selected direct
+  or snapshot authority used by counterfactual routing. Rollback first
   disables snapshot placement and verifies approximate fallback, then removes
   the companion and socket. A separate production-shaped overlay and semantic
   validator now add one companion and one explicitly profiled provisioner per
@@ -793,25 +795,27 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   pin the qualified v0.1.0 LB and companion manifests by SHA tag and digest.
   The node06 host setup, fresh per-engine attestations, full preflight, and
   restricted-identity off-mode LB start now pass without an engine restart.
-  The `123dd9d` diagnostic companions are deployed and healthy. A remains
-  correctly fenced because its vLLM publisher aged past a reconstructable
-  sequence-zero generation. A naturally justified B rollback supplied a fresh
-  attested generation and exposed a concrete compact-index incompatibility:
+  The r97 orphan-parity companion is digest-pinned on both engines. A naturally
+  justified B rollback supplied a fresh attested generation and exposed a
+  concrete compact-index incompatibility:
   r34 may publish a short partial MLA block whose internal parent is absent
   from the public event stream. The raw exact index already filters every
   absent-parent store without overclaiming, while the compact adapter had
   treated `ParentNotFound` as fatal. r97 gives both paths the same conservative
-  contract. A B-only candidate replay became authoritative within two seconds
-  of a complete-block allocation, published 19 blocks, then applied a later
-  live batch and grew to 28 with zero invalid events. Publish and pin that
-  companion before restoring the dual-engine topology; do not restart A merely
-  to manufacture a fresh generation. A repository-owned
+  contract. The corrected companions survived the later canonical A/B rolls and
+  now publish 36 and 173 blocks respectively with zero invalid replay events. A
+  repository-owned
   qualification gate now turns the next natural generation into one bounded
   command: read-only validation refuses fenced sources without mutation, while
   explicit apply mode holds the common lock across five LB-only shadow
   recreates, immutable-engine checks, nearest-rank p95 at or below three
-  seconds, and mandatory config-hash-verified rollback. Once both sources
-  become authoritative, run that gate before the capacity cells.
+  seconds, and mandatory config-hash-verified rollback. r99 removes two false
+  negatives before the full gate: it timestamps snapshot publication separately
+  from the slower ordinary-health probe and makes `/health` report the selected
+  compact authority rather than the unused raw-event inventory. A production-
+  shaped candidate recovered both 36/173-block inventories and 2/2 serving in
+  2.150s with a clean immutable rollback. Publish and pin r99, then run the
+  five-cycle gate before capacity cells.
   Compare at least 100,000 exact versus approximate decisions before placement
   can consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.
