@@ -2953,12 +2953,18 @@ fast clients, a stalled third/slow reader, overflow, disconnect, and late CPU
 completion before any shadow deployment.
 
 The first PR #48 Drone attempt ran two identical cold Rust lanes concurrently
-(`push` and `pull_request`) and both failed after the local 29.5-second gate and
-GitHub's full 1m14s Rust gate had passed. Reproducing the exact
-`rust:1.95-bookworm` container from a cold registry/index completed the new
-Linux socket tests successfully in 46.5 seconds. To remove this avoidable CI
-contention, Drone now runs feature work once for PRs targeting `main` and again
-only for the post-merge `main` push. Its redundant release build was removed:
-the required local pre-push gate still builds release, and GitHub builds the
-published release container on `main`. Drone continues to enforce format,
-strict Clippy, all Rust tests, Go parity/vet/format, and Python protocol tests.
+(`push` and `pull_request`) after the local 29.5-second and GitHub full Rust
+gates had passed. An exact cold reproduction found one root-sensitive test
+assertion: with a deliberately wrong expected UID, a non-root run rejects the
+parent first as `UntrustedParent`, while Drone's root-owned directory remains a
+trusted ancestor and the root-owned target is then rejected as
+`UnexpectedOwner`. Both are the intended fail-closed result; the test now
+accepts either content-free policy rejection. The reproduction also passed the
+new Linux socket tests in 46.5 seconds and all Go/Python container gates.
+
+To remove avoidable CI contention independent of that test correction, Drone
+now runs feature work once for PRs targeting `main` and again only for the
+post-merge `main` push. Its redundant release build was removed: the required
+local pre-push gate still builds release, and GitHub builds the published
+release container on `main`. Drone continues to enforce format, strict Clippy,
+all Rust tests, Go parity/vet/format, and Python protocol tests.

@@ -371,7 +371,7 @@ mod tests {
         let path = directory.path("secret");
         write_secret(&path, &SECRET);
         let actual = policy(&path).expected_owner_uid;
-        assert_eq!(
+        assert!(matches!(
             load_snapshot_session_secret(
                 &path,
                 SnapshotSecretFilePolicy {
@@ -379,8 +379,8 @@ mod tests {
                 },
             )
             .unwrap_err(),
-            SnapshotSecretFileError::UntrustedParent
-        );
+            SnapshotSecretFileError::UntrustedParent | SnapshotSecretFileError::UnexpectedOwner
+        ));
         assert_eq!(
             load_snapshot_session_secret(Path::new("relative-secret"), policy(&path)).unwrap_err(),
             SnapshotSecretFileError::InvalidPath
