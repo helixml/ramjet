@@ -3188,3 +3188,39 @@ and two serialized starts at 22.99ms wall; 131,072 records measured 28.45ms and
 140.94/192.67ms and roughly 196/286-312MiB. These clear the 3s recovery gate but
 do not meet a sub-10ms ingestion pause target. Instrument clone duration before
 shadow and prefer immutable/COW generation ownership if that p99 is required.
+
+## 2026-08-13 — Dynamo, Kimi-K3, and DwarfStar upstream refresh
+
+Primary-source refresh found Dynamo v1.3.1 as the newest stable release and
+`v1.4.0-kimi-k3-dev.1` as an explicitly non-QA-gated preview. Dynamo v1.3's
+router direction now includes a standalone selection service, branch-sharded KV
+indexing, a compressed concurrent radix tree, topology-aware routing, separated
+chat/tool/reasoning parsers, and offline trace replay. Its standalone router
+exposes `best_worker_id` plus `get_overlap_scores`, including device, pinned-host,
+disk, and shared-cache tiers. The actionable node06 lesson is to keep exact
+inventory and counterfactual overlap observable independently of request proxying;
+branch sharding is not justified for two engines until measured lock/index cost
+requires it.
+
+The Kimi-K3 Dynamo preview targets aggregated and disaggregated TP8 GB300 / TP16
+GB200 deployments and explicitly does not cover RTX PRO 6000. K3 itself is a
+2.8T-parameter hybrid KDA/Gated-MLA model with a one-million-token context, so
+this refresh does not change the existing node06 feasibility rejection. Its
+applicable lessons remain model-aware cache geometry, request-class budgets,
+failure-bounded affinity, and strict frontend parser/reasoning/tool parity.
+
+DwarfStar's current native agent treats the rendered conversation and saved KV
+state as one session truth, persists complete KV sessions to disk, keeps tool
+syntax native to the model, and can rebuild a stripped session by prefilling its
+saved rendered text. This supports the current companion/session direction but
+does not make its local GGUF cache format compatible with vLLM. The next
+persistent-tier experiment should therefore prove engine-rendered-token parity,
+session snapshot/rebuild correctness, and output parity before measuring NVMe
+recovery benefit. No node06 state changed during this refresh.
+
+Sources inspected: [Dynamo v1.3.1 release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.3.1),
+[Dynamo v1.3.0 router release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.3.0),
+[standalone router contract](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md),
+[Dynamo Kimi-K3 preview](https://github.com/ai-dynamo/dynamo/releases/tag/v1.4.0-kimi-k3-dev.1),
+[Kimi-K3](https://github.com/MoonshotAI/Kimi-K3), and
+[DwarfStar](https://github.com/antirez/ds4).

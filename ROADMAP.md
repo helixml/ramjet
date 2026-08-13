@@ -618,6 +618,28 @@ node06). The design rationale for each lives in DESIGN.md.
   recommendation (not an action) for `MAX_NUM_SEQS` / instance count.
   Dynamo's planner, read-only.
 
+- 🔨 **Track current upstream contracts, not names.** The 2026-08-13 refresh
+  finds Dynamo v1.3.1 as the newest stable release. Dynamo v1.3 made its
+  standalone selection service, branch-sharded KV indexer, compressed radix
+  tree, topology-aware routing, parser separation, and trace replay first-class;
+  `best_worker_id` and `get_overlap_scores` expose selection and per-tier overlap
+  without requiring Dynamo to proxy the request. Keep mini-dynamo's two-engine
+  implementation smaller, but preserve those boundaries: engine-neutral exact
+  inventory, read-only counterfactual selection/overlap, and replayable workload
+  traces. Add an offline `get_overlap_scores`-equivalent diagnostic after the
+  snapshot owner lands; do not import branch sharding until profiling shows one
+  compact index or its lock is actually limiting node06.
+
+  Dynamo's Kimi-K3 v1.4 preview is explicitly non-production and targets TP8
+  GB300 / TP16 GB200. It is useful evidence for frontend parser/reasoning/tool
+  separation and aggregated-versus-disaggregated recipes, not evidence that K3
+  fits node06. DwarfStar's current native-agent contract reinforces the session
+  direction already selected here: rendered conversation plus durable KV state
+  is the session truth, tool syntax stays model-native, and a stripped session
+  can rebuild from saved rendered text. For mini-dynamo, preserve the exact
+  engine-rendered-token golden boundary and add an explicit session snapshot /
+  rebuild experiment before any persistent L2 promotion.
+
 ## Longer term / speculative
 
 - ⬜ **Kimi K3 feasibility gate, not a deployment promise.** K3 is 2.8T total
