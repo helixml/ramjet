@@ -4618,3 +4618,56 @@ misleading result. Run the fresh-salt 52/64 boundary only after both engines
 establish a new authoritative generation (or the production snapshot path is
 qualified), then compare raw residency, projected pressure, route split, and
 second-wave cold/partial/full survival before considering any placement change.
+
+## 2026-08-13 — r89–r90 companion replay-churn fence and rollout
+
+The first production-shaped companion audit found both services listening and
+attested but correctly reporting `source_ready=0`. Engine B had accumulated 50
+structurally invalid full replays plus four transport failures. Invalid replay
+work consumed 33.57s in aggregate; transport failures held bounded attempts for
+1,200.02s. Reissuing a completed, structurally invalid history against the same
+synchronous publisher generation cannot make that history authoritative and
+adds avoidable publisher work.
+
+#116 changes only that terminal state. A structurally invalid completed full
+replay now discards its private generation and retains the already-installed
+SUB connection in fenced observe-only mode. Ordinary later events cannot cause
+another replay or reconnect; an authenticated incarnation change or explicit
+all-blocks clear may establish a new boundary. Transport failure remains
+retryable because it does not prove the replay content invalid. A dedicated
+test proves one incomplete replay request, no reconnect under a later ordinary
+event, zero partial publication, and recovery on an authoritative clear.
+
+The local gate passed strict Clippy, 334 Rust unit tests plus every integration
+suite, 188 Python tests, both Compose validators, and release builds of the
+companion and attestation binaries. The focused lane rebuilt for 28.50s but ran
+its 12 tests in 0.04s. The widened Clippy and test walls were 12.03s and 16.85s;
+the companion release relink took an unexpectedly slow 53.87s. Drone #308
+passed, and main build #309 spent 131s/134s publishing the companion/LB images
+in parallel after its quality gate. Keep these compiler and publisher cache
+regressions visible; they are iteration costs, not serving measurements.
+
+#117 pins the production overlay and validator to the immutable `4203b06`
+artifacts: LB digest `sha256:9151c298...aa292` and companion digest
+`sha256:86805b8c...d2578`. Both pulled images report the full merge revision in
+their OCI labels. The complete host-authority check, production host validator,
+semantic Compose validator, and dual-profile render passed on node06. The first
+validator pass also caught a missing mirrored metrics-only Caddy snippet before
+any container changed; syncing the repository artifact closed that admission
+failure.
+
+Under the common deployment lock, only `snapshot-companion-a` and
+`snapshot-companion-b` were recreated with `--no-deps`. Both became healthy
+with zero restarts. The LB and r34 engine start timestamps were unchanged, and
+ordinary `/health` remained 2/2. Parallel direct allocations returned HTTP 200
+with 2,137 prompt tokens in 0.369s and 0.371s. After the allocations, each
+companion retained exactly one connect attempt/connection, authenticated
+authority, and a listening socket; neither emitted replay/reconnect churn.
+
+Both sources remain `source_ready=0`: by this rollout both engine generations
+were already beyond the companion's bounded 10,000-step bootstrap window. This
+is a safe admission failure, not a sub-3s recovery result. Do not clear or
+restart a healthy engine solely for the experiment. Keep the companions alive
+through the next independently justified engine generation, require source
+readiness there, then enable snapshot `shadow`, perform an LB-only restart, and
+measure authenticated recovery before collecting the 52/64-app capacity cells.
