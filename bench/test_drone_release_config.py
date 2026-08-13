@@ -42,10 +42,41 @@ class DroneReleaseConfigTest(unittest.TestCase):
             self.assertIn(f"sh bench/drone_release_guard.sh {kind}", body)
             self.assertIn("exec /bin/drone-docker", body)
             self.assertIn(image_tag, body)
+            self.assertIn("- OCI_VERSION=${DRONE_TAG}", body)
+            self.assertIn("- OCI_REVISION=${DRONE_COMMIT_SHA}", body)
             self.assertEqual(body.count("tags:"), 1)
             self.assertRegex(body, r"(?ms)when:\n      event:\n        - tag")
             self.assertRegex(body, r"(?ms)depends_on:\n      - release-quality-complete")
             self.assertNotIn("edge", body)
+
+    def test_runtime_images_declare_exact_oci_identity_labels(self):
+        for name in ("Dockerfile", "Dockerfile.companion"):
+            dockerfile = (ROOT / name).read_text()
+            self.assertIn(
+                'org.opencontainers.image.source="https://github.com/helixml/mini-dynamo"',
+                dockerfile,
+            )
+            self.assertIn('org.opencontainers.image.version="${OCI_VERSION}"', dockerfile)
+            self.assertIn('org.opencontainers.image.revision="${OCI_REVISION}"', dockerfile)
+            self.assertIn("ARG OCI_VERSION", dockerfile)
+            self.assertIn("ARG OCI_REVISION", dockerfile)
+
+    def test_main_candidates_also_receive_exact_revision_metadata(self):
+        quality = DRONE.read_text().split("\n---\n")[0]
+        for step, version in (
+            ("publish-image", "OCI_VERSION=rust-${DRONE_COMMIT_SHA:0:7}"),
+            (
+                "publish-companion-image",
+                "OCI_VERSION=companion-rust-${DRONE_COMMIT_SHA:0:7}",
+            ),
+        ):
+            section = re.search(
+                rf"(?ms)^  - name: {step}\n(.*?)(?=^  - name: |^trigger:)", quality
+            )
+            self.assertIsNotNone(section, step)
+            body = section.group(1)
+            self.assertIn(version, body)
+            self.assertIn("OCI_REVISION=${DRONE_COMMIT_SHA}", body)
 
 
 if __name__ == "__main__":

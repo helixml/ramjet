@@ -132,6 +132,9 @@ steps:
         from_secret: ghcr_username
       password:
         from_secret: ghcr_token
+      build_args:
+        - OCI_VERSION=rust-${DRONE_COMMIT_SHA:0:7}
+        - OCI_REVISION=${DRONE_COMMIT_SHA}
       tags:
         - rust-${DRONE_COMMIT_SHA:0:7}
         - rust-edge
@@ -165,6 +168,9 @@ steps:
         from_secret: ghcr_username
       password:
         from_secret: ghcr_token
+      build_args:
+        - OCI_VERSION=companion-rust-${DRONE_COMMIT_SHA:0:7}
+        - OCI_REVISION=${DRONE_COMMIT_SHA}
       tags:
         - companion-rust-${DRONE_COMMIT_SHA:0:7}
         - companion-rust-edge
@@ -281,6 +287,9 @@ steps:
         from_secret: ghcr_username
       password:
         from_secret: ghcr_token
+      build_args:
+        - OCI_VERSION=${DRONE_TAG}
+        - OCI_REVISION=${DRONE_COMMIT_SHA}
       tags:
         - ${DRONE_TAG}
     when:
@@ -305,6 +314,9 @@ steps:
         from_secret: ghcr_username
       password:
         from_secret: ghcr_token
+      build_args:
+        - OCI_VERSION=${DRONE_TAG}
+        - OCI_REVISION=${DRONE_COMMIT_SHA}
       tags:
         - companion-${DRONE_TAG}
     when:
