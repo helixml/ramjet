@@ -446,6 +446,12 @@ node06). The design rationale for each lives in DESIGN.md.
   stride and do not address r5's sequential extra-call failures. Reopen only
   for an immutable r5+ artifact or a narrow patch that passes the retained
   real-output goldens before any image build.
+  The Phase-B direct-P2P prerequisite is now tool-ready and read-only-qualified:
+  exact NVIDIA `nvbandwidth`/`nccl-tests` sources build against canonical r34,
+  and node06 preflight discovers the isolated B reservation as GPUs 4–7 with
+  1,830MiB free per GPU while preserving 2/2 health and every container
+  identity. The remaining 1MiB SM-vs-CE scout is separately explicit because
+  it temporarily single-homes production; run it only in a low-traffic window.
 
 - 🔨 **KV-event ground truth.** Subscribe to vLLM `kv_events` (block
   stored/removed) and replace the approximate LRU index with the engine's

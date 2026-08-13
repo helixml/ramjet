@@ -151,7 +151,9 @@ def parse_topology_matrix(output: str) -> tuple[list[str], dict[str, list[str]]]
         if not fields:
             continue
         if header is None and fields[0] == "GPU0":
-            header = [field for field in fields if field.startswith("GPU")]
+            # `topo -m` appends columns such as "GPU NUMA ID". Only numbered
+            # GPU labels belong to the adjacency matrix.
+            header = [field for field in fields if re.fullmatch(r"GPU\d+", field)]
             continue
         if header is not None and re.fullmatch(r"GPU\d+", fields[0]):
             rows[fields[0]] = fields[1 : 1 + len(header)]
@@ -181,7 +183,9 @@ def validate_pair_matrix(indices: list[int], command: list[str], expected: str) 
 
 
 def container_pids(name: str) -> set[int]:
-    output = run(["docker", "top", name, "-eo", "pid="])
+    # Docker forwards ps arguments, but node06's daemon rejects the GNU-style
+    # empty `pid=` header override. Keep the portable header and ignore it.
+    output = run(["docker", "top", name, "-eo", "pid"])
     return {int(value.strip()) for value in output.splitlines() if value.strip().isdigit()}
 
 

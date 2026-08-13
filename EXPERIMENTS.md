@@ -3577,3 +3577,32 @@ C128A stride and do not explain r5's sequential extra calls and invalid JSON.
 Verdict: **no-go** for another image or node06 experiment from current public
 upstream. Reopen only for an immutable r5+ artifact or a narrow source-locked
 patch that first passes the retained real-output and synthetic parser goldens.
+
+## 2026-08-13 — direct-P2P tool build and read-only node06 preflight
+
+The Phase-B prerequisite tooling was exercised through its zero-serving-impact
+boundary. Its first exact-r34 cold build failed closed after the 181.9-second
+base extraction plus compile because the Python NCCL package exposes only
+versioned `libnccl.so.2`, while `nccl-tests` expects an unversioned development
+link. A build-only link to that exact packaged library fixed the contract; the
+warm rebuild completed in 26.8 seconds and exported 10.9MiB. The immutable
+receipt is:
+
+- manifest SHA-256 `ede7b69919c1346aae01c718a8c09e8546b684c6d92c08a7c0406933b70878e0`;
+- `nvbandwidth` SHA-256 `ba0b486efb1a83ceb535243730fe51fb7104a21a7e3f90dd590b4bed465fb023`;
+- `all_reduce_perf` SHA-256 `17f2cca118295e4d16d1a1adbe62c6e69b03d188de68f14fc3fa8427b2c74257`.
+
+Two read-only attempts then exposed and locked node06 CLI compatibility: Docker
+accepts `top -eo pid` but rejects the empty-header `pid=` form, and NVIDIA 595's
+topology header contains a non-adjacency `GPU NUMA ID` column. Both attempts
+failed before any LB or GPU action. The corrected preflight completed in 4.0
+seconds and verified exact r34/driver/process ownership, the NUMA-1 reservation
+on GPUs 4–7, directed `NODE` topology, directed P2P read/write support, and
+1,830MiB free on each target GPU.
+
+LB and engine container IDs, start times, image IDs, and zero restart counts
+were identical before and after; mini-dynamo remained 2/2 healthy with both
+`ds4proxy_upstream_up` gauges at one. Tools are staged root-owned and
+non-writable under `/tmp` on node06, but no tool container, CUDA context, LB
+recreate, or benchmark ran. The next gate remains the separately acknowledged
+1MiB/two-GPU scout during a low-traffic window.

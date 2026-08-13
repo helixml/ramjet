@@ -123,6 +123,13 @@ class P2PPrerequisiteTest(unittest.TestCase):
         self.assertIn("/tmp/nccl-dev/lib/libnccl.so", dockerfile)
         self.assertIn("NCCL_HOME=/tmp/nccl-dev", dockerfile)
 
+    def test_container_pid_query_uses_node06_compatible_docker_top(self):
+        with mock.patch.object(
+            phase_b, "run", return_value="PID\n101\n202\n"
+        ) as command:
+            self.assertEqual(phase_b.container_pids("engine"), {101, 202})
+        command.assert_called_once_with(["docker", "top", "engine", "-eo", "pid"])
+
     def test_tool_staging_requires_external_hash_owner_lock_and_no_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -228,6 +235,16 @@ class P2PPrerequisiteTest(unittest.TestCase):
                     phase_b.validate_pair_matrix(
                         [0, 1], ["nvidia-smi", "topo", "-m"], "NODE"
                     )
+
+    def test_topology_parser_ignores_node06_gpu_numa_metadata_column(self):
+        matrix = (
+            "\x1b[4mGPU0\tGPU1\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID\x1b[0m\n"
+            "GPU0\tX\tNODE\t0-11\t0\tN/A\n"
+            "GPU1\tNODE\tX\t0-11\t0\tN/A\n"
+        )
+        header, rows = phase_b.parse_topology_matrix(matrix)
+        self.assertEqual(header, ["GPU0", "GPU1"])
+        self.assertEqual(rows, {"GPU0": ["X", "NODE"], "GPU1": ["NODE", "X"]})
 
     def test_private_result_writer_uses_exclusive_mode_0600(self):
         with tempfile.TemporaryDirectory() as directory:
