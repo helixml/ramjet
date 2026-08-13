@@ -162,6 +162,7 @@ fn log_startup(config: &Config) {
         kv_event_replay_limit = config.kv_event_replay_limit,
         snapshot_route_mode = ?config.snapshot_route_mode,
         snapshot_route_sources = config.snapshot_route_sources.len(),
+        snapshot_route_attestation_refresh_ms = config.snapshot_route_attestation_refresh_ms,
         "mini-dynamo up: API :8000, metrics :9090"
     );
 }

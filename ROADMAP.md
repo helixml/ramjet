@@ -691,8 +691,13 @@ node06). The design rationale for each lives in DESIGN.md.
   labels are configuration ordinals only, and `ready` follows authoritative
   actor publication rather than a merely connected Unix socket. Cancellation,
   timeout, reconnect, and rolling-overlap paths balance their gauges through a
-  drop guard. Next add hot attestation refresh and production-shaped Compose/
-  Caddy wiring.
+  drop guard. The LB also hot-reloads each authenticated
+  incarnation through the same hardened file and HMAC policy. A monotonic
+  authority revision prevents watch coalescing from hiding an invalid interval:
+  loss, rotation, channel closure, or a skipped revision revokes the old actor
+  epoch before reconnect, while an unchanged identity causes no churn. Valid
+  atomic engine rotation therefore no longer requires an LB restart. Next add
+  production-shaped Compose/Caddy wiring.
   Compare at least 100,000 exact versus approximate decisions before placement
   can consume this state; Dynamo's additional tree-dump recovery remains the
   scale-out reference.

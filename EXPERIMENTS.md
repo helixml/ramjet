@@ -3878,3 +3878,41 @@ contended relink is recorded, not accepted as the warm-loop baseline. No
 node06, container, engine, Compose, Caddy, secret, route, or GPU state changed.
 Hot LB attestation refresh, production dual-domain Compose/Caddy wiring, and
 100,000 revision-stable shadow comparisons remain deployment gates.
+
+## 2026-08-13 — r59 LB hot engine-attestation rotation
+
+The off-by-default snapshot route no longer pins its expected engine
+incarnation for the lifetime of the stateless LB. Startup still preflights all
+session secrets, digest secrets, attestation envelopes, socket parents, and
+upstream cardinality before spawning anything. Each per-engine watcher then
+reloads the attestation at the bounded
+`DS4_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS` interval using the same symlink,
+owner, permission, link-count, inode-stability, size, schema, field, and HMAC
+checks as startup.
+
+The LB channel carries a monotonic, redacted authority revision as well as the
+optional incarnation. This closes the value-watch race where a rapid
+`valid -> invalid -> same valid` sequence could otherwise coalesce back to the
+same value: any new revision revokes the published actor state before the
+active consumer is dropped. Missing, malformed, unsafe, unauthenticated, or
+closed authority suppresses new exact-session attempts. A later valid envelope
+recovers with a fresh non-reused challenge and the newly captured expected
+identity. An identical refresh at the same revision does not reconnect.
+Authority loss affects only the compact exact-shadow inventory; approximate
+routing, upstream health, `/health`, and request serving remain independent.
+
+Focused filesystem tests covered unchanged atomic replacement, valid atomic
+identity rotation, unsafe mode, malformed content, loss, and recovery. Real
+Unix-stream reconnect tests covered same-identity no-churn, immediate stale
+publication/session fencing, new-identity recovery, no attempts while authority
+is absent, fresh challenge use, and a deliberately coalesced loss/recovery
+revision. The warm focused check/test loop was 3.43s/11.53s for the shared
+module rebuild and 0.04s for each attestation and reconnect test set. This was
+a GPU-free control-plane change. After rebasing onto r58's fixed-cardinality
+readiness metrics, the widened gate passed strict Clippy in 6.87s, 329 library
+plus 38 integration tests in 28.17s, and 105 Python tests plus agent validation
+in 1.04s; the final release relink took 43.58s. The isolated release profile
+had earlier paid a one-time 102.56s cold dependency build and then completed an
+immediate no-op rebuild in 1.72s. No Compose, Caddy, image, node06 process,
+container, route, engine, secret, or production state changed. Production
+shadow rollout remains gated on the dual-domain Compose/Caddy wiring.

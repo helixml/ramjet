@@ -48,6 +48,47 @@ impl Drop for CompanionDigestSecret {
     }
 }
 
+/// Redacted monotonic authority observed by an LB reconnect owner.
+///
+/// The revision changes for every valid/unavailable transition. A watch
+/// receiver can therefore detect a coalesced `valid -> invalid -> same valid`
+/// sequence and still revoke the session that crossed the authority gap.
+#[derive(Clone, Eq, PartialEq)]
+pub struct EngineIncarnationAuthority {
+    revision: u64,
+    incarnation: Option<EngineIncarnation>,
+}
+
+impl EngineIncarnationAuthority {
+    #[must_use]
+    pub const fn new(revision: u64, incarnation: Option<EngineIncarnation>) -> Self {
+        Self {
+            revision,
+            incarnation,
+        }
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    #[must_use]
+    pub const fn incarnation(&self) -> Option<&EngineIncarnation> {
+        self.incarnation.as_ref()
+    }
+}
+
+impl std::fmt::Debug for EngineIncarnationAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EngineIncarnationAuthority")
+            .field("revision", &self.revision)
+            .field("available", &self.incarnation.is_some())
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum CompanionAttestationError {
     #[error("companion protected file validation failed")]
@@ -203,6 +244,54 @@ pub async fn watch_authenticated_engine_incarnation(
     }
 }
 
+/// Poll an authenticated manifest for an LB reconnect owner. Unlike the
+/// compatibility watcher above, this channel carries a monotonic revision so
+/// intermediate authority loss cannot be hidden by watch-value coalescing.
+pub async fn watch_authenticated_engine_incarnation_authority(
+    path: &Path,
+    policy: SnapshotSecretFilePolicy,
+    secret: CompanionDigestSecret,
+    refresh: Duration,
+    authority: &watch::Sender<EngineIncarnationAuthority>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut ticker = tokio::time::interval(refresh);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_failure = None;
+    loop {
+        tokio::select! {
+            biased;
+            () = wait_for_shutdown(&mut shutdown) => return,
+            _ = ticker.tick() => {
+                let refreshed = load_authenticated_engine_incarnation(path, policy, &secret);
+                let next = match refreshed {
+                    Ok(incarnation) => {
+                        last_failure = None;
+                        Some(incarnation)
+                    }
+                    Err(error) => {
+                        let reason = error.reason();
+                        if last_failure != Some(reason) {
+                            tracing::warn!(reason, "engine incarnation authority unavailable");
+                            last_failure = Some(reason);
+                        }
+                        None
+                    }
+                };
+                authority.send_if_modified(|current| {
+                    if current.incarnation == next {
+                        false
+                    } else {
+                        current.revision = current.revision.saturating_add(1);
+                        current.incarnation = next;
+                        true
+                    }
+                });
+            }
+        }
+    }
+}
+
 fn validate_incarnation(incarnation: &EngineIncarnation) -> Result<(), CompanionAttestationError> {
     let components = [
         incarnation.engine_id.as_bytes(),
@@ -344,6 +433,13 @@ mod tests {
             fs::write(&self.attestation, bytes).unwrap();
             fs::set_permissions(&self.attestation, fs::Permissions::from_mode(0o600)).unwrap();
         }
+
+        fn atomically_replace_attestation(&self, bytes: &[u8]) {
+            let replacement = self.directory.join("attestation.next");
+            fs::write(&replacement, bytes).unwrap();
+            fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::rename(replacement, &self.attestation).unwrap();
+        }
     }
 
     impl Drop for TestFiles {
@@ -367,6 +463,14 @@ mod tests {
         let files = TestFiles::new();
         let secret = load_companion_digest_secret(&files.secret, files.policy()).unwrap();
         assert_eq!(format!("{secret:?}"), "CompanionDigestSecret([REDACTED])");
+        let authority = EngineIncarnationAuthority::new(7, Some(incarnation(42)));
+        let authority_debug = format!("{authority:?}");
+        assert_eq!(
+            authority_debug,
+            "EngineIncarnationAuthority { revision: 7, available: true }"
+        );
+        assert!(!authority_debug.contains("engine-a"));
+        assert!(!authority_debug.contains("sha256:image"));
         let encoded = encode_authenticated_engine_incarnation(&incarnation(42), &secret).unwrap();
         files.write_attestation(&encoded);
         assert_eq!(
@@ -400,17 +504,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watcher_fences_invalid_refresh_and_restores_authenticated_authority() {
+    async fn watcher_does_not_churn_same_identity_and_accepts_atomic_rotation() {
         let files = TestFiles::new();
         let secret = load_companion_digest_secret(&files.secret, files.policy()).unwrap();
         let good = encode_authenticated_engine_incarnation(&incarnation(42), &secret).unwrap();
         files.write_attestation(&good);
-        let (authority_tx, mut authority_rx) = watch::channel(Some(incarnation(42)));
+        let (authority_tx, mut authority_rx) =
+            watch::channel(EngineIncarnationAuthority::new(1, Some(incarnation(42))));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let path = files.attestation.clone();
         let policy = files.policy();
         let task = tokio::spawn(async move {
-            watch_authenticated_engine_incarnation(
+            watch_authenticated_engine_incarnation_authority(
                 &path,
                 policy,
                 secret,
@@ -421,11 +526,19 @@ mod tests {
             .await;
         });
 
-        files.write_attestation(b"not authenticated");
+        files.atomically_replace_attestation(&good);
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        assert!(!authority_rx.has_changed().unwrap());
+
+        let signing_secret = load_companion_digest_secret(&files.secret, files.policy()).unwrap();
+        let rotated =
+            encode_authenticated_engine_incarnation(&incarnation(43), &signing_secret).unwrap();
+        files.atomically_replace_attestation(&rotated);
         timeout(Duration::from_secs(1), async {
             loop {
                 authority_rx.changed().await.unwrap();
-                if authority_rx.borrow_and_update().is_none() {
+                let current = authority_rx.borrow_and_update();
+                if current.revision() == 2 && current.incarnation() == Some(&incarnation(43)) {
                     break;
                 }
             }
@@ -433,14 +546,51 @@ mod tests {
         .await
         .unwrap();
 
+        shutdown_tx.send(true).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watcher_fences_unsafe_and_malformed_refreshes_then_recovers() {
+        let files = TestFiles::new();
+        let secret = load_companion_digest_secret(&files.secret, files.policy()).unwrap();
+        let good = encode_authenticated_engine_incarnation(&incarnation(42), &secret).unwrap();
+        files.write_attestation(&good);
+        let (authority_tx, mut authority_rx) =
+            watch::channel(EngineIncarnationAuthority::new(1, Some(incarnation(42))));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let path = files.attestation.clone();
+        let policy = files.policy();
+        let task = tokio::spawn(async move {
+            watch_authenticated_engine_incarnation_authority(
+                &path,
+                policy,
+                secret,
+                Duration::from_millis(10),
+                &authority_tx,
+                shutdown_rx,
+            )
+            .await;
+        });
+
+        fs::set_permissions(&files.attestation, fs::Permissions::from_mode(0o666)).unwrap();
+        wait_for_authority(&mut authority_rx, 2, None).await;
+
+        files.atomically_replace_attestation(&good);
+        wait_for_authority(&mut authority_rx, 3, Some(&incarnation(42))).await;
+
+        files.atomically_replace_attestation(b"not authenticated");
+        wait_for_authority(&mut authority_rx, 4, None).await;
+
         let signing_secret = load_companion_digest_secret(&files.secret, files.policy()).unwrap();
         let refreshed =
             encode_authenticated_engine_incarnation(&incarnation(43), &signing_secret).unwrap();
-        files.write_attestation(&refreshed);
+        files.atomically_replace_attestation(&refreshed);
         timeout(Duration::from_secs(1), async {
             loop {
                 authority_rx.changed().await.unwrap();
-                if authority_rx.borrow_and_update().as_ref() == Some(&incarnation(43)) {
+                let current = authority_rx.borrow_and_update();
+                if current.revision() == 5 && current.incarnation() == Some(&incarnation(43)) {
                     break;
                 }
             }
@@ -449,5 +599,23 @@ mod tests {
         .unwrap();
         shutdown_tx.send(true).unwrap();
         task.await.unwrap();
+    }
+
+    async fn wait_for_authority(
+        authority: &mut watch::Receiver<EngineIncarnationAuthority>,
+        revision: u64,
+        expected: Option<&EngineIncarnation>,
+    ) {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                authority.changed().await.unwrap();
+                let current = authority.borrow_and_update();
+                if current.revision() == revision && current.incarnation() == expected {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
     }
 }

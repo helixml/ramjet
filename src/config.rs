@@ -55,6 +55,7 @@ pub struct Config {
     pub snapshot_route_mode: SnapshotRouteMode,
     pub snapshot_route_sources: Vec<SnapshotRouteSourceConfig>,
     pub snapshot_route_secret_owner_uid: u32,
+    pub snapshot_route_attestation_refresh_ms: usize,
     pub snapshot_route_attempt_timeout_ms: usize,
     pub snapshot_route_reconnect_min_ms: usize,
     pub snapshot_route_reconnect_max_ms: usize,
@@ -165,6 +166,7 @@ struct SnapshotRouteSettings {
     mode: SnapshotRouteMode,
     sources: Vec<SnapshotRouteSourceConfig>,
     secret_owner_uid: u32,
+    attestation_refresh_ms: usize,
     attempt_timeout_ms: usize,
     reconnect_min_ms: usize,
     reconnect_max_ms: usize,
@@ -326,6 +328,7 @@ impl Config {
             snapshot_route_mode: snapshot_route.mode,
             snapshot_route_sources: snapshot_route.sources,
             snapshot_route_secret_owner_uid: snapshot_route.secret_owner_uid,
+            snapshot_route_attestation_refresh_ms: snapshot_route.attestation_refresh_ms,
             snapshot_route_attempt_timeout_ms: snapshot_route.attempt_timeout_ms,
             snapshot_route_reconnect_min_ms: snapshot_route.reconnect_min_ms,
             snapshot_route_reconnect_max_ms: snapshot_route.reconnect_max_ms,
@@ -456,11 +459,18 @@ fn snapshot_route_settings(
             mode,
             sources: Vec::new(),
             secret_owner_uid: 0,
+            attestation_refresh_ms: 1_000,
             attempt_timeout_ms: 30_000,
             reconnect_min_ms: 250,
             reconnect_max_ms: 5_000,
         });
     }
+    let attestation_refresh_ms = bounded_positive(
+        get,
+        "DS4_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS",
+        1_000,
+        MAX_SNAPSHOT_ROUTE_RECONNECT_MS,
+    )?;
     let attempt_timeout_ms = bounded_positive(
         get,
         "DS4_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS",
@@ -594,6 +604,7 @@ fn snapshot_route_settings(
         mode,
         sources,
         secret_owner_uid,
+        attestation_refresh_ms,
         attempt_timeout_ms,
         reconnect_min_ms,
         reconnect_max_ms,
@@ -1021,6 +1032,7 @@ mod tests {
         assert_eq!(config.snapshot_route_mode, SnapshotRouteMode::Off);
         assert!(config.snapshot_route_sources.is_empty());
         assert_eq!(config.snapshot_route_secret_owner_uid, 0);
+        assert_eq!(config.snapshot_route_attestation_refresh_ms, 1_000);
         assert_eq!(config.snapshot_route_attempt_timeout_ms, 30_000);
         assert_eq!(config.snapshot_route_reconnect_min_ms, 250);
         assert_eq!(config.snapshot_route_reconnect_max_ms, 5_000);
@@ -1142,6 +1154,7 @@ mod tests {
             ),
             ("DS4_SNAPSHOT_ROUTE_GROUPS", "0:0,1:2"),
             ("DS4_SNAPSHOT_ROUTE_SECRET_OWNER_UID", "12000"),
+            ("DS4_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS", "250"),
         ]);
         let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
         assert_eq!(config.snapshot_route_sources.len(), 2);
@@ -1149,6 +1162,7 @@ mod tests {
         assert_eq!(config.snapshot_route_sources[1].data_parallel_rank, 1);
         assert_eq!(config.snapshot_route_sources[1].group_idx, 2);
         assert_eq!(config.snapshot_route_secret_owner_uid, 12000);
+        assert_eq!(config.snapshot_route_attestation_refresh_ms, 250);
         assert!(config.kv_event_sources.is_empty());
         let debug = format!("{:?}", config.snapshot_route_sources);
         for protected in ["a.sock", "a-session", "a-digest", "a-attest", "12001"] {

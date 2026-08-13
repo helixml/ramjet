@@ -109,6 +109,13 @@ impl SnapshotConsumer {
         &self.publication
     }
 
+    /// Startup-pinned expectation used by reconnect owners without a hot
+    /// authority channel.
+    #[must_use]
+    pub fn expected_engine_incarnation(&self) -> &EngineIncarnation {
+        &self.config.expected_engine_incarnation
+    }
+
     /// Consume one already-connected companion session until it is fenced.
     ///
     /// The caller owns challenge randomness and reuse prevention. `deadline` is
@@ -126,18 +133,46 @@ impl SnapshotConsumer {
         challenge: SnapshotSessionChallenge,
         deadline: Instant,
     ) -> Result<(), SnapshotConsumerError> {
-        timeout_at(deadline, self.consume_until(stream, challenge))
-            .await
-            .map_err(|_| SnapshotConsumerError::Timeout)?
+        self.consume_with_expected_incarnation(
+            stream,
+            challenge,
+            deadline,
+            self.config.expected_engine_incarnation.clone(),
+        )
+        .await
+    }
+
+    /// Consume using one authority value captured by the reconnect owner.
+    /// A later authority update cancels this future and revokes its actor epoch
+    /// before another attempt is created with the new expectation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same content-free transport, authentication, build, or
+    /// lifecycle errors as [`Self::consume`].
+    pub async fn consume_with_expected_incarnation(
+        &self,
+        stream: UnixStream,
+        challenge: SnapshotSessionChallenge,
+        deadline: Instant,
+        expected_engine_incarnation: EngineIncarnation,
+    ) -> Result<(), SnapshotConsumerError> {
+        timeout_at(
+            deadline,
+            self.consume_until(stream, challenge, &expected_engine_incarnation),
+        )
+        .await
+        .map_err(|_| SnapshotConsumerError::Timeout)?
     }
 
     async fn consume_until(
         &self,
         mut stream: UnixStream,
         challenge: SnapshotSessionChallenge,
+        expected_engine_incarnation: &EngineIncarnation,
     ) -> Result<(), SnapshotConsumerError> {
         let authenticated = self
-            .request_authenticated_snapshot(&mut stream, challenge)
+            .request_authenticated_snapshot(&mut stream, challenge, expected_engine_incarnation)
             .await?;
         let identity = SnapshotActorIdentity {
             engine_incarnation: authenticated.engine_incarnation().clone(),
@@ -222,6 +257,7 @@ impl SnapshotConsumer {
         &self,
         stream: &mut UnixStream,
         challenge: SnapshotSessionChallenge,
+        expected_engine_incarnation: &EngineIncarnation,
     ) -> Result<AuthenticatedSnapshot, SnapshotConsumerError> {
         verify_peer(stream, self.config.expected_peer_uid)?;
         let hello =
@@ -236,7 +272,7 @@ impl SnapshotConsumer {
             &response,
             SnapshotSessionExpectations {
                 challenge,
-                engine_incarnation: &self.config.expected_engine_incarnation,
+                engine_incarnation: expected_engine_incarnation,
                 digest_key_id: &self.digest_key_id,
                 minimum_snapshot_watermark: self.config.minimum_snapshot_watermark,
                 minimum_companion_generation: self.config.minimum_companion_generation,

@@ -223,6 +223,20 @@ impl<I> SnapshotBootstrapActor<I> {
             })
     }
 
+    /// Revoke every publication and in-flight generation after independent
+    /// control-plane authority is lost or rotated.
+    ///
+    /// This is deliberately unconditional: a missing attestation has no
+    /// identity against which an existing generation could remain trusted.
+    /// Late transport notifications are harmless because their epochs are no
+    /// longer present.
+    pub fn revoke_authority(&mut self) -> bool {
+        let had_authority = self.published.is_some() || !self.sessions.is_empty();
+        self.published = None;
+        self.sessions.clear();
+        had_authority
+    }
+
     /// Start one authenticated companion session.
     ///
     /// A differing identity revokes all old state before admitting the new
@@ -748,6 +762,20 @@ mod tests {
         assert_ne!(actor.published_marker(), Some(old_marker));
         assert_eq!(actor.published_marker().unwrap().epoch, new);
         assert_eq!(actor.session_count(), 1);
+    }
+
+    #[test]
+    fn authority_loss_revokes_publication_and_all_sessions_idempotently() {
+        let identity = identity("engine-a", KEY_A, 7);
+        let mut actor = SnapshotBootstrapActor::new(SnapshotActorLimits::default()).unwrap();
+        let epoch = begin_build(&mut actor, &identity, 100);
+        finish_publish(&mut actor, &identity, epoch, 100, vec![1]);
+
+        assert!(actor.revoke_authority());
+        assert!(actor.published_index().is_none());
+        assert_eq!(actor.session_count(), 0);
+        assert!(!actor.revoke_authority());
+        assert_eq!(actor.disconnected(epoch), ActorAction::StaleEpochIgnored);
     }
 
     #[test]
