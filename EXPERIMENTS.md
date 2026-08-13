@@ -4671,3 +4671,43 @@ restart a healthy engine solely for the experiment. Keep the companions alive
 through the next independently justified engine generation, require source
 readiness there, then enable snapshot `shadow`, perform an LB-only restart, and
 measure authenticated recovery before collecting the 52/64-app capacity cells.
+
+## 2026-08-13 — r92–r94 bounded replay diagnostics and companion rollout
+
+#119 adds a closed `apply|boundary|tail|commit` reason to the existing
+companion owner-event metric when the single bounded private replay fails. A
+private commit failure now follows the same stable fenced observe-only rule as
+other structurally invalid completed replays; transport failures remain
+retryable. The dedicated metric test and 12 owner tests passed, followed by
+strict Clippy, 334 Rust unit tests plus every integration suite, 188 Python
+tests, both production Compose gates, and a companion release build. The warm
+walls were 0.29s for formatting, 5.96s for Clippy, 7.34s for Rust tests, 1.93s
+for Python, and 29.92s for the companion release link. Drone #314 passed in
+69s; main build #315 published the LB and companion in 123s and 119s.
+
+#120 pins the production overlay and its admission validator to the immutable
+`123dd9d` artifacts. The companion is
+`companion-rust-123dd9d@sha256:386c88b9...57cfa3`; its OCI revision is the full
+merged commit `123dd9d94d883e9096de8176d3db49e1fdf0ed84`. The unchanged LB
+admission pin is the corresponding `rust-123dd9d@sha256:9ffc514d...f105c`.
+The semantic validator, all 10 adversarial Compose tests, and both-profile
+render passed locally. Drone #316 completed the configuration-only PR gate in
+27s.
+
+On node06, the host-authority check, full production host validator, semantic
+Compose validator, and both-profile render all passed before mutation. Under
+the shared deployment lock, only `snapshot-companion-a` and
+`snapshot-companion-b` were force-recreated with `--no-deps`; the complete
+locked recreate/healthy/identity verification took 8.3s. Both new containers
+are healthy with zero restarts. The LB and both r34 engine start timestamps and
+restart counts remained unchanged. LB and direct A/B chat probes all returned
+HTTP 200 in 0.131–0.139s.
+
+Each companion remains authenticated and listening with exactly one connect
+attempt and one connection. Both report `source_ready=0` and no
+`replay_invalid` series because these already-aged engine generations cannot
+start a bounded replay; importantly, the counts remain stable and there is no
+publisher/reconnect churn. Snapshot routing remains off and approximate
+serving remains 2/2 healthy. The next admissible readiness and sub-3s LB-only
+recovery measurement still waits for an independently justified fresh engine
+generation; this rollout does not manufacture one.
