@@ -3110,3 +3110,25 @@ and jitter bounds. Focused test runtime is 0.04 seconds.
 This stays outside approximate serving and is not wired into proxy startup.
 The 2ms publication poll should eventually become an actor notification, and
 refreshed expected engine incarnation remains a control-plane responsibility.
+
+## 2026-08-13 — issue #41 true offline stack and captured-shape gate
+
+The public modules now run together in one offline lifecycle harness: hardened
+socket bind/publication and inode guard, two-client supervisor, authenticated
+producer, reconnect owner, consumer, actor, and digest index. The stateful
+captured source exercises initial publication/index lookup, authenticated live
+store/remove, explicit rolling replacement, LB owner stop/restart recovery,
+companion stop with fail-closed publication and socket removal, companion
+restart/republication, authenticated generation rollover to a new consumer,
+and final zero socket/session/publication leak. A second test holds both slots
+with authenticated slow readers over 2,048-record snapshots, observes immediate
+third-client rejection, and proves shutdown releases both. Ten repetitions
+passed 20/20; the focused body is about 0.07 seconds. No runtime bug was found.
+
+The release benchmark now includes the complete authenticated handoff at the
+captured 36,612-record / 9,372,672-token shape. The snapshot is 6,040,438 bytes
+and authenticated response 6,040,952 bytes. Measured locally: encode 11.509ms,
+decode 12.543ms, repeated decode 8.750ms, wire encode 6.961ms, wire decode
+7.519ms, private rebuild 22.355ms, total process wall 0.15s, and roughly 58MiB
+RSS/HWM. Timing remains an observational release harness rather than a flaky CI
+threshold. The sub-3s offline acceptance gate is cleared by a wide margin.
