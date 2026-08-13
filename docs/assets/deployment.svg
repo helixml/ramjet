@@ -28,11 +28,11 @@
     <filter id="brandGlow" x="-30%" y="-30%" width="160%" height="160%">
       <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#586cff" flood-opacity=".28"/>
     </filter>
-    <marker id="arrowWarm" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
-      <path d="M0 0l10 5-10 5z" fill="#16b887"/>
+    <marker id="arrowWarm" viewBox="0 0 12 12" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1 1l10 5-10 5z" fill="#16b887"/>
     </marker>
-    <marker id="arrowMuted" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
-      <path d="M0 0l10 5-10 5z" fill="#8795b5"/>
+    <marker id="arrowMuted" viewBox="0 0 12 12" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1 1l10 5-10 5z" fill="#8795b5"/>
     </marker>
     <style>
       .title{font:700 22px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#17203a}
@@ -60,10 +60,10 @@
 
   <!-- Request -->
   <g filter="url(#softShadow)">
-    <rect class="card" x="52" y="108" width="252" height="324" rx="24"/>
+    <rect class="card" x="52" y="108" width="252" height="278" rx="24"/>
   </g>
   <text class="tiny" x="78" y="143">INCOMING REQUEST</text>
-  <text class="title" x="78" y="177">Shared prompt</text>
+  <text class="title" x="78" y="177">Agent prompt</text>
   <text class="body" x="78" y="202">system + conversation prefix</text>
 
   <g transform="translate(78 235)">
@@ -79,10 +79,6 @@
     <rect x="66" y="96" width="106" height="18" rx="9" fill="#8d85ff"/>
     <rect x="180" y="96" width="46" height="18" rx="9" fill="#d8dcE8"/>
   </g>
-  <rect x="78" y="378" width="126" height="30" rx="15" fill="#eceaff"/>
-  <circle cx="96" cy="393" r="5" fill="#665dff"/>
-  <text x="108" y="398" style="font:650 13px ui-sans-serif,system-ui,sans-serif;fill:#5047d8">reusable prefix</text>
-
   <!-- Ingress line -->
   <path d="M304 270C335 270 338 270 366 270" fill="none" stroke="#6573ef" stroke-width="4" stroke-linecap="round"/>
   <circle cx="368" cy="270" r="6" fill="#6573ef"/>

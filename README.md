@@ -57,8 +57,8 @@ services:
       - "8000:8000" # OpenAI API + /health
       - "9090:9090" # Prometheus
     environment:
-      DS4_UPSTREAM: http://engine-a:8000,http://engine-b:8000
-      # DS4_UPSTREAM_TOKEN: ${VLLM_API_KEY} # if your engines require one
+      DS4_UPSTREAM: http://model-server-1:8000,http://model-server-2:8000
+      # DS4_UPSTREAM_TOKEN: ${MODEL_SERVER_API_KEY} # if required
 ```
 
 ```bash
@@ -71,6 +71,12 @@ Safe defaults enable locality/load routing and keep tokenizer, raw KV-event,
 exact-placement, and snapshot paths off. See the complete
 [configuration table](docs/configuration.md), or start from the validated
 [two-replica Compose stack](deploy/dspark_0731/docker-compose.yaml).
+
+> **Backend compatibility:** `model-server-1` and `model-server-2` are example
+> Docker DNS names—replace them with your backends. The default router is not
+> tied to vLLM: it forwards OpenAI-compatible APIs and health-checks each server
+> with `GET /v1/models`. The opt-in `/tokenize`, KV-event, exact-routing, and
+> snapshot research paths are currently designed for vLLM/DSpark.
 
 ## The routing rule
 
