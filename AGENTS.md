@@ -458,10 +458,16 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   destination digest for each manifest. Never create a tag merely to test the
   pipeline; unit/static tests and Drone PR quality are
   the non-publishing acceptance path.
-- Crane's published image has `/busybox/sh` but no `/bin/sh`; every Crane Drone
-  step must declare that entrypoint explicitly. Failed tag build #266 completed
-  the full quality gate but exited both publishers before commands for this
-  reason, so no registry operation occurred. The narrowly scoped
+- Crane's published image has `/busybox/sh` but no `/bin/sh`, and Drone 2.12
+  silently discarded an attempted step-level entrypoint override. Failed tag
+  build #266 and recovery #269 therefore exited both publishers before commands;
+  neither performed a registry operation. Release publishers run instead in the
+  content-keyed `Dockerfile.release-tools` image: digest-pinned Alpine supplies
+  `/bin/sh`, and the Crane binary is copied from its digest-pinned upstream image
+  and smoke-tested during the build. `bench/release_tools_image.py` binds all
+  consumers and the sole guarded Kaniko publisher to the Dockerfile hash. Never
+  point release steps directly at an unknown third-party shell layout.
+  The narrowly scoped
   `release-v0.1.0-recovery` promote pipeline is the only recovery: it accepts
   target `release-v0.1.0`, fetches and peels the existing immutable tag to
   `b0e070073d4266018d2f907ff35a7ee88adfdcd4`, checks that tag's Cargo version,

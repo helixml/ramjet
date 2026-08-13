@@ -4154,8 +4154,23 @@ entrypoint is `/ko-app/crane` and it provides `/busybox/sh`, not the `/bin/sh`
 that Drone attempted for commands, so neither authentication nor any registry
 read/write ran.
 
-Normal tag publishers now set `/busybox/sh` explicitly. A separate one-purpose
-Drone promotion recovery accepts only target `release-v0.1.0`; its validation
+An initial source fix attempted to set `/busybox/sh` explicitly. Main build #268
+passed in 61s and all ordinary publisher guards skipped in 0-1s with no Kaniko
+or registry action. The one authorized command
+`drone build promote helixml/mini-dynamo 268 release-v0.1.0` created recovery
+build #269. Its tag/commit/version validation passed in one second, but Drone
+2.12 silently discarded the entrypoint field and both publishers again failed
+before commands with no logs. No registry operation occurred.
+
+The durable fix is a content-keyed release-tools image built from digest-pinned
+Alpine with the Crane binary copied from the digest-pinned upstream image.
+`Dockerfile.release-tools` executes `/bin/sh -c 'crane version'` while building,
+and all tag/recovery publishers use its generated content tag. A fourth guarded
+Kaniko main publisher owns that image; release-tools input changes select it and
+only it. A local cold build and actual `/bin/sh` invocation passed in 5.97s.
+
+The separate one-purpose Drone promotion recovery accepts only target
+`release-v0.1.0`; its validation
 step fetches and peels the existing tag, requires the exact qualified commit and
 the tag's Cargo version `0.1.0`, and emits revision/target/tag-bound private
 markers. Its two Crane steps reuse the ordinary label/digest validation and

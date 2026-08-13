@@ -1,0 +1,6 @@
+# syntax=docker/dockerfile:1.7
+FROM gcr.io/go-containerregistry/crane@sha256:ba318977330d2a41fdd4af7536d35567a4ceb204252b7dfcd19b01dad2567793 AS crane
+FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+COPY --from=crane /ko-app/crane /usr/local/bin/crane
+RUN /bin/sh -c 'command -v crane && crane version'
+ENTRYPOINT ["/bin/sh"]

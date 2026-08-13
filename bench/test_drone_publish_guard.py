@@ -126,6 +126,25 @@ class DronePublishGuardTest(unittest.TestCase):
             {"rust-deps": False, "lb": False, "companion": True},
         )
 
+    def test_release_tools_inputs_select_only_the_tools_publisher(self):
+        before = self.commit({"README.md": "base"})
+        after = self.commit(
+            {
+                "Dockerfile.release-tools": "pinned shell and crane",
+                ".docker/release-tools-key": "content key",
+            }
+        )
+        self.assert_matrix(
+            before,
+            after,
+            {
+                "rust-deps": False,
+                "release-tools": True,
+                "lb": False,
+                "companion": False,
+            },
+        )
+
     def test_dependency_seed_and_both_app_images_publish_in_one_merge(self):
         before = self.commit({"README.md": "base"})
         after = self.commit(

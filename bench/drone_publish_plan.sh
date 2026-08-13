@@ -55,11 +55,15 @@ umask 077
 mkdir -- "$temporary" || fail plan_create_failed
 trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
 
-for kind in rust-deps lb companion; do
+for kind in rust-deps release-tools lb companion; do
   case "$kind" in
     rust-deps)
       set -- ':(top)Cargo.toml' ':(top)Cargo.lock' ':(top)rust-toolchain.toml' \
         ':(top)Dockerfile.deps' ':(top).docker/rust-deps-key'
+      ;;
+    release-tools)
+      set -- ':(top)Dockerfile.release-tools' \
+        ':(top).docker/release-tools-key'
       ;;
     lb)
       set -- ':(top)Cargo.toml' ':(top)Cargo.lock' ':(top)rust-toolchain.toml' \

@@ -45,8 +45,10 @@ class DroneReleaseConfigTest(unittest.TestCase):
             )
             self.assertIsNotNone(section, step)
             body = section.group(1)
-            self.assertIn("gcr.io/go-containerregistry/crane@sha256:", body)
-            self.assertIn("entrypoint:\n      - /busybox/sh", body)
+            self.assertRegex(
+                body,
+                r"image: ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]{64}",
+            )
             self.assertIn(f"sh bench/drone_release_publish.sh {kind}", body)
             self.assertNotIn("drone-docker", body)
             self.assertNotIn("settings:", body)
@@ -96,7 +98,10 @@ class DroneReleaseConfigTest(unittest.TestCase):
             )
             self.assertIsNotNone(section, step)
             body = section.group(1)
-            self.assertIn("entrypoint:\n      - /busybox/sh", body)
+            self.assertRegex(
+                body,
+                r"image: ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]{64}",
+            )
             self.assertIn(f"sh bench/drone_release_recovery_publish.sh {kind}", body)
             self.assertRegex(
                 body,

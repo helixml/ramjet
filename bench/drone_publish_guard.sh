@@ -5,7 +5,7 @@ set -eu
 
 kind=${1-}
 case "$kind" in
-  rust-deps|lb|companion) ;;
+  rust-deps|release-tools|lb|companion) ;;
   *)
     echo "publisher_guard=error reason=invalid_publisher" >&2
     exit 2

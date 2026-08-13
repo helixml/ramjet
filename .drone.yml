@@ -113,6 +113,33 @@ steps:
     depends_on:
       - quality-complete
 
+  - name: publish-release-tools-image
+    image: gcr.io/kaniko-project/executor@sha256:2562c4fe551399514277ffff7dcca9a3b1628c4ea38cb017d7286dc6ea52f4cd
+    pull: if-not-exists
+    environment:
+      GHCR_USERNAME:
+        from_secret: ghcr_username
+      GHCR_TOKEN:
+        from_secret: ghcr_token
+    commands:
+      - |
+        status=0
+        sh bench/drone_publish_guard.sh release-tools || status=$?
+        if [ "$status" -eq 3 ]; then exit 0; fi
+        if [ "$status" -ne 0 ]; then exit "$status"; fi
+        auth=$(printf '%s:%s' "$GHCR_USERNAME" "$GHCR_TOKEN" | base64 | tr -d '\n')
+        mkdir -p /kaniko/.docker
+        printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" >/kaniko/.docker/config.json
+        exec /kaniko/executor --context . --dockerfile Dockerfile.release-tools \
+          --destination ghcr.io/helixml/mini-dynamo:release-tools-sha256-244bfd3b33987aedfd342ca70253320cda509bd4d6bc3aac6320b87fd50c5733 \
+          --cache=true --cache-repo=ghcr.io/helixml/mini-dynamo-build-cache \
+          --cache-ttl=336h --snapshot-mode=redo --reproducible
+    when:
+      event:
+        - push
+    depends_on:
+      - quality-complete
+
   # GHCR publishing lives here, not GitHub Actions. The push-event guard keeps
   # registry credentials out of pull-request builds. Both release images wait
   # for the dependency guard; a dependency-input change seeds the required base
@@ -272,10 +299,8 @@ steps:
       - release-deployment-compose
 
   - name: release-image
-    image: gcr.io/go-containerregistry/crane@sha256:ba318977330d2a41fdd4af7536d35567a4ceb204252b7dfcd19b01dad2567793
+    image: ghcr.io/helixml/mini-dynamo:release-tools-sha256-244bfd3b33987aedfd342ca70253320cda509bd4d6bc3aac6320b87fd50c5733
     pull: if-not-exists
-    entrypoint:
-      - /busybox/sh
     environment:
       GHCR_USERNAME:
         from_secret: ghcr_username
@@ -291,10 +316,8 @@ steps:
       - release-quality-complete
 
   - name: release-companion-image
-    image: gcr.io/go-containerregistry/crane@sha256:ba318977330d2a41fdd4af7536d35567a4ceb204252b7dfcd19b01dad2567793
+    image: ghcr.io/helixml/mini-dynamo:release-tools-sha256-244bfd3b33987aedfd342ca70253320cda509bd4d6bc3aac6320b87fd50c5733
     pull: if-not-exists
-    entrypoint:
-      - /busybox/sh
     environment:
       GHCR_USERNAME:
         from_secret: ghcr_username
@@ -336,10 +359,8 @@ steps:
       - sh bench/drone_release_recovery_plan.sh
 
   - name: recover-v0.1.0-image
-    image: gcr.io/go-containerregistry/crane@sha256:ba318977330d2a41fdd4af7536d35567a4ceb204252b7dfcd19b01dad2567793
+    image: ghcr.io/helixml/mini-dynamo:release-tools-sha256-244bfd3b33987aedfd342ca70253320cda509bd4d6bc3aac6320b87fd50c5733
     pull: if-not-exists
-    entrypoint:
-      - /busybox/sh
     environment:
       GHCR_USERNAME:
         from_secret: ghcr_username
@@ -352,10 +373,8 @@ steps:
       - validate-v0.1.0-authority
 
   - name: recover-v0.1.0-companion-image
-    image: gcr.io/go-containerregistry/crane@sha256:ba318977330d2a41fdd4af7536d35567a4ceb204252b7dfcd19b01dad2567793
+    image: ghcr.io/helixml/mini-dynamo:release-tools-sha256-244bfd3b33987aedfd342ca70253320cda509bd4d6bc3aac6320b87fd50c5733
     pull: if-not-exists
-    entrypoint:
-      - /busybox/sh
     environment:
       GHCR_USERNAME:
         from_secret: ghcr_username
