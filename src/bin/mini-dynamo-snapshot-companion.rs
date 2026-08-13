@@ -46,7 +46,11 @@ async fn run() -> anyhow::Result<()> {
 
     let config = SingleEngineCompanionConfig::from_env()
         .context("invalid standalone snapshot companion configuration")?;
-    tracing::info!(enabled = config.enabled(), "snapshot companion starting");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        enabled = config.enabled(),
+        "snapshot companion starting"
+    );
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let service = run_single_engine_companion(config, shutdown_rx);
     tokio::pin!(service);
