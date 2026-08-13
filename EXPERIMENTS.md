@@ -3916,3 +3916,50 @@ had earlier paid a one-time 102.56s cold dependency build and then completed an
 immediate no-op rebuild in 1.72s. No Compose, Caddy, image, node06 process,
 container, route, engine, secret, or production state changed. Production
 shadow rollout remains gated on the dual-domain Compose/Caddy wiring.
+
+## 2026-08-13 — r60 explicit content-keyed Drone dependency image
+
+Main build #233 exposed that the rolling inline-cache scheme was not durable on
+the publisher's Docker 20.10 daemon. A `.drone.yml`-only change still matched
+both publisher path guards; each imported its edge image but rebuilt the Cargo
+dependency layer anyway. The LB publisher took 135s and the companion 129s.
+This contradicted the 14s no-source acceptance from #214 and made the rolling
+edge tag both an output and a fragile cache authority.
+
+The replacement makes dependencies an explicit shared build input. A new
+`Dockerfile.deps` contains no repository source or secret: it starts from the
+pinned Rust 1.95 Bookworm manifest digest, compiles every locked dependency
+against dummy package targets, removes the package's own artifacts, and retains
+the registry plus dependency outputs. Its GHCR tag includes the full SHA-256 of
+`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, and `Dockerfile.deps`.
+`bench/rust_deps_image.py` derives, updates, and validates that key across the
+committed key, both release Dockerfiles, and Drone. Both real images inherit the
+base and use `cargo build --locked --offline`, so a missing, stale, or incomplete
+base fails closed instead of silently downloading or rebuilding dependencies.
+
+Drone builds the dependency image only when one of those inputs or its derived
+key changes. Both release publishers depend on it; Drone's skipped-step graph
+correction lets source-only publishers proceed against the existing immutable
+tag. `.drone.yml` was removed from both release path filters, so a CI-only merge
+now runs zero publishers and cannot retag either edge image. A dependency change
+is safe in one merge: the dependency publisher completes before both release
+publishers start.
+
+Local measurements used the final locked graph and the same pinned Rust base.
+The one-time seed was 918,503,269 uncompressed bytes. Docker 29 built that cold
+seed in 132.19s, then built the LB fully offline in 49.57s and the companion in
+35.30s. An isolated Docker 20.10.24 daemon—the Drone engine generation—built
+the seed in 90.00s and pushed it to a disposable local registry in 27.52s. A
+second fresh Docker 20.10.24 daemon pulled it in 15.34s and built the LB offline
+in 50.18s: 65.52s pull-plus-build versus #233's 135s publisher, a local 51.5%
+reduction. GHCR transfer and final push remain to be measured on the first main
+acceptance build; these local-registry timings are not substituted for that
+result.
+
+The dependency tag is content-derived and normal CI never overwrites an old
+key, but GHCR tags remain mutable registry objects rather than cryptographic
+deploy attestations. Only trusted `main` pushes receive package credentials,
+the dependency image contains public dependency sources/artifacts only, and
+release compilation has no network access. Image signing or a post-seed digest
+pin would be a separate supply-chain improvement. No node06 process, container,
+image, route, engine, secret, or GPU state changed in this experiment.

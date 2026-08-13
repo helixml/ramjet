@@ -77,12 +77,31 @@ Compose run beside them. Build #205 completed the full PR gate in 58s versus
 69s for the prior serial Rust lane. If a no-dependency change regresses that
 loop, inspect the step timings and cache/export path before accepting it.
 
-Both GHCR publishers are path-gated to their real image inputs. Preserve those
-guards: a docs-only push that re-tags an image from imported inline cache can
-drop reusable intermediate dependency metadata from the rolling edge tag. That
-made the next Rust build pay a 57s dependency rebuild in Drone #223. A normal
-Markdown/bench/deploy-only merge should stop after the quality gate and must
-not rewrite either `rust-edge` tag.
+Both GHCR release publishers are path-gated to their real image inputs;
+`.drone.yml` by itself is deliberately not an image input. The expensive locked
+Cargo graph lives in the public, source-free image named by
+`.docker/rust-deps-key`. Drone rebuilds that image only when `Cargo.toml`,
+`Cargo.lock`, `rust-toolchain.toml`, or `Dockerfile.deps` changes, then waits for
+it before building either release image. Source-only releases inherit the
+content-keyed image directly and compile offline, so this does not depend on
+inline-cache behavior in the runner's ephemeral Docker 20.10 daemon.
+
+After changing a dependency input, update every content-keyed reference and
+validate it before building:
+
+```bash
+python3 bench/rust_deps_image.py --update
+python3 bench/rust_deps_image.py
+```
+
+For the first local build of a new key, seed the base explicitly; after Drone
+publishes it on `main`, ordinary builds pull the same public default:
+
+```bash
+deps_ref=$(python3 bench/rust_deps_image.py --print-reference)
+docker build -f Dockerfile.deps -t "$deps_ref" .
+docker build --build-arg RUST_DEPS_IMAGE="$deps_ref" .
+```
 
 `Cargo.toml` deliberately limits the crate package to Rust sources, examples,
 compatibility fixtures, and Cargo manifests. This keeps edits under `bench/`
@@ -371,13 +390,17 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   pull-request containers never receive those secrets. GitHub Actions is not a
   second CI system for this repository. Drone's PR quality budget is currently
   about 58s; inspect and record regressions instead of adding duplicate gates.
-  The release Dockerfile keeps dependency compilation in an ordinary layer and
-  publishes inline BuildKit metadata in `rust-edge`; each fresh DinD imports
-  that private image with `cache_from`. Do not replace this with `purge: false`
-  (the daemon is ephemeral) or a new privileged plugin without proving the
-  runner permits it. Build #212 is the 113s cold seed control; fresh-runner
-  documentation-only build #214 published in 14s and completed end to end in
-  72s. Treat a no-Rust publish materially above that as a cache regression.
+  The release Dockerfiles inherit the content-keyed `rust-deps-sha256-*` image
+  and compile the repository crate with Cargo offline. This is an explicit
+  build input supported by the runner's Docker 20.10 daemon, not inline-cache
+  metadata. The dependency publisher is conditional and shared by the LB and
+  companion; Drone corrects their dependency graph when that step is skipped.
+  A `.drone.yml`-, Markdown-, benchmark-, or deployment-only merge must run no
+  image publisher at all. Source-only builds should pay the base pull plus one
+  crate relink, never dependency compilation. Build #233's 135s/129s publishers
+  are the regression control; inspect any post-cutover source build that returns
+  to that class. Do not add privileged cache plugins or `purge: false`: the
+  publisher daemons remain ephemeral.
   Node06 deploys should keep using the warm local `bench/build_transfer.sh`
   path because it reuses the development BuildKit cache.
 - Build the LB locally and stream it to node06 when the local amd64 Docker

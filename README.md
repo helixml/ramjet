@@ -246,6 +246,22 @@ the GPU-free agent protocol suite, and Compose validation run in parallel. The
 post-merge publishers build and push the LB and companion images only after the
 quality gate succeeds.
 
+Release builds share a public, content-keyed Rust dependency base. Ordinary
+source changes therefore compile only this crate, fully offline, even on
+Drone's fresh Docker 20.10 daemons. If `Cargo.toml`, `Cargo.lock`,
+`rust-toolchain.toml`, or `Dockerfile.deps` changes, refresh the committed key
+and its Docker/Drone references first:
+
+    python3 bench/rust_deps_image.py --update
+    python3 bench/rust_deps_image.py
+
+Drone publishes the new dependency image before either release image on the
+same `main` build. To bootstrap that key locally before it exists in GHCR:
+
+    deps_ref=$(python3 bench/rust_deps_image.py --print-reference)
+    docker build -f Dockerfile.deps -t "$deps_ref" .
+    docker build --build-arg RUST_DEPS_IMAGE="$deps_ref" .
+
 Measure the request-preparation hot path before and after tokenizer work:
 
     cargo run --release --locked --example preparation_bench

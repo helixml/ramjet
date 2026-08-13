@@ -1,26 +1,11 @@
 # syntax=docker/dockerfile:1.7
-FROM rust:1.95-bookworm AS build
+ARG RUST_DEPS_IMAGE=ghcr.io/helixml/mini-dynamo:rust-deps-sha256-73812d07a8a087cd8dfc6d3a882ebdc01be55451e465b4faed964881249cc33a
+FROM ${RUST_DEPS_IMAGE} AS build
 WORKDIR /src
 
-# Keep the expensive dependency graph in an exported image layer. Drone's
-# publisher uses a fresh Docker daemon for every build, so BuildKit cache
-# mounts alone cannot accelerate the next run.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-RUN mkdir -p src/bin \
-    && printf 'fn main() {}\n' > src/bin/mini-dynamo-snapshot-companion.rs \
-    && printf 'fn main() {}\n' > src/bin/mini-dynamo-attestation-provisioner.rs \
-    && cargo build --release --locked \
-        --bin mini-dynamo-snapshot-companion \
-        --bin mini-dynamo-attestation-provisioner \
-    && rm -rf src \
-    && rm -f target/release/mini-dynamo-snapshot-companion \
-    && rm -f target/release/mini-dynamo-attestation-provisioner \
-    && rm -f target/release/deps/mini_dynamo_snapshot_companion-* \
-    && rm -f target/release/deps/mini_dynamo_attestation_provisioner-* \
-    && rm -rf target/release/.fingerprint/mini-dynamo-*
-
 COPY src ./src
-RUN cargo build --release --locked \
+RUN cargo build --release --locked --offline \
         --bin mini-dynamo-snapshot-companion \
         --bin mini-dynamo-attestation-provisioner \
     && cp target/release/mini-dynamo-snapshot-companion /mini-dynamo-snapshot-companion \
