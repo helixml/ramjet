@@ -305,9 +305,14 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   `target/` and Docker BuildKit cache warm; do not clean either between runs.
 - Drone intentionally runs once per PR (and once after merge on `main`), not
   again for every feature-branch push. Its Rust lane omits a redundant release
-  build: the local pre-push gate builds release, while the GitHub main workflow
-  builds and publishes the release container. This halves cold CI contention
-  without dropping format, Clippy, test, Go, or protocol coverage.
+  build: the local pre-push gate builds release, and Drone's post-merge main
+  pipeline builds and publishes the release container to GHCR (the Actions
+  GITHUB_TOKEN is denied write on that package — issue #39; the `publish-image`
+  step reads `ghcr_username`/`ghcr_token` Drone secrets instead). GitHub
+  Actions keeps format, Clippy, test, and deploy-config validation only. The
+  Drone image build runs in a fresh dind daemon, so it pays a cold cargo
+  release build on every publish; node06 deploys should keep using the warm
+  local `bench/build_transfer.sh` path.
 - Build the LB locally and stream it to node06 when the local amd64 Docker
   cache is warm. A typical warm LB transfer is seconds and avoids consuming
   node06's scarce 8-9GiB available host memory:
