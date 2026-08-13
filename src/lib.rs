@@ -1,5 +1,7 @@
 pub mod block_digest;
 
+pub mod companion_config;
+pub mod companion_metrics;
 pub mod compat;
 pub mod config;
 pub mod digest_index;
