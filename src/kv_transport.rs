@@ -37,6 +37,9 @@ pub struct KvTransportConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SequencedBatch {
     pub sequence: u64,
+    /// Original bounded `MessagePack` payload, retained so an authenticated
+    /// local tail can forward the exact vLLM bytes after applying `batch`.
+    pub payload: Bytes,
     pub batch: KvEventBatch,
 }
 
@@ -529,6 +532,7 @@ fn decode_frames(
     let payload = payload.ok_or(KvTransportError::InvalidFrameCount)?;
     Ok(SequencedBatch {
         sequence: u64::from_be_bytes(sequence),
+        payload: payload.clone(),
         batch: decode_batch(payload, limits)?,
     })
 }
@@ -561,6 +565,7 @@ mod tests {
         ]);
         let parsed = parse_live_message(&live, b"kv", KvWireLimits::default()).unwrap();
         assert_eq!(parsed.sequence, 42);
+        assert_eq!(parsed.payload.as_ref(), EMPTY_BATCH);
         assert!(parsed.batch.events.is_empty());
         assert_eq!(parsed.batch.data_parallel_rank, Some(0));
     }
@@ -573,13 +578,11 @@ mod tests {
             Bytes::copy_from_slice(&7_u64.to_be_bytes()),
             Bytes::from_static(EMPTY_BATCH),
         ]);
-        assert_eq!(
-            parse_replay_message(&replay, b"kv", KvWireLimits::default())
-                .unwrap()
-                .unwrap()
-                .sequence,
-            7
-        );
+        let parsed = parse_replay_message(&replay, b"kv", KvWireLimits::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.sequence, 7);
+        assert_eq!(parsed.payload.as_ref(), EMPTY_BATCH);
         let end = message(vec![
             Bytes::new(),
             Bytes::new(),

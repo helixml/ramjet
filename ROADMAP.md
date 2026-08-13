@@ -537,8 +537,17 @@ node06). The design rationale for each lives in DESIGN.md.
   consumption. Normal attempts are serial; only an explicit capacity-one
   replacement command overlaps a second session, preserves the old same-
   identity publication until the new epoch is caught up, and drops the old
-  future only after handoff. Shutdown cancels promptly. Add the concrete long-
-  lived index source and Compose runtime, then run at least
+  future only after handoff. Shutdown cancels promptly. The concrete long-lived
+  source now owns bounded digest state across LB sessions, stages sparse replay
+  privately, atomically publishes a complete boundary, registers subscribers
+  before cloning that boundary, and fans out the already-qualified MessagePack
+  bytes. Index failures, transport authority loss, rebuilds, or attested
+  incarnation changes fence every session and advance the companion generation;
+  a slow or disconnected reader only loses its own subscription. Tail payloads
+  are shared and each session has a 16MiB default / 64MiB maximum aggregate
+  queued-byte budget in addition to its entry bound; overflow and rebuild use
+  prioritized out-of-band revocation so stale tail frames are not drained. Add the
+  process-level ZMQ/replay/reconnect/attestation driver, then run at least
   100,000 revision-stable shadow comparisons before placement can consume it.
 
   The off-by-default library runtime now composes typed config, hardened secret
@@ -549,7 +558,22 @@ node06). The design rationale for each lives in DESIGN.md.
   executable would be ambiguous. The coordinator uses the stricter snapshot or
   tail-idle duration as its one absolute session deadline until phase-specific
   deadlines exist. Next add authenticated engine selection or one socket per
-  engine, then inject the concrete long-lived index sources.
+  engine, then inject the concrete source through a process-level driver that
+  owns `ZmqKvEventSource`, subscribe-before-replay, reconnects, complete sparse
+  replay, and authenticated engine-incarnation refresh.
+
+  A true offline public-stack harness now proves initial publication, live
+  store/remove, rolling handoff, LB owner restart, companion shutdown/socket
+  cleanup/restart, identity rollover, and leak-free teardown; two authenticated
+  slow readers also hold both supervisor slots while a third is rejected. Ten
+  repeated runs passed 20/20. At the captured 36,612-block / 9.37M-token shape,
+  the 6.04MB snapshot encoded in 11.5ms, authenticated wire encode/decode took
+  7.0/7.5ms, private rebuild took 22.4ms, total process wall was 0.15s, and peak
+  RSS was about 58MiB. This clears the sub-3s offline gate with wide margin.
+  The remaining synchronous atomic index clone was measured separately: one/two
+  captured-shape starts pause the source lock for about 7.7/23.0ms; at the
+  131,072-record maximum this is about 28.5/82.3ms. Instrument this before shadow
+  and move to immutable/COW generations if ingestion p99 must stay below 10ms.
 
   Deployment hardening is also part of the gate: distinct fixed LB/companion
   UIDs with one shared GID; a companion-owned non-LB-writable socket directory

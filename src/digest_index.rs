@@ -6,7 +6,7 @@
 //! retained only for parent and removal reconciliation.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -15,12 +15,16 @@ use thiserror::Error;
 
 use crate::{
     block_digest::{BlockCommitment, BlockDigestError, BlockDigester, PrimaryCommitment},
-    kv_snapshot::{DigestAlgorithm, GroupDisposition, ResetKind, SnapshotBlockHash, SnapshotBody},
+    kv_snapshot::{
+        DigestAlgorithm, DigestRecord, DigestSpec, EngineIncarnation, GroupDisposition,
+        GroupMetadata, ResetKind, ResetScope, SnapshotBlockHash, SnapshotBody, SnapshotCapacity,
+    },
     kv_wire::{BlockRemoved, BlockStored, ExternalBlockHash},
 };
 
 const ROOT_NODE: usize = 0;
 const DIGEST_BYTES: usize = 32;
+const DIGEST_BYTES_U16: u16 = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DigestIndexLimits {
@@ -135,7 +139,7 @@ enum ChildEntry {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Node {
     parent: Option<usize>,
     block: Option<PrimaryCommitment>,
@@ -162,7 +166,7 @@ impl Node {
 
 type CommitFn = fn(&BlockDigester, &[u32]) -> Result<BlockCommitment, DigestIndexError>;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DigestKvIndex {
     limits: DigestIndexLimits,
     digester: Arc<BlockDigester>,
@@ -233,6 +237,112 @@ impl DigestKvIndex {
             commitment_bytes: self.live_nodes.saturating_mul(DIGEST_BYTES),
             poisoned_edges: self.poisoned_edges,
         }
+    }
+
+    /// Public identity of this index's digest secret. This is safe metadata,
+    /// not the secret itself.
+    #[must_use]
+    pub fn digest_key_id(&self) -> [u8; DIGEST_BYTES] {
+        *self.digester.key_id().as_bytes()
+    }
+
+    /// Export one atomic, breadth-first snapshot from this owned index view.
+    ///
+    /// Clone the index under the live-state lock before calling this method;
+    /// traversal and `MessagePack` encoding can then proceed without delaying
+    /// vLLM event ingestion. The export contains commitments and external
+    /// block identities only, never token IDs or the HMAC secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded index error on cancellation, poisoned state, integer
+    /// overflow, or inconsistent internal linkage.
+    pub fn export_snapshot_with_cancel(
+        &self,
+        engine_incarnation: EngineIncarnation,
+        watermark: u64,
+        group: GroupMetadata,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SnapshotBody, DigestIndexError> {
+        if cancelled() {
+            return Err(DigestIndexError::Cancelled);
+        }
+        if self.poisoned_edges != 0 {
+            return Err(DigestIndexError::DigestCollision);
+        }
+
+        let mut records = Vec::with_capacity(self.live_nodes);
+        let mut record_for_node = vec![None; self.nodes.len()];
+        let mut prefix_for_node = vec![0_u64; self.nodes.len()];
+        let mut queue = VecDeque::new();
+        let mut roots = child_nodes(self.node(ROOT_NODE))?;
+        roots.sort_unstable();
+        queue.extend(roots.into_iter().map(|node| (ROOT_NODE, node)));
+
+        while let Some((parent_id, node_id)) = queue.pop_front() {
+            if cancelled() {
+                return Err(DigestIndexError::Cancelled);
+            }
+            let parent = self.node(parent_id);
+            let node = self.node(node_id);
+            let primary = node.block.ok_or(DigestIndexError::InvalidSnapshotRecord)?;
+            let guard = match parent.children.get(&primary) {
+                Some(ChildEntry::Unique { guard, node }) if *node == node_id => *guard,
+                _ => return Err(DigestIndexError::InvalidSnapshotRecord),
+            };
+            let parent_record = if parent_id == ROOT_NODE {
+                None
+            } else {
+                record_for_node[parent_id]
+            };
+            let prefix_token_ids = prefix_for_node[parent_id]
+                .checked_add(u64::from(primary.token_count))
+                .ok_or(DigestIndexError::CapacityExceeded)?;
+            let mut digest = Vec::with_capacity(DIGEST_BYTES);
+            digest.extend_from_slice(&primary.digest);
+            digest.extend_from_slice(&guard);
+            let record_index =
+                u32::try_from(records.len()).map_err(|_| DigestIndexError::CapacityExceeded)?;
+            records.push(DigestRecord {
+                group_slot: 0,
+                parent_record,
+                external_hash: external_hash_to_snapshot(
+                    node.external_hash
+                        .as_ref()
+                        .ok_or(DigestIndexError::InvalidSnapshotRecord)?,
+                ),
+                block_digest: digest,
+                block_token_ids: primary.token_count,
+                prefix_token_ids,
+                present: node.present,
+            });
+            record_for_node[node_id] = Some(record_index);
+            prefix_for_node[node_id] = prefix_token_ids;
+
+            let mut children = child_nodes(node)?;
+            children.sort_unstable();
+            queue.extend(children.into_iter().map(|child| (node_id, child)));
+        }
+        if records.len() != self.live_nodes {
+            return Err(DigestIndexError::InvalidSnapshotRecord);
+        }
+
+        let mut body = SnapshotBody {
+            engine_incarnation,
+            watermark,
+            reset_scope: ResetScope::full_engine(),
+            digest: DigestSpec {
+                algorithm: DigestAlgorithm::HmacSha256V1,
+                key_id: self.digester.key_id().to_vec(),
+                digest_bytes: DIGEST_BYTES_U16,
+            },
+            capacity: SnapshotCapacity::default(),
+            groups: vec![group],
+            records,
+        };
+        body.refresh_capacity()
+            .map_err(|_| DigestIndexError::CapacityExceeded)?;
+        Ok(body)
     }
 
     /// Add one decoded and already-filtered live store event.
@@ -718,6 +828,24 @@ fn snapshot_hash(hash: &SnapshotBlockHash) -> Result<ExternalBlockHash, DigestIn
     }
 }
 
+fn external_hash_to_snapshot(hash: &ExternalBlockHash) -> SnapshotBlockHash {
+    match hash {
+        ExternalBlockHash::Bytes(bytes) => SnapshotBlockHash::Bytes(bytes.clone()),
+        ExternalBlockHash::Signed(value) => SnapshotBlockHash::Signed(*value),
+        ExternalBlockHash::Unsigned(value) => SnapshotBlockHash::Unsigned(*value),
+    }
+}
+
+fn child_nodes(node: &Node) -> Result<Vec<usize>, DigestIndexError> {
+    node.children
+        .values()
+        .map(|entry| match entry {
+            ChildEntry::Unique { node, .. } => Ok(*node),
+            ChildEntry::Poisoned { .. } => Err(DigestIndexError::DigestCollision),
+        })
+        .collect()
+}
+
 fn external_hash_len(hash: &ExternalBlockHash) -> usize {
     match hash {
         ExternalBlockHash::Bytes(bytes) => bytes.len(),
@@ -841,6 +969,74 @@ mod tests {
 
         index.remove(&remove_event(&[11, 10]));
         assert_eq!(index.stats().external_hash_bytes, 0);
+    }
+
+    #[test]
+    fn exports_canonical_bfs_with_absent_ancestor_and_exact_contract() {
+        let mut index = index();
+        index
+            .store(&store_event(&[10, 11], None, &[1, 2, 3, 4], 2))
+            .unwrap();
+        index.store(&store_event(&[20], None, &[8, 9], 2)).unwrap();
+        index.remove(&remove_event(&[10]));
+
+        let body = index
+            .export_snapshot_with_cancel(
+                EngineIncarnation {
+                    engine_id: "engine-a".to_owned(),
+                    model_revision: "revision".to_owned(),
+                    image_digest: "sha256:image".to_owned(),
+                    process_started_unix_ns: 42,
+                    attestation_sha256: vec![7; 32],
+                },
+                99,
+                GroupMetadata {
+                    data_parallel_rank: 0,
+                    group_idx: 0,
+                    attention_kind: AttentionKind::MlaAttention,
+                    disposition: GroupDisposition::Indexed,
+                    block_size: 2,
+                },
+                || false,
+            )
+            .unwrap();
+
+        assert_eq!(body.watermark, 99);
+        assert_eq!(body.records.len(), 3);
+        assert_eq!(body.capacity.records, 3);
+        assert!(digester().key_id().matches_wire(&body.digest.key_id));
+        let ancestor = body
+            .records
+            .iter()
+            .position(|record| record.external_hash == SnapshotBlockHash::Unsigned(10))
+            .unwrap();
+        let child = body
+            .records
+            .iter()
+            .position(|record| record.external_hash == SnapshotBlockHash::Unsigned(11))
+            .unwrap();
+        assert!(!body.records[ancestor].present);
+        assert_eq!(
+            body.records[child].parent_record,
+            Some(u32::try_from(ancestor).unwrap())
+        );
+        assert!(ancestor < child);
+        assert_eq!(body.records[child].prefix_token_ids, 4);
+        assert!(
+            body.records
+                .iter()
+                .all(|record| record.block_digest.len() == 32)
+        );
+
+        assert_eq!(
+            index.export_snapshot_with_cancel(
+                body.engine_incarnation.clone(),
+                99,
+                body.groups[0].clone(),
+                || true,
+            ),
+            Err(DigestIndexError::Cancelled)
+        );
     }
 
     fn forced_primary_collision(
