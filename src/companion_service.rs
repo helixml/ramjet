@@ -998,6 +998,34 @@ mod tests {
     }
 
     #[test]
+    fn stable_observe_only_fence_has_a_bounded_metric_reason() {
+        let event =
+            CompanionIndexOwnerEvent::Rebuild(CompanionIndexOwnerRebuildReason::ReplayTooLarge);
+        assert_eq!(owner_event_labels(&event), ("rebuild", "replay_too_large"));
+
+        let registry = Registry::new();
+        let observer = OwnerObserver::new(&registry).unwrap();
+        observer.observe(event);
+        let family = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "ds4proxy_snapshot_companion_owner_events_total")
+            .expect("owner metric family");
+        assert_eq!(family.get_metric().len(), 1);
+        let labels = family.get_metric()[0].get_label();
+        assert!(
+            labels
+                .iter()
+                .any(|label| { label.name() == "event" && label.value() == "rebuild" })
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|label| { label.name() == "reason" && label.value() == "replay_too_large" })
+        );
+    }
+
+    #[test]
     fn debug_and_errors_never_expose_protected_paths_or_endpoints() {
         let files = TestFiles::new();
         let config = load(&files.values());
