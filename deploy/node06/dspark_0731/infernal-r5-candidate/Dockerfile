@@ -22,6 +22,13 @@ RUN set -eux; \
     test -d "${source_root}/.git"; \
     test "$(git -C "${source_root}" write-tree)" = "${BASE_VLLM_TREE}"; \
     echo "${OVERLAY_PATCH_SHA256}  /tmp/r4-v4-correctness.patch" | sha256sum -c -; \
+    git -C "${source_root}" update-index --refresh -- \
+      vllm/models/deepseek_v4/sparse_mla.py \
+      vllm/parser/deepseek_v4.py \
+      vllm/parser/engine/parser_engine.py \
+      vllm/parser/engine/parser_engine_config.py \
+      vllm/parser/engine/streaming_parser_engine.py \
+      vllm/tool_parsers/utils.py; \
     git -C "${source_root}" apply --check /tmp/r4-v4-correctness.patch; \
     git -C "${source_root}" apply --index /tmp/r4-v4-correctness.patch; \
     git -C "${source_root}" diff --cached --check; \

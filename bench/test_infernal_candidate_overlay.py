@@ -68,6 +68,14 @@ class InfernalCandidateOverlayTest(unittest.TestCase):
         self.assertIn("FROM ${BASE_IMAGE}", dockerfile)
         self.assertIn("/opt/infernal-invocation/vllm", dockerfile)
         self.assertIn('git -C "${source_root}" write-tree', dockerfile)
+        self.assertIn('git -C "${source_root}" update-index --refresh --', dockerfile)
+        refresh = dockerfile.split("update-index --refresh --", 1)[1].split(
+            "git -C", 1
+        )[0]
+        self.assertEqual(
+            [path for path in manifest["changed_files"] if path in refresh],
+            manifest["changed_files"],
+        )
         self.assertIn("find_spec", dockerfile)
         for variable in (
             "TRITON_CACHE_DIR",
