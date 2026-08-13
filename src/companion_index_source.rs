@@ -53,8 +53,6 @@ pub enum CompanionIndexSourceError {
     NotReady,
     #[error("companion replay state is invalid")]
     InvalidReplay,
-    #[error("companion live sequence has a gap")]
-    SequenceGap,
     #[error("companion generation was exhausted")]
     GenerationExhausted,
     #[error("companion digest index update failed")]
@@ -183,18 +181,31 @@ impl CompanionIndexSource {
         let mut state = self.state.lock();
         let replay = state
             .replay
-            .as_mut()
+            .as_ref()
             .ok_or(CompanionIndexSourceError::InvalidReplay)?;
         if replay
             .last_sequence
             .is_some_and(|previous| batch.sequence <= previous)
         {
+            state.replay = None;
             return Err(CompanionIndexSourceError::InvalidReplay);
         }
-        let summary = self
-            .delta
-            .apply_batch(&mut replay.index, &batch.batch)
-            .map_err(|_| CompanionIndexSourceError::Index)?;
+        let result = self.delta.apply_batch(
+            &mut state
+                .replay
+                .as_mut()
+                .ok_or(CompanionIndexSourceError::InvalidReplay)?
+                .index,
+            &batch.batch,
+        );
+        let Ok(summary) = result else {
+            state.replay = None;
+            return Err(CompanionIndexSourceError::Index);
+        };
+        let replay = state
+            .replay
+            .as_mut()
+            .ok_or(CompanionIndexSourceError::InvalidReplay)?;
         replay.last_sequence = Some(batch.sequence);
         Ok(summary)
     }
@@ -205,15 +216,15 @@ impl CompanionIndexSource {
     ///
     /// # Errors
     ///
-    /// Rejects a watermark older than the final replay batch.
+    /// Rejects and discards a stage unless its final observed event exactly
+    /// matches the claimed authoritative watermark.
     pub fn finish_replay(&self, through: u64) -> Result<(), CompanionIndexSourceError> {
         let mut state = self.state.lock();
         let replay = state
             .replay
             .take()
             .ok_or(CompanionIndexSourceError::InvalidReplay)?;
-        if replay.last_sequence.is_some_and(|last| last > through) {
-            state.replay = Some(replay);
+        if replay.last_sequence != Some(through) {
             return Err(CompanionIndexSourceError::InvalidReplay);
         }
         state.index = replay.index;
@@ -223,13 +234,15 @@ impl CompanionIndexSource {
     }
 
     /// Apply and fan out one live batch after the authoritative watermark.
-    /// Duplicate deliveries are ignored. A gap or index failure fences the
-    /// generation and starts a fresh empty replay stage.
+    /// Duplicate deliveries are ignored. Real vLLM watermarks are sparse, so
+    /// every strictly newer batch is accepted; the process-level transport
+    /// fence must recover actual loss before feeding this source. An index
+    /// failure fences the generation and starts a fresh empty replay stage.
     ///
     /// # Errors
     ///
-    /// Returns `NotReady` while rebuilding and `SequenceGap` or `Index` after
-    /// fencing an invalid live transition.
+    /// Returns `NotReady` while rebuilding and `Index` after fencing an
+    /// invalid live transition.
     pub fn apply_live(
         &self,
         batch: &SequencedBatch,
@@ -241,10 +254,6 @@ impl CompanionIndexSource {
         let watermark = state.watermark.ok_or(CompanionIndexSourceError::NotReady)?;
         if batch.sequence <= watermark {
             return Ok(DigestDeltaSummary::default());
-        }
-        if batch.sequence != watermark.saturating_add(1) {
-            fence_locked(&mut state, None)?;
-            return Err(CompanionIndexSourceError::SequenceGap);
         }
         let Ok(summary) = self.delta.apply_batch(&mut state.index, &batch.batch) else {
             fence_locked(&mut state, None)?;
@@ -320,24 +329,31 @@ impl SnapshotProducerSource for CompanionIndexSource {
         let state = Arc::clone(&self.state);
         let group = self.config.group.clone();
         let snapshot_limits = self.config.snapshot_limits;
+        let build_identity = identity.clone();
+        let build_cancellation = cancellation.clone();
         Ok(Box::pin(async move {
-            let body = index
-                .export_snapshot_with_cancel(
-                    identity.engine_incarnation.clone(),
-                    watermark,
-                    group,
-                    || cancellation.is_cancelled(),
-                )
-                .map_err(|error| map_build_error(&error))?;
-            let frame =
-                encode_snapshot_with_cancel(&body, snapshot_limits, || cancellation.is_cancelled())
-                    .map_err(|error| {
-                        if matches!(error, crate::kv_snapshot::SnapshotError::Cancelled) {
-                            SnapshotProducerSourceError::Cancelled
-                        } else {
-                            SnapshotProducerSourceError::Failed
-                        }
-                    })?;
+            let frame = tokio::task::spawn_blocking(move || {
+                let body = index
+                    .export_snapshot_with_cancel(
+                        build_identity.engine_incarnation.clone(),
+                        watermark,
+                        group,
+                        || build_cancellation.is_cancelled(),
+                    )
+                    .map_err(|error| map_build_error(&error))?;
+                encode_snapshot_with_cancel(&body, snapshot_limits, || {
+                    build_cancellation.is_cancelled()
+                })
+                .map_err(|error| {
+                    if matches!(error, crate::kv_snapshot::SnapshotError::Cancelled) {
+                        SnapshotProducerSourceError::Cancelled
+                    } else {
+                        SnapshotProducerSourceError::Failed
+                    }
+                })
+            })
+            .await
+            .map_err(|_| SnapshotProducerSourceError::Failed)??;
 
             let mut current = state.lock();
             if cancellation.is_cancelled() || !current.ready || current.identity != identity {
@@ -379,11 +395,18 @@ fn fence_locked(
     state: &mut SourceState,
     engine_incarnation: Option<EngineIncarnation>,
 ) -> Result<(), CompanionIndexSourceError> {
-    let next_generation = state
-        .identity
-        .companion_generation
-        .checked_add(1)
-        .ok_or(CompanionIndexSourceError::GenerationExhausted)?;
+    let Some(next_generation) = state.identity.companion_generation.checked_add(1) else {
+        state.ready = false;
+        state.watermark = None;
+        state.index.clear();
+        state.replay = None;
+        let identity = state.identity.clone();
+        for publisher in state.subscribers.values() {
+            let _ = publisher.try_send(ProducerTailEvent::Disconnect(identity.clone()));
+        }
+        state.subscribers.clear();
+        return Err(CompanionIndexSourceError::GenerationExhausted);
+    };
     state.ready = false;
     state.watermark = None;
     state.index.clear();
@@ -495,10 +518,50 @@ mod tests {
         }
     }
 
+    fn empty_batch(sequence: u64) -> SequencedBatch {
+        SequencedBatch {
+            sequence,
+            payload: Bytes::from(vec![u8::try_from(sequence).unwrap()]),
+            batch: KvEventBatch {
+                timestamp: 1.0,
+                data_parallel_rank: Some(0),
+                events: Vec::new(),
+            },
+        }
+    }
+
+    fn large_store_batch(sequence: u64, blocks: u32) -> SequencedBatch {
+        SequencedBatch {
+            sequence,
+            payload: Bytes::from(vec![u8::try_from(sequence).unwrap()]),
+            batch: KvEventBatch {
+                timestamp: 1.0,
+                data_parallel_rank: Some(0),
+                events: vec![KvEvent::BlockStored(BlockStored {
+                    block_hashes: (1..=blocks)
+                        .map(|hash| ExternalBlockHash::Unsigned(u64::from(hash)))
+                        .collect(),
+                    parent_block_hash: None,
+                    token_ids: (1..=blocks).collect(),
+                    block_size: 1,
+                    group_idx: Some(0),
+                    kv_cache_spec_kind: Some("mla_attention".to_owned()),
+                    kv_cache_spec_sliding_window: None,
+                    medium: Some("GPU".to_owned()),
+                    locality: Some("LOCAL".to_owned()),
+                    lora_name: None,
+                    cache_namespace: None,
+                    has_extra_keys: false,
+                })],
+            },
+        }
+    }
+
     #[tokio::test]
     async fn session_is_registered_before_snapshot_build_and_tail_is_ordered() {
         let source = source(2);
         source.apply_replay(&store_batch(7, 70, &[1, 2])).unwrap();
+        source.apply_replay(&empty_batch(10)).unwrap();
         source.finish_replay(10).unwrap();
         let (publisher, cancellation, mut receiver, _signal, _cancelled) =
             test_tail_channel(4, 1024);
@@ -548,6 +611,7 @@ mod tests {
     #[tokio::test]
     async fn session_cancellation_does_not_stop_long_lived_index() {
         let source = source(1);
+        source.apply_replay(&empty_batch(10)).unwrap();
         source.finish_replay(10).unwrap();
         let (publisher, cancellation, _receiver, signal, cancelled) = test_tail_channel(2, 1024);
         let build = source.start(publisher, cancellation).unwrap();
@@ -568,6 +632,7 @@ mod tests {
     #[tokio::test]
     async fn queue_backpressure_drops_only_slow_session() {
         let source = source(1);
+        source.apply_replay(&empty_batch(10)).unwrap();
         source.finish_replay(10).unwrap();
         let (publisher, cancellation, _receiver, _signal, _cancelled) = test_tail_channel(1, 1024);
         let _build = source.start(publisher, cancellation).unwrap();
@@ -584,6 +649,7 @@ mod tests {
     #[tokio::test]
     async fn two_sessions_receive_independent_tail_and_third_is_rejected() {
         let source = source(2);
+        source.apply_replay(&empty_batch(10)).unwrap();
         source.finish_replay(10).unwrap();
         let (publisher_a, cancellation_a, mut receiver_a, _signal_a, _cancelled_a) =
             test_tail_channel(3, 1024);
@@ -613,16 +679,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gap_fences_sessions_and_replay_recovers_new_generation() {
+    async fn sparse_live_progress_is_valid_and_explicit_rebuild_fences_sessions() {
         let source = source(1);
+        source.apply_replay(&empty_batch(10)).unwrap();
         source.finish_replay(10).unwrap();
         let (publisher, cancellation, mut receiver, _signal, _cancelled) =
             test_tail_channel(2, 1024);
         let _build = source.start(publisher, cancellation).unwrap();
-        assert_eq!(
-            source.apply_live(&store_batch(12, 72, &[3, 4])),
-            Err(CompanionIndexSourceError::SequenceGap)
-        );
+        source.apply_live(&store_batch(12, 72, &[3, 4])).unwrap();
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            ProducerTailEvent::Batch {
+                event_watermark: 12,
+                ..
+            }
+        ));
+        assert!(source.status().ready);
+
+        source.begin_rebuild(None).unwrap();
         assert!(matches!(
             receiver.recv().await.unwrap(),
             ProducerTailEvent::IdentityChanged(ProducerIdentity {
@@ -636,6 +710,7 @@ mod tests {
         assert_eq!(fenced.active_sessions, 0);
 
         source.apply_replay(&store_batch(20, 80, &[8, 9])).unwrap();
+        source.apply_replay(&empty_batch(25)).unwrap();
         source.finish_replay(25).unwrap();
         let recovered = source.status();
         assert!(recovered.ready);
@@ -646,6 +721,7 @@ mod tests {
     #[tokio::test]
     async fn attested_incarnation_change_fences_old_session() {
         let source = source(1);
+        source.apply_replay(&empty_batch(10)).unwrap();
         source.finish_replay(10).unwrap();
         let (publisher, cancellation, mut receiver, _signal, _cancelled) =
             test_tail_channel(2, 1024);
@@ -664,10 +740,76 @@ mod tests {
         assert_eq!(status.active_sessions, 0);
     }
 
+    #[tokio::test]
+    async fn generation_exhaustion_permanently_fences_state_and_sessions() {
+        let source = Arc::new(
+            CompanionIndexSource::new(config(1), incarnation("engine-a"), u64::MAX, &SECRET)
+                .unwrap(),
+        );
+        source.apply_replay(&empty_batch(10)).unwrap();
+        source.finish_replay(10).unwrap();
+        let (publisher, cancellation, mut receiver, _signal, _cancelled) =
+            test_tail_channel(2, 1024);
+        let _build = source.start(publisher, cancellation).unwrap();
+
+        assert_eq!(
+            source.begin_rebuild(None),
+            Err(CompanionIndexSourceError::GenerationExhausted)
+        );
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            ProducerTailEvent::Disconnect(ProducerIdentity {
+                companion_generation: u64::MAX,
+                ..
+            })
+        ));
+        let status = source.status();
+        assert!(!status.ready);
+        assert_eq!(status.watermark, None);
+        assert_eq!(status.indexed_blocks, 0);
+        assert_eq!(status.active_sessions, 0);
+        assert_eq!(
+            source.apply_replay(&empty_batch(11)),
+            Err(CompanionIndexSourceError::InvalidReplay)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn large_snapshot_build_yields_reactor_and_observes_cancellation() {
+        let source = source(1);
+        source.apply_replay(&large_store_batch(10, 50_000)).unwrap();
+        source.finish_replay(10).unwrap();
+        let (publisher, cancellation, _receiver, signal, cancelled) = test_tail_channel(2, 1024);
+        let mut build = source.start(publisher, cancellation).unwrap();
+        let (heartbeat_sender, heartbeat) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            let _ = heartbeat_sender.send(());
+        });
+
+        tokio::select! {
+            result = &mut build => panic!("blocking snapshot build completed on reactor: {result:?}"),
+            result = heartbeat => result.unwrap(),
+        }
+        cancelled.store(true, Ordering::Release);
+        signal.send(true).unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut build)
+                .await
+                .unwrap(),
+            Err(SnapshotProducerSourceError::Cancelled)
+        ));
+        tokio::task::yield_now().await;
+        assert!(source.status().ready);
+        assert_eq!(source.status().active_sessions, 0);
+        assert_eq!(source.status().indexed_blocks, 50_000);
+    }
+
     #[test]
     fn clear_event_resets_index_without_losing_authority() {
         let source = source(1);
         source.apply_replay(&store_batch(7, 70, &[1, 2])).unwrap();
+        source.apply_replay(&empty_batch(10)).unwrap();
         source.finish_replay(10).unwrap();
         let summary = source.apply_live(&clear_batch(11)).unwrap();
         assert_eq!(summary.clear_events, 1);
@@ -675,5 +817,50 @@ mod tests {
         assert!(status.ready);
         assert_eq!(status.watermark, Some(11));
         assert_eq!(status.indexed_blocks, 0);
+    }
+
+    #[test]
+    fn incomplete_or_regressing_replay_cannot_be_published() {
+        let source = source(1);
+        source.apply_replay(&empty_batch(7)).unwrap();
+        assert_eq!(
+            source.finish_replay(10),
+            Err(CompanionIndexSourceError::InvalidReplay)
+        );
+        assert_eq!(
+            source.apply_replay(&empty_batch(10)),
+            Err(CompanionIndexSourceError::InvalidReplay)
+        );
+
+        source.begin_rebuild(None).unwrap();
+        source.apply_replay(&empty_batch(10)).unwrap();
+        assert_eq!(
+            source.apply_replay(&empty_batch(10)),
+            Err(CompanionIndexSourceError::InvalidReplay)
+        );
+        assert_eq!(
+            source.finish_replay(10),
+            Err(CompanionIndexSourceError::InvalidReplay)
+        );
+        assert!(!source.status().ready);
+    }
+
+    #[test]
+    fn replay_index_error_discards_private_stage() {
+        let source = source(1);
+        let mut invalid = store_batch(7, 70, &[1, 2]);
+        let KvEvent::BlockStored(stored) = &mut invalid.batch.events[0] else {
+            panic!("test batch must contain a store");
+        };
+        stored.parent_block_hash = Some(ExternalBlockHash::Unsigned(999));
+        assert_eq!(
+            source.apply_replay(&invalid),
+            Err(CompanionIndexSourceError::Index)
+        );
+        assert_eq!(
+            source.finish_replay(7),
+            Err(CompanionIndexSourceError::InvalidReplay)
+        );
+        assert!(!source.status().ready);
     }
 }

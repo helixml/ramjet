@@ -134,6 +134,8 @@ cargo test --locked --test snapshot_consumer_adversarial
 cargo test --locked snapshot_producer
 cargo test --locked snapshot_reconnect
 cargo test --locked companion_runtime
+cargo test --locked companion_index_source
+cargo test --locked --test snapshot_stack_e2e
 cargo test --locked --test snapshot_digest_lifecycle
 ```
 
@@ -170,12 +172,28 @@ shutdown. Until the authenticated hello carries an engine selector, fail closed
 unless exactly one source is configured; never guess which engine a client
 intended.
 
+`companion_index_source` owns one long-lived per-engine digest index independently
+of LB sessions. Register a session before cloning its snapshot boundary, do
+traversal/encoding off the ingestion lock, retain only bounded qualified wire
+payloads for active tails, and fence every session plus the generation when the
+transport owner loses authority, the index fails, or attested incarnation
+changes. vLLM event watermarks are sparse: accept strictly increasing forward
+jumps here and let the process-level replay fence distinguish omitted scheduler
+steps from lost event batches. A client disconnect removes only that subscriber;
+it must never stop or clear the index.
+
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
 Validate the trusted socket parent on every connect, use a fresh OS-random
 challenge under the bounded reuse ledger, and carry one absolute attempt
 deadline through connect and consumption. Shutdown drops the consumer future
 immediately; approximate serving is never owned by this path.
+
+Keep the true public-stack harness green: it composes safe socket publication,
+supervisor, producer, reconnect owner, consumer, actor, and digest index. Use
+`cargo run --release --locked --example snapshot_shape_bench` for the captured
+36,612-block authenticated wire/rebuild measurement; timings are observational
+and must not become flaky CI thresholds.
 
 ## node06 — the test/production box
 

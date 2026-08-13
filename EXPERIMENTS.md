@@ -3132,3 +3132,44 @@ Four focused tests cover off mode without source/filesystem state, post-bind
 supervisor failure cleanup, bounded shutdown cleanup, and terminal/capacity
 report mapping. The full Rust suite and strict Clippy pass. This is still not a
 CLI command and changes neither ordinary LB startup nor node06.
+
+## 2026-08-13 — issue #41 true offline stack and captured-shape gate
+
+The public modules now run together in one offline lifecycle harness: hardened
+socket bind/publication and inode guard, two-client supervisor, authenticated
+producer, reconnect owner, consumer, actor, and digest index. It covers initial
+publication, live store/remove, rolling replacement, LB owner restart, companion
+shutdown/socket cleanup/restart, identity rollover, and leak-free teardown. Two
+authenticated slow readers hold both slots while a third is rejected. Ten runs
+passed 20/20; the focused body is about 0.07 seconds.
+
+At the captured 36,612-record / 9,372,672-token shape, the snapshot is 6,040,438
+bytes and authenticated response 6,040,952 bytes. Measured locally: encode
+11.509ms, decode 12.543ms, repeated decode 8.750ms, wire encode 6.961ms, wire
+decode 7.519ms, private rebuild 22.355ms, total process wall 0.15s, and about
+58MiB RSS/HWM. This clears the sub-3s offline gate with wide margin.
+
+## 2026-08-13 — issue #41 long-lived companion digest source
+
+The concrete engine-neutral source owns one bounded digest index across LB
+session churn. Full replay is staged privately and committed atomically;
+sessions are registered under the same boundary lock before the index is cloned,
+while breadth-first export and MessagePack encoding run off-lock. Live batches
+reuse the already-qualified bounded vLLM payload for authenticated tails. The
+source supports at most two subscribers, drops only a slow or cancelled
+subscriber, and leaves the long-lived index running when an LB disconnects.
+
+Replay disorder, digest-index failure, transport authority loss, rebuild, or an
+attested engine-incarnation change fences all sessions, clears authority, and
+advances the generation. vLLM watermarks are sparse, so strictly increasing
+forward jumps are valid here; the process-level replay fence must distinguish
+omitted scheduler steps from lost event batches. Focused tests cover boundary
+ordering, cancellation isolation, slow-reader backpressure, two-client capacity,
+sparse watermarks with explicit rebuild/recovery, incarnation rollover, and a
+full-engine clear.
+
+This remains offline. The next seam is a process-level owner that constructs
+`ZmqKvEventSource`, subscribes live before replay, drives complete sparse replay
+and live ingestion across reconnects, and refreshes the authenticated engine
+incarnation. It is not yet a CLI command, Compose source, shadow consumer, or
+node06 deployment.
