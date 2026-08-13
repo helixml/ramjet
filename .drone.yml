@@ -47,6 +47,36 @@ steps:
       - go-parity-oracle
       - agent-protocol
 
+  # GHCR publishing lives here, not GitHub Actions: the Actions GITHUB_TOKEN
+  # is denied write_package on the existing ghcr.io/helixml/mini-dynamo
+  # package (issue #39). Requires two Drone repository secrets:
+  #   ghcr_username — account with write access to the package
+  #   ghcr_token    — a PAT with the write:packages scope
+  # The push-event guard keeps secrets away from pull_request builds; the
+  # pipeline trigger already limits push events to main.
+  - name: publish-image
+    image: plugins/docker
+    pull: if-not-exists
+    environment:
+      # The Dockerfile's `syntax` directive and cargo cache mounts need
+      # BuildKit; the plugin's docker CLI inherits this.
+      DOCKER_BUILDKIT: "1"
+    settings:
+      registry: ghcr.io
+      repo: ghcr.io/helixml/mini-dynamo
+      username:
+        from_secret: ghcr_username
+      password:
+        from_secret: ghcr_token
+      tags:
+        - rust-${DRONE_COMMIT_SHA:0:7}
+        - rust-edge
+    when:
+      event:
+        - push
+    depends_on:
+      - quality-complete
+
 trigger:
   event:
     - push

@@ -12,8 +12,8 @@ permissions:
 
 concurrency:
   group: rust-${{ github.event.pull_request.number || github.ref }}
-  # PRs and main publish only their newest commit. Immutable version-tag builds
-  # are never superseded and must run to completion.
+  # PRs and main check only their newest commit. Version-tag runs are never
+  # superseded and must run to completion.
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
 
 jobs:
@@ -38,47 +38,6 @@ jobs:
           docker compose -f deploy/node06/dspark_0731/docker-compose.yaml config --quiet
           deploy/node06/dspark_0731/validate-snapshot-companion-compose.py
 
-  image:
-    if: github.event_name != 'pull_request'
-    needs: check
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/helixml/mini-dynamo
-          tags: |
-            type=sha,prefix=rust-
-            type=ref,event=tag
-            type=raw,value=rust-edge,enable=${{ github.ref == 'refs/heads/main' }}
-      # Export the expensive Rust build cache before the permission-dependent
-      # registry write. A GHCR ACL failure must not make the next run rebuild
-      # every dependency from scratch (issue #39).
-      - name: Build image and persist cache
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          push: false
-          platforms: linux/amd64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Push image
-        env:
-          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
-        run: |
-          while IFS= read -r tag; do
-            test -z "$tag" || docker push "$tag"
-          done <<< "$IMAGE_TAGS"
+  # Container publishing moved to Drone's post-merge `publish-image` step: the
+  # Actions GITHUB_TOKEN is denied write_package on the existing GHCR package
+  # (issue #39), while Drone holds a PAT-backed registry secret.
