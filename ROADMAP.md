@@ -574,6 +574,11 @@ node06). The design rationale for each lives in DESIGN.md.
   captured-shape starts pause the source lock for about 7.7/23.0ms; at the
   131,072-record maximum this is about 28.5/82.3ms. Instrument this before shadow
   and move to immutable/COW generations if ingestion p99 must stay below 10ms.
+  Runtime telemetry now polls the source every 25ms and separately reports
+  listening, exact authority, replay/building/ready/fenced phase, watermark
+  presence, indexed blocks, and active sessions with fixed label cardinality.
+  The existing operational ready gauge is true only when the socket is listening
+  and the source is authoritative; either shutdown or a rebuild clears it.
 
   Deployment hardening is also part of the gate: distinct fixed LB/companion
   UIDs with one shared GID; a companion-owned non-LB-writable socket directory

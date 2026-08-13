@@ -286,10 +286,44 @@ pub(crate) fn test_tail_channel(
     )
 }
 
+/// Content-free readiness view exposed by a producer source.
+///
+/// Implementations must not place identities, watermarks, hashes, or payload-
+/// derived values in this status. The runtime uses it only for a bounded
+/// operational readiness surface.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SnapshotProducerSourceStatus {
+    pub phase: SnapshotProducerSourcePhase,
+    pub ready: bool,
+    pub watermark_present: bool,
+    pub active_sessions: usize,
+    pub indexed_blocks: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SnapshotProducerSourcePhase {
+    /// The source does not expose authoritative status. This is deliberately
+    /// not ready, so socket publication alone cannot claim exact authority.
+    #[default]
+    Unknown,
+    Replay,
+    Building,
+    Ready,
+    Fenced,
+}
+
 /// Engine-independent source boundary. `start` must establish live-tail
 /// capture before returning its snapshot build future and must return quickly.
 /// The future and every task using the publisher must observe cancellation.
 pub trait SnapshotProducerSource: Send + Sync + 'static {
+    /// Return a content-free, bounded snapshot of source authority.
+    ///
+    /// Generic sources default to unknown and not ready. Exact sources should
+    /// override this rather than relying on socket publication as readiness.
+    fn status(&self) -> SnapshotProducerSourceStatus {
+        SnapshotProducerSourceStatus::default()
+    }
+
     /// Begin tail capture and return independently owned snapshot-build work.
     ///
     /// # Errors

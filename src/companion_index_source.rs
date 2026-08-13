@@ -22,7 +22,7 @@ use crate::{
     snapshot_producer::{
         ProducerIdentity, ProducerSnapshot, ProducerTailEvent, SnapshotBuildFuture,
         SnapshotProducerCancellation, SnapshotProducerSource, SnapshotProducerSourceError,
-        SnapshotTailPublisher,
+        SnapshotProducerSourcePhase, SnapshotProducerSourceStatus, SnapshotTailPublisher,
     },
 };
 
@@ -38,6 +38,7 @@ pub struct CompanionIndexSourceConfig {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CompanionIndexStatus {
+    pub phase: SnapshotProducerSourcePhase,
     pub ready: bool,
     pub watermark: Option<u64>,
     pub companion_generation: u64,
@@ -76,6 +77,8 @@ struct SourceState {
     replay: Option<ReplayState>,
     watermark: Option<u64>,
     ready: bool,
+    fenced: bool,
+    builds_in_progress: usize,
     next_session_id: u64,
     subscribers: HashMap<u64, SnapshotTailPublisher>,
 }
@@ -149,6 +152,8 @@ impl CompanionIndexSource {
                 }),
                 watermark: None,
                 ready: false,
+                fenced: false,
+                builds_in_progress: 0,
                 next_session_id: 1,
                 subscribers: HashMap::new(),
             })),
@@ -158,12 +163,17 @@ impl CompanionIndexSource {
     #[must_use]
     pub fn status(&self) -> CompanionIndexStatus {
         let state = self.state.lock();
+        let indexed_blocks = state.replay.as_ref().map_or_else(
+            || state.index.stats().nodes,
+            |replay| replay.index.stats().nodes,
+        );
         CompanionIndexStatus {
+            phase: source_phase(&state),
             ready: state.ready,
             watermark: state.watermark,
             companion_generation: state.identity.companion_generation,
             active_sessions: state.subscribers.len(),
-            indexed_blocks: state.index.stats().nodes,
+            indexed_blocks,
         }
     }
 
@@ -188,6 +198,7 @@ impl CompanionIndexSource {
             .is_some_and(|previous| batch.sequence <= previous)
         {
             state.replay = None;
+            state.fenced = true;
             return Err(CompanionIndexSourceError::InvalidReplay);
         }
         let result = self.delta.apply_batch(
@@ -200,6 +211,7 @@ impl CompanionIndexSource {
         );
         let Ok(summary) = result else {
             state.replay = None;
+            state.fenced = true;
             return Err(CompanionIndexSourceError::Index);
         };
         let replay = state
@@ -207,6 +219,7 @@ impl CompanionIndexSource {
             .as_mut()
             .ok_or(CompanionIndexSourceError::InvalidReplay)?;
         replay.last_sequence = Some(batch.sequence);
+        state.fenced = false;
         Ok(summary)
     }
 
@@ -225,11 +238,13 @@ impl CompanionIndexSource {
             .take()
             .ok_or(CompanionIndexSourceError::InvalidReplay)?;
         if replay.last_sequence != Some(through) {
+            state.fenced = true;
             return Err(CompanionIndexSourceError::InvalidReplay);
         }
         state.index = replay.index;
         state.watermark = Some(through);
         state.ready = true;
+        state.fenced = false;
         Ok(())
     }
 
@@ -292,6 +307,17 @@ impl CompanionIndexSource {
 }
 
 impl SnapshotProducerSource for CompanionIndexSource {
+    fn status(&self) -> SnapshotProducerSourceStatus {
+        let status = self.status();
+        SnapshotProducerSourceStatus {
+            phase: status.phase,
+            ready: status.ready,
+            watermark_present: status.watermark.is_some(),
+            active_sessions: status.active_sessions,
+            indexed_blocks: status.indexed_blocks,
+        }
+    }
+
     fn start(
         &self,
         publisher: SnapshotTailPublisher,
@@ -315,6 +341,7 @@ impl SnapshotProducerSource for CompanionIndexSource {
                 .checked_add(1)
                 .ok_or(SnapshotProducerSourceError::Failed)?;
             state.subscribers.insert(session_id, publisher);
+            state.builds_in_progress = state.builds_in_progress.saturating_add(1);
             (
                 session_id,
                 state.index.clone(),
@@ -327,10 +354,14 @@ impl SnapshotProducerSource for CompanionIndexSource {
         let mut cleanup_cancellation = cancellation.clone();
         tokio::spawn(async move {
             cleanup_cancellation.cancelled().await;
-            cleanup_state.lock().subscribers.remove(&session_id);
+            let mut state = cleanup_state.lock();
+            state.subscribers.remove(&session_id);
         });
 
         let state = Arc::clone(&self.state);
+        let build_guard = SourceBuildGuard {
+            state: Arc::clone(&state),
+        };
         let group = self.config.group.clone();
         let snapshot_limits = self.config.snapshot_limits;
         let build_identity = identity.clone();
@@ -359,6 +390,7 @@ impl SnapshotProducerSource for CompanionIndexSource {
             .await
             .map_err(|_| SnapshotProducerSourceError::Failed)??;
 
+            drop(build_guard);
             let mut current = state.lock();
             if cancellation.is_cancelled() || !current.ready || current.identity != identity {
                 current.subscribers.remove(&session_id);
@@ -388,6 +420,17 @@ impl SnapshotProducerSource for CompanionIndexSource {
     }
 }
 
+struct SourceBuildGuard {
+    state: Arc<Mutex<SourceState>>,
+}
+
+impl Drop for SourceBuildGuard {
+    fn drop(&mut self) {
+        let mut state = self.state.lock();
+        state.builds_in_progress = state.builds_in_progress.saturating_sub(1);
+    }
+}
+
 fn map_build_error(error: &DigestIndexError) -> SnapshotProducerSourceError {
     if *error == DigestIndexError::Cancelled {
         SnapshotProducerSourceError::Cancelled
@@ -402,6 +445,8 @@ fn fence_locked(
 ) -> Result<(), CompanionIndexSourceError> {
     let Some(next_generation) = state.identity.companion_generation.checked_add(1) else {
         state.ready = false;
+        state.fenced = true;
+        state.builds_in_progress = 0;
         state.watermark = None;
         state.index.clear();
         state.replay = None;
@@ -414,6 +459,8 @@ fn fence_locked(
         return Err(CompanionIndexSourceError::GenerationExhausted);
     };
     state.ready = false;
+    state.fenced = true;
+    state.builds_in_progress = 0;
     state.watermark = None;
     state.index.clear();
     state.identity.companion_generation = next_generation;
@@ -431,6 +478,18 @@ fn fence_locked(
         last_sequence: None,
     });
     Ok(())
+}
+
+fn source_phase(state: &SourceState) -> SnapshotProducerSourcePhase {
+    if state.fenced {
+        SnapshotProducerSourcePhase::Fenced
+    } else if state.builds_in_progress != 0 {
+        SnapshotProducerSourcePhase::Building
+    } else if state.ready {
+        SnapshotProducerSourcePhase::Ready
+    } else {
+        SnapshotProducerSourcePhase::Replay
+    }
 }
 
 #[cfg(test)]
@@ -1012,6 +1071,47 @@ mod tests {
             Err(CompanionIndexSourceError::InvalidReplay)
         );
         assert!(!source.status().ready);
+    }
+
+    #[tokio::test]
+    async fn status_tracks_replay_build_ready_and_fenced_without_identity() {
+        let source = source(1);
+        assert_eq!(source.status().phase, SnapshotProducerSourcePhase::Replay);
+        assert!(!source.status().ready);
+        assert!(source.status().watermark.is_none());
+
+        source.apply_replay(&empty_batch(10)).unwrap();
+        source.finish_replay(10).unwrap();
+        assert_eq!(source.status().phase, SnapshotProducerSourcePhase::Ready);
+        assert!(source.status().ready);
+        assert_eq!(source.status().watermark, Some(10));
+
+        let (publisher, cancellation, _receiver, signal, _cancelled) = test_tail_channel(2, 1_024);
+        let build = source.start(publisher, cancellation).unwrap();
+        assert_eq!(source.status().phase, SnapshotProducerSourcePhase::Building);
+        assert!(source.status().ready);
+        assert_eq!(source.status().active_sessions, 1);
+        drop(build);
+        assert_eq!(source.status().phase, SnapshotProducerSourcePhase::Ready);
+
+        signal.send(true).unwrap();
+        timeout(Duration::from_secs(1), async {
+            while source.status().active_sessions != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        source.begin_rebuild(None).unwrap();
+        assert_eq!(source.status().phase, SnapshotProducerSourcePhase::Fenced);
+        assert!(!source.status().ready);
+        assert!(source.status().watermark.is_none());
+        source.apply_replay(&empty_batch(20)).unwrap();
+        assert_eq!(source.status().phase, SnapshotProducerSourcePhase::Replay);
+        source.finish_replay(20).unwrap();
+        assert_eq!(source.status().phase, SnapshotProducerSourcePhase::Ready);
+        assert!(source.status().ready);
     }
 
     #[test]

@@ -5,11 +5,15 @@
 //! balancer does not call this coordinator. A missing source therefore fails
 //! before secret or socket filesystem state is touched.
 
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use prometheus::Registry;
 use thiserror::Error;
-use tokio::{net::UnixListener, sync::watch, time::timeout};
+use tokio::{
+    net::UnixListener,
+    sync::watch,
+    time::{MissedTickBehavior, interval, timeout},
+};
 
 use crate::{
     companion_config::{SnapshotCompanionConfig, SnapshotCompanionMode},
@@ -34,6 +38,7 @@ use crate::{
 const FRAME_OVERHEAD_BYTES: usize = 4 * 1024;
 const METADATA_BYTES: usize = 4 * 1024;
 const INCARNATION_COMPONENT_BYTES: usize = 512;
+const SOURCE_STATUS_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnapshotCompanionRunReport {
@@ -133,7 +138,7 @@ where
     ) -> Fut,
     Fut: Future<Output = Result<SnapshotSupervisorReport, SnapshotSupervisorError>>,
 {
-    let metrics = CompanionMetrics::new(registry, &config)?;
+    let metrics = Arc::new(CompanionMetrics::new(registry, &config)?);
     if config.mode == SnapshotCompanionMode::Off {
         return Ok(SnapshotCompanionRunReport::Off);
     }
@@ -177,6 +182,8 @@ where
             expected_owner_uid: config.secret_owner_uid,
         },
     )?;
+    metrics.update_source_status(engine, source.status());
+    let producer_source = Arc::clone(&source);
     let producer = Arc::new(SnapshotProducer::new(
         SnapshotProducerConfig {
             expected_peer_uid: client_uid,
@@ -197,7 +204,7 @@ where
             tail_queue_max_bytes: config.tail_queue_max_bytes,
         },
         Arc::new(secret),
-        source,
+        producer_source,
     )?);
 
     // Bind last so every startup error above is guaranteed socket-free.
@@ -213,16 +220,21 @@ where
         .map_err(|_| SnapshotCompanionRuntimeError::ListenerConversion)?;
     let listener = UnixListener::from_std(listener)
         .map_err(|_| SnapshotCompanionRuntimeError::ListenerConversion)?;
-    metrics.set_ready(engine, true);
+    metrics.set_listening(engine, true);
 
     let shutdown_monitor = shutdown.clone();
     let result = await_bounded_shutdown(
-        run_supervisor(listener, supervisor_config, shutdown, producer),
+        observe_source_status(
+            run_supervisor(listener, supervisor_config, shutdown, producer),
+            source,
+            Arc::clone(&metrics),
+            engine,
+        ),
         shutdown_monitor,
         config.shutdown_deadline,
     )
     .await;
-    metrics.set_ready(engine, false);
+    metrics.set_listening(engine, false);
     if let Ok(Ok(report)) = &result {
         record_supervisor_report(&metrics, engine, *report);
     }
@@ -232,6 +244,32 @@ where
     }
     let report = result??;
     Ok(SnapshotCompanionRunReport::Served(report))
+}
+
+async fn observe_source_status<F>(
+    supervisor: F,
+    source: Arc<dyn SnapshotProducerSource>,
+    metrics: Arc<CompanionMetrics>,
+    engine: CompanionEngineSlot,
+) -> Result<SnapshotSupervisorReport, SnapshotSupervisorError>
+where
+    F: Future<Output = Result<SnapshotSupervisorReport, SnapshotSupervisorError>>,
+{
+    tokio::pin!(supervisor);
+    let mut ticker = interval(SOURCE_STATUS_INTERVAL);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut supervisor => {
+                metrics.update_source_status(engine, source.status());
+                return result;
+            }
+            _ = ticker.tick() => {
+                metrics.update_source_status(engine, source.status());
+            }
+        }
+    }
 }
 
 async fn await_bounded_shutdown<F>(
@@ -312,6 +350,7 @@ mod tests {
     };
 
     use prometheus::TextEncoder;
+    use tokio::sync::oneshot;
     use tokio::time::{sleep, timeout};
 
     use super::*;
@@ -319,7 +358,7 @@ mod tests {
         companion_config::SnapshotCompanionSource,
         snapshot_producer::{
             SnapshotBuildFuture, SnapshotProducerCancellation, SnapshotProducerSourceError,
-            SnapshotTailPublisher,
+            SnapshotProducerSourcePhase, SnapshotProducerSourceStatus, SnapshotTailPublisher,
         },
     };
 
@@ -399,6 +438,40 @@ mod tests {
         }
     }
 
+    struct MutableStatusSource {
+        phase: AtomicUsize,
+    }
+
+    impl SnapshotProducerSource for MutableStatusSource {
+        fn status(&self) -> SnapshotProducerSourceStatus {
+            match self.phase.load(Ordering::Acquire) {
+                0 => SnapshotProducerSourceStatus {
+                    phase: SnapshotProducerSourcePhase::Replay,
+                    ..SnapshotProducerSourceStatus::default()
+                },
+                1 => SnapshotProducerSourceStatus {
+                    phase: SnapshotProducerSourcePhase::Ready,
+                    ready: true,
+                    watermark_present: true,
+                    active_sessions: 1,
+                    indexed_blocks: 42,
+                },
+                _ => SnapshotProducerSourceStatus {
+                    phase: SnapshotProducerSourcePhase::Fenced,
+                    ..SnapshotProducerSourceStatus::default()
+                },
+            }
+        }
+
+        fn start(
+            &self,
+            _publisher: SnapshotTailPublisher,
+            _cancellation: SnapshotProducerCancellation,
+        ) -> Result<SnapshotBuildFuture, SnapshotProducerSourceError> {
+            Err(SnapshotProducerSourceError::Failed)
+        }
+    }
+
     fn source() -> Arc<dyn SnapshotProducerSource> {
         Arc::new(UnavailableSource)
     }
@@ -436,18 +509,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_observer_tracks_live_source_authority_transitions() {
+        let files = TestFiles::new();
+        let registry = Registry::new();
+        let metrics = Arc::new(CompanionMetrics::new(&registry, &files.config()).unwrap());
+        let engine = metrics.engine_slot(0).unwrap();
+        metrics.set_listening(engine, true);
+        let source = Arc::new(MutableStatusSource {
+            phase: AtomicUsize::new(0),
+        });
+        let source_dyn: Arc<dyn SnapshotProducerSource> = source.clone();
+        let (finish, finished) = oneshot::channel();
+        let observer = tokio::spawn(observe_source_status(
+            async move {
+                finished.await.unwrap();
+                Ok(SnapshotSupervisorReport::default())
+            },
+            source_dyn,
+            metrics,
+            engine,
+        ));
+
+        sleep(SOURCE_STATUS_INTERVAL * 2).await;
+        let replay = metric_text(&registry);
+        assert!(replay.contains(
+            "ds4proxy_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"replay\"} 1"
+        ));
+        assert!(replay.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 0"));
+
+        source.phase.store(1, Ordering::Release);
+        sleep(SOURCE_STATUS_INTERVAL * 2).await;
+        let ready = metric_text(&registry);
+        assert!(ready.contains(
+            "ds4proxy_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"ready\"} 1"
+        ));
+        assert!(ready.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 1"));
+        assert!(ready.contains("ds4proxy_snapshot_companion_source_ready{engine=\"engine-0\"} 1"));
+        assert!(
+            ready.contains(
+                "ds4proxy_snapshot_companion_source_indexed_blocks{engine=\"engine-0\"} 42"
+            )
+        );
+
+        source.phase.store(2, Ordering::Release);
+        sleep(SOURCE_STATUS_INTERVAL * 2).await;
+        let fenced = metric_text(&registry);
+        assert!(fenced.contains(
+            "ds4proxy_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"fenced\"} 1"
+        ));
+        assert!(fenced.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 0"));
+        finish.send(()).unwrap();
+        observer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn supervisor_start_failure_removes_published_socket() {
         let files = TestFiles::new();
         let socket = files.socket.clone();
+        let registry = Registry::new();
+        let registry_ref = &registry;
+        let socket_ref = &socket;
         let (_, shutdown) = watch::channel(false);
         let result = run_snapshot_companion_with(
             files.config(),
-            &Registry::new(),
+            &registry,
             Some(source()),
             shutdown,
             move |listener, supervisor, _, _| async move {
-                assert!(socket.exists());
+                assert!(socket_ref.exists());
                 assert_eq!(supervisor.session_timeout, Duration::from_millis(100));
+                let text = metric_text(registry_ref);
+                assert!(text.contains(
+                    "ds4proxy_snapshot_companion_listening{engine=\"engine-0\"} 1"
+                ));
+                assert!(
+                    text.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 0")
+                );
+                assert!(text.contains(
+                    "ds4proxy_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"unknown\"} 1"
+                ));
                 drop(listener);
                 Err(SnapshotSupervisorError::Listener)
             },
@@ -460,6 +600,10 @@ mod tests {
             ))
         ));
         assert!(!files.socket.exists());
+        assert!(
+            metric_text(&registry)
+                .contains("ds4proxy_snapshot_companion_listening{engine=\"engine-0\"} 0")
+        );
     }
 
     #[tokio::test]

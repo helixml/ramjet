@@ -11,6 +11,7 @@ use prometheus::{
 use thiserror::Error;
 
 use crate::companion_config::SnapshotCompanionConfig;
+use crate::snapshot_producer::{SnapshotProducerSourcePhase, SnapshotProducerSourceStatus};
 use crate::snapshot_tail::SnapshotTailFenceReason;
 
 const ENGINE_SLOTS: [CompanionEngineSlot; 2] = [
@@ -306,7 +307,13 @@ impl CompanionMetricsError {
 pub struct CompanionMetrics {
     source_count: usize,
     enabled: Gauge,
+    listening: GaugeVec,
     ready: GaugeVec,
+    source_ready: GaugeVec,
+    source_phase: GaugeVec,
+    source_watermark_present: GaugeVec,
+    source_indexed_blocks: GaugeVec,
+    source_active_sessions: GaugeVec,
     sessions: GaugeVec,
     session_results: CounterVec,
     tail_queue_depth: GaugeVec,
@@ -350,9 +357,39 @@ impl CompanionMetrics {
                 "ds4proxy_snapshot_companion_enabled",
                 "Whether snapshot companion serving is configured",
             ))?,
+            listening: gauge(
+                "ds4proxy_snapshot_companion_listening",
+                "Whether the companion Unix socket is published and accepting clients",
+                &["engine"],
+            )?,
             ready: gauge(
                 "ds4proxy_snapshot_companion_ready",
-                "Whether an engine companion state is ready to serve snapshots",
+                "Whether the companion is listening with an authoritative exact source",
+                &["engine"],
+            )?,
+            source_ready: gauge(
+                "ds4proxy_snapshot_companion_source_ready",
+                "Whether the exact source is authoritative and ready for snapshots",
+                &["engine"],
+            )?,
+            source_phase: gauge(
+                "ds4proxy_snapshot_companion_source_phase",
+                "Current exact-source lifecycle as a bounded one-hot phase",
+                &["engine", "phase"],
+            )?,
+            source_watermark_present: gauge(
+                "ds4proxy_snapshot_companion_source_watermark_present",
+                "Whether the exact source has an authoritative watermark",
+                &["engine"],
+            )?,
+            source_indexed_blocks: gauge(
+                "ds4proxy_snapshot_companion_source_indexed_blocks",
+                "Blocks retained by the exact companion source",
+                &["engine"],
+            )?,
+            source_active_sessions: gauge(
+                "ds4proxy_snapshot_companion_source_active_sessions",
+                "Sessions currently registered with the exact companion source",
                 &["engine"],
             )?,
             sessions: gauge(
@@ -474,10 +511,45 @@ impl CompanionMetrics {
         Ok(CompanionEngineSlot { index })
     }
 
-    pub fn set_ready(&self, engine: CompanionEngineSlot, ready: bool) {
+    pub fn set_listening(&self, engine: CompanionEngineSlot, listening: bool) {
+        let engine = engine.label();
+        self.listening
+            .with_label_values(&[engine])
+            .set(f64::from(listening));
+        let source_ready = self.source_ready.with_label_values(&[engine]).get() != 0.0;
         self.ready
-            .with_label_values(&[engine.label()])
-            .set(f64::from(ready));
+            .with_label_values(&[engine])
+            .set(f64::from(listening && source_ready));
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    pub fn update_source_status(
+        &self,
+        engine: CompanionEngineSlot,
+        status: SnapshotProducerSourceStatus,
+    ) {
+        let engine = engine.label();
+        self.source_ready
+            .with_label_values(&[engine])
+            .set(f64::from(status.ready));
+        let listening = self.listening.with_label_values(&[engine]).get() != 0.0;
+        self.ready
+            .with_label_values(&[engine])
+            .set(f64::from(listening && status.ready));
+        self.source_watermark_present
+            .with_label_values(&[engine])
+            .set(f64::from(status.watermark_present));
+        self.source_indexed_blocks
+            .with_label_values(&[engine])
+            .set(status.indexed_blocks as f64);
+        self.source_active_sessions
+            .with_label_values(&[engine])
+            .set(status.active_sessions as f64);
+        for phase in source_phases() {
+            self.source_phase
+                .with_label_values(&[engine, source_phase_label(phase)])
+                .set(f64::from(phase == status.phase));
+        }
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -639,7 +711,19 @@ impl CompanionMetrics {
     fn initialize_series(&self) {
         for engine in ENGINE_SLOTS {
             let engine_label = engine.label();
+            self.listening.with_label_values(&[engine_label]);
             self.ready.with_label_values(&[engine_label]);
+            self.source_ready.with_label_values(&[engine_label]);
+            self.source_watermark_present
+                .with_label_values(&[engine_label]);
+            self.source_indexed_blocks
+                .with_label_values(&[engine_label]);
+            self.source_active_sessions
+                .with_label_values(&[engine_label]);
+            for phase in source_phases() {
+                self.source_phase
+                    .with_label_values(&[engine_label, source_phase_label(phase)]);
+            }
             self.published_generation.with_label_values(&[engine_label]);
             self.published_index_entries
                 .with_label_values(&[engine_label]);
@@ -708,7 +792,13 @@ impl CompanionMetrics {
     fn collectors(&self) -> Vec<Box<dyn Collector>> {
         vec![
             Box::new(self.enabled.clone()),
+            Box::new(self.listening.clone()),
             Box::new(self.ready.clone()),
+            Box::new(self.source_ready.clone()),
+            Box::new(self.source_phase.clone()),
+            Box::new(self.source_watermark_present.clone()),
+            Box::new(self.source_indexed_blocks.clone()),
+            Box::new(self.source_active_sessions.clone()),
             Box::new(self.sessions.clone()),
             Box::new(self.session_results.clone()),
             Box::new(self.tail_queue_depth.clone()),
@@ -727,6 +817,26 @@ impl CompanionMetrics {
             Box::new(self.discards.clone()),
             Box::new(self.identity_changes.clone()),
         ]
+    }
+}
+
+const fn source_phases() -> [SnapshotProducerSourcePhase; 5] {
+    [
+        SnapshotProducerSourcePhase::Unknown,
+        SnapshotProducerSourcePhase::Replay,
+        SnapshotProducerSourcePhase::Building,
+        SnapshotProducerSourcePhase::Ready,
+        SnapshotProducerSourcePhase::Fenced,
+    ]
+}
+
+const fn source_phase_label(phase: SnapshotProducerSourcePhase) -> &'static str {
+    match phase {
+        SnapshotProducerSourcePhase::Unknown => "unknown",
+        SnapshotProducerSourcePhase::Replay => "replay",
+        SnapshotProducerSourcePhase::Building => "building",
+        SnapshotProducerSourcePhase::Ready => "ready",
+        SnapshotProducerSourcePhase::Fenced => "fenced",
     }
 }
 
@@ -805,7 +915,13 @@ mod tests {
         let text = text(&registry);
         for expected in [
             "ds4proxy_snapshot_companion_enabled 1",
+            "ds4proxy_snapshot_companion_listening{engine=\"engine-0\"} 0",
             "ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 0",
+            "ds4proxy_snapshot_companion_source_ready{engine=\"engine-0\"} 0",
+            "ds4proxy_snapshot_companion_source_phase{engine=\"engine-1\",phase=\"fenced\"} 0",
+            "ds4proxy_snapshot_companion_source_watermark_present{engine=\"engine-0\"} 0",
+            "ds4proxy_snapshot_companion_source_indexed_blocks{engine=\"engine-0\"} 0",
+            "ds4proxy_snapshot_companion_source_active_sessions{engine=\"engine-1\"} 0",
             "ds4proxy_snapshot_companion_sessions{engine=\"engine-1\",state=\"catching_up\"} 0",
             "ds4proxy_snapshot_companion_sessions_total{engine=\"engine-0\",outcome=\"rejected\",reason=\"authentication\"} 0",
             "ds4proxy_snapshot_companion_tail_queue_depth{client_slot=\"client-1\",engine=\"engine-0\"} 0",
@@ -842,7 +958,17 @@ mod tests {
         let metrics =
             CompanionMetrics::new(&registry, &config(SnapshotCompanionMode::Serve)).unwrap();
         let engine = metrics.engine_slot(1).unwrap();
-        metrics.set_ready(engine, true);
+        metrics.set_listening(engine, true);
+        metrics.update_source_status(
+            engine,
+            SnapshotProducerSourceStatus {
+                phase: SnapshotProducerSourcePhase::Ready,
+                ready: true,
+                watermark_present: true,
+                active_sessions: 2,
+                indexed_blocks: 36_612,
+            },
+        );
         metrics.set_session_state(engine, CompanionSessionState::Published, 1);
         metrics.record_session(engine, CompanionSessionResult::Completed);
         metrics.set_tail_queue_depth(engine, 0, 4).unwrap();
@@ -861,13 +987,42 @@ mod tests {
         assert!(metrics.set_tail_queue_depth(engine, 2, 0).is_err());
         assert!(metrics.engine_slot(2).is_err());
 
-        let text = text(&registry);
-        assert!(text.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-1\"} 1"));
-        assert!(text.contains(
+        let before_stop = text(&registry);
+        assert!(
+            before_stop.contains("ds4proxy_snapshot_companion_listening{engine=\"engine-1\"} 1")
+        );
+        assert!(before_stop.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-1\"} 1"));
+        assert!(
+            before_stop.contains("ds4proxy_snapshot_companion_source_ready{engine=\"engine-1\"} 1")
+        );
+        assert!(before_stop.contains(
+            "ds4proxy_snapshot_companion_source_phase{engine=\"engine-1\",phase=\"ready\"} 1"
+        ));
+        assert!(
+            before_stop.contains(
+                "ds4proxy_snapshot_companion_source_active_sessions{engine=\"engine-1\"} 2"
+            )
+        );
+        assert_eq!(
+            before_stop
+                .lines()
+                .filter(|line| line.starts_with("ds4proxy_snapshot_companion_source_phase{"))
+                .count(),
+            ENGINE_SLOTS.len() * source_phases().len()
+        );
+
+        metrics.set_listening(engine, false);
+        let stopped = text(&registry);
+        assert!(stopped.contains("ds4proxy_snapshot_companion_listening{engine=\"engine-1\"} 0"));
+        assert!(stopped.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-1\"} 0"));
+        assert!(
+            stopped.contains("ds4proxy_snapshot_companion_source_ready{engine=\"engine-1\"} 1")
+        );
+        assert!(before_stop.contains(
             "ds4proxy_snapshot_companion_published_index_entries{engine=\"engine-1\"} 36612"
         ));
         assert!(
-            text.contains(
+            before_stop.contains(
                 "ds4proxy_snapshot_companion_published_tokens{engine=\"engine-1\"} 9216000"
             )
         );
@@ -878,7 +1033,7 @@ mod tests {
             "snapshot-session",
         ] {
             assert!(
-                !text.contains(forbidden),
+                !before_stop.contains(forbidden),
                 "metric output leaked {forbidden}"
             );
         }
