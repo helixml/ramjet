@@ -60,7 +60,7 @@ if destination_result=$(crane digest "$destination" 2>&1); then
   fail destination_conflict
 fi
 case "$destination_result" in
-  *MANIFEST_UNKNOWN*|*NAME_UNKNOWN*|*"manifest unknown"*|*"404 Not Found"*|*"not found"*) ;;
+  *MANIFEST_UNKNOWN*|*NAME_UNKNOWN*|*"manifest unknown"*|*"404 Not Found"*) ;;
   *) fail destination_lookup ;;
 esac
 

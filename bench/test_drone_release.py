@@ -126,6 +126,7 @@ class DroneReleaseTest(unittest.TestCase):
             "      different) printf '%s\\n' sha256:other ;;\n"
             "      missing) echo MANIFEST_UNKNOWN >&2; exit 1 ;;\n"
             "      error) echo registry_unavailable >&2; exit 1 ;;\n"
+            "      misleading) echo credential_helper_not_found >&2; exit 1 ;;\n"
             "    esac ;;\n"
             "  copy)\n"
             "    printf '%s\\n' \"$2 -> $3\" >> crane-copies\n"
@@ -266,13 +267,16 @@ class DroneReleaseTest(unittest.TestCase):
         self.assertFalse((self.root / "crane-copies").exists())
 
     def test_registry_publish_fails_closed_when_destination_lookup_is_ambiguous(self):
-        environment = self.prepared_publish_environment("error")
-        result = self.run_script(PUBLISH, "lb", environment=environment)
-        self.assertEqual(result.returncode, 2, result)
-        self.assertEqual(
-            result.stderr.strip(), "release_publish=error reason=destination_lookup"
-        )
-        self.assertFalse((self.root / "crane-copies").exists())
+        for state in ("error", "misleading"):
+            with self.subTest(state=state):
+                environment = self.prepared_publish_environment(state)
+                result = self.run_script(PUBLISH, "lb", environment=environment)
+                self.assertEqual(result.returncode, 2, result)
+                self.assertEqual(
+                    result.stderr.strip(),
+                    "release_publish=error reason=destination_lookup",
+                )
+                self.assertFalse((self.root / "crane-copies").exists())
 
 
 if __name__ == "__main__":
