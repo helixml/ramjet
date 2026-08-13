@@ -40,4 +40,3 @@ for component in "${components[@]}"; do
 done
 
 echo "snapshot companion host preflight passed"
-
