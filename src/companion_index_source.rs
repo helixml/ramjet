@@ -189,38 +189,28 @@ impl CompanionIndexSource {
         batch: &SequencedBatch,
     ) -> Result<DigestDeltaSummary, CompanionIndexSourceError> {
         let mut state = self.state.lock();
-        let replay = state
-            .replay
-            .as_ref()
-            .ok_or(CompanionIndexSourceError::InvalidReplay)?;
-        if replay
-            .last_sequence
-            .is_some_and(|previous| batch.sequence <= previous)
-        {
-            state.replay = None;
-            state.fenced = true;
+        apply_replay_locked(&self.delta, &mut state, batch)
+    }
+
+    /// Apply replay only while the caller still owns the expected companion
+    /// generation. This closes the cancellation race where an abandoned
+    /// blocking replay worker observes shutdown after a fresh rebuild started.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidReplay` without touching the current stage when the
+    /// generation changed, and otherwise has the same behavior as
+    /// [`Self::apply_replay`].
+    pub fn apply_replay_for_generation(
+        &self,
+        expected_generation: u64,
+        batch: &SequencedBatch,
+    ) -> Result<DigestDeltaSummary, CompanionIndexSourceError> {
+        let mut state = self.state.lock();
+        if state.identity.companion_generation != expected_generation {
             return Err(CompanionIndexSourceError::InvalidReplay);
         }
-        let result = self.delta.apply_batch(
-            &mut state
-                .replay
-                .as_mut()
-                .ok_or(CompanionIndexSourceError::InvalidReplay)?
-                .index,
-            &batch.batch,
-        );
-        let Ok(summary) = result else {
-            state.replay = None;
-            state.fenced = true;
-            return Err(CompanionIndexSourceError::Index);
-        };
-        let replay = state
-            .replay
-            .as_mut()
-            .ok_or(CompanionIndexSourceError::InvalidReplay)?;
-        replay.last_sequence = Some(batch.sequence);
-        state.fenced = false;
-        Ok(summary)
+        apply_replay_locked(&self.delta, &mut state, batch)
     }
 
     /// Atomically publish a completed replay through the exact `through`
@@ -429,6 +419,45 @@ impl Drop for SourceBuildGuard {
         let mut state = self.state.lock();
         state.builds_in_progress = state.builds_in_progress.saturating_sub(1);
     }
+}
+
+fn apply_replay_locked(
+    delta: &SnapshotDigestDeltaAdapter,
+    state: &mut SourceState,
+    batch: &SequencedBatch,
+) -> Result<DigestDeltaSummary, CompanionIndexSourceError> {
+    let replay = state
+        .replay
+        .as_ref()
+        .ok_or(CompanionIndexSourceError::InvalidReplay)?;
+    if replay
+        .last_sequence
+        .is_some_and(|previous| batch.sequence <= previous)
+    {
+        state.replay = None;
+        state.fenced = true;
+        return Err(CompanionIndexSourceError::InvalidReplay);
+    }
+    let result = delta.apply_batch(
+        &mut state
+            .replay
+            .as_mut()
+            .ok_or(CompanionIndexSourceError::InvalidReplay)?
+            .index,
+        &batch.batch,
+    );
+    let Ok(summary) = result else {
+        state.replay = None;
+        state.fenced = true;
+        return Err(CompanionIndexSourceError::Index);
+    };
+    let replay = state
+        .replay
+        .as_mut()
+        .ok_or(CompanionIndexSourceError::InvalidReplay)?;
+    replay.last_sequence = Some(batch.sequence);
+    state.fenced = false;
+    Ok(summary)
 }
 
 fn map_build_error(error: &DigestIndexError) -> SnapshotProducerSourceError {
