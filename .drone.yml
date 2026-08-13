@@ -74,11 +74,43 @@ steps:
       - agent-protocol
       - deployment-compose
 
+  # Compile the locked dependency graph once per manifest/toolchain/dependency
+  # Dockerfile key. The content-addressed tag is then an explicit base image,
+  # not a best-effort BuildKit cache hint. Drone corrects dependencies around
+  # this conditionally skipped step for source-only pushes.
+  - name: publish-rust-deps-image
+    image: plugins/docker
+    pull: if-not-exists
+    environment:
+      DOCKER_BUILDKIT: "1"
+    settings:
+      registry: ghcr.io
+      repo: ghcr.io/helixml/mini-dynamo
+      dockerfile: Dockerfile.deps
+      username:
+        from_secret: ghcr_username
+      password:
+        from_secret: ghcr_token
+      tags:
+        - rust-deps-sha256-73812d07a8a087cd8dfc6d3a882ebdc01be55451e465b4faed964881249cc33a
+    when:
+      event:
+        - push
+      paths:
+        include:
+          - Cargo.toml
+          - Cargo.lock
+          - rust-toolchain.toml
+          - Dockerfile.deps
+          - .docker/rust-deps-key
+    depends_on:
+      - quality-complete
+
   # GHCR publishing lives here, not GitHub Actions. The push-event guard keeps
-  # registry credentials out of pull-request builds.
+  # registry credentials out of pull-request builds. Both release images wait
+  # for a dependency seed when its inputs changed; otherwise Drone removes the
+  # skipped dependency from the graph.
   - name: publish-image
-    # Use the publisher privileged on this runner. Inline BuildKit metadata in
-    # rust-edge makes its dependency layer importable by the next fresh DinD.
     image: plugins/docker
     pull: if-not-exists
     environment:
@@ -93,16 +125,11 @@ steps:
       tags:
         - rust-${DRONE_COMMIT_SHA:0:7}
         - rust-edge
-      build_args:
-        - BUILDKIT_INLINE_CACHE=1
-      cache_from:
-        - ghcr.io/helixml/mini-dynamo:rust-edge
     when:
       event:
         - push
       paths:
         include:
-          - .drone.yml
           - Cargo.toml
           - Cargo.lock
           - rust-toolchain.toml
@@ -111,11 +138,11 @@ steps:
           - src/**
     depends_on:
       - quality-complete
+      - publish-rust-deps-image
 
   # The snapshot companion is a separate, off-by-default executable and image.
-  # Build it only when its Rust/build inputs change. An inline dependency layer
-  # keeps the cold DinD publisher fast without requiring privileged cache
-  # plugins on this runner.
+  # Build it only when its Rust/build inputs change; it shares the same explicit
+  # dependency image as the ordinary LB.
   - name: publish-companion-image
     image: plugins/docker
     pull: if-not-exists
@@ -132,16 +159,11 @@ steps:
       tags:
         - companion-rust-${DRONE_COMMIT_SHA:0:7}
         - companion-rust-edge
-      build_args:
-        - BUILDKIT_INLINE_CACHE=1
-      cache_from:
-        - ghcr.io/helixml/mini-dynamo:companion-rust-edge
     when:
       event:
         - push
       paths:
         include:
-          - .drone.yml
           - Cargo.toml
           - Cargo.lock
           - rust-toolchain.toml
@@ -149,6 +171,7 @@ steps:
           - src/**
     depends_on:
       - quality-complete
+      - publish-rust-deps-image
 
 trigger:
   event:

@@ -1,22 +1,15 @@
 # syntax=docker/dockerfile:1.7
-FROM rust:1.95-bookworm AS build
+ARG RUST_DEPS_IMAGE=ghcr.io/helixml/mini-dynamo:rust-deps-sha256-73812d07a8a087cd8dfc6d3a882ebdc01be55451e465b4faed964881249cc33a
+FROM ${RUST_DEPS_IMAGE} AS build
 WORKDIR /src
 
-# Build the dependency graph before copying application sources. The resulting
-# target directory is an ordinary layer so BuildKit's registry exporter can
-# reuse it on an ephemeral CI runner; cache-mount contents are builder-local and
-# are not part of an exported cache.
+# Re-copy the manifests so a deliberately overridden or stale dependency base
+# cannot hide a mismatch. The default content-keyed base contains every locked
+# dependency and makes this build network-independent.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-RUN mkdir src \
-    && printf 'fn main() {}\n' > src/main.rs \
-    && cargo build --release --locked --bin mini-dynamo \
-    && rm -rf src \
-    && rm -f target/release/mini-dynamo target/release/deps/mini_dynamo-* \
-    && rm -rf target/release/.fingerprint/mini-dynamo-*
-
 COPY src ./src
 COPY compat ./compat
-RUN cargo build --release --locked --bin mini-dynamo \
+RUN cargo build --release --locked --offline --bin mini-dynamo \
     && cp target/release/mini-dynamo /mini-dynamo
 
 FROM gcr.io/distroless/cc-debian12

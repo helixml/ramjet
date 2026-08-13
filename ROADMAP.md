@@ -318,12 +318,15 @@ node06). The design rationale for each lives in DESIGN.md.
 - ✅ **Drone-only CI + package publishing.** One PR pipeline fetches Cargo once,
   then runs strict Clippy, the complete Rust suite, GPU-free protocol tests, and
   Compose validation in parallel. Main publishes both the LB and companion
-  images only after that quality gate. Inline BuildKit metadata in the rolling
-  edge tags survives the runner's ephemeral Docker daemon; publishers are
-  path-gated so documentation/deployment changes cannot erase dependency-cache
-  metadata. The Rust cutover is complete and the obsolete Go lane and packages
-  are removed. Preserve the measured ~58–59s PR quality budget and investigate
-  cache or scheduling regressions rather than adding duplicate CI systems.
+  images only after that quality gate. A shared, source-free dependency image
+  is keyed by the complete SHA-256 of the pinned toolchain, Cargo manifests,
+  lockfile, and dependency Dockerfile; both release builds inherit it explicitly
+  and compile offline instead of trusting Docker 20.10 inline-cache import.
+  Dependency inputs rebuild that image first, while CI/docs/deploy-only changes
+  run no publisher. The Rust cutover is complete and the obsolete Go lane and
+  packages are removed. Preserve the measured ~58–59s PR quality budget and
+  investigate cache or scheduling regressions rather than adding duplicate CI
+  systems.
 - ⬜ **Secure post-deploy Helix acceptance.** The retired plaintext key was
   removed from both node06 guides. The separately supplied internal-account
   credential is also unusable for the test app (HTTP 403; `/users/me` returns

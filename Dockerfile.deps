@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1.7
+# This image is content-keyed by Cargo.toml, Cargo.lock, rust-toolchain.toml,
+# and this Dockerfile. Keep it source-free and secret-free: it is a public
+# build input shared by both release images.
+FROM rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1
+WORKDIR /src
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+RUN mkdir -p src/bin \
+    && printf 'pub fn dependency_seed() {}\n' > src/lib.rs \
+    && printf 'fn main() {}\n' > src/main.rs \
+    && printf 'fn main() {}\n' > src/bin/mini-dynamo-snapshot-companion.rs \
+    && printf 'fn main() {}\n' > src/bin/mini-dynamo-attestation-provisioner.rs \
+    && cargo build --release --locked --bins \
+    && cargo clean --release -p mini-dynamo \
+    && rm -rf src
