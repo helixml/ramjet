@@ -665,7 +665,10 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   or live gap is already beyond that bounded replay window, the same subscribed
   connection remains stably fenced and observe-only; ordinary subsequent events
   neither cause reconnect/generation churn nor restore authority, while a real
-  all-blocks clear establishes a safe new boundary. The standalone
+  all-blocks clear establishes a safe new boundary. The same rule now applies
+  after a structurally invalid completed full replay: repeating identical
+  history against the synchronous publisher cannot establish authority, while
+  transport failures remain retryable. The standalone
   offline Compose/security harness now models the current one-source runtime as
   two isolated processes and authority domains: distinct companions, UIDs,
   tmpfs directories, sockets, secrets, clients, and readiness checks per engine.
