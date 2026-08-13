@@ -1,12 +1,22 @@
 //! Fail-closed lifecycle fencing for snapshot bootstrap and live-tail catch-up.
 //!
-//! This module deliberately owns no transport and no index. A caller first
-//! authenticates and decodes a full-engine snapshot, then presents only its
-//! lifecycle metadata here. Tail payloads may be committed only when
-//! [`TailAction::Apply`] is returned, and an index may be published only when
-//! [`CaughtUpAction::Ready`] is returned.
+//! This module owns no transport or index. Snapshot input is the opaque result
+//! of session authentication. Tail, caught-up, and identity frames are also
+//! opaque and have crate-private constructors: a future session decoder is the
+//! only intended production caller. Until that decoder exists this foundation
+//! is deliberately unwired and is not deployable.
+//!
+//! The companion's contiguous `delivery_sequence` is distinct from vLLM's
+//! sparse real-event watermark. Strict `+1` checks apply only to delivery
+//! sequence; a jump in real-event watermark is valid because scheduler steps
+//! without KV events are not published.
 
-use crate::kv_snapshot::{EngineIncarnation, ResetScope};
+use crate::{
+    kv_snapshot::{EngineIncarnation, ResetScope},
+    snapshot_session::AuthenticatedSnapshot,
+};
+
+const SNAPSHOT_DELIVERY_SEQUENCE: u64 = 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnapshotTailState {
@@ -18,13 +28,13 @@ pub enum SnapshotTailState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnapshotTailFenceReason {
-    UnauthenticatedSnapshot,
     StaleSnapshot,
     UnsupportedResetScope,
     IncarnationChanged,
     DigestKeyChanged,
     GenerationChanged,
     TailGap,
+    EventWatermarkRegression,
     SequenceOverflow,
     BufferOverflow,
     CaughtUpMismatch,
@@ -38,13 +48,13 @@ impl SnapshotTailFenceReason {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::UnauthenticatedSnapshot => "unauthenticated_snapshot",
             Self::StaleSnapshot => "stale_snapshot",
             Self::UnsupportedResetScope => "unsupported_reset_scope",
             Self::IncarnationChanged => "incarnation_changed",
             Self::DigestKeyChanged => "digest_key_changed",
             Self::GenerationChanged => "generation_changed",
             Self::TailGap => "tail_gap",
+            Self::EventWatermarkRegression => "event_watermark_regression",
             Self::SequenceOverflow => "sequence_overflow",
             Self::BufferOverflow => "buffer_overflow",
             Self::CaughtUpMismatch => "caught_up_mismatch",
@@ -56,7 +66,7 @@ impl SnapshotTailFenceReason {
 }
 
 /// Public lifecycle state. It intentionally excludes engine identity, key ID,
-/// event sequences, and snapshot/index content.
+/// event/delivery sequences, and snapshot/index content.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SnapshotTailStatus {
     pub revision: u64,
@@ -65,33 +75,108 @@ pub struct SnapshotTailStatus {
     pub reason: Option<SnapshotTailFenceReason>,
 }
 
-/// Identity carried by an authenticated snapshot or live-tail control plane.
-#[derive(Clone, Copy, Debug)]
-pub struct SnapshotTailIdentity<'a> {
-    pub engine_incarnation: &'a EngineIncarnation,
-    pub digest_key_id: &'a [u8],
-    pub generation: u64,
+#[derive(Clone, Copy)]
+struct AuthenticatedIdentity<'a> {
+    engine_incarnation: &'a EngineIncarnation,
+    digest_key_id: &'a [u8],
+    generation: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct AuthenticatedSnapshot<'a> {
-    pub identity: SnapshotTailIdentity<'a>,
-    pub watermark: u64,
-    pub reset_scope: ResetScope,
-    /// Must be set only after the snapshot frame and its channel/session have
-    /// both been authenticated by the transport layer.
-    pub authenticated: bool,
+/// Opaque output expected from the future authenticated tail-frame decoder.
+/// No public constructor exists, so callers outside the crate cannot assert
+/// that arbitrary metadata was authenticated.
+pub struct AuthenticatedTailFrame<'a> {
+    identity: AuthenticatedIdentity<'a>,
+    delivery_sequence: u64,
+    event_watermark: u64,
+}
+
+impl<'a> AuthenticatedTailFrame<'a> {
+    #[allow(dead_code)]
+    pub(crate) const fn from_authenticated_session(
+        engine_incarnation: &'a EngineIncarnation,
+        digest_key_id: &'a [u8],
+        generation: u64,
+        delivery_sequence: u64,
+        event_watermark: u64,
+    ) -> Self {
+        Self {
+            identity: AuthenticatedIdentity {
+                engine_incarnation,
+                digest_key_id,
+                generation,
+            },
+            delivery_sequence,
+            event_watermark,
+        }
+    }
+}
+
+/// Opaque explicit end-of-tail marker from an authenticated session frame.
+pub struct AuthenticatedCaughtUpFrame<'a> {
+    identity: AuthenticatedIdentity<'a>,
+    delivery_sequence: u64,
+    event_watermark: u64,
+}
+
+impl<'a> AuthenticatedCaughtUpFrame<'a> {
+    #[allow(dead_code)]
+    pub(crate) const fn from_authenticated_session(
+        engine_incarnation: &'a EngineIncarnation,
+        digest_key_id: &'a [u8],
+        generation: u64,
+        delivery_sequence: u64,
+        event_watermark: u64,
+    ) -> Self {
+        Self {
+            identity: AuthenticatedIdentity {
+                engine_incarnation,
+                digest_key_id,
+                generation,
+            },
+            delivery_sequence,
+            event_watermark,
+        }
+    }
+}
+
+/// Opaque authenticated control-plane identity refresh.
+pub struct AuthenticatedIdentityFrame<'a> {
+    identity: AuthenticatedIdentity<'a>,
+}
+
+impl<'a> AuthenticatedIdentityFrame<'a> {
+    #[allow(dead_code)]
+    pub(crate) const fn from_authenticated_session(
+        engine_incarnation: &'a EngineIncarnation,
+        digest_key_id: &'a [u8],
+        generation: u64,
+    ) -> Self {
+        Self {
+            identity: AuthenticatedIdentity {
+                engine_incarnation,
+                digest_key_id,
+                generation,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnapshotAction {
-    Accepted { watermark: u64 },
+    Accepted {
+        snapshot_watermark: u64,
+        delivery_sequence: u64,
+    },
     Fenced(SnapshotTailFenceReason),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TailAction {
-    Apply { sequence: u64 },
+    Apply {
+        delivery_sequence: u64,
+        event_watermark: u64,
+    },
     Duplicate,
     Fenced(SnapshotTailFenceReason),
 }
@@ -114,8 +199,9 @@ pub enum IdentityAction {
 pub struct SnapshotTailFence {
     expected_incarnation: EngineIncarnation,
     expected_digest_key_id: Vec<u8>,
-    minimum_watermark: u64,
-    applied_sequence: Option<u64>,
+    minimum_snapshot_watermark: u64,
+    applied_delivery_sequence: Option<u64>,
+    applied_event_watermark: Option<u64>,
     revision: u64,
     generation: u64,
     state: SnapshotTailState,
@@ -126,15 +212,16 @@ impl SnapshotTailFence {
     #[must_use]
     pub fn start_bootstrap(
         expected_incarnation: EngineIncarnation,
-        minimum_watermark: u64,
+        minimum_snapshot_watermark: u64,
         expected_digest_key_id: Vec<u8>,
         generation: u64,
     ) -> Self {
         Self {
             expected_incarnation,
             expected_digest_key_id,
-            minimum_watermark,
-            applied_sequence: None,
+            minimum_snapshot_watermark,
+            applied_delivery_sequence: None,
+            applied_event_watermark: None,
             revision: 1,
             generation,
             state: SnapshotTailState::AwaitingSnapshot,
@@ -152,46 +239,54 @@ impl SnapshotTailFence {
         }
     }
 
-    /// Validate an already-decoded snapshot before any snapshot records are
-    /// committed to the private catch-up index.
-    pub fn accept_snapshot(&mut self, snapshot: AuthenticatedSnapshot<'_>) -> SnapshotAction {
+    /// Validate session-authenticated snapshot metadata before committing its
+    /// records to a private catch-up index. The decoded snapshot's reset scope
+    /// is supplied separately because it is part of the snapshot body.
+    pub fn accept_snapshot(
+        &mut self,
+        snapshot: &AuthenticatedSnapshot,
+        reset_scope: ResetScope,
+    ) -> SnapshotAction {
         if let Some(reason) = self.reason {
             return SnapshotAction::Fenced(reason);
         }
         if self.state != SnapshotTailState::AwaitingSnapshot {
             return SnapshotAction::Fenced(self.fence(SnapshotTailFenceReason::UnexpectedState));
         }
-        if !snapshot.authenticated {
-            return SnapshotAction::Fenced(
-                self.fence(SnapshotTailFenceReason::UnauthenticatedSnapshot),
-            );
-        }
-        if let Err(reason) = self.check_identity(snapshot.identity) {
+        let identity = AuthenticatedIdentity {
+            engine_incarnation: snapshot.engine_incarnation(),
+            digest_key_id: snapshot.digest_key_id(),
+            generation: snapshot.companion_generation(),
+        };
+        if let Err(reason) = self.check_identity(identity) {
             return SnapshotAction::Fenced(self.fence(reason));
         }
-        if snapshot.reset_scope != ResetScope::full_engine() {
+        if reset_scope != ResetScope::full_engine() {
             return SnapshotAction::Fenced(
                 self.fence(SnapshotTailFenceReason::UnsupportedResetScope),
             );
         }
-        if snapshot.watermark < self.minimum_watermark {
+        let watermark = snapshot.snapshot_watermark();
+        if watermark < self.minimum_snapshot_watermark {
             return SnapshotAction::Fenced(self.fence(SnapshotTailFenceReason::StaleSnapshot));
         }
-        if snapshot.watermark == u64::MAX {
-            return SnapshotAction::Fenced(self.fence(SnapshotTailFenceReason::SequenceOverflow));
-        }
 
-        self.applied_sequence = Some(snapshot.watermark);
+        // The authenticated snapshot is delivery item zero. Its real-event
+        // watermark is an independent, potentially sparse engine sequence.
+        self.applied_delivery_sequence = Some(SNAPSHOT_DELIVERY_SEQUENCE);
+        self.applied_event_watermark = Some(watermark);
         self.state = SnapshotTailState::CatchingUp;
         self.bump_revision();
         SnapshotAction::Accepted {
-            watermark: snapshot.watermark,
+            snapshot_watermark: watermark,
+            delivery_sequence: SNAPSHOT_DELIVERY_SEQUENCE,
         }
     }
 
-    /// Sequence one buffered or live event. Identity is checked even for a
-    /// duplicate so a stale stream can never hide a generation/key change.
-    pub fn accept_tail(&mut self, identity: SnapshotTailIdentity<'_>, sequence: u64) -> TailAction {
+    /// Sequence one authenticated buffered/live tail frame. Identity is
+    /// checked before duplicate handling, so a publisher restart with a lower
+    /// delivery sequence cannot masquerade as an old duplicate.
+    pub fn accept_tail(&mut self, frame: &AuthenticatedTailFrame<'_>) -> TailAction {
         if let Some(reason) = self.reason {
             return TailAction::Fenced(reason);
         }
@@ -201,48 +296,54 @@ impl SnapshotTailFence {
         ) {
             return TailAction::Fenced(self.fence(SnapshotTailFenceReason::UnexpectedState));
         }
-        if let Err(reason) = self.check_identity(identity) {
+        if let Err(reason) = self.check_identity(frame.identity) {
             return TailAction::Fenced(self.fence(reason));
         }
 
-        let Some(applied) = self.applied_sequence else {
+        let (Some(applied_delivery), Some(applied_event)) =
+            (self.applied_delivery_sequence, self.applied_event_watermark)
+        else {
             return TailAction::Fenced(self.fence(SnapshotTailFenceReason::UnexpectedState));
         };
-        if sequence <= applied {
+        if frame.delivery_sequence <= applied_delivery {
             return TailAction::Duplicate;
         }
-        let Some(expected) = applied.checked_add(1) else {
+        let Some(expected_delivery) = applied_delivery.checked_add(1) else {
             return TailAction::Fenced(self.fence(SnapshotTailFenceReason::SequenceOverflow));
         };
-        if sequence != expected {
+        if frame.delivery_sequence != expected_delivery {
             return TailAction::Fenced(self.fence(SnapshotTailFenceReason::TailGap));
         }
-        if sequence == u64::MAX {
+        if frame.delivery_sequence == u64::MAX {
             return TailAction::Fenced(self.fence(SnapshotTailFenceReason::SequenceOverflow));
         }
+        if frame.event_watermark <= applied_event {
+            return TailAction::Fenced(
+                self.fence(SnapshotTailFenceReason::EventWatermarkRegression),
+            );
+        }
 
-        self.applied_sequence = Some(sequence);
+        self.applied_delivery_sequence = Some(frame.delivery_sequence);
+        self.applied_event_watermark = Some(frame.event_watermark);
         self.bump_revision();
-        TailAction::Apply { sequence }
+        TailAction::Apply {
+            delivery_sequence: frame.delivery_sequence,
+            event_watermark: frame.event_watermark,
+        }
     }
 
-    /// Publish only when the producer explicitly marks the sequence already
-    /// applied by this consumer as caught up.
-    pub fn caught_up(
-        &mut self,
-        identity: SnapshotTailIdentity<'_>,
-        sequence: u64,
-    ) -> CaughtUpAction {
+    /// Publish only when an authenticated producer marker names the delivery
+    /// sequence and real-event watermark already applied by this consumer.
+    pub fn caught_up(&mut self, frame: &AuthenticatedCaughtUpFrame<'_>) -> CaughtUpAction {
         if let Some(reason) = self.reason {
             return CaughtUpAction::Fenced(reason);
         }
-        if let Err(reason) = self.check_identity(identity) {
+        if let Err(reason) = self.check_identity(frame.identity) {
             return CaughtUpAction::Fenced(self.fence(reason));
         }
-        let Some(applied) = self.applied_sequence else {
-            return CaughtUpAction::Fenced(self.fence(SnapshotTailFenceReason::UnexpectedState));
-        };
-        if sequence != applied {
+        if self.applied_delivery_sequence != Some(frame.delivery_sequence)
+            || self.applied_event_watermark != Some(frame.event_watermark)
+        {
             return CaughtUpAction::Fenced(self.fence(SnapshotTailFenceReason::CaughtUpMismatch));
         }
         match self.state {
@@ -258,13 +359,13 @@ impl SnapshotTailFence {
         }
     }
 
-    /// Observe a control-plane identity refresh even when no tail payload is
-    /// arriving. Rotation or process replacement immediately revokes Ready.
-    pub fn observe_identity(&mut self, identity: SnapshotTailIdentity<'_>) -> IdentityAction {
+    /// Authenticated control-plane refresh for immediate revocation even when
+    /// no tail payload is arriving.
+    pub fn observe_identity(&mut self, frame: &AuthenticatedIdentityFrame<'_>) -> IdentityAction {
         if let Some(reason) = self.reason {
             return IdentityAction::Fenced(reason);
         }
-        match self.check_identity(identity) {
+        match self.check_identity(frame.identity) {
             Ok(()) => IdentityAction::Current,
             Err(reason) => IdentityAction::Fenced(self.fence(reason)),
         }
@@ -284,7 +385,7 @@ impl SnapshotTailFence {
 
     fn check_identity(
         &self,
-        identity: SnapshotTailIdentity<'_>,
+        identity: AuthenticatedIdentity<'_>,
     ) -> Result<(), SnapshotTailFenceReason> {
         if identity.generation != self.generation {
             return Err(SnapshotTailFenceReason::GenerationChanged);
@@ -302,7 +403,8 @@ impl SnapshotTailFence {
         if self.state != SnapshotTailState::Fenced {
             self.state = SnapshotTailState::Fenced;
             self.reason = Some(reason);
-            self.applied_sequence = None;
+            self.applied_delivery_sequence = None;
+            self.applied_event_watermark = None;
             self.bump_revision();
         }
         self.reason.unwrap_or(reason)
@@ -316,9 +418,18 @@ impl SnapshotTailFence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_snapshot::ResetKind;
+    use crate::{
+        kv_snapshot::ResetKind,
+        snapshot_session::{
+            SnapshotSessionBinding, SnapshotSessionChallenge, SnapshotSessionExpectations,
+            SnapshotSessionLimits, SnapshotSessionSecret, decode_authenticated_snapshot,
+            encode_authenticated_snapshot,
+        },
+    };
 
-    const KEY_ID: &[u8] = b"test-key-id";
+    const CHALLENGE: SnapshotSessionChallenge = SnapshotSessionChallenge::new([0x31; 32]);
+    const SECRET_BYTES: [u8; 32] = *b"snapshot-session-secret-32-byte!";
+    const KEY_ID: [u8; 32] = [0x6b; 32];
     const GENERATION: u64 = 7;
 
     fn incarnation(suffix: &str) -> EngineIncarnation {
@@ -335,127 +446,179 @@ mod tests {
         SnapshotTailFence::start_bootstrap(incarnation("a"), floor, KEY_ID.to_vec(), GENERATION)
     }
 
-    fn identity(engine: &EngineIncarnation) -> SnapshotTailIdentity<'_> {
-        SnapshotTailIdentity {
+    fn snapshot(engine: &EngineIncarnation, watermark: u64) -> AuthenticatedSnapshot {
+        let binding = SnapshotSessionBinding {
+            challenge: CHALLENGE,
             engine_incarnation: engine,
-            digest_key_id: KEY_ID,
-            generation: GENERATION,
-        }
+            snapshot_watermark: watermark,
+            digest_key_id: &KEY_ID,
+            companion_generation: GENERATION,
+        };
+        let secret = SnapshotSessionSecret::new(SECRET_BYTES);
+        let frame = encode_authenticated_snapshot(
+            b"opaque-snapshot",
+            binding,
+            &secret,
+            SnapshotSessionLimits::default(),
+        )
+        .unwrap();
+        decode_authenticated_snapshot(
+            &frame,
+            SnapshotSessionExpectations {
+                challenge: CHALLENGE,
+                engine_incarnation: engine,
+                digest_key_id: &KEY_ID,
+                minimum_snapshot_watermark: watermark,
+                minimum_companion_generation: GENERATION,
+            },
+            &secret,
+            SnapshotSessionLimits::default(),
+        )
+        .unwrap()
     }
 
-    fn snapshot(engine: &EngineIncarnation, watermark: u64) -> AuthenticatedSnapshot<'_> {
-        AuthenticatedSnapshot {
-            identity: identity(engine),
-            watermark,
-            reset_scope: ResetScope::full_engine(),
-            authenticated: true,
-        }
+    fn tail(
+        engine: &EngineIncarnation,
+        delivery_sequence: u64,
+        event_watermark: u64,
+    ) -> AuthenticatedTailFrame<'_> {
+        AuthenticatedTailFrame::from_authenticated_session(
+            engine,
+            &KEY_ID,
+            GENERATION,
+            delivery_sequence,
+            event_watermark,
+        )
+    }
+
+    fn caught_up(
+        engine: &EngineIncarnation,
+        delivery_sequence: u64,
+        event_watermark: u64,
+    ) -> AuthenticatedCaughtUpFrame<'_> {
+        AuthenticatedCaughtUpFrame::from_authenticated_session(
+            engine,
+            &KEY_ID,
+            GENERATION,
+            delivery_sequence,
+            event_watermark,
+        )
     }
 
     fn assert_fenced(machine: &SnapshotTailFence, reason: SnapshotTailFenceReason) {
-        let status = machine.status();
-        assert_eq!(status.state, SnapshotTailState::Fenced);
-        assert_eq!(status.reason, Some(reason));
+        assert_eq!(machine.status().state, SnapshotTailState::Fenced);
+        assert_eq!(machine.status().reason, Some(reason));
     }
 
     #[test]
     fn stale_snapshot_fences_while_equal_and_new_watermarks_are_accepted() {
         let engine = incarnation("a");
-
         let mut stale = machine(10);
         assert_eq!(
-            stale.accept_snapshot(snapshot(&engine, 9)),
+            stale.accept_snapshot(&snapshot(&engine, 9), ResetScope::full_engine()),
             SnapshotAction::Fenced(SnapshotTailFenceReason::StaleSnapshot)
         );
-        assert_fenced(&stale, SnapshotTailFenceReason::StaleSnapshot);
 
         for watermark in [10, 11] {
             let mut current = machine(10);
             assert_eq!(
-                current.accept_snapshot(snapshot(&engine, watermark)),
-                SnapshotAction::Accepted { watermark }
+                current.accept_snapshot(&snapshot(&engine, watermark), ResetScope::full_engine()),
+                SnapshotAction::Accepted {
+                    snapshot_watermark: watermark,
+                    delivery_sequence: 0,
+                }
             );
-            assert_eq!(current.status().state, SnapshotTailState::CatchingUp);
         }
     }
 
     #[test]
-    fn tail_is_strictly_contiguous_and_duplicates_are_side_effect_free() {
+    fn sparse_real_watermarks_are_not_delivery_gaps() {
         let engine = incarnation("a");
-        let mut lifecycle = machine(40);
-        lifecycle.accept_snapshot(snapshot(&engine, 40));
-        let revision = lifecycle.status().revision;
-
+        let mut lifecycle = machine(1_000);
+        lifecycle.accept_snapshot(&snapshot(&engine, 1_000), ResetScope::full_engine());
         assert_eq!(
-            lifecycle.accept_tail(identity(&engine), 39),
-            TailAction::Duplicate
+            lifecycle.accept_tail(&tail(&engine, 1, 9_000)),
+            TailAction::Apply {
+                delivery_sequence: 1,
+                event_watermark: 9_000,
+            }
         );
         assert_eq!(
-            lifecycle.accept_tail(identity(&engine), 40),
-            TailAction::Duplicate
+            lifecycle.accept_tail(&tail(&engine, 2, 100_000)),
+            TailAction::Apply {
+                delivery_sequence: 2,
+                event_watermark: 100_000,
+            }
         );
-        assert_eq!(lifecycle.status().revision, revision);
-        assert_eq!(
-            lifecycle.accept_tail(identity(&engine), 41),
-            TailAction::Apply { sequence: 41 }
-        );
-        assert_eq!(
-            lifecycle.accept_tail(identity(&engine), 43),
-            TailAction::Fenced(SnapshotTailFenceReason::TailGap)
-        );
-        assert_fenced(&lifecycle, SnapshotTailFenceReason::TailGap);
     }
 
     #[test]
-    fn ready_requires_exact_explicit_caught_up_marker() {
+    fn delivery_is_contiguous_and_duplicates_are_side_effect_free() {
+        let engine = incarnation("a");
+        let mut lifecycle = machine(40);
+        lifecycle.accept_snapshot(&snapshot(&engine, 40), ResetScope::full_engine());
+        let revision = lifecycle.status().revision;
+        assert_eq!(
+            lifecycle.accept_tail(&tail(&engine, 0, 40)),
+            TailAction::Duplicate
+        );
+        assert_eq!(lifecycle.status().revision, revision);
+        assert!(matches!(
+            lifecycle.accept_tail(&tail(&engine, 1, 50)),
+            TailAction::Apply { .. }
+        ));
+        assert_eq!(
+            lifecycle.accept_tail(&tail(&engine, 3, 60)),
+            TailAction::Fenced(SnapshotTailFenceReason::TailGap)
+        );
+    }
+
+    #[test]
+    fn nonincreasing_event_watermark_fences_only_on_new_delivery() {
+        let engine = incarnation("a");
+        let mut lifecycle = machine(40);
+        lifecycle.accept_snapshot(&snapshot(&engine, 40), ResetScope::full_engine());
+        assert_eq!(
+            lifecycle.accept_tail(&tail(&engine, 0, 1)),
+            TailAction::Duplicate
+        );
+        assert_eq!(
+            lifecycle.accept_tail(&tail(&engine, 1, 40)),
+            TailAction::Fenced(SnapshotTailFenceReason::EventWatermarkRegression)
+        );
+    }
+
+    #[test]
+    fn ready_requires_exact_authenticated_caught_up_marker() {
         let engine = incarnation("a");
         let mut lifecycle = machine(5);
-        lifecycle.accept_snapshot(snapshot(&engine, 5));
-        lifecycle.accept_tail(identity(&engine), 6);
-        assert_eq!(lifecycle.status().state, SnapshotTailState::CatchingUp);
+        lifecycle.accept_snapshot(&snapshot(&engine, 5), ResetScope::full_engine());
+        lifecycle.accept_tail(&tail(&engine, 1, 9));
         assert_eq!(
-            lifecycle.caught_up(identity(&engine), 6),
+            lifecycle.caught_up(&caught_up(&engine, 1, 9)),
             CaughtUpAction::Ready
         );
         assert_eq!(lifecycle.status().state, SnapshotTailState::Ready);
-        let revision = lifecycle.status().revision;
         assert_eq!(
-            lifecycle.caught_up(identity(&engine), 6),
+            lifecycle.caught_up(&caught_up(&engine, 1, 9)),
             CaughtUpAction::AlreadyReady
         );
-        assert_eq!(lifecycle.status().revision, revision);
-        assert_eq!(
-            lifecycle.accept_tail(identity(&engine), 7),
-            TailAction::Apply { sequence: 7 }
-        );
-        assert_eq!(lifecycle.status().state, SnapshotTailState::Ready);
-    }
 
-    #[test]
-    fn mismatched_caught_up_marker_fences() {
-        let engine = incarnation("a");
-        for marker in [4, 6] {
-            let mut lifecycle = machine(5);
-            lifecycle.accept_snapshot(snapshot(&engine, 5));
+        for (delivery, event) in [(0, 9), (1, 8), (2, 9)] {
+            let mut mismatch = machine(5);
+            mismatch.accept_snapshot(&snapshot(&engine, 5), ResetScope::full_engine());
+            mismatch.accept_tail(&tail(&engine, 1, 9));
             assert_eq!(
-                lifecycle.caught_up(identity(&engine), marker),
+                mismatch.caught_up(&caught_up(&engine, delivery, event)),
                 CaughtUpAction::Fenced(SnapshotTailFenceReason::CaughtUpMismatch)
             );
         }
     }
 
     #[test]
-    fn snapshot_authentication_and_full_reset_scope_are_mandatory() {
+    fn only_complete_full_engine_reset_scope_is_accepted() {
         let engine = incarnation("a");
-        let mut unauthenticated = snapshot(&engine, 1);
-        unauthenticated.authenticated = false;
-        let mut lifecycle = machine(1);
-        assert_eq!(
-            lifecycle.accept_snapshot(unauthenticated),
-            SnapshotAction::Fenced(SnapshotTailFenceReason::UnauthenticatedSnapshot)
-        );
-
-        let unsupported_scopes = [
+        let unsupported = [
             ResetScope {
                 kind: ResetKind::DataParallelRank,
                 data_parallel_rank: Some(0),
@@ -477,87 +640,71 @@ mod tests {
                 group_idx: None,
             },
         ];
-        for reset_scope in unsupported_scopes {
-            let mut partial = snapshot(&engine, 1);
-            partial.reset_scope = reset_scope;
+        for scope in unsupported {
             let mut lifecycle = machine(1);
             assert_eq!(
-                lifecycle.accept_snapshot(partial),
+                lifecycle.accept_snapshot(&snapshot(&engine, 1), scope),
                 SnapshotAction::Fenced(SnapshotTailFenceReason::UnsupportedResetScope)
             );
         }
     }
 
     #[test]
-    fn every_identity_change_fences_snapshot_and_tail() {
+    fn identity_changes_are_checked_before_duplicate_delivery() {
         let expected = incarnation("a");
         let changed = incarnation("b");
-
-        let bad_snapshot_identities = [
-            SnapshotTailIdentity {
-                engine_incarnation: &changed,
-                digest_key_id: KEY_ID,
-                generation: GENERATION,
-            },
-            SnapshotTailIdentity {
-                engine_incarnation: &expected,
-                digest_key_id: b"changed-key",
-                generation: GENERATION,
-            },
-            SnapshotTailIdentity {
-                engine_incarnation: &expected,
-                digest_key_id: KEY_ID,
-                generation: GENERATION + 1,
-            },
+        let cases = [
+            (
+                AuthenticatedTailFrame::from_authenticated_session(
+                    &changed, &KEY_ID, GENERATION, 0, 1,
+                ),
+                SnapshotTailFenceReason::IncarnationChanged,
+            ),
+            (
+                AuthenticatedTailFrame::from_authenticated_session(
+                    &expected,
+                    &[0x7c; 32],
+                    GENERATION,
+                    0,
+                    1,
+                ),
+                SnapshotTailFenceReason::DigestKeyChanged,
+            ),
+            (
+                AuthenticatedTailFrame::from_authenticated_session(
+                    &expected,
+                    &KEY_ID,
+                    GENERATION + 1,
+                    0,
+                    1,
+                ),
+                SnapshotTailFenceReason::GenerationChanged,
+            ),
         ];
-        let reasons = [
-            SnapshotTailFenceReason::IncarnationChanged,
-            SnapshotTailFenceReason::DigestKeyChanged,
-            SnapshotTailFenceReason::GenerationChanged,
-        ];
-        for (bad_identity, reason) in bad_snapshot_identities.into_iter().zip(reasons) {
+        for (frame, reason) in cases {
             let mut lifecycle = machine(1);
-            let mut candidate = snapshot(&expected, 1);
-            candidate.identity = bad_identity;
-            assert_eq!(
-                lifecycle.accept_snapshot(candidate),
-                SnapshotAction::Fenced(reason)
-            );
-        }
-
-        for (bad_identity, reason) in bad_snapshot_identities.into_iter().zip(reasons) {
-            let mut lifecycle = machine(1);
-            lifecycle.accept_snapshot(snapshot(&expected, 1));
-            assert_eq!(
-                lifecycle.accept_tail(bad_identity, 1),
-                TailAction::Fenced(reason)
-            );
+            lifecycle.accept_snapshot(&snapshot(&expected, 1), ResetScope::full_engine());
+            assert_eq!(lifecycle.accept_tail(&frame), TailAction::Fenced(reason));
         }
     }
 
     #[test]
-    fn identity_refresh_revokes_ready_without_waiting_for_an_event() {
+    fn authenticated_identity_refresh_revokes_ready_without_an_event() {
         let expected = incarnation("a");
         let changed = incarnation("b");
         let mut lifecycle = machine(1);
-        lifecycle.accept_snapshot(snapshot(&expected, 1));
-        lifecycle.caught_up(identity(&expected), 1);
+        lifecycle.accept_snapshot(&snapshot(&expected, 1), ResetScope::full_engine());
+        lifecycle.caught_up(&caught_up(&expected, 0, 1));
+        let frame =
+            AuthenticatedIdentityFrame::from_authenticated_session(&changed, &KEY_ID, GENERATION);
         assert_eq!(
-            lifecycle.observe_identity(identity(&expected)),
-            IdentityAction::Current
-        );
-        assert_eq!(
-            lifecycle.observe_identity(SnapshotTailIdentity {
-                engine_incarnation: &changed,
-                digest_key_id: KEY_ID,
-                generation: GENERATION,
-            }),
+            lifecycle.observe_identity(&frame),
             IdentityAction::Fenced(SnapshotTailFenceReason::IncarnationChanged)
         );
     }
 
     #[test]
-    fn disconnect_overflow_and_cancellation_are_terminal_fences() {
+    fn disconnect_overflow_and_cancellation_are_terminal() {
         type FenceSignal = fn(&mut SnapshotTailFence);
         let cases: [(FenceSignal, SnapshotTailFenceReason); 3] = [
             (
@@ -585,51 +732,37 @@ mod tests {
     }
 
     #[test]
-    fn sequence_overflow_fences_snapshot_or_tail() {
+    fn delivery_sequence_overflow_fences() {
         let engine = incarnation("a");
-        let mut snapshot_overflow = machine(0);
+        let mut lifecycle = machine(1);
+        lifecycle.accept_snapshot(&snapshot(&engine, 1), ResetScope::full_engine());
+        lifecycle.applied_delivery_sequence = Some(u64::MAX - 1);
         assert_eq!(
-            snapshot_overflow.accept_snapshot(snapshot(&engine, u64::MAX)),
-            SnapshotAction::Fenced(SnapshotTailFenceReason::SequenceOverflow)
-        );
-
-        let mut tail_overflow = machine(u64::MAX - 1);
-        tail_overflow.accept_snapshot(snapshot(&engine, u64::MAX - 1));
-        assert_eq!(
-            tail_overflow.accept_tail(identity(&engine), u64::MAX),
+            lifecycle.accept_tail(&tail(&engine, u64::MAX, 2)),
             TailAction::Fenced(SnapshotTailFenceReason::SequenceOverflow)
         );
+        assert_fenced(&lifecycle, SnapshotTailFenceReason::SequenceOverflow);
     }
 
     #[test]
-    fn invalid_order_fences_and_first_reason_is_sticky() {
+    fn invalid_order_is_sticky_and_status_is_content_free() {
         let engine = incarnation("a");
-        let mut lifecycle = machine(0);
+        let mut lifecycle = machine(123);
         assert_eq!(
-            lifecycle.accept_tail(identity(&engine), 0),
+            lifecycle.accept_tail(&tail(&engine, 1, 124)),
             TailAction::Fenced(SnapshotTailFenceReason::UnexpectedState)
         );
         let revision = lifecycle.status().revision;
         lifecycle.cancel();
         assert_eq!(lifecycle.status().revision, revision);
-        assert_fenced(&lifecycle, SnapshotTailFenceReason::UnexpectedState);
-    }
-
-    #[test]
-    fn public_status_contains_only_lifecycle_metadata() {
-        let lifecycle = machine(123);
         assert_eq!(
             lifecycle.status(),
             SnapshotTailStatus {
-                revision: 1,
+                revision,
                 generation: GENERATION,
-                state: SnapshotTailState::AwaitingSnapshot,
-                reason: None,
+                state: SnapshotTailState::Fenced,
+                reason: Some(SnapshotTailFenceReason::UnexpectedState),
             }
-        );
-        assert_eq!(
-            SnapshotTailFenceReason::DigestKeyChanged.as_str(),
-            "digest_key_changed"
         );
     }
 }
