@@ -46,6 +46,66 @@ The typed required-tool case deliberately reserves 256 output tokens. A live
 correctness budgets above measured valid output instead of treating benchmark-
 induced truncation as a frontend-parser failure.
 
+## Sovereign trace-shape replay
+
+`bench/agent_trace.py` accepts an optional content-free workload shape exported
+inside the sovereign environment. It does not accept OpenAI requests or logs.
+Every JSONL record has exactly these fields:
+
+```json
+{"schema_version":1,"arrival_offset_ms":0,"prefix_group":0,"shared_prefix_tokens":32768,"prompt_tokens":33024,"history_turns":2,"history_tool_rounds":1,"history_parallel_calls":2,"protocol":"parallel_tool","stream":true,"expected_tool_calls":2,"max_output_tokens":256,"observed_completion_tokens":190,"sampling":{"temperature":1.0,"top_p":0.95,"seed":7,"reasoning_effort":"high"}}
+```
+
+The trusted exporter must:
+
+- replace source app/session identifiers with prefix groups densely numbered
+  from zero in first-seen order;
+- use relative arrival offsets bucketed to 100ms, never absolute timestamps;
+- retain only prompt/shared-prefix/completion token counts, turn/tool counts,
+  fixed protocol enums, and sampling settings;
+- emit no prompt/generated text, tool schemas/names/arguments/results, request
+  or user/session IDs, URLs, credentials, fingerprints, or source hashes.
+
+The ingester rejects unknown or missing fields, strings outside fixed enums,
+non-finite/unbounded numbers, non-bucketed or regressing timing, sparse prefix
+groups, inconsistent tool shapes, more than a ten-minute arrival window,
+16M prompt tokens / 1M maximum output tokens in aggregate, and more than 1,024
+records or 4MiB. The
+input must be a singly linked regular mode-`0600` file owned by the runner in a
+non-symlink mode-`0700` parent. This makes accidental raw request/log ingestion
+fail before any network call.
+
+Validate locally, then replay on the sovereign node with a fresh cache salt:
+
+```bash
+install -d -m 0700 /run/user/$(id -u)/mini-dynamo-traces
+umask 077
+chmod 0600 /run/user/$(id -u)/mini-dynamo-traces/shape.jsonl
+python3 bench/agent_trace.py validate \
+  /run/user/$(id -u)/mini-dynamo-traces/shape.jsonl
+
+python3 bench/agent_trace.py run http://127.0.0.1:8006 deepseek-v4-flash \
+  /run/user/$(id -u)/mini-dynamo-traces/shape.jsonl \
+  --metadata-json /tmp/node06-agent-metadata.json \
+  --salt "$(date +%s%N)" --concurrency 32 \
+  > /run/user/$(id -u)/mini-dynamo-traces/result.jsonl
+chmod 0600 /run/user/$(id -u)/mini-dynamo-traces/result.jsonl
+```
+
+Replay builds synthetic messages in memory. Same-group prefixes are nested;
+different groups and salts are unlinkable. The recorded target prompt-token
+count is checked against authoritative response usage with a bounded default
+tolerance (5% or 256 tokens), so a synthetic density mismatch fails the shape
+gate instead of silently becoming performance evidence. Arrival timing is
+scheduled from relative buckets and client queueing remains measurable.
+
+Output contains only shape ordinals, bounded protocol errors/categories,
+usage/timing counts, opaque route ordinals, deployment provenance, and aggregate
+shape buckets. It never prints the input line, prefix group, raw salt, generated
+content, reasoning, or tool arguments. Keep both input and output only under
+the organization's normal private benchmark retention policy; never commit,
+upload as a public CI artifact, or copy either outside the sovereign boundary.
+
 The corpus follows the public DeepSeek-V4 encoding contract in which tools use
 DSML internally but OpenAI-compatible endpoints must return structured
 `tool_calls`. Raw DSML is therefore always a protocol failure at the client
