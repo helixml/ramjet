@@ -66,6 +66,8 @@ pub enum SnapshotSocketPathError {
     InvalidPath,
     #[error("snapshot socket parent metadata is unavailable")]
     ParentMetadata,
+    #[error("snapshot companion process metadata is unavailable")]
+    ProcessMetadata,
     #[error("snapshot socket parent contains a symbolic link")]
     ParentSymlink,
     #[error("snapshot socket parent is not a directory")]
@@ -82,6 +84,16 @@ pub enum SnapshotSocketPathError {
     PermissionFailed,
     #[error("snapshot socket metadata is invalid")]
     InvalidSocketMetadata,
+    #[error("snapshot socket target metadata is unavailable")]
+    SocketTargetMetadata,
+    #[error("snapshot socket target is not a Unix socket")]
+    SocketType,
+    #[error("snapshot socket owner does not match its parent owner")]
+    SocketOwnerMismatch,
+    #[error("snapshot socket permissions are invalid")]
+    SocketPermissions,
+    #[error("snapshot socket has an unexpected link count")]
+    SocketLinkCount,
     #[error("snapshot socket atomic publication failed")]
     PublishFailed,
     #[error("snapshot socket temporary cleanup failed")]
@@ -94,6 +106,7 @@ impl SnapshotSocketPathError {
         match self {
             Self::InvalidPath => "invalid_path",
             Self::ParentMetadata => "parent_metadata",
+            Self::ProcessMetadata => "process_metadata",
             Self::ParentSymlink => "parent_symlink",
             Self::ParentNotDirectory => "parent_not_directory",
             Self::ParentOwnerMismatch => "parent_owner_mismatch",
@@ -102,6 +115,11 @@ impl SnapshotSocketPathError {
             Self::BindFailed => "bind_failed",
             Self::PermissionFailed => "permission_failed",
             Self::InvalidSocketMetadata => "invalid_socket_metadata",
+            Self::SocketTargetMetadata => "socket_target_metadata",
+            Self::SocketType => "socket_type",
+            Self::SocketOwnerMismatch => "socket_owner_mismatch",
+            Self::SocketPermissions => "socket_permissions",
+            Self::SocketLinkCount => "socket_link_count",
             Self::PublishFailed => "publish_failed",
             Self::TemporaryCleanupFailed => "temporary_cleanup_failed",
         }
@@ -238,6 +256,60 @@ pub fn validate_socket_client_path(
     policy: SocketParentPolicy,
 ) -> Result<(), SnapshotSocketPathError> {
     validate_socket_parent(normalized_parent(public_path)?, policy)
+}
+
+/// Validate the filesystem readiness contract of a published companion socket.
+///
+/// This deliberately does not connect: the companion's own UID is not an
+/// authorized router UID, so an active probe would create rejected sessions
+/// and consume accept-loop telemetry. Container process liveness plus the
+/// exclusively-owned parent and exact published-socket metadata prove that the
+/// correctly-identified standalone service reached socket publication.
+/// Authenticated authority readiness remains an operational metric rather than
+/// Docker health.
+///
+/// # Errors
+///
+/// Returns [`SnapshotSocketPathError`] for a relative/non-normalized path, an
+/// unsafe or symlinked parent not owned by this process, or a target that is
+/// not a singly-linked mode-0660 Unix socket owned by the parent owner.
+pub fn validate_published_socket(
+    public_path: &Path,
+) -> Result<SocketIdentity, SnapshotSocketPathError> {
+    let parent = normalized_parent(public_path)?;
+    let parent_metadata =
+        fs::symlink_metadata(parent).map_err(|_| SnapshotSocketPathError::ParentMetadata)?;
+    // The companion currently targets Linux, where the followed `/proc/self`
+    // process directory is owned by the effective UID. Keeping this check in
+    // safe std code avoids adding a libc dependency or an unsafe `geteuid(2)`
+    // call merely for the health probe. A missing procfs fails closed.
+    let process_uid = fs::metadata("/proc/self")
+        .map_err(|_| SnapshotSocketPathError::ProcessMetadata)?
+        .uid();
+    validate_socket_parent(
+        parent,
+        SocketParentPolicy {
+            owner_uid: process_uid,
+        },
+    )?;
+    let metadata = fs::symlink_metadata(public_path)
+        .map_err(|_| SnapshotSocketPathError::SocketTargetMetadata)?;
+    if !metadata.file_type().is_socket() {
+        return Err(SnapshotSocketPathError::SocketType);
+    }
+    if metadata.uid() != parent_metadata.uid() {
+        return Err(SnapshotSocketPathError::SocketOwnerMismatch);
+    }
+    if metadata.mode() & 0o777 != SOCKET_MODE {
+        return Err(SnapshotSocketPathError::SocketPermissions);
+    }
+    if metadata.nlink() != 1 {
+        return Err(SnapshotSocketPathError::SocketLinkCount);
+    }
+    Ok(SocketIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
 }
 
 /// Bind a unique private socket, set mode `0660`, and atomically publish it
@@ -458,6 +530,10 @@ mod tests {
         assert_eq!(metadata.mode() & 0o777, SOCKET_MODE);
         assert_eq!(metadata.dev(), published.identity().device());
         assert_eq!(metadata.ino(), published.identity().inode());
+        assert_eq!(
+            validate_published_socket(&path).unwrap(),
+            published.identity()
+        );
 
         let client = UnixStream::connect(&path).unwrap();
         let _server = published.listener().accept().unwrap().0;
@@ -542,6 +618,42 @@ mod tests {
             bind_and_publish(Path::new("relative.sock"), directory.policy()),
             Err(SnapshotSocketPathError::InvalidPath)
         ));
+        assert!(matches!(
+            validate_published_socket(Path::new("relative.sock")),
+            Err(SnapshotSocketPathError::InvalidPath)
+        ));
+    }
+
+    #[test]
+    fn healthcheck_rejects_missing_non_socket_linked_and_wrong_mode_targets() {
+        let directory = TestDirectory::new();
+        let path = directory.path().join("companion.sock");
+        assert!(matches!(
+            validate_published_socket(&path),
+            Err(SnapshotSocketPathError::SocketTargetMetadata)
+        ));
+
+        fs::write(&path, b"not a socket").unwrap();
+        assert!(matches!(
+            validate_published_socket(&path),
+            Err(SnapshotSocketPathError::SocketType)
+        ));
+        fs::remove_file(&path).unwrap();
+
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            validate_published_socket(&path),
+            Err(SnapshotSocketPathError::SocketPermissions)
+        ));
+        fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE)).unwrap();
+        let linked = directory.path().join("linked.sock");
+        fs::hard_link(&path, &linked).unwrap();
+        assert!(matches!(
+            validate_published_socket(&path),
+            Err(SnapshotSocketPathError::SocketLinkCount)
+        ));
+        drop(listener);
     }
 
     #[test]

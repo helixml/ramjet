@@ -1,10 +1,44 @@
-use anyhow::Context;
+use std::{ffi::OsString, path::PathBuf};
+
+use anyhow::{Context, bail};
 use mini_dynamo::companion_service::{SingleEngineCompanionConfig, run_single_engine_companion};
+use mini_dynamo::snapshot_socket_path::validate_published_socket;
 use tokio::sync::watch;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    match command(std::env::args_os().skip(1))? {
+        Command::Run => run().await,
+        Command::Healthcheck(path) => {
+            validate_published_socket(&path).context("snapshot companion healthcheck failed")?;
+            Ok(())
+        }
+    }
+}
+
+enum Command {
+    Run,
+    Healthcheck(PathBuf),
+}
+
+fn command(mut arguments: impl Iterator<Item = OsString>) -> anyhow::Result<Command> {
+    let Some(first) = arguments.next() else {
+        return Ok(Command::Run);
+    };
+    if first != "healthcheck" {
+        bail!("invalid snapshot companion command");
+    }
+    let Some(path) = arguments.next() else {
+        bail!("snapshot companion healthcheck requires one socket path");
+    };
+    if arguments.next().is_some() {
+        bail!("snapshot companion healthcheck accepts exactly one socket path");
+    }
+    Ok(Command::Healthcheck(PathBuf::from(path)))
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer().json())
