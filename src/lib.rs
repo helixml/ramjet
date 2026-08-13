@@ -19,6 +19,7 @@ pub mod shims;
 pub mod snapshot_bootstrap;
 pub mod snapshot_secret_file;
 pub mod snapshot_session;
+pub mod snapshot_socket_path;
 pub mod snapshot_tail;
 pub mod snapshot_tail_wire;
 pub mod snapshot_transport;
