@@ -34,6 +34,12 @@ and a fixed seed. A result fails if DSML fragments appear in normal content,
 tool names/JSON/types do not match, reasoning is missing where required, or
 the task-completion expectation is absent.
 
+Every live run derives a fixed-size cache namespace from `--salt`, including
+when `--prefix-kib=0`; use one fresh salt for each matched cold/warm pair. The
+zero-prefix case adds only the sub-KiB namespace, while positive sizes include
+it inside the requested byte count. This prevents nominally cold corpus runs
+from inheriting identical prompt state from an earlier experiment.
+
 The typed required-tool case deliberately reserves 256 output tokens. A live
 256KiB/c8 run used 184-206 tokens for valid nested JSON, while its former
 192-token cap produced an intermittent structurally incomplete call. Keep

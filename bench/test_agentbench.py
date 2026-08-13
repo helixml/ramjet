@@ -8,6 +8,7 @@ from agentbench import (
     DEFAULT_CORPUS,
     SSEDecoder,
     UPSTREAM_RESPONSE_FIXTURES,
+    add_prefix,
     bounded_route_counts,
     load_cases,
     validate_case,
@@ -30,6 +31,37 @@ def sse(event):
 
 
 class AgentBenchTest(unittest.TestCase):
+    def test_zero_prefix_uses_stable_per_run_cache_namespace(self):
+        fixture = case()
+        original = json.loads(json.dumps(fixture))
+
+        first = add_prefix(fixture, 0, "run-one")
+        repeated = add_prefix(fixture, 0, "run-one")
+        different = add_prefix(fixture, 0, "run-two")
+
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(
+            first["request"]["messages"][0]["content"],
+            different["request"]["messages"][0]["content"],
+        )
+        self.assertLess(
+            len(first["request"]["messages"][0]["content"].encode("utf-8")), 1024
+        )
+        self.assertNotIn("run-one", first["request"]["messages"][0]["content"])
+        self.assertEqual(first["request"]["messages"][1], fixture["request"]["messages"][0])
+        self.assertEqual(fixture, original)
+
+    def test_positive_prefix_keeps_requested_size_and_salt_identity(self):
+        fixture = case()
+        first = add_prefix(fixture, 2, "run-one")
+        different = add_prefix(fixture, 2, "run-two")
+
+        self.assertEqual(len(first["request"]["messages"][0]["content"].encode()), 2048)
+        self.assertNotEqual(
+            first["request"]["messages"][0]["content"],
+            different["request"]["messages"][0]["content"],
+        )
+
     def test_route_summary_has_fixed_privacy_safe_cardinality(self):
         self.assertEqual(
             bounded_route_counts(
