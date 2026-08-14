@@ -24,6 +24,13 @@ python3 deploy/dspark_0731/infernal-r11-candidate/validate-compose.py
 Observed warm registry reads took 2.6-7.9 seconds. Run the check before a
 large pull and again immediately before a live qualification.
 
+The r11 manifest contains 12.79 GiB compressed across 79 layers. It shares 51
+layers (9.85 GiB) with immutable r4, leaving 2.94 GiB/28 layers unique to r11.
+Do not prune the cached r4 image before the node06 pull; verify the exact r4
+digest is still present, then pull r11 once outside startup/benchmark timing.
+If r4 was pruned, budget the full 12.79 GiB cold transfer instead of treating
+the incremental figure as guaranteed.
+
 ## First run after the cooling repair
 
 Do not start with a full-box matrix. Capture idle GPU/BMC/airflow evidence,
