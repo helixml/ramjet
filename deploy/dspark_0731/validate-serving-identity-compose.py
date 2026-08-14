@@ -19,9 +19,11 @@ OVERLAY = HERE / "docker-compose.compatibility-identity.yaml"
 MIDDLEWARE = HERE / "engine_identity_middleware.py"
 MANIFEST = ROOT / "compat" / "deepseek-v4-r34.json"
 ENGINES = ("dspark-0731", "dspark-0731-b")
-MIDDLEWARE_TARGET = "/opt/vllm/vllm/mini_dynamo_engine_identity.py"
+MIDDLEWARE_TARGET = (
+    "/opt/venv/lib/python3.12/site-packages/mini_dynamo_engine_identity.py"
+)
 MANIFEST_TARGET = "/opt/mini-dynamo/compatibility.json"
-MIDDLEWARE_IMPORT = "vllm.mini_dynamo_engine_identity.ServingIdentityMiddleware"
+MIDDLEWARE_IMPORT = "mini_dynamo_engine_identity.ServingIdentityMiddleware"
 ENGINE_IMAGE = (
     "voipmonitor/vllm@sha256:"
     "820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b"
@@ -152,6 +154,8 @@ def validate_enabled(document: dict[str, Any]) -> None:
             fail(f"{name} manifest pin changed")
         if environment.get("MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH") != "/workspace/model/tokenizer.json":
             fail(f"{name} tokenizer verification path changed")
+        if environment.get("MINI_DYNAMO_SERVING_IDENTITY_VERIFY_TIMEOUT_MS") != "4000":
+            fail(f"{name} live verification timeout changed")
         if not environment.get("VLLM_API_KEY"):
             fail(f"{name} has no endpoint bearer authority")
         arguments = environment.get("EXTRA_VLLM_ARGS", "")
