@@ -16,6 +16,26 @@ Compose dry-run validation, harness/unit/CI work, and offline analysis of
 already-captured results. No node06 experiment result was produced and no live
 performance claim should be inferred from this entry.
 
+## 2026-08-14 — offline SLO-goodput Pareto reporting contract
+
+Issue #148's reporting layer was implemented without node06 access or new
+serving measurements. It requires exact configuration/workload digests, GPU
+count, observation window, complete repetition identity, explicit direct versus
+serial domains, and per-request TTFT, TPOT, correctness, and token observations.
+Missing fields fail schema validation; not-evaluated correctness or timing makes
+the complete configuration ineligible rather than silently dropping a request.
+
+The frontier uses qualified requests per GPU-hour at every supplied SLO.
+Dominance is deliberately conservative: one configuration's minimum observed
+repetition must meet or exceed the peer's maximum at every SLO and exceed one.
+When conservative all-SLO dominance cannot be established, overlapping ranges
+stay non-dominated and are labelled; medians are summaries, not significance
+claims. Cohorts are bounded, hold offered request count fixed, compare GPU
+allocations through the normalized objective, and require balanced direct
+crossovers. Raw normalized cells and repetition metrics remain in the output,
+and automatic promotion is always false. This is an offline decision artifact,
+not new RTX PRO 6000 performance evidence.
+
 Append-only record of controlled serving experiments. Configuration changes use
 rolling engine restarts; the other TP4 engine stays available. Every comparison
 must use the same workload, fresh cache-busting salts where applicable, and a
