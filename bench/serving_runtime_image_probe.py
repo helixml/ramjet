@@ -3,16 +3,22 @@
 
 The probe renders the production Compose pair, lets the exact engine launcher
 construct its final argv/environment, and replaces only the terminal vllm
-executable with a read-only evidence collector. It never starts vLLM, opens a
-network, mounts model data, or prints raw argv/environment values.
+executable with a read-only evidence collector. It can either check the pinned
+manifest or atomically generate reviewed replacement bytes with ``--output``.
+It never starts vLLM, opens a network, mounts model data, or prints raw
+argv/environment values.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
+import os
 import pathlib
+import re
+import stat
 import subprocess
 import tempfile
 import time
@@ -32,6 +38,60 @@ CONTAINER_PATH = (
     "/usr/sbin:/usr/bin:/sbin:/bin"
 )
 MAX_CAPTURE_BYTES = 1 << 20
+MAX_RUNTIME_ARGUMENTS = 256
+MAX_RUNTIME_ARGUMENT_BYTES = 4096
+MAX_RUNTIME_ARGUMENT_TOTAL_BYTES = 64 << 10
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+RUNTIME_ROOT_KEYS = {
+    "schema_version",
+    "compatibility_manifest_sha256",
+    "engine",
+    "process",
+}
+RUNTIME_PROCESS_KEYS = {
+    "argv",
+    "argv_sha256",
+    "environment",
+    "environment_sha256",
+    "packages",
+    "packages_sha256",
+    "artifacts",
+    "artifacts_sha256",
+}
+KV_EVENT_KEYS = {
+    "enable_kv_cache_events",
+    "publisher",
+    "endpoint",
+    "replay_endpoint",
+    "buffer_steps",
+    "hwm",
+    "max_queue_size",
+    "topic",
+}
+LAUNCH_ENVIRONMENT_KEYS = {
+    "ALLREDUCE_MODE",
+    "BACKEND",
+    "BLOCK_SIZE",
+    "CUDA_DEVICE_ORDER",
+    "CUDA_VISIBLE_DEVICES",
+    "DCP_SIZE",
+    "DSPARK_CAPACITY_LOG_INTERVAL",
+    "DSPARK_DEPTH_MODE",
+    "DSPARK_STS_LOG_INTERVAL",
+    "DSPARK_TOKENS",
+    "EXTRA_VLLM_ARGS",
+    "GPU_MEMORY_UTILIZATION",
+    "KV_OFFLOADING_SIZE",
+    "MAX_MODEL_LEN",
+    "MAX_NUM_BATCHED_TOKENS",
+    "MAX_NUM_SEQS",
+    "MODE",
+    "MODEL_ROOT",
+    "NCCL_P2P_DISABLE",
+    "PORT",
+    "SERVED_MODEL_NAME",
+    "TP_SIZE",
+}
 
 WRAPPER = r'''#!/opt/venv/bin/python
 import hashlib
@@ -127,6 +187,30 @@ def manifest_errors(document: Any) -> list[str]:
     return errors
 
 
+def validate_generation_template(document: Any) -> None:
+    if (
+        not isinstance(document, dict)
+        or set(document) != RUNTIME_ROOT_KEYS
+        or document.get("schema_version") != 2
+        or not isinstance(document.get("compatibility_manifest_sha256"), str)
+        or _SHA256.fullmatch(document["compatibility_manifest_sha256"]) is None
+    ):
+        raise ProbeError("runtime manifest generation template is invalid")
+    engine = document.get("engine")
+    if (
+        not isinstance(engine, dict)
+        or set(engine) != {"core_process_count", "kv_events"}
+        or type(engine.get("core_process_count")) is not int
+        or not 0 < engine["core_process_count"] <= 64
+        or not isinstance(engine.get("kv_events"), dict)
+        or set(engine["kv_events"]) != KV_EVENT_KEYS
+    ):
+        raise ProbeError("runtime manifest engine template is invalid")
+    process = document.get("process")
+    if not isinstance(process, dict) or set(process) != RUNTIME_PROCESS_KEYS:
+        raise ProbeError("runtime manifest process template is invalid")
+
+
 def comparison_errors(expected: dict[str, Any], actual: Any) -> list[str]:
     if not isinstance(actual, dict):
         return ["capture.document"]
@@ -159,6 +243,167 @@ def comparison_errors(expected: dict[str, Any], actual: Any) -> list[str]:
     return errors
 
 
+def option_json(argv: list[str], name: str) -> Any:
+    values = []
+    for index, argument in enumerate(argv):
+        if argument == name:
+            if index + 1 >= len(argv):
+                raise ProbeError("generated serving option is incomplete")
+            values.append(argv[index + 1])
+        elif argument.startswith(f"{name}="):
+            values.append(argument.partition("=")[2])
+    if len(values) != 1:
+        raise ProbeError("generated serving option is ambiguous")
+    try:
+        return json.loads(values[0])
+    except json.JSONDecodeError as error:
+        raise ProbeError("generated serving option is invalid") from error
+
+
+def generated_manifest(template: dict[str, Any], captured: Any) -> dict[str, Any]:
+    if not isinstance(template, dict) or not isinstance(template.get("process"), dict):
+        raise ProbeError("runtime manifest template is invalid")
+    if not isinstance(captured, dict):
+        raise ProbeError("captured serving process is invalid")
+    process = template["process"]
+    argv = captured.get("argv")
+    environment = captured.get("environment")
+    packages = captured.get("packages")
+    artifacts = captured.get("artifacts")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(value, str) and value for value in argv)
+        or not isinstance(environment, dict)
+        or not isinstance(packages, dict)
+        or not isinstance(artifacts, list)
+        or set(environment) != set(process.get("environment", {}))
+        or set(packages) != set(process.get("packages", {}))
+        or [item.get("path") for item in artifacts if isinstance(item, dict)]
+        != [item.get("path") for item in process.get("artifacts", []) if isinstance(item, dict)]
+    ):
+        raise ProbeError("captured serving process shape changed")
+    if (
+        len(argv) > MAX_RUNTIME_ARGUMENTS
+        or argv[0] != "serve"
+        or sum(len(value.encode("utf-8")) for value in argv)
+        > MAX_RUNTIME_ARGUMENT_TOTAL_BYTES
+        or any(not generated_string(value) for value in argv)
+    ):
+        raise ProbeError("captured serving argv is invalid")
+    if any(
+        not isinstance(key, str)
+        or not generated_string(key, 256)
+        or not generated_string(value)
+        for key, value in environment.items()
+    ):
+        raise ProbeError("captured serving environment is invalid")
+    if any(
+        not isinstance(key, str)
+        or not generated_string(key, 256)
+        or not generated_string(value)
+        for key, value in packages.items()
+    ):
+        raise ProbeError("captured serving packages are invalid")
+    if any(
+        not isinstance(item, dict)
+        or set(item) != {"path", "sha256"}
+        or not generated_string(item["path"])
+        or not isinstance(item["sha256"], str)
+        or _SHA256.fullmatch(item["sha256"]) is None
+        for item in artifacts
+    ):
+        raise ProbeError("captured serving artifacts are invalid")
+    if any(
+        argument.split("=", 1)[0]
+        in {"--api-key", "--token", "--hf-token", "--authorization"}
+        for argument in argv
+    ):
+        raise ProbeError("captured serving argv contains a sensitive option")
+
+    generated_process = {
+        "argv": argv,
+        "argv_sha256": nul_joined_sha256(argv),
+        "environment": environment,
+        "environment_sha256": canonical_json_sha256(environment),
+        "packages": packages,
+        "packages_sha256": canonical_json_sha256(packages),
+        "artifacts": artifacts,
+        "artifacts_sha256": canonical_json_sha256(artifacts),
+    }
+    document = copy.deepcopy(template)
+    try:
+        expected_kv_events = document["engine"]["kv_events"]
+    except (KeyError, TypeError) as error:
+        raise ProbeError("runtime manifest engine template is invalid") from error
+    captured_kv_events = option_json(argv, "--kv-events-config")
+    if (
+        not isinstance(expected_kv_events, dict)
+        or not isinstance(captured_kv_events, dict)
+        or set(captured_kv_events) != set(expected_kv_events)
+    ):
+        raise ProbeError("captured KV-event schema changed")
+    document["engine"]["kv_events"] = captured_kv_events
+    document["process"] = generated_process
+    return document
+
+
+def generated_string(value: Any, limit: int = MAX_RUNTIME_ARGUMENT_BYTES) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value.isascii()
+        and "\0" not in value
+        and len(value.encode()) <= limit
+    )
+
+
+def manifest_bytes(document: dict[str, Any]) -> bytes:
+    return (json.dumps(document, indent=2) + "\n").encode("ascii")
+
+
+def write_manifest(path: pathlib.Path, raw: bytes, *, replace: bool) -> None:
+    parent = path.parent
+    if not parent.is_dir() or parent.is_symlink():
+        raise ProbeError("runtime manifest output parent is invalid")
+    if parent.stat().st_mode & 0o022:
+        raise ProbeError("runtime manifest output parent is writable")
+    if path.exists() or path.is_symlink():
+        if not replace:
+            raise ProbeError("runtime manifest output already exists")
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ProbeError("runtime manifest output is unsafe")
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
+    temporary_path = pathlib.Path(temporary)
+    try:
+        os.fchmod(descriptor, 0o644)
+        destination = os.fdopen(descriptor, "wb", closefd=True)
+        descriptor = -1
+        with destination:
+            destination.write(raw)
+            destination.flush()
+            os.fsync(destination.fileno())
+        if replace:
+            os.replace(temporary_path, path)
+        else:
+            os.link(temporary_path, path)
+            temporary_path.unlink()
+        directory = os.open(parent, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def safe_environment(environment: Any) -> dict[str, str]:
     if not isinstance(environment, dict):
         raise ProbeError("rendered engine environment is invalid")
@@ -166,16 +411,10 @@ def safe_environment(environment: Any) -> dict[str, str]:
     for key, value in environment.items():
         if not isinstance(key, str):
             raise ProbeError("rendered engine environment is invalid")
-        if (
-            key.startswith("MINI_DYNAMO_")
-            or "SECRET" in key
-            or "PASSWORD" in key
-            or "CREDENTIAL" in key
-            or key.endswith("_TOKEN")
-            or key.endswith("_API_KEY")
-            or key.endswith("_AUTHORIZATION")
-        ):
+        if key.startswith("MINI_DYNAMO_") or sensitive_environment_name(key):
             continue
+        if key not in LAUNCH_ENVIRONMENT_KEYS:
+            raise ProbeError("rendered engine environment has an unreviewed setting")
         if not isinstance(value, (str, int, float, bool)):
             raise ProbeError("rendered engine environment is invalid")
         if key == "EXTRA_VLLM_ARGS" and any(
@@ -186,6 +425,20 @@ def safe_environment(environment: Any) -> dict[str, str]:
         result[key] = str(value)
     result["PATH"] = CONTAINER_PATH
     return result
+
+
+def sensitive_environment_name(value: str) -> bool:
+    return (
+        "SECRET" in value
+        or "PASSWORD" in value
+        or "CREDENTIAL" in value
+        or "ACCESS_KEY" in value
+        or "PRIVATE_KEY" in value
+        or "BEARER" in value
+        or value.endswith("_TOKEN")
+        or value.endswith("_API_KEY")
+        or value.endswith("_AUTHORIZATION")
+    )
 
 
 def render() -> dict[str, Any]:
@@ -281,20 +534,40 @@ def main() -> int:
     parser.add_argument("--manifest", type=pathlib.Path, default=MANIFEST)
     parser.add_argument("--service", default=DEFAULT_SERVICE)
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--output",
+        type=pathlib.Path,
+        help="atomically write image-derived manifest bytes instead of checking",
+    )
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="replace one existing regular output file (requires --output)",
+    )
     arguments = parser.parse_args()
     if not 1 <= arguments.timeout_seconds <= 120:
         raise SystemExit("timeout must be between 1 and 120 seconds")
+    if arguments.replace and arguments.output is None:
+        raise SystemExit("--replace requires --output")
     try:
         raw = arguments.manifest.read_bytes()
         manifest = json.loads(raw)
-        errors = manifest_errors(manifest)
+        validate_generation_template(manifest)
+        errors = manifest_errors(manifest) if arguments.output is None else []
         captured, image, elapsed_ms = run_probe(
             render(),
             arguments.manifest,
             arguments.service,
             arguments.timeout_seconds,
         )
-        errors.extend(comparison_errors(manifest["process"], captured))
+        generated = generated_manifest(manifest, captured)
+        generated_raw = manifest_bytes(generated)
+        if arguments.output is None:
+            errors.extend(comparison_errors(manifest["process"], captured))
+            if generated.get("engine") != manifest.get("engine"):
+                errors.append("engine")
+        else:
+            write_manifest(arguments.output, generated_raw, replace=arguments.replace)
     except (OSError, json.JSONDecodeError):
         print(
             json.dumps(
@@ -314,6 +587,22 @@ def main() -> int:
             )
         )
         return 1
+    if arguments.output is not None:
+        print(
+            json.dumps(
+                {
+                    "status": "generated",
+                    "service": arguments.service,
+                    "image": image,
+                    "manifest_sha256": hashlib.sha256(generated_raw).hexdigest(),
+                    "template_match": generated_raw == raw,
+                    "elapsed_ms": elapsed_ms,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 0
     process = manifest["process"]
     print(
         json.dumps(

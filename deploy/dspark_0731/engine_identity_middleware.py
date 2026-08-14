@@ -435,6 +435,9 @@ def _sensitive_runtime_environment_key(value: str) -> bool:
         "SECRET" in value
         or "PASSWORD" in value
         or "CREDENTIAL" in value
+        or "ACCESS_KEY" in value
+        or "PRIVATE_KEY" in value
+        or "BEARER" in value
         or value.endswith("_TOKEN")
         or value.endswith("_API_KEY")
         or value.endswith("_AUTHORIZATION")

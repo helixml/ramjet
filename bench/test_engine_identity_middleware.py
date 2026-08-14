@@ -605,6 +605,24 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
             ), self.assertRaises(ValueError):
                 middleware_module._normalized_process_argv()
 
+    def test_runtime_environment_secret_names_are_conservative(self):
+        for key in (
+            "PRIVATE_API_KEY",
+            "AWS_ACCESS_KEY_ID",
+            "TLS_PRIVATE_KEY",
+            "INTERNAL_BEARER",
+            "DATABASE_PASSWORD",
+        ):
+            with self.subTest(key=key):
+                self.assertTrue(
+                    middleware_module._sensitive_runtime_environment_key(key)
+                )
+        self.assertFalse(
+            middleware_module._sensitive_runtime_environment_key(
+                "LOCAL_INFERENCE_CACHE_FINGERPRINT"
+            )
+        )
+
     def test_duplicate_authorization_is_rejected(self):
         middleware = self.middleware()
         messages = []

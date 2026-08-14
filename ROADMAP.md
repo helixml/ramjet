@@ -129,12 +129,23 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   and 16GiB free. This is rollout scaffolding, not persistence evidence: one
   engine must still prove clean/faster second-start readiness while its peer
   serves.
+  r114 removes the remaining manual process-field/hash editing inside this
+  repository. The same sub-second launcher capture can atomically emit a
+  canonical manifest while retaining only the reviewed template authority;
+  it derives argv, 68 selected non-secret environment values, packages,
+  artifact hashes, all four domain digests, and the exact KV-event object.
+  The current r34 generation is byte-identical at SHA-256
+  `294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4`.
+  Output parents/files are hardened, process shape/ASCII/capacity and secret
+  names fail closed, and candidate diffs plus pins still require semantic
+  validation. The external engine-image build still needs to emit/sign this
+  evidence to make it a build-native supply-chain artifact.
   Live event/replay qualification is therefore still mandatory, the Compose
   default remains `http`, and no enablement is admissible. The larger issue
   #15 bundle still needs live driver/kernel/topology evidence, qualified
-  persistent-cache restart measurements, representative warmups, complete
-  build-produced runtime-manifest generation, and immutable engine-image
-  qualification.
+  persistent-cache restart measurements, representative warmups, upstream
+  build-integrated/signed runtime-manifest publication, and immutable
+  engine-image qualification.
 - 🔨 **Exact KV-event shadow index.** The transport-independent sequence fence
   now starts untrusted, requests bounded contiguous replay on gaps, increments
   generations on restart/unrecoverable recovery, and admits exact state after
