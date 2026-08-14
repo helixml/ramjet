@@ -635,6 +635,9 @@ fn sensitive_runtime_environment_key(value: &str) -> bool {
     value.contains("SECRET")
         || value.contains("PASSWORD")
         || value.contains("CREDENTIAL")
+        || value.contains("ACCESS_KEY")
+        || value.contains("PRIVATE_KEY")
+        || value.contains("BEARER")
         || value.ends_with("_TOKEN")
         || value.ends_with("_API_KEY")
         || value.ends_with("_AUTHORIZATION")
@@ -1013,12 +1016,14 @@ mod tests {
         let mut unknown = baseline;
         unknown["engine"]["kv_events"]["unknown"] = serde_json::json!(true);
         cases.push(unknown);
-        let mut secret = serde_json::from_slice::<Value>(include_bytes!(
-            "../compat/deepseek-v4-r34-serving-runtime.json"
-        ))
-        .unwrap();
-        secret["process"]["environment"]["PRIVATE_API_KEY"] = serde_json::json!("private");
-        cases.push(secret);
+        for key in ["PRIVATE_API_KEY", "AWS_ACCESS_KEY_ID", "TLS_PRIVATE_KEY"] {
+            let mut secret = serde_json::from_slice::<Value>(include_bytes!(
+                "../compat/deepseek-v4-r34-serving-runtime.json"
+            ))
+            .unwrap();
+            secret["process"]["environment"][key] = serde_json::json!("private");
+            cases.push(secret);
+        }
 
         for candidate in cases {
             let rejected = serde_json::from_value::<ServingRuntimeManifest>(candidate)

@@ -5512,3 +5512,37 @@ directory or engine changed. The admissible live experiment is one engine at a
 time with production single-homed on its peer: compare first/second restart
 readiness, JIT markers, cache bytes/inodes, correctness, and steady serving,
 then retain the overlay only if the second start is clean and faster.
+
+## 2026-08-14 — r114 deterministic image-derived runtime manifest
+
+The r112 process authority was verified from the immutable image but its 68
+environment values, package/artifact evidence, KV-event object, and four
+domain hashes were still committed through a manual capture/edit cycle. r114
+extends the existing real-launcher probe with an explicit `--output` mode. It
+uses the exact same network-disabled, GPU-free entrypoint execution, retains
+only the reviewed template's environment/package keys and artifact paths, and
+atomically emits canonical schema-v2 bytes. Existing output replacement is
+explicit and accepts only a one-link regular file under a non-symlink,
+non-group/world-writable parent.
+
+The generator derives normalized argv, selected environment, eight package
+versions, artifact hashes, the exact KV-event JSON, and all four domain
+digests. It rejects shape changes, sensitive argv, secret/password/credential,
+access-key/private-key/bearer environment names, non-ASCII/NUL/oversized
+values, unexpected KV fields, malformed artifact hashes, and unsafe output
+targets with bounded messages. The Compose-to-launcher environment is also an
+exact reviewed allowlist, so a newly introduced setting cannot silently affect
+generation. Raw argv/environment remain absent from stdout.
+
+The exact r34 generation completed in 637ms and was byte-for-byte identical to
+`compat/deepseek-v4-r34-serving-runtime.json`, retaining SHA-256
+`294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4`.
+This closes hand-edited field/hash drift inside mini-dynamo. It does not claim
+the external engine build emits or signs the evidence; that upstream
+supply-chain integration and live node06 qualification remain open.
+
+The final warm local gate passed warning-denied Clippy, all 412 Rust tests,
+and the locked release build in 6.11s wall with 251MiB peak compiler RSS. The
+five-case agent corpus plus all 280 Python tests passed in 4.06s, all four
+deployment validators plus host-script syntax passed in 0.82s, and the exact
+image/cache probes plus canonical generation comparison passed in 3.91s.

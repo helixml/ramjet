@@ -139,10 +139,13 @@ class ServingIdentityComposeTest(unittest.TestCase):
             ):
                 validator.validate_runtime_manifest(malformed)
 
-        secret = copy.deepcopy(runtime)
-        secret["process"]["environment"]["PRIVATE_API_KEY"] = "private"
-        with self.assertRaisesRegex(validator.ValidationError, "mapping key"):
-            validator.validate_runtime_manifest(secret)
+        for key in ("PRIVATE_API_KEY", "AWS_ACCESS_KEY_ID", "TLS_PRIVATE_KEY"):
+            secret = copy.deepcopy(runtime)
+            secret["process"]["environment"][key] = "private"
+            with self.subTest(key=key), self.assertRaisesRegex(
+                validator.ValidationError, "mapping key"
+            ):
+                validator.validate_runtime_manifest(secret)
 
     def test_lb_and_engine_runtime_authorities_cannot_be_cross_wired(self):
         document = validator.render(enabled=True)

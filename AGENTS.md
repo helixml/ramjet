@@ -176,6 +176,20 @@ collector. It compares the complete normalized argv, selected non-secret
 environment, package versions, launcher hash, and NCCL library hash. It took
 0.6–0.9s warm in r112. Do not add the 12.5GB image pull to Drone.
 
+Use that same command with `--output PATH` to generate canonical, image-derived
+runtime-manifest bytes. The output parent must already exist and be neither a
+symlink nor group/world writable; existing outputs require `--replace` and
+must be one-link regular files. Generation retains only the reviewed template
+shape and derives argv, selected non-secret environment, packages, artifact
+hashes, their four domain digests, and the KV-event object from the real
+launcher. The host-to-container launcher inputs are an exact reviewed allowlist;
+an unfamiliar non-secret setting also fails instead of silently affecting the
+capture. It must reproduce r34 byte-for-byte before use on a candidate. Review
+the candidate diff and rerun the semantic validator plus both service probes;
+never update a pin from the printed digest alone. This closes manual field/hash
+editing inside mini-dynamo, but it does not claim the external engine build
+itself emits or signs the manifest.
+
 For the default-off persistent JIT-cache overlay, keep the no-GPU loop to:
 
 ```bash

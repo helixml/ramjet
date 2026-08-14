@@ -126,6 +126,13 @@ configuration, complete normalized serving argv, selected non-secret
 environment, runtime package versions, and exact launcher/NCCL artifact hashes;
 its `compatibility_manifest_sha256` must equal the renderer/tokenizer manifest
 pin exactly.
+`bench/serving_runtime_image_probe.py --output PATH` derives canonical process
+and KV-event evidence from the real immutable launcher without a GPU or
+network. It preserves the reviewed template key/path shape, rejects secret-like
+or malformed capture, and writes atomically; the generated diff, semantic
+Compose validation, both service shapes, and every new SHA pin still require
+review before rollout. The external engine build does not yet emit or sign
+this manifest itself.
 A mismatching replica is removed from ordinary serving until a later probe
 passes; the other healthy replica remains available. Keep the default `http`
 mode unless every upstream implements the identity contract below. Inspect
