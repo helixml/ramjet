@@ -334,9 +334,14 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   inventory can never produce a mixed accounting view. Placement selection is
   unchanged: the gain/load gates still run against the pre-route estimate.
   Journal v8 additionally records the reservation actually acquired on the
-  finish record, which under failover is the reserving candidate's value rather
-  than the initially selected candidate's estimate; replay accepts v1-v8 and
-  the serving-cost audit prefers the admitted value with a v1-v7 fallback. Raw
+  finish record; replay accepts v1-v8 and the serving-cost audit prefers the
+  admitted value with a v1-v7 fallback. Two rollout properties are worth
+  stating before any placement interval: the recompute feeds the upstream load
+  that *subsequent* approximate decisions read, so warm-engine steering is a
+  deliberate feedback loop rather than a no-op; and a stale approximate index
+  over an evicted prefix makes the exact reservation rise, so
+  `ds4proxy_upstream_load_units` may step up on first rollout without a
+  regression. Raw
   token IDs, block hashes, and prompts remain out of logs. This is local work
   only — no node06 observation has been performed under the cooling moratorium.
 - ✅ **Replay cancellation and publisher-backpressure resilience.** r23 proved

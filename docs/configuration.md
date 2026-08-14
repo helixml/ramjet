@@ -176,11 +176,24 @@ resident therefore reserves proportionally less capacity, bounded by the same
 `DS4_ROUTE_LOAD_UNIT_BYTES` quantum and `DS4_ROUTE_MAX_LOAD_UNITS` cap. The
 recompute is atomic across healthy candidates and fails closed: if any healthy
 candidate lacks a trusted overlap, every original reservation is preserved. It
-never changes which replica is selected — placement is decided first, and the
-gain/load gates still run against the pre-route estimate. This applies only to
-`DS4_EXACT_ROUTE_MODE=placement`, and there whether or not the exact winner
-actually moves the request. `shadow` stays strictly observation-only: it never
-alters a reservation.
+never changes the selected replica for the request being recomputed — placement
+is decided first, and the gain/load gates still run against the pre-route
+estimate. It does change the load accounting that *later* decisions read: the
+reservation is what `acquire_if_healthy` adds to the upstream's load, which
+becomes the next request's alpha-weighted load term. Steering warm work to an
+engine that now reports lower load is the intended effect, but it is a feedback
+loop, not a no-op.
+
+This applies only to `DS4_EXACT_ROUTE_MODE=placement`, and there whether or not
+the exact winner actually moves the request. `shadow` stays strictly
+observation-only: it never alters a reservation.
+
+The recompute can also *raise* a reservation, up to `DS4_ROUTE_MAX_LOAD_UNITS`.
+If the approximate prefix index is stale and the engine has actually evicted
+the prefix, exact overlap is zero and the request correctly reserves the cold
+cost the approximate estimate understated. Expect `ds4proxy_upstream_load_units`
+to step up on the first placement rollout; watch the upstream-split panel and
+compare against the journal rather than assuming a regression.
 
 Compatibility admission is an independent serving gate. It requires
 `DS4_TOKENIZER_MODE=local-shadow` plus the SHA-pinned manifest so local golden
@@ -481,10 +494,14 @@ TPOT, failure, and client-disconnect summaries. Headline latency/token
 distributions include successful completions only; each outcome has a separate
 distribution so early disconnects cannot look like cheaper successful work.
 Journal v8 adds `request_load_units` to the finish record: the reservation
-actually acquired for the served upstream. Under failover that is the reserving
-candidate's value, not the initially selected candidate's estimate, so the
-audit prefers it and falls back to the pre-route candidate estimate for v1-v7
-traces. It is a bounded integer and carries no prefix identity.
+actually acquired for the served upstream. The start record's candidate
+estimates are written pre-exact, so under placement mode the finish value
+differs from them on every recomputed request, not only on failover; failover
+additionally makes the reserving candidate differ from the selected one. The
+audit therefore prefers the finish value and falls back to the pre-route
+candidate estimate only for v1-v7 traces, where that fallback systematically
+over-reports warm requests under placement. It is a bounded integer and carries
+no prefix identity.
 Journal v1-v6 records remain readable and are
 labelled `legacy`; missing or semantically impossible v7/v8 telemetry is
 collapsed to `invalid` instead of propagating an arbitrary label. This is evidence

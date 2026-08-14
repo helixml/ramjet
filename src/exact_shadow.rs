@@ -386,13 +386,7 @@ impl ExactRouteShadow {
                 self.load_estimator,
             );
         } else if mode.applies() {
-            recompute_exact_reservations(
-                request_bytes,
-                token_ids.len(),
-                decision,
-                result,
-                self.load_estimator,
-            );
+            recompute_exact_reservations(request_bytes, decision, result, self.load_estimator);
         }
         self.metrics
             .exact_route_placement
@@ -983,18 +977,18 @@ fn apply_placement(
     decision.affinity_blocks = winner_state.affinity_blocks;
     decision.load_units = winner_state.request_load_units;
     decision.outcome = Outcome::Exact;
-    recompute_exact_reservations(
-        request_bytes,
-        prompt_tokens,
-        decision,
-        exact,
-        load_estimator,
-    );
+    recompute_exact_reservations(request_bytes, decision, exact, load_estimator);
 }
 
+/// Rescale admission reservations onto the exact warm-prefix overlap.
+///
+/// The denominator is read from `exact` rather than accepted from the caller so
+/// it cannot drift from the `overlaps` it scales: a mismatched prompt length
+/// would silently reserve the wrong capacity with nothing to fence it. A
+/// failure result carries `prompt_tokens: 0` and empty overlaps, which both
+/// fail closed here.
 fn recompute_exact_reservations(
     request_bytes: usize,
-    prompt_tokens: usize,
     decision: &mut Decision,
     exact: &PreRouteResult,
     load_estimator: RequestLoadEstimator,
@@ -1011,9 +1005,11 @@ fn recompute_exact_reservations(
         let Some(overlap_tokens) = exact.overlaps.get(candidate.index).copied().flatten() else {
             return;
         };
-        let Some(units) =
-            load_estimator.estimate_exact_tokens(request_bytes, overlap_tokens, prompt_tokens)
-        else {
+        let Some(units) = load_estimator.estimate_exact_tokens(
+            request_bytes,
+            overlap_tokens,
+            exact.prompt_tokens,
+        ) else {
             return;
         };
         updates.push((candidate.index, units));
@@ -1806,7 +1802,7 @@ mod tests {
             winner: Some(0),
         };
 
-        recompute_exact_reservations(1_024, 4, &mut route, &exact, estimator());
+        recompute_exact_reservations(1_024, &mut route, &exact, estimator());
 
         assert_eq!(route, original);
     }

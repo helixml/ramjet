@@ -1022,21 +1022,24 @@ impl Proxy {
             },
         );
 
+        // Carry each candidate's own reservation rather than re-deriving it in
+        // the retry loop: a failover target must acquire and journal its own
+        // units, never the originally selected candidate's.
         let serving_candidates = decision
             .candidates
             .iter()
-            .copied()
-            .filter(|candidate| {
+            .filter_map(|candidate| {
                 decision
                     .candidate_state
                     .iter()
                     .find(|state| state.index == *candidate)
-                    .is_some_and(|state| state.healthy)
+                    .filter(|state| state.healthy)
+                    .map(|state| (*candidate, state.request_load_units))
             })
             .collect::<Vec<_>>();
         let mut last_error = None;
         let mut selected = None;
-        for (attempt, &candidate) in serving_candidates.iter().enumerate() {
+        for (attempt, &(candidate, units)) in serving_candidates.iter().enumerate() {
             let url = upstream_url(&self.inner.config.upstreams[candidate], &parts.uri);
             let mut outbound = self
                 .inner
@@ -1044,11 +1047,6 @@ impl Proxy {
                 .request(parts.method.clone(), url)
                 .body(body.clone());
             outbound = outbound.headers(filtered_headers(&parts.headers));
-            let units = decision
-                .candidate_state
-                .iter()
-                .find(|state| state.index == candidate)
-                .map_or(decision.load_units, |state| state.request_load_units);
             let Some(load) = self.acquire_if_healthy(candidate, units) else {
                 continue;
             };
