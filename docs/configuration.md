@@ -431,6 +431,47 @@ constraints in [DistServe](https://www.usenix.org/conference/osdi24/presentation
 Its TTFT-per-uncached-token statistic includes queueing and transport, so it is
 a serving-cost signal rather than isolated engine throughput.
 
+Compare multiple correctness-qualified configurations with explicit TTFT/TPOT
+SLOs using the offline Pareto reporter:
+
+```bash
+python3 bench/slo_pareto_report.py campaign.json --json > report.json
+python3 bench/slo_pareto_report.py campaign.json
+python3 bench/slo_pareto_report.py --print-example > campaign.example.json
+```
+
+The bounded schema-v1 manifest requires a campaign ID, expected repetition
+count, named SLO pairs, and normalized cells. Every cell carries immutable
+configuration/workload SHA-256 identities, an explicit
+`direct_engine_crossover` or `lb_serial` domain, GPU count, observation window,
+repetition, privacy-safe per-request timing/correctness/token observations, and
+direct-crossover provenance where applicable. Effective tokens per step is
+accepted only with a reconciled native interval.
+
+Missing keys are schema errors. Present but missing/not-evaluated timing or
+correctness makes the complete configuration ineligible and the CLI exits 3
+after emitting the auditable report. Every configuration must have exactly the
+declared repetitions. Direct and serial domains and workload digests form
+separate cohorts, while per-GPU-hour efficiency stays comparable across GPU
+allocations inside a cohort. Every cohort fixes the offered request count;
+direct crossovers additionally require two configurations with balanced,
+inverse engine assignments.
+
+The frontier objective is qualified requests per GPU-hour at every supplied
+SLO. Dominance uses observed repetition ranges: candidate minimum must be at
+least the peer maximum for every SLO and strictly greater for one. Overlap stays
+non-dominated whenever conservative all-SLO dominance cannot be established;
+no confidence interval is invented. Raw
+normalized cells and repetition metrics remain in JSON, and automatic
+promotion is always false.
+
+`codebench.py` emits request-level TTFT/TPOT, repetition, cache, completion, and
+per-repetition observation-window data suitable for normalization, but `ok`
+means only transport/output/usage/timing completeness. It is not semantic or
+tool correctness. Join it to independently qualified correctness and immutable
+identities; never feed it directly to the reporter or manufacture passing
+correctness.
+
 Journals contain sizes, opaque ordinals, route state, status, latency, and
 aggregate usage—not prompts, generated text, request IDs, cache keys, tokens,
 or upstream hostnames.

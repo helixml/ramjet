@@ -13,7 +13,9 @@ SCRIPT = pathlib.Path(__file__).with_name("codebench.py")
 
 class BenchmarkHandler(BaseHTTPRequestHandler):
     metrics_calls = 0
+    request_calls = 0
     engine_generation_tokens = 2
+    single_delta = False
 
     def log_message(self, _format, *_args):
         return
@@ -24,16 +26,19 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", "0"))
         self.rfile.read(length)
-        events = (
-            {"choices": [{"delta": {"content": "x"}}]},
-            {
-                "choices": [{"delta": {"content": "y"}}],
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 2,
-                    "prompt_tokens_details": {"cached_tokens": 0},
-                },
+        final = {
+            "choices": [{"delta": {"content": "y"}}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+                "prompt_tokens_details": {"cached_tokens": 0},
             },
+        }
+        self.__class__.request_calls += 1
+        single_delta = self.__class__.single_delta and self.__class__.request_calls > 1
+        events = (final,) if single_delta else (
+            {"choices": [{"delta": {"content": "x"}}]},
+            final,
         )
         body = b"".join(
             b"data: " + json.dumps(event).encode() + b"\n\n" for event in events
@@ -68,9 +73,11 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
 
 
 class CodebenchTest(unittest.TestCase):
-    def run_benchmark(self, engine_generation_tokens):
+    def run_benchmark(self, engine_generation_tokens, *, single_delta=False):
         BenchmarkHandler.metrics_calls = 0
+        BenchmarkHandler.request_calls = 0
         BenchmarkHandler.engine_generation_tokens = engine_generation_tokens
+        BenchmarkHandler.single_delta = single_delta
         server = ThreadingHTTPServer(("127.0.0.1", 0), BenchmarkHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -99,6 +106,22 @@ class CodebenchTest(unittest.TestCase):
         result = self.run_benchmark(engine_generation_tokens=2)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
+        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(report["type"], "engine_cell")
+        self.assertGreater(report["observation_window_seconds"], 0)
+        self.assertEqual(report["completion_rate"], 1)
+        self.assertEqual(len(report["request_observations"]), 1)
+        self.assertEqual(len(report["repetition_observations"]), 1)
+        self.assertEqual(report["repetition_observations"][0]["repetition"], 0)
+        self.assertGreater(
+            report["repetition_observations"][0]["observation_window_seconds"], 0
+        )
+        observation = report["request_observations"][0]
+        self.assertEqual(observation["repetition"], 0)
+        self.assertTrue(observation["ok"])
+        self.assertIsNotNone(observation["ttft_ms"])
+        self.assertIsNotNone(observation["tpot_ms"])
+        self.assertIsNotNone(report["tpot_ms_p95"])
         self.assertTrue(report["dspark"]["reconciled"])
         self.assertNotIn("measurement_error", report)
 
@@ -108,6 +131,15 @@ class CodebenchTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["dspark"]["state"], "contaminated")
         self.assertEqual(report["measurement_error"], "speculation_not_reconciled")
+
+    def test_one_stream_delta_cannot_false_green_without_measurable_tpot(self):
+        result = self.run_benchmark(engine_generation_tokens=2, single_delta=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["requests_ok"], 0)
+        self.assertEqual(report["requests_failed"], 1)
+        self.assertIsNone(report["request_observations"][0]["tpot_ms"])
+        self.assertIn("measurable TPOT", report["errors"][0])
 
 
 if __name__ == "__main__":

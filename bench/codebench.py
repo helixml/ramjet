@@ -125,8 +125,22 @@ def one(index, output):
             "wall_seconds": ended - started,
             "route": route,
         }
+        if completion_tokens > 1 and output[index]["decode_seconds"] is not None:
+            output[index]["tpot_ms"] = round(
+                1000 * output[index]["decode_seconds"] / (completion_tokens - 1),
+                3,
+            )
+        else:
+            output[index]["tpot_ms"] = None
+        output[index]["ok"] = (
+            output[index]["ok"]
+            and output[index]["tpot_ms"] is not None
+            and output[index]["tpot_ms"] > 0
+        )
         if not output[index]["ok"]:
-            output[index]["error"] = "missing generated output or authoritative usage"
+            output[index]["error"] = (
+                "missing generated output, authoritative usage, or measurable TPOT"
+            )
     except Exception as error:
         output[index] = {"ok": False, "error": f"{type(error).__name__}: {error}"}
 
@@ -173,11 +187,21 @@ if not warmup or not all(item.get("ok") for item in warmup.values()):
 metrics_before = metric_snapshot()
 batches = []
 requests = []
-for _ in range(RUNS):
+measurement_started = time.perf_counter()
+for repetition in range(RUNS):
     output, wall = run_batch()
-    requests.extend(output.values())
+    for index in sorted(output):
+        output[index]["repetition"] = repetition
+        requests.append(output[index])
     completed = sum(item.get("completion_tokens", 0) for item in output.values())
-    batches.append({"wall_seconds": wall, "completion_tokens": completed})
+    batches.append(
+        {
+            "repetition": repetition,
+            "wall_seconds": wall,
+            "completion_tokens": completed,
+        }
+    )
+measurement_wall_seconds = time.perf_counter() - measurement_started
 
 good = [item for item in requests if item.get("ok")]
 decode_rates = [
@@ -186,6 +210,7 @@ decode_rates = [
     if item.get("decode_seconds") and item.get("completion_tokens")
 ]
 ttfts = [item["ttft"] for item in good if item.get("ttft") is not None]
+tpots = [item["tpot_ms"] for item in good if item.get("tpot_ms") is not None]
 aggregate_rates = [item["completion_tokens"] / item["wall_seconds"] for item in batches]
 dspark = speculative_delta(
     metrics_before,
@@ -195,6 +220,8 @@ dspark = speculative_delta(
     expected_enabled=os.environ.get("BENCH_SPEC_MODE", "enabled") == "enabled",
 )
 result = {
+    "schema_version": 2,
+    "type": "engine_cell",
     "label": os.environ.get("SWEEP_LABEL", "run"),
     "base": BASE,
     "concurrency": CONCURRENCY,
@@ -204,12 +231,55 @@ result = {
     "temperature": TEMPERATURE,
     "requests_ok": len(good),
     "requests_failed": len(requests) - len(good),
+    "completion_rate": round(len(good) / len(requests), 6) if requests else None,
+    "observation_window_seconds": round(measurement_wall_seconds, 6),
     "per_stream_decode_tok_s_median": round(statistics.median(decode_rates), 1) if decode_rates else None,
     "aggregate_tok_s_median": round(statistics.median(aggregate_rates), 1) if aggregate_rates else None,
     "ttft_ms_median": round(statistics.median(ttfts) * 1000, 1) if ttfts else None,
     "ttft_ms_p95": round(percentile(ttfts, 0.95) * 1000, 1) if ttfts else None,
+    "tpot_ms_median": round(statistics.median(tpots), 3) if tpots else None,
+    "tpot_ms_p95": round(percentile(tpots, 0.95), 3) if tpots else None,
     "prompt_tokens": good[0].get("prompt_tokens") if good else None,
     "cached_tokens": good[0].get("cached_tokens") if good else None,
+    "cache_hit_pct": (
+        round(
+            100
+            * sum(item.get("cached_tokens", 0) for item in good)
+            / sum(item.get("prompt_tokens", 0) for item in good),
+            3,
+        )
+        if sum(item.get("prompt_tokens", 0) for item in good)
+        else None
+    ),
+    "request_observations": [
+        {
+            "repetition": item["repetition"],
+            "ok": item.get("ok") is True,
+            "prompt_tokens": item.get("prompt_tokens"),
+            "cached_tokens": item.get("cached_tokens"),
+            "completion_tokens": item.get("completion_tokens"),
+            "ttft_ms": (
+                round(item["ttft"] * 1000, 3)
+                if item.get("ttft") is not None
+                else None
+            ),
+            "tpot_ms": item.get("tpot_ms"),
+            "wall_ms": (
+                round(item["wall_seconds"] * 1000, 3)
+                if item.get("wall_seconds") is not None
+                else None
+            ),
+        }
+        for item in requests
+    ],
+    "repetition_observations": [
+        {
+            "repetition": item["repetition"],
+            "observation_window_seconds": round(item["wall_seconds"], 6),
+            "completion_tokens": item["completion_tokens"],
+        }
+        for item in batches
+    ],
     "route_counts": {
         route: sum(1 for item in good if item.get("route") == route)
         for route in sorted({item.get("route") for item in good if item.get("route") is not None})

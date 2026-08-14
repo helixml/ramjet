@@ -125,6 +125,20 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   c8 code/prose scout, or full direct matrix gate. Pay for a two-round r34/r11
   crossover only if the scout is near the promotion threshold. Cache/locality
   and aggregate box tests remain later serial gates.
+- ✅ **Correctness-gated SLO-goodput Pareto reporting (#148).** A bounded
+  GPU-free campaign artifact carries explicit TTFT/TPOT SLOs, immutable
+  configuration/workload identities, GPU counts, observation windows,
+  repetitions, direct-crossover versus serial-LB domains, native reconciliation,
+  and privacy-safe per-request correctness/timing/token observations. Missing
+  fields fail closed; not-evaluated results remain auditable but make the
+  configuration ineligible. The frontier compares qualified requests per
+  GPU-hour across every SLO using conservative observed ranges (candidate
+  minimum versus peer maximum), so overlapping noise is never called a win.
+  Cohorts cap configurations, fix offered load, compare GPU allocations through
+  the normalized objective, and require balanced direct crossovers. Raw cells,
+  per-repetition metrics, cache/throughput context, dominance, and overlap labels
+  are retained in JSON and concise text. Automatic promotion is always false.
+  Live r11 evidence remains prohibited by the node06 moratorium.
 - ✅ **Single-parse approximate preparation.** One JSON parse now feeds both
   compatibility mutations and canonical route fingerprints; cache observation
   reuses the prepared vector. Release-mode preparation is 0.49ms at 256KiB and
