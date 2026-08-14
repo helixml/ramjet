@@ -24,6 +24,8 @@ pub mod metrics;
 pub mod prepare;
 pub mod proxy;
 pub mod router;
+mod session;
+mod session_affinity;
 pub mod shadow_soak;
 pub mod shims;
 pub mod snapshot_actor;

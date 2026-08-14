@@ -99,9 +99,10 @@ deeper raw overlap.
 - Bounded memory, request sanitization, model metadata rewriting, and upstream
   cancellation when the client disappears.
 
-Exact tokenization, fenced KV indexes, authenticated snapshot companions, and
-placement canaries remain opt-in research surfaces. They fail closed and are
-not dependencies of ordinary serving.
+Exact tokenization, fenced KV indexes, authenticated snapshot companions,
+exact-placement canaries, and session-affinity shadow telemetry remain opt-in
+research surfaces. The session path cannot change placement. These paths fail
+closed and are not dependencies of ordinary serving.
 
 ## Operate it
 

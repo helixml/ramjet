@@ -8,15 +8,23 @@ use serde::Serialize;
 use crate::{
     config::Config,
     router::{CandidateState, Decision},
+    session_affinity::SessionAffinityObservation,
     tokenizer::CanaryAssignment,
     usage::Accumulator,
 };
 
-const VERSION: u8 = 4;
+const VERSION: u8 = 5;
 
 pub struct RouteJournal {
     enabled: bool,
     sequence: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RouteAnnotations {
+    pub(crate) served_chosen: Option<usize>,
+    pub(crate) exact_canary: CanaryAssignment,
+    pub(crate) session_affinity: Option<SessionAffinityObservation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +48,8 @@ pub struct StartRecord<'a> {
     score_tie_break: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     exact_canary: Option<CanaryAssignment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_affinity: Option<SessionAffinityObservation>,
     candidates: &'a [CandidateState],
 }
 
@@ -80,9 +90,8 @@ impl RouteJournal {
         endpoint: &str,
         request_bytes: usize,
         decision: &Decision,
-        served_chosen: Option<usize>,
         config: &Config,
-        exact_canary: CanaryAssignment,
+        annotations: RouteAnnotations,
     ) -> Option<u64> {
         if !self.enabled || endpoint == "other" {
             return None;
@@ -93,9 +102,8 @@ impl RouteJournal {
             endpoint,
             request_bytes,
             decision,
-            served_chosen,
             config,
-            exact_canary,
+            annotations,
         );
         emit(&record);
         Some(sequence)
@@ -107,9 +115,8 @@ impl RouteJournal {
         endpoint: &'a str,
         request_bytes: usize,
         decision: &'a Decision,
-        served_chosen: Option<usize>,
         config: &Config,
-        exact_canary: CanaryAssignment,
+        annotations: RouteAnnotations,
     ) -> StartRecord<'a> {
         StartRecord {
             v: VERSION,
@@ -120,7 +127,7 @@ impl RouteJournal {
             request_bytes,
             total_blocks: decision.total_blocks,
             chosen: decision.candidate_state.first().map(|state| state.index),
-            served_chosen,
+            served_chosen: annotations.served_chosen,
             outcome: decision.outcome.label(),
             rotation: decision.rotation,
             alpha: config.route_alpha,
@@ -129,7 +136,9 @@ impl RouteJournal {
             load_unit_bytes: config.route_load_unit_bytes,
             max_load_units: config.route_max_load_units,
             score_tie_break: "overlap",
-            exact_canary: (exact_canary != CanaryAssignment::NotApplicable).then_some(exact_canary),
+            exact_canary: (annotations.exact_canary != CanaryAssignment::NotApplicable)
+                .then_some(annotations.exact_canary),
+            session_affinity: annotations.session_affinity,
             candidates: &decision.candidate_state,
         }
     }
@@ -193,7 +202,11 @@ fn emit(record: &impl Serialize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Affinity, router::Outcome};
+    use crate::{
+        config::Affinity,
+        router::Outcome,
+        session_affinity::{SessionAffinityObservation, SessionAffinityOutcome},
+    };
 
     #[test]
     fn start_record_is_privacy_bounded() {
@@ -226,9 +239,20 @@ mod tests {
             "chat",
             1_555_943,
             &decision,
-            Some(1),
             &config,
-            CanaryAssignment::Treatment,
+            RouteAnnotations {
+                served_chosen: Some(1),
+                exact_canary: CanaryAssignment::Treatment,
+                session_affinity: Some(SessionAffinityObservation {
+                    policy_version: 1,
+                    bonus_blocks: 4,
+                    max_load_delta: 0,
+                    outcome: SessionAffinityOutcome::WouldPreferPrimary,
+                    primary: Some(0),
+                    secondary: Some(1),
+                    target: Some(0),
+                }),
+            },
         ))
         .unwrap();
         for forbidden in ["secret-engine", "http://", "prompt", "fingerprint"] {
@@ -239,7 +263,10 @@ mod tests {
         }
         assert!(encoded.contains("\"chosen\":1"));
         assert!(encoded.contains("\"served_chosen\":1"));
-        assert!(encoded.contains("\"v\":4"));
+        assert!(encoded.contains("\"v\":5"));
         assert!(encoded.contains("\"exact_canary\":\"treatment\""));
+        assert!(encoded.contains(
+            "\"session_affinity\":{\"policy_version\":1,\"bonus_blocks\":4,\"max_load_delta\":0,\"outcome\":\"would_prefer_primary\",\"primary\":0,\"secondary\":1,\"target\":0}"
+        ));
     }
 }

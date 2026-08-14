@@ -69,6 +69,12 @@ services:
       # requires a secret in the uncommitted node .env and one X-Session-ID.
       DS4_EXACT_ROUTE_CANARY_BPS: ${DS4_EXACT_ROUTE_CANARY_BPS:-0}
       DS4_EXACT_ROUTE_CANARY_KEY: ${DS4_EXACT_ROUTE_CANARY_KEY:-}
+      # Stateless primary/secondary session assignment is observation-only.
+      # The independent key stays in the uncommitted node .env when enabled.
+      DS4_SESSION_AFFINITY_MODE: ${DS4_SESSION_AFFINITY_MODE:-off}
+      DS4_SESSION_AFFINITY_KEY: ${DS4_SESSION_AFFINITY_KEY:-}
+      DS4_SESSION_AFFINITY_BONUS_BLOCKS: ${DS4_SESSION_AFFINITY_BONUS_BLOCKS:-4}
+      DS4_SESSION_AFFINITY_MAX_LOAD_DELTA: ${DS4_SESSION_AFFINITY_MAX_LOAD_DELTA:-0}
       # One-shot served-request qualification. Marked capture requires the
       # authenticated snapshot-shadow overlay; the later comparison loop is
       # in-memory and does not dispatch additional inference.

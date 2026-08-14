@@ -868,7 +868,17 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   migration nor
   alpha pressure moves them off their warm engine (DwarfStar pinned-deep-trunk
   analogue). Follow Kimi K3's failure-bounded form: assign a deterministic
-  primary plus a pre-assigned secondary, not an unbounded hard pin.
+  primary plus a pre-assigned secondary, not an unbounded hard pin. r107 adds
+  the first default-off observation slice: an independent keyed rendezvous
+  pair, primary-then-secondary health/load admission, a bounded
+  cache-equivalent bonus, fixed-cardinality metrics, and privacy-bounded
+  journal-v5 records with an independent replay/mismatch oracle and policy
+  sweeps. It is deliberately stateless and cannot alter the route. Before
+  placement, decide whether deterministic first-touch assignment is sufficient
+  or a bounded table must learn the actually served first replica; then compose
+  exact/session proposals explicitly and recheck load atomically at dispatch.
+  Do not describe r107 as previous-replica affinity or promote it from shadow
+  based only on synthetic hash balance.
 - ⬜ **Request-class budgets / admission control.** The weighted load score is
   reactive, but does not isolate short interactive traffic from a burst of
   200K–393K prefills. Add observable short/medium/long token-estimate classes,

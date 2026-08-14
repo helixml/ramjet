@@ -5123,3 +5123,45 @@ node06 still timed out over both Tailscale and SSH, so this is local recovery-
 tool qualification only. The 104-source/100K live journal, r105 rollback audit,
 and unchanged engine-identity proof remain mandatory before issue #41 can
 advance.
+
+## 2026-08-14 — r107 local session-affinity shadow foundation
+
+r107 adds a default-off, observation-only primary/secondary assignment for the
+existing bounded `X-Session-ID`. An independent 32–256-byte key drives
+HMAC-SHA256 rendezvous ranking over opaque upstream ordinals. The prospective
+primary is admitted only within a configurable delta of the least-loaded
+healthy replica; otherwise the preassigned secondary is considered under the
+same gate. A small cache-equivalent bonus is then compared with the complete
+approximate-router ordering: weighted score, raw-overlap tie-break, and rotated
+ordinal. The normal and exact serving decisions remain untouched.
+
+The first review found that the initial shadow implementation treated a
+weighted-score equality as a migration without applying raw overlap and
+rotation. That would have corrupted promotion evidence despite being
+serving-safe. The comparator and tests now match the router exactly. Telemetry
+also separates secondary consideration caused by primary health from load
+gating, distinguishes an unavailable assigned pair from a global outage, and
+preinitializes every endpoint/outcome series. A proxy integration proves a
+session mapped away from the cold approximate winner still dispatches to the
+approximate replica and strips the private header upstream.
+
+Route journal v5 records only the policy version, bonus/load bounds, typed
+outcome, and primary/secondary/target ordinals. It contains no session ID,
+HMAC score, key, prompt, token, or hostname. `route_replay.py` independently
+reproduces the Rust decision and target, reports record mismatches, filters
+outcomes, and sweeps the bonus/load delta. This is deliberately stateless
+prospective assignment—not learned previous-replica affinity and not serving
+failover. Placement still requires an explicit exact/session composition,
+dispatch-time atomic health/load admission, a percentage gate, and live
+cache/TTFT evidence.
+
+Local qualification passed: strict all-target/all-feature Clippy; 363 Rust
+unit tests plus every integration suite in 18.04s; 232 Python tests in 2.54s;
+the five-case agent corpus; ordinary Compose rendering; and both snapshot
+Compose validators. A second independent read-only audit found no remaining
+actionable blocker after rechecking every initial finding. The source-changing
+thin-LTO release link completed in approximately 28s wall time; the warm locked
+release verification took 0.15s and produced a 12,419,480-byte stripped LB
+binary. The accidental worktree-local Cargo target was removed, recovering
+5.7GiB while preserving the shared canonical cache. node06 remained
+unreachable, so no live r107 inference or TTFT claim is made.

@@ -236,7 +236,7 @@ is the reference for the failure semantics below:
 | NVIDIA Dynamo | conditional disaggregation (cold prefill placement) | **v0.1.0** (size-weighted load reservation) |
 | NVIDIA Dynamo | event gaps, replay, exact token-ID lookup, and `best_worker_id`-style counterfactuals | **r20 pre-route shadow**, placement still disabled |
 | [Kimi K3 / KDA](https://github.com/MoonshotAI/Kimi-K3/blob/main/k3_tech_report.pdf) | model-aware cache geometry; recurrent state remains reusable | research / benchmark |
-| Kimi K3 | primary/secondary affinity and request-class budgets | planned, scaled down to two engines |
+| Kimi K3 | primary/secondary affinity and request-class budgets | primary/secondary shadow in r107; placement and budgets planned |
 | DwarfStar/ds4 | per-request timings surfaced to ops | **v0.1.0** (logs + histograms) |
 | DwarfStar/ds4 | decision traces and policy replay | **v0.1.0** (privacy-bounded static replay) |
 | SGLang router | radix-tree-approximate LB | **v0.1.0** (chain fingerprints) |
@@ -258,6 +258,9 @@ See [ROADMAP.md](ROADMAP.md) for the tracked list. Summary below.
    long-lived orchestrator conversations so neither the router (migration)
    nor alpha pressure moves them off their warm engine. Use Kimi K3's bounded
    primary/secondary assignment so failure recovery spreads cold re-prefill.
+   r107 first measures a stateless keyed pair behind health/load gates; it does
+   not yet change placement or learn the replica that served a session's first
+   request.
 4. **True disaggregated prefill** once engines expose KV transfer (vLLM P/D
    + NIXL): route prefill to a prefill pool, stream KV to a decode engine.
    Single-box value is modest; multi-node value is large.

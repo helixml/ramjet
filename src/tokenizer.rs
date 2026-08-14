@@ -15,7 +15,6 @@ use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, TextInput, deepseek_f
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tokio::{
     sync::{Semaphore, mpsc},
     time::Instant,
@@ -32,6 +31,7 @@ use crate::{
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
     router::Decision,
+    session::{OpaqueSession, hmac_sha256},
     shadow_soak::{
         CaptureResult, ShadowSoak, ShadowSoakAttestation, ShadowSoakConfig, ShadowSoakSource,
         ShadowSoakStatus, StartResult,
@@ -130,13 +130,6 @@ pub(crate) struct ExactTokens {
 pub(crate) struct PreRouteTokens {
     pub(crate) tokens: ExactTokens,
     attestation_revision: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CanarySession<'a> {
-    Missing,
-    Invalid,
-    Valid(&'a [u8]),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -587,7 +580,7 @@ impl TokenizerObserver {
         &self,
         endpoint: Endpoint,
         eligible: bool,
-        session: CanarySession<'_>,
+        session: OpaqueSession<'_>,
     ) -> CanaryAssignment {
         if self.exact_route_mode != ExactRouteMode::Placement || !eligible {
             return CanaryAssignment::NotApplicable;
@@ -671,7 +664,7 @@ impl TokenizerObserver {
 }
 
 fn exact_canary_assignment(
-    session: CanarySession<'_>,
+    session: OpaqueSession<'_>,
     key: Option<&[u8]>,
     canary_bps: usize,
 ) -> CanaryAssignment {
@@ -679,9 +672,9 @@ fn exact_canary_assignment(
         return CanaryAssignment::Disabled;
     }
     match session {
-        CanarySession::Missing => CanaryAssignment::MissingSession,
-        CanarySession::Invalid => CanaryAssignment::InvalidSession,
-        CanarySession::Valid(session_id) => {
+        OpaqueSession::Missing => CanaryAssignment::MissingSession,
+        OpaqueSession::Invalid => CanaryAssignment::InvalidSession,
+        OpaqueSession::Valid(session_id) => {
             if exact_canary_enrolled(session_id, key, canary_bps) {
                 CanaryAssignment::Treatment
             } else {
@@ -705,32 +698,6 @@ fn exact_canary_enrolled(session_id: &[u8], key: Option<&[u8]>, canary_bps: usiz
     let value = u64::from_be_bytes(digest[..8].try_into().expect("SHA-256 has eight bytes"));
     u128::from(value) * (CANARY_BPS_SCALE as u128)
         < (canary_bps as u128) * (u128::from(u64::MAX) + 1)
-}
-
-fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
-    const BLOCK_BYTES: usize = 64;
-    let mut normalized = [0_u8; BLOCK_BYTES];
-    if key.len() > BLOCK_BYTES {
-        normalized[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        normalized[..key.len()].copy_from_slice(key);
-    }
-    let mut inner_pad = [0x36_u8; BLOCK_BYTES];
-    let mut outer_pad = [0x5c_u8; BLOCK_BYTES];
-    for ((inner, outer), key_byte) in inner_pad.iter_mut().zip(&mut outer_pad).zip(normalized) {
-        *inner ^= key_byte;
-        *outer ^= key_byte;
-    }
-    let mut inner = Sha256::new();
-    inner.update(inner_pad);
-    for part in parts {
-        inner.update(part);
-    }
-    let inner_digest = inner.finalize();
-    let mut outer = Sha256::new();
-    outer.update(outer_pad);
-    outer.update(inner_digest);
-    outer.finalize().into()
 }
 
 fn validate_tokenizer_sha256(path: &str, expected: &str) -> anyhow::Result<()> {
@@ -1784,19 +1751,19 @@ mod tests {
     fn exact_canary_assignment_has_an_instant_fail_closed_zero() {
         let key = b"0123456789abcdef0123456789abcdef";
         assert_eq!(
-            exact_canary_assignment(CanarySession::Valid(b"session"), Some(key), 0),
+            exact_canary_assignment(OpaqueSession::Valid(b"session"), Some(key), 0),
             CanaryAssignment::Disabled
         );
         assert_eq!(
-            exact_canary_assignment(CanarySession::Missing, Some(key), 10_000),
+            exact_canary_assignment(OpaqueSession::Missing, Some(key), 10_000),
             CanaryAssignment::MissingSession
         );
         assert_eq!(
-            exact_canary_assignment(CanarySession::Invalid, Some(key), 10_000),
+            exact_canary_assignment(OpaqueSession::Invalid, Some(key), 10_000),
             CanaryAssignment::InvalidSession
         );
         assert_eq!(
-            exact_canary_assignment(CanarySession::Valid(b"session"), Some(key), 10_000),
+            exact_canary_assignment(OpaqueSession::Valid(b"session"), Some(key), 10_000),
             CanaryAssignment::Treatment
         );
     }
