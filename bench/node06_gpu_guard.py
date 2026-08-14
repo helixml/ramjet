@@ -33,7 +33,7 @@ from typing import Callable
 
 from node06_operational_moratorium import (
     MoratoriumError,
-    require_supervised_authorization,
+    require_active_work_permitted,
 )
 
 
@@ -1135,11 +1135,6 @@ def parser() -> argparse.ArgumentParser:
         help="preserve only a rollback-capable root until the owner grace expires",
     )
     result.add_argument("--nvidia-smi", default=DEFAULT_NVIDIA_SMI)
-    result.add_argument(
-        "--supervised-authorization-file",
-        type=pathlib.Path,
-        help="fresh owner-only authorization for this supervised node06 window",
-    )
     result.add_argument("command", nargs=argparse.REMAINDER)
     return result
 
@@ -1177,10 +1172,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         validate_args(args)
-        require_supervised_authorization(
-            args.supervised_authorization_file,
-            f"gpu-workload.{args.label}",
-        )
+        require_active_work_permitted(f"gpu-workload.{args.label}")
         return run_guard(args)
     except (GuardError, MoratoriumError) as error:
         print(f"node06 GPU guard: {error}", file=sys.stderr)

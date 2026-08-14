@@ -30,7 +30,7 @@ from typing import Any, Callable
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from node06_operational_moratorium import (  # noqa: E402
     MoratoriumError,
-    require_supervised_authorization,
+    require_active_work_permitted,
 )
 
 
@@ -1268,11 +1268,6 @@ def parser() -> argparse.ArgumentParser:
     mode.add_argument("--run-full-prerequisite", action="store_true")
     result.add_argument("--acknowledge-production-risk")
     result.add_argument(
-        "--supervised-authorization-file",
-        type=pathlib.Path,
-        help="fresh owner-only authorization for this supervised node06 window",
-    )
-    result.add_argument(
         "--tools-dir", type=pathlib.Path, default=pathlib.Path("/tmp/mini-dynamo-p2p-tools")
     )
     result.add_argument("--expected-tools-manifest-sha256")
@@ -1324,10 +1319,7 @@ def main(argv: list[str] | None = None) -> int:
             else "p2p-gpu-scout"
         )
         try:
-            require_supervised_authorization(
-                args.supervised_authorization_file,
-                operation,
-            )
+            require_active_work_permitted(operation)
         except MoratoriumError as exc:
             print(f"active mode blocked by node06 moratorium: {exc}", file=sys.stderr)
             return 2

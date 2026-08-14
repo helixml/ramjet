@@ -24,31 +24,6 @@ def final_record(path):
     return records(path)[-1]
 
 
-def supervised_authorization(root, operation="gpu-workload.node06-experiment"):
-    root = pathlib.Path(root)
-    root.chmod(0o700)
-    now = int(time.time())
-    path = root / "supervised-authorization.json"
-    path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "node": "node06",
-                "operation": operation,
-                "issued_at_unix": now,
-                "expires_at_unix": now + 300,
-                "nonce": "b" * 32,
-                "acknowledgement": moratorium.ACKNOWLEDGEMENT,
-                "ac_repair_confirmed": True,
-                "supervisor_present": True,
-            }
-        ),
-        encoding="utf-8",
-    )
-    path.chmod(0o600)
-    return path
-
-
 def pid_is_active(pid):
     try:
         raw = pathlib.Path(f"/proc/{pid}/stat").read_text()
@@ -429,13 +404,19 @@ class Node06GpuGuardTests(unittest.TestCase):
             )
             request_pid_path = root / "request.pid"
             output = root / "guard.jsonl"
-            authorization = supervised_authorization(root)
+            module_dir = str(pathlib.Path(guard.__file__).parent)
+            launcher = (
+                "import sys; sys.path.insert(0, sys.argv.pop(1)); "
+                "import node06_operational_moratorium as m; "
+                "m.MORATORIUM_ACTIVE=False; import node06_gpu_guard as g; "
+                "raise SystemExit(g.main(sys.argv[1:]))"
+            )
             process = subprocess.Popen(
                 [
                     sys.executable,
-                    guard.__file__,
-                    "--supervised-authorization-file",
-                    str(authorization),
+                    "-c",
+                    launcher,
+                    module_dir,
                     "--nvidia-smi",
                     str(nvidia_smi),
                     "--output",
@@ -582,14 +563,11 @@ class Node06GpuGuardTests(unittest.TestCase):
             nvidia_smi.write_text(f"#!/bin/sh\nprintf '%b' '{rows}\\n'\n")
             nvidia_smi.chmod(0o755)
             output = root / "result.json"
-            authorization = supervised_authorization(root)
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
                 io.StringIO()
-            ):
+            ), mock.patch.object(moratorium, "MORATORIUM_ACTIVE", False):
                 result = guard.main(
                     [
-                        "--supervised-authorization-file",
-                        str(authorization),
                         "--nvidia-smi",
                         str(nvidia_smi),
                         "--output",

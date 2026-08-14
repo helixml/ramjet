@@ -450,10 +450,10 @@ is limited to development-host image/manifest inspection, registry pulls,
 runtime-receipt validation, Compose rendering without mutation, local tests,
 and documentation. Commands later in this section describe the future
 supervised procedure; they are not current authorization to execute it.
-The active GPU guard and P2P harness additionally require a fresh owner-only,
-operation-bound authorization file that attests AC repair and a present
-supervisor. Do not create or synthesize that file from an agent workflow; its
-creation is the operator's explicit lifting action for one short window.
+The active GPU guard and P2P harness contain a static fail-closed moratorium.
+Do not bypass or monkeypatch it in an operational workflow. Lifting it requires
+the user's explicit supervised authorization after AC repair and a reviewed
+repository change; healthy telemetry alone cannot satisfy it.
 
 For DSpark reliability changes, keep the GPU-free loop focused and exercise
 the real routing boundary with loopback upstreams:

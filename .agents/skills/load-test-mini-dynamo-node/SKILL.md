@@ -22,9 +22,9 @@ development host, validate manifests and runtime receipts, render Compose in
 dry-run mode, improve harnesses/tests, and review historical results. Do not
 connect to node06 merely to see whether it has returned. Stop after preparation
 and report the exact command plan that still requires supervised authorization.
-The GPU guard requires a fresh private authorization file for any future run.
-Do not generate it on the user's behalf: the supervisor creates it only while
-lifting the moratorium for that named window.
+The GPU guard contains a static fail-closed moratorium. Do not bypass or patch
+it during operational work. A reviewed repository change may lift it only after
+the user explicitly authorizes a supervised post-repair window.
 
 Run the smallest load test that answers the question, preserve production, and
 leave an identity-bound experiment record. Treat node06 as a live serving box,
