@@ -12,7 +12,7 @@ services:
     volumes:
       - type: bind
         source: ${MINI_DYNAMO_SERVING_IDENTITY_MIDDLEWARE_SOURCE:-./engine_identity_middleware.py}
-        target: /opt/vllm/vllm/mini_dynamo_engine_identity.py
+        target: /opt/venv/lib/python3.12/site-packages/mini_dynamo_engine_identity.py
         read_only: true
         bind:
           create_host_path: false
@@ -26,14 +26,15 @@ services:
       MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_PATH: /opt/mini-dynamo/compatibility.json
       MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SHA256: 4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa
       MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH: /workspace/model/tokenizer.json
-      EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_A_IDENTITY---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""} --override-generation-config {"top_p":0.95} --middleware vllm.mini_dynamo_engine_identity.ServingIdentityMiddleware}'
+      MINI_DYNAMO_SERVING_IDENTITY_VERIFY_TIMEOUT_MS: "4000"
+      EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_A_IDENTITY---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""} --override-generation-config {"top_p":0.95} --middleware mini_dynamo_engine_identity.ServingIdentityMiddleware}'
 
   dspark-0731-b:
     image: voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b
     volumes:
       - type: bind
         source: ${MINI_DYNAMO_SERVING_IDENTITY_MIDDLEWARE_SOURCE:-./engine_identity_middleware.py}
-        target: /opt/vllm/vllm/mini_dynamo_engine_identity.py
+        target: /opt/venv/lib/python3.12/site-packages/mini_dynamo_engine_identity.py
         read_only: true
         bind:
           create_host_path: false
@@ -47,4 +48,5 @@ services:
       MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_PATH: /opt/mini-dynamo/compatibility.json
       MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SHA256: 4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa
       MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH: /workspace/model/tokenizer.json
-      EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_B_IDENTITY---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""} --override-generation-config {"top_p":0.95} --middleware vllm.mini_dynamo_engine_identity.ServingIdentityMiddleware}'
+      MINI_DYNAMO_SERVING_IDENTITY_VERIFY_TIMEOUT_MS: "4000"
+      EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_B_IDENTITY---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""} --override-generation-config {"top_p":0.95} --middleware mini_dynamo_engine_identity.ServingIdentityMiddleware}'

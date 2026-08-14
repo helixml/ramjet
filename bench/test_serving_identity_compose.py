@@ -56,11 +56,20 @@ class ServingIdentityComposeTest(unittest.TestCase):
         middleware = validator.volume_by_target(service, validator.MIDDLEWARE_TARGET)
         self.assertEqual(
             middleware["target"],
-            "/opt/vllm/vllm/mini_dynamo_engine_identity.py",
+            "/opt/venv/lib/python3.12/site-packages/mini_dynamo_engine_identity.py",
         )
 
         service["image"] = "voipmonitor/vllm:mutable"
         with self.assertRaisesRegex(validator.ValidationError, "not pinned"):
+            validator.validate_enabled(document)
+
+    def test_live_verification_timeout_is_fixed_and_bounded_below_lb_timeout(self):
+        document = validator.render(enabled=True)
+        service = document["services"][validator.ENGINES[0]]
+        service["environment"][
+            "MINI_DYNAMO_SERVING_IDENTITY_VERIFY_TIMEOUT_MS"
+        ] = "5000"
+        with self.assertRaisesRegex(validator.ValidationError, "timeout"):
             validator.validate_enabled(document)
 
     def test_qualified_engine_arguments_cannot_be_dropped(self):

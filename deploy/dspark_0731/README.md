@@ -58,7 +58,16 @@ incarnation from `/proc`, emits only the model/engine/tokenizer/renderer subset,
 and refuses startup on a missing bearer, unsafe schema, non-regular manifest,
 or digest mismatch. It also compares the live vLLM distribution version,
 served model name, context limit, and tokenizer artifact hash with the
-manifest before it can answer the endpoint.
+manifest before it can answer the endpoint. On the first authenticated control
+request, it makes bounded in-memory ASGI calls to the initialized vLLM app for
+`/v1/models`, every committed `/tokenize` golden, and `/health` before and
+after rendering. No loopback socket is opened. A complete match is cached for
+that frontend process; every later identity request still rechecks live health.
+The whole first proof has a 4s deadline, below the LB's 5s admission deadline.
+Because the probes deliberately traverse vLLM's real inner middleware and
+routes, the first proof contributes one `/v1/models` and ten `/tokenize`
+requests to vLLM's frontend HTTP metrics. Treat that bounded startup evidence
+as control traffic when interpreting request counters.
 
 Render and validate the candidate without starting an engine:
 
@@ -68,6 +77,22 @@ docker compose -f deploy/dspark_0731/docker-compose.yaml \
   -f deploy/dspark_0731/docker-compose.compatibility-identity.yaml \
   config --quiet
 ```
+
+When the exact image is already cached, verify the real import path without a
+GPU or network (0.47s warm on the 2026-08-14 development host):
+
+```bash
+docker run --rm --network none \
+  --entrypoint /opt/venv/bin/python \
+  --mount type=bind,src="$PWD/deploy/dspark_0731/engine_identity_middleware.py",dst=/opt/venv/lib/python3.12/site-packages/mini_dynamo_engine_identity.py,readonly \
+  voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b \
+  -c 'from mini_dynamo_engine_identity import ServingIdentityMiddleware; print("identity middleware import passed")'
+```
+
+Do not make this 12.5GB image pull part of the ordinary local or Drone loop.
+Use node06's or the development host's warm cache. The source tree at
+`/opt/vllm/vllm` is not on r34's runtime `sys.path`; only the installed
+`site-packages` target above passed the exact-image import.
 
 The operational node06 directory is a mirror rather than a repository
 checkout. Before its eventual one-engine trial, copy the overlay, middleware,
@@ -84,8 +109,9 @@ so a stale operational copy fails before an engine is recreated.
 
 The validator proves that ordinary Compose has no middleware or identity
 mounts, both opt-in engines use the immutable Gilded r34 digest and the image's
-real `vllm` import path, the KV publisher and sampling floor exactly match their
-qualified JSON values, every bind is read-only and cannot create a host path,
+real installed Python 3.12 `site-packages` import path, the KV publisher and
+sampling floor exactly match their qualified JSON values, every bind is
+read-only and cannot create a host path,
 the manifest pin and both mounted artifacts match committed bytes, and the LB
 remains in `http` admission mode. It also
 validates any `EXTRA_VLLM_ARGS_A_IDENTITY` or
@@ -101,12 +127,14 @@ clean. **Keep `DS4_UPSTREAM_ADMISSION_MODE=http`; this candidate MUST NOT be
 used to enable compatibility admission, even when both endpoint documents
 match.** The middleware verifies the live vLLM distribution, configured model
 name/context, and tokenizer bytes. It still re-publishes the manifest's model
-root and renderer profile without a live golden-render check, and Compose—not
-the process—provides the immutable image binding. It also does not attest the
-driver/CUDA/NCCL/kernel/cache/warmup bundle required to close issue #15. Its
-incarnation is the API frontend process rather than vLLM's separate EngineCore
-worker. A later qualified runtime-bundle publisher must close those bindings
-before compatibility admission can be enabled.
+root and renderer profile only after the real initialized `/v1/models` and all
+ten renderer/token-ID goldens match. Compose—not the process—still provides the
+immutable image binding. The health bracket observes vLLM's monitored
+EngineCore lifecycle (the pinned fork has no core-respawn path), but it does not
+publish the EngineCore/KV-publisher PID. It also does not attest the complete
+driver/CUDA/NCCL/kernel/cache/warmup bundle required to close issue #15. A later
+qualified runtime-bundle publisher must close those bindings before
+compatibility admission can be enabled.
 
 ## Offline dual-companion security harness
 

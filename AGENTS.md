@@ -163,6 +163,15 @@ image's `--middleware` import contract without GPUs, single-home production on
 the peer, then recreate and qualify only one engine. Record the render,
 preflight, restart, and first endpoint/request wall times separately.
 
+The identity middleware's nested probes must clone the original request scope
+so vLLM routes retain the real FastAPI `app.state`. `/tokenize` owns child tasks
+for work and disconnect detection. On an outer timeout, signal a synthetic
+`http.disconnect`, wait for cooperative child cleanup, and only then use a
+bounded emergency cancellation; directly cancelling the route wrapper leaks
+both children in the pinned fork. Keep the exact-decorator-shaped regression
+green. Successful renderer proof may be process-cached, but live `/health`
+remains mandatory on every identity response.
+
 The digest index is a memory/recovery optimization, not a faster lookup path.
 Its pre-shadow gates are: no overclaims in differential tests, matched 80K
 lookup at most 250us and 5x raw exact, 524K at most 2ms, 36,612-record import

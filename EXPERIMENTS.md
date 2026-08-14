@@ -5281,3 +5281,63 @@ Compose rendering, all three semantic deployment validators, `git diff
 cached release build (0.16s). Both normal and tag Drone deployment lanes run
 the serving validator and Docker-capable Compose mutation tests; the generic
 Python lane may safely skip those tests when Docker is absent.
+
+## 2026-08-14 — r110 live renderer/model proof and exact r34 preflight
+
+r109 deliberately re-served the pinned renderer and model-root fields without
+live proof. Source inspection of the exact r34 vLLM fork showed that a custom
+class middleware is outermost but can call its inner ASGI chain without
+recursion. The initialized `/v1/models` and `/tokenize` handlers read the real
+FastAPI app state, while `/health` observes `AsyncLLM.errored`. EngineCore is a
+separate child, but the pinned client monitors it, marks the frontend dead on
+exit, and has no respawn path. This permits a stronger frontend-process proof
+without a loopback HTTP hop or a vLLM patch.
+
+The first implementation exposed two source-level bugs that the happy-path
+mock missed. First, calling the inner chain with a fresh ASGI scope omitted the
+real FastAPI `app`, so every actual handler would fail at `request.app.state`.
+The retained code clones the authenticated outer scope and replaces only the
+synthetic request fields. Second, vLLM's `with_cancellation` decorator spawns a
+handler and disconnect listener but has no cancellation `finally`; directly
+timing out the wrapper orphans both. The retained adapter shields the inner app,
+signals `http.disconnect`, waits 250ms for cooperative cleanup, and uses
+emergency cancellation only after that. An exact-decorator-shaped regression
+proves no child remains after timeout.
+
+The first authenticated identity request now checks live health, the exact
+model ID/root/context from `/v1/models`, all ten committed `/tokenize` token
+counts and big-endian-u32 digest goldens, and health again. Only a complete
+match is process-cached; every later identity request still checks health. A
+fixed 4s proof deadline is below the LB's 5s admission deadline. Responses and
+failures remain content-free, token IDs never leave the inner call, concurrent
+first checks share one lock, and failed/timed-out proofs are retryable rather
+than cached. The real inner middleware records one models and ten tokenize HTTP
+observations on that first proof; they are bounded control traffic and never
+reach inference scheduling.
+
+The exact-image runtime preflight also disproved r109's inferred mount. r34
+contains a source copy under `/opt/vllm`, but its `sys.path` imports the installed
+package from `/opt/venv/lib/python3.12/site-packages`; importing the overlay from
+the source-tree mount failed in 6.68s. Mounting the standalone module in the
+installed `site-packages` root passed in 0.47s warm with network disabled and no
+GPU. The image's installed vLLM version exactly matched the manifest, and its
+Python 3.12 runtime loaded all ten committed goldens. The locally cached image
+is 12,525,646,780 bytes, so this pull stays outside normal local/Drone loops.
+
+A seven-round, 200,000-call-per-round synthetic ordinary-path check measured a
+66.3ns direct no-op median and 219.0ns wrapped median, or 152.7ns added on this
+run. The control-path additions do not execute on inference requests; this is
+Python call overhead only, not HTTP or inference latency. node06 remained
+offline, so the live first-proof duration, metrics side effects, normal
+inference correctness, and rolling availability gate are still unqualified.
+Compatibility admission therefore remains prohibited.
+
+Final local qualification passed 12 middleware tests in 0.37s, 7 semantic
+Compose tests in 0.56s, all 251 Python tests in 2.85s, agent corpus validation,
+all three deployment validators, formatting, strict all-target/all-feature
+Clippy, 371 Rust unit tests plus every integration/doc target in 5.41s, and a
+locked release build in 10.15s. The removed Go oracle was not run because the
+completed Rust cutover has no Go module. After the final schema/test edits, a
+network-disabled import of the current middleware in the exact pinned r34
+image passed in 0.50s; the mounted file SHA-256 was
+`85362e6c35d4f7d0decf1e26b2baacb83d06243c622046cc072e98a1b4c4ca0d`.

@@ -89,11 +89,18 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   live vLLM version/model/context/tokenizer, derives the serving frontend's
   boot/process incarnation, and leaves ordinary inference on the direct vLLM
   path. A semantic Compose validator proves the base stack remains unchanged,
-  pins r34's immutable image and real import path, and requires exact qualified
-  KV-publisher/sampling JSON. The endpoint still re-publishes unverified
-  renderer/model-root fields and does not identify EngineCore, so it is not an
-  admission authority: the Compose default remains `http` and no enablement is
-  admissible. The larger issue #15 bundle still needs driver/CUDA/NCCL,
+  pins r34's immutable image and requires exact qualified
+  KV-publisher/sampling JSON. r110's exact-image preflight corrected the mount
+  from the non-imported `/opt/vllm` source tree to the installed Python 3.12
+  `site-packages` path. r110 also moves renderer/model-root from asserted to
+  live evidence: the first authenticated control request exercises the real
+  initialized model registry and every committed `/tokenize` golden through
+  the inner ASGI app, with health before/after and cooperative timeout cleanup;
+  later calls recheck health. The proof is cached only after a complete match.
+  It still does not identify the EngineCore/KV-publisher PID or bind the full
+  runtime bundle, so it is not an admission authority: the Compose default
+  remains `http` and no enablement is admissible. The larger issue #15 bundle
+  still needs driver/CUDA/NCCL,
   kernel/patch, topology,
   normalized argv/environment, compile-cache identity, representative warmups,
   complete runtime-manifest generation, and immutable engine-image

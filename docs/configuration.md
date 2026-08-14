@@ -158,12 +158,20 @@ It authenticates independently with the engine bearer so middleware ordering
 cannot expose the document, and startup verifies the live vLLM package, served
 model, context length, and tokenizer digest. The overlay is deliberately
 separate from the base Compose, pins the immutable r34 image, and does not
-enable LB admission. It does not live-verify the manifest renderer/model-root
-claims, attest vLLM's separate EngineCore process, or bind the complete runtime
-bundle. Validate it with `validate-serving-identity-compose.py` and roll one
-engine at a time. This candidate is diagnostic only: keep the LB in `http`
-mode even after both direct endpoints and normal inference pass. Compatibility
-mode requires a later complete runtime-bundle publisher.
+enable LB admission. The first authenticated identity call exercises the real
+initialized `/v1/models` and all committed `/tokenize` goldens through the
+inner ASGI app, brackets them with vLLM health, and caches a complete match for
+that frontend process. Later calls still check health. The 4s inner deadline is
+below the LB's 5s control deadline; cancellation sends an internal disconnect
+and waits for vLLM's child tasks so a timeout cannot orphan tokenization work.
+The one-time proof intentionally appears in vLLM's HTTP metrics as one models
+request and ten tokenize requests; it never reaches inference scheduling.
+This verifies the live renderer/model-root claims and monitored core lifecycle,
+but not an EngineCore/KV-publisher PID or the complete runtime bundle. Validate
+it with `validate-serving-identity-compose.py` and roll one engine at a time.
+The candidate remains diagnostic: keep the LB in `http` mode even after both
+direct endpoints and normal inference pass. Compatibility mode requires a
+later complete runtime-bundle publisher.
 
 Cold exact misses also emit a strictly observation-only projected-balance
 counterfactual. `ds4proxy_exact_route_projected_balance_total` adds each
