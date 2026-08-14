@@ -10,8 +10,10 @@ from candidate_gate import (
     ContainerIdentity,
     GateError,
     SubprocessRunner,
+    plan_contract,
     run_gate,
 )
+from node06_gpu_guard import GuardError
 
 
 class FakeRunner:
@@ -54,6 +56,16 @@ class FakeRunner:
 
 class CandidateGateTest(unittest.TestCase):
     def setUp(self):
+        self.guard_contract = {
+            "expected_gpus": 8,
+            "abort_c": 78.0,
+            "run_id": "1" * 32,
+        }
+        self.guard_patch = mock.patch(
+            "candidate_gate.gpu_guard.validate_inherited_guard",
+            return_value=self.guard_contract,
+        )
+        self.guard_validator = self.guard_patch.start()
         self.temporary = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.temporary.name)
         self.engine_path = self.root / "engine.json"
@@ -105,6 +117,7 @@ class CandidateGateTest(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+        self.guard_patch.stop()
 
     def args(self, through="smoke", resume=False):
         return argparse.Namespace(
@@ -218,17 +231,51 @@ class CandidateGateTest(unittest.TestCase):
             run_gate(self.args(), runner)
         self.assertEqual(runner.commands, [])
 
+    def test_thermal_guard_is_required_before_metadata_or_container_access(self):
+        for failure in ("missing capability", "invalid capability"):
+            runner = FakeRunner(self.identity)
+            with self.subTest(failure=failure), mock.patch(
+                "candidate_gate.gpu_guard.validate_inherited_guard",
+                side_effect=GuardError(failure),
+            ), self.assertRaisesRegex(GateError, "thermal guard"):
+                run_gate(self.args(), runner)
+            self.assertEqual(runner.commands, [])
+            self.assertFalse(self.output.exists())
+
+    def test_plan_binds_stable_guard_policy_without_breaking_resume(self):
+        plan = plan_contract(self.args(), self.agent, self.guard_contract)
+        self.assertEqual(
+            plan["thermal_guard"], {"expected_gpus": 8, "abort_c": 78.0}
+        )
+        replacement = {**self.guard_contract, "run_id": "2" * 32}
+        self.assertEqual(plan, plan_contract(self.args(), self.agent, replacement))
+
+    def test_records_link_the_specific_guard_run(self):
+        runner = FakeRunner(self.identity)
+        self.assertEqual(run_gate(self.args(), runner), 0)
+        self.assertTrue(
+            all(
+                record["thermal_guard_run_id"] == self.guard_contract["run_id"]
+                for record in self.records()
+            )
+        )
+
+    def test_gate_validates_guard_capability_once_with_conservative_limits(self):
+        runner = FakeRunner(self.identity)
+        self.assertEqual(run_gate(self.args(), runner), 0)
+        self.guard_validator.assert_called_once_with(
+            expected_gpus=8, maximum_abort_c=78
+        )
+
     def test_real_runner_uses_a_secret_free_bounded_inspect_format(self):
-        completed = mock.Mock(
-            returncode=0,
-            stdout=(
+        child = mock.Mock(returncode=0)
+        child.communicate.return_value = (
                 b"sha256:manifest\texample.invalid/engine@sha256:manifest\t"
-                b"2026-08-13T00:00:00Z\t0\ttrue\n"
-            ),
-            stderr=b"",
+                b"2026-08-13T00:00:00Z\t0\ttrue\n",
+                b"",
         )
         with (
-            mock.patch("candidate_gate.subprocess.run", return_value=completed) as called,
+            mock.patch("candidate_gate.subprocess.Popen", return_value=child) as called,
             mock.patch.dict(
                 "candidate_gate.os.environ",
                 {"BENCH_TOKEN": "secret", "BENCH_PROMPT": "uncontrolled"},
@@ -239,6 +286,7 @@ class CandidateGateTest(unittest.TestCase):
         self.assertEqual(identity, self.identity)
         argv = called.call_args.args[0]
         self.assertIn("\t", argv[3])
+        self.assertTrue(called.call_args.kwargs["start_new_session"])
         self.assertNotIn("{{json .}}", argv[3])
         self.assertNotIn("Env", argv[3])
         child_env = called.call_args.kwargs["env"]

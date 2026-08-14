@@ -514,26 +514,61 @@ probes fall back to the public default token. Every manual shadow recreate must
 install an unconditional baseline rollback trap before the mutation.
 
 Run the 104-source/100K exact-route shadow soak only through
-`bench/node06_shadow_soak_gate.py`, not through an SSH-attached
-`shadow_soak.py`. The gate reserves a mode-0600 journal, verifies the explicitly
-named immutable baseline and candidate renders, holds the common deployment
+`bench/node06_gpu_guard.py` wrapping `bench/node06_shadow_soak_gate.py`, not
+through an SSH-attached `shadow_soak.py`. The thermal guard must observe all
+eight GPUs even when a workload intentionally uses only one TP4 pair. Its
+conservative defaults wait for every GPU to be at or below 65C, start a nominal
+one-second poll with each query bounded to two seconds, and terminate the
+complete benchmark descendant tree if any GPU reaches
+78C or if `nvidia-smi` telemetry is lost. On an abort it gives request-generating
+descendants at most five seconds to cancel, escalating sooner if a subsequent
+sample remains at or above 78C or telemetry disappears, while the deployment
+owner retains a separate bounded rollback grace. Telemetry continues while
+available; if it is lost, request work is killed and the rollback owner keeps
+only that bounded grace. These
+are operational abort thresholds, not claims about the hardware's damage limit.
+Never raise them merely to finish a benchmark. This is a request-generator kill
+switch, not proof that passive cooling is healthy or that no thermal slowdown
+occurred: the core sensor cannot see chassis airflow, inlet/exhaust temperature,
+coolant state, unsupported board/memory sensors, or every throttle source. The
+guard reserves a mode-0600 append-only JSONL journal and fsyncs a start record,
+periodic checkpoints, and the final result. Records contain the stable GPU name
+and hashed UUID identity plus bounded telemetry aggregates, but never argv or
+the environment. Stdout/journald receives only run ID, status, reason, and exit
+code; hardware identity and telemetry remain in the owner-only file. A
+universal launch-gated exec owner arms race-closed parent
+death handling before releasing any command and owns escaped sessions, so loss
+of the outer sampler cancels direct scripts as well as guard-aware Python gates.
+The inner gate verifies the explicitly named immutable
+baseline and candidate renders, holds the common deployment
 lock across the LB-only candidate recreate and measurement, checks that both
 engines and companions keep their identities, and restores the exact admitted
 snapshot-shadow/soak-off baseline on success, failure, timeout, or handled
 signal. It reads the bearer from the protected deployment `.env` internally;
 never put that token in argv or a systemd property. Copy the gate together with
 `snapshot_recovery_gate.py`, `shadow_soak.py`, `cachebench.py`, and
-`engine_metrics.py`, then detach it from Tailscale/SSH:
+`engine_metrics.py`, and `node06_gpu_guard.py`, then detach it from
+Tailscale/SSH. Both journals live below a precreated owner-only directory; do
+not put the thermal journal or bearer in argv-visible systemd properties:
 
 ```bash
+install -d -o root -g root -m 0700 \
+  /home/luke/inference/dspark_0731/.experiments
 systemd-run --unit=mini-dynamo-shadow-soak-rNN --no-block \
   --property=Type=exec --property=WorkingDirectory=/home/luke/inference/dspark_0731 \
   --property=UMask=0077 --property=Restart=no --property=RuntimeMaxSec=2400 \
   --property=TimeoutStopSec=900 --property=KillMode=mixed \
+  /usr/bin/python3 ./node06_gpu_guard.py \
+  --label rNN-shadow-soak \
+  --output .experiments/rNN-thermal.jsonl \
+  --workload-grace-seconds 5 \
+  --termination-grace-seconds 780 \
+  --preserve-rollback-owner -- \
   /usr/bin/python3 ./node06_shadow_soak_gate.py \
-  --candidate-image sha256:<local-image-id> \
-  --expected-baseline-image <repository:tag@sha256:digest> \
-  --salt rNN-<fresh-nonce> --output /tmp/rNN-shadow-soak.json
+    --candidate-image sha256:<local-image-id> \
+    --expected-baseline-image <repository:tag@sha256:digest> \
+    --salt rNN-<fresh-nonce> \
+    --output .experiments/rNN-shadow-soak.json
 ```
 
 The runner retries only an authenticated proxy-marked pre-dispatch tokenizer or
@@ -543,6 +578,31 @@ passing result requires retry-reason totals to match the proxy's source-attempt
 counters exactly. A host power loss cannot execute an in-memory rollback; after
 any connectivity loss, verify boot ID, detached-unit result, LB config/image,
 engine identities, and the journal before treating rollback as proved.
+
+After the 2026-08-14 cooling failure, no sustained request-generating benchmark
+may start on node06 until cooling is repaired and a read-only
+inventory/temperature/power preflight is recorded with
+`bench/capture_node06.sh`. Inspect each device's reported target,
+maximum-operating, slowdown, and shutdown thresholds; never infer the hardware
+limit from r115's deliberately lower 78C policy, and inspect BMC/facility and
+driver slowdown evidence independently. Re-enter with one TP4 pair while
+production is stopped or isolated, then a bounded dual-pair cell; do not jump
+directly to the 52/64-app long-context boundary. Every sustained candidate
+request gate, context sweep, capacity cell, or matrix must run under
+`node06_gpu_guard.py` with a fresh mode-0600 JSONL journal. Candidate engine
+container startup, model load, and JIT occur before `candidate_gate.py` and are
+therefore outside this request-process wrapper: isolate one TP4 pair and watch
+BMC/facility plus driver telemetry manually until a container-aware rollout
+owner exists. Keep the wrapper outside the deployment lock owner so a thermal
+signal cancels its request clients within the at-most-five-second workload grace while
+allowing the inner owner up to its separate 780-second rollback grace. Telemetry
+continues during that grace while available; telemetry loss kills request work
+but does not strand the LB by preempting the bounded rollback owner. Keep
+that grace below systemd's 900-second `TimeoutStopSec` so systemd does not race
+the guard's baseline restoration. `--preserve-rollback-owner` is valid only
+for this rollback-capable shadow owner. Never use it for candidate gates,
+direct benchmark scripts, or any root process that generates requests; those
+roots belong to the five-second workload grace.
 
 ### Preflight engine flags before a rolling restart
 
@@ -867,17 +927,29 @@ bench/node06_engine_metadata.sh /tmp/candidate-engine.json dspark-0731-b \
 BENCH_GPU_COUNT=4 bench/node06_agent_metadata.sh \
   /tmp/candidate-agent.json dspark-0731-b
 
-python3 bench/candidate_gate.py \
-  --base http://127.0.0.1:8013 --model deepseek-v4-flash \
-  --container dspark-0731-b \
-  --engine-metadata /tmp/candidate-engine.json \
-  --agent-metadata /tmp/candidate-agent.json \
-  --output /tmp/candidate-gate.jsonl --through smoke
+install -d -o root -g root -m 0700 \
+  /home/luke/inference/dspark_0731/.experiments
+python3 bench/node06_gpu_guard.py \
+  --label candidate-smoke \
+  --output /home/luke/inference/dspark_0731/.experiments/candidate-smoke-thermal.jsonl \
+  -- python3 bench/candidate_gate.py \
+    --base http://127.0.0.1:8013 --model deepseek-v4-flash \
+    --container dspark-0731-b \
+    --engine-metadata /tmp/candidate-engine.json \
+    --agent-metadata /tmp/candidate-agent.json \
+    --output /tmp/candidate-gate.jsonl --through smoke
 ```
 
 Only a green smoke may continue to `--through scout --resume` (one code and
 one prose c8 cell), then `--through matrix --resume`. Resume requires the same
 immutable candidate, process lifetime, metadata, and hashed plan/scripts.
+Every resumed invocation needs a fresh thermal-journal path; the candidate
+plan binds the same stable eight-GPU ceiling while each candidate record links
+its fresh guard run ID; resume therefore never reuses a thermal journal or
+invalidates otherwise identical plan policy. The gate refuses to run outside
+the guard. The wrapper covers request generation only; use the separate
+one-TP4 isolation and manual BMC/driver watch above for engine startup and model
+load.
 Every boundary rechecks image/start/restart identity and scans only that
 stage's container-log interval for late JIT, CUDA, NCCL, OOM, Xid, traceback,
 or fatal-runtime markers. A correctness/runtime failure stops before the next
@@ -977,9 +1049,9 @@ EXPERIMENTS.md — add yours there too):
    `<tag>`; confirm `ds4proxy_upstream_up` shows both engines and the boot
    log line has the config you meant to ship.
 3. **Correctness before capacity**: for an engine candidate, run
-   `candidate_gate.py --through smoke`; continue through its c8 scout and full
-   direct matrix only while every prior stage is green and free of runtime/JIT
-   markers.
+   `candidate_gate.py --through smoke` inside `node06_gpu_guard.py`; continue
+   through its c8 scout and full direct matrix only while every prior stage is
+   green, below the thermal ceiling, and free of runtime/JIT markers.
 4. **Bench matrix** (fresh SALT per run, per the A/B protocol):
    locality (`locality_bench.sh`), concurrent same-app
    (`concurrent_sameapp.sh`), aggregate regression (`bench_serving.sh 16 512`),

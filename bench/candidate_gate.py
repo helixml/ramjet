@@ -17,9 +17,12 @@ import os
 import pathlib
 import platform
 import re
+import signal
 import subprocess
 import sys
 import time
+
+import node06_gpu_guard as gpu_guard
 
 
 SCHEMA_VERSION = 1
@@ -97,21 +100,42 @@ class Stage:
 
 
 class SubprocessRunner:
+    def __init__(self):
+        self.child = None
+
     def run(self, argv, env=None):
         child_env = dict(os.environ)
         for key in CONTROLLED_ENV:
             child_env.pop(key, None)
         child_env.update(env or {})
         try:
-            completed = subprocess.run(
+            self.child = subprocess.Popen(
                 argv,
-                check=False,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 env=child_env,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
             )
+            stdout, stderr = self.child.communicate()
+            return CommandResult(self.child.returncode, stdout, stderr)
         except OSError as error:
             return CommandResult(127, b"", type(error).__name__.encode())
-        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+        finally:
+            self.child = None
+
+    def cancel(self):
+        child = self.child
+        if child is None or child.poll() is not None:
+            return
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+        except ProcessLookupError:
+            return
 
     def inspect(self, container):
         template = (
@@ -147,6 +171,23 @@ def canonical_digest(value):
 
 def bytes_digest(value):
     return hashlib.sha256(value).hexdigest()
+
+
+def thermal_guard_contract():
+    try:
+        guard = gpu_guard.validate_inherited_guard(
+            expected_gpus=8, maximum_abort_c=78
+        )
+    except gpu_guard.GuardError as error:
+        raise GateError(
+            "candidate gate requires an inherited eight-GPU thermal guard "
+            "capability at 78C or lower"
+        ) from error
+    return {
+        "expected_gpus": guard["expected_gpus"],
+        "abort_c": guard["abort_c"],
+        "run_id": guard["run_id"],
+    }
 
 
 def read_json(path):
@@ -272,13 +313,18 @@ def build_stages(args):
     return (agent, scout, matrix)
 
 
-def plan_contract(args, agent_metadata):
+def plan_contract(args, agent_metadata, thermal_guard=None):
+    guard = thermal_guard if thermal_guard is not None else thermal_guard_contract()
     return {
         "plan_version": PLAN_VERSION,
         "python": platform.python_version(),
         "base": args.base.rstrip("/"),
         "model": args.model,
         "container": args.container,
+        "thermal_guard": {
+            "expected_gpus": guard["expected_gpus"],
+            "abort_c": guard["abort_c"],
+        },
         "agent_metadata_sha256": canonical_digest(agent_metadata),
         "inputs": {
             name: script_digest(SCRIPT_DIR / name)
@@ -360,12 +406,15 @@ def record_base(candidate_sha256, plan_sha256, gate, started, ended):
 
 def run_gate(args, runner=None):
     runner = runner or SubprocessRunner()
+    thermal_guard = thermal_guard_contract()
     engine_metadata = read_json(args.engine_metadata)
     agent_metadata = read_json(args.agent_metadata)
     candidate = candidate_contract(engine_metadata)
     validate_agent_metadata(agent_metadata, candidate)
     candidate_sha256 = canonical_digest(candidate)
-    plan_sha256 = canonical_digest(plan_contract(args, agent_metadata))
+    plan_sha256 = canonical_digest(
+        plan_contract(args, agent_metadata, thermal_guard)
+    )
     expected = expected_identity(candidate)
     successful = load_prior(args.output, candidate_sha256, plan_sha256, args.resume)
 
@@ -381,6 +430,7 @@ def run_gate(args, runner=None):
     identity_record = record_base(candidate_sha256, plan_sha256, "identity", started, ended)
     identity_record.update(
         {
+            "thermal_guard_run_id": thermal_guard["run_id"],
             "status": status,
             "receipt_verified": candidate["receipt_verified"],
             "error": error,
@@ -395,6 +445,7 @@ def run_gate(args, runner=None):
         if stage.name in successful:
             now = utc_now()
             record = record_base(candidate_sha256, plan_sha256, stage.name, now, now)
+            record["thermal_guard_run_id"] = thermal_guard["run_id"]
             record["status"] = "resumed"
             append_record(args.output, record)
             continue
@@ -438,6 +489,7 @@ def run_gate(args, runner=None):
         )
         record.update(
             {
+                "thermal_guard_run_id": thermal_guard["run_id"],
                 "status": stage_status,
                 "error_class": error_class,
                 "error": stage_error,
@@ -477,11 +529,24 @@ def main(argv=None):
     args = parser().parse_args(argv)
     if args.artifacts_dir is None:
         args.artifacts_dir = pathlib.Path(str(args.output) + ".artifacts")
+    runner = SubprocessRunner()
+    previous_handlers = {}
+
+    def interrupt(_signum, _frame):
+        runner.cancel()
+        raise GateError("thermal guard interrupted candidate gate")
+
+    for watched in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        previous_handlers[watched] = signal.signal(watched, interrupt)
     try:
-        return run_gate(args)
+        return run_gate(args, runner)
     except GateError as error:
         print(f"candidate gate: {error}", file=sys.stderr)
         return 2
+    finally:
+        runner.cancel()
+        for watched, handler in previous_handlers.items():
+            signal.signal(watched, handler)
 
 
 if __name__ == "__main__":

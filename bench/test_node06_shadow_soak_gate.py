@@ -13,6 +13,13 @@ from unittest import mock
 import node06_shadow_soak_gate as gate
 
 
+GUARD_CONTRACT = {
+    "expected_gpus": 8,
+    "abort_c": 78.0,
+    "run_id": "2" * 32,
+}
+
+
 def identity(name, image="image@sha256:abc"):
     return gate.recovery.ContainerIdentity(
         container_id=f"id-{name}",
@@ -263,13 +270,44 @@ class Node06ShadowSoakGateTests(unittest.TestCase):
                 "/tmp/result.json",
             ]
         )
-        gate.validate_args(parsed)
+        with mock.patch(
+            "node06_shadow_soak_gate.gpu_guard.validate_inherited_guard",
+            return_value=GUARD_CONTRACT,
+        ) as validator:
+            gate.validate_args(parsed)
+        validator.assert_called_once_with(expected_gpus=8, maximum_abort_c=78)
         self.assertEqual(len(parsed.engine_metrics), 2)
         self.assertEqual(len(parsed.companion_metrics_socket), 2)
         self.assertEqual(parsed.health_url, "http://127.0.0.1:8006/health")
         parsed.expected_baseline_image = "repo/image:mutable"
-        with self.assertRaises(gate.recovery.GateError):
+        with mock.patch(
+            "node06_shadow_soak_gate.gpu_guard.validate_inherited_guard",
+            return_value=GUARD_CONTRACT,
+        ), self.assertRaises(gate.recovery.GateError):
             gate.validate_args(parsed)
+
+    def test_shadow_soak_requires_the_conservative_eight_gpu_guard(self):
+        candidate = "sha256:" + "a" * 64
+        parsed = gate.parser().parse_args(
+            [
+                "--candidate-image",
+                candidate,
+                "--expected-baseline-image",
+                "repo/image:tag@sha256:" + "b" * 64,
+                "--salt",
+                "fresh",
+                "--output",
+                "/tmp/result.json",
+            ]
+        )
+        cases = ("missing capability", "invalid capability")
+        for failure in cases:
+            with self.subTest(failure=failure), mock.patch(
+                "node06_shadow_soak_gate.gpu_guard.validate_inherited_guard",
+                side_effect=gate.gpu_guard.GuardError(failure),
+            ), self.assertRaises(gate.recovery.GateError) as caught:
+                gate.validate_args(parsed)
+            self.assertEqual(caught.exception.reason, "thermal_guard_required")
 
     def test_signal_is_latched_and_never_raises_after_rollback_begins(self):
         runtime = gate.NodeShadowRuntime.__new__(gate.NodeShadowRuntime)
@@ -357,11 +395,15 @@ class Node06ShadowSoakGateTests(unittest.TestCase):
             runtime.args = argparse.Namespace(
                 candidate_image="sha256:" + "a" * 64,
                 expected_baseline_image="image@sha256:" + "b" * 64,
+                thermal_guard=GUARD_CONTRACT,
             )
             runtime._bound_plan = None
             bound = runtime.plan()
             self.assertIn("cachebench", bound)
             self.assertIn("engine_metrics", bound)
+            self.assertEqual(
+                bound["thermal_guard"], GUARD_CONTRACT
+            )
             paths["cachebench.py"].write_text("changed")
             with self.assertRaises(gate.recovery.GateError):
                 runtime.plan()
