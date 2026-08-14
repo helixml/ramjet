@@ -94,6 +94,8 @@ deeper raw overlap.
 
 - OpenAI-compatible chat/completions, streaming, reasoning, and tool calls.
 - `ok`, `degraded`, and `unhealthy` readiness at `GET /health`.
+- Optional SHA-pinned model/template compatibility admission for engines that
+  expose the atomic identity contract, with fail-closed per-replica recovery.
 - Stable `ds4proxy_*` Prometheus metrics on port `9090`.
 - Opaque `X-Mini-Dynamo-Upstream` route correlation without leaking hosts.
 - Bounded memory, request sanitization, model metadata rewriting, and upstream

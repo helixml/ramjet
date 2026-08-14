@@ -63,6 +63,9 @@ services:
       DS4_EXACT_ROUTE_MODE: ${DS4_EXACT_ROUTE_MODE:-shadow}
       DS4_EXACT_ROUTE_MANIFEST_PATH: ${DS4_EXACT_ROUTE_MANIFEST_PATH:-/compat/deepseek-v4-r34.json}
       DS4_EXACT_ROUTE_MANIFEST_SHA256: ${DS4_EXACT_ROUTE_MANIFEST_SHA256:-4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa}
+      # Optional serving admission stays permissive until separately qualified.
+      DS4_UPSTREAM_ADMISSION_MODE: ${DS4_UPSTREAM_ADMISSION_MODE:-http}
+      DS4_UPSTREAM_ADMISSION_TIMEOUT_MS: ${DS4_UPSTREAM_ADMISSION_TIMEOUT_MS:-5000}
       DS4_EXACT_ROUTE_WORKERS: ${DS4_EXACT_ROUTE_WORKERS:-8}
       DS4_EXACT_ROUTE_TIMEOUT_MS: ${DS4_EXACT_ROUTE_TIMEOUT_MS:-250}
       # Placement stays disabled by default. A nonzero percentage additionally

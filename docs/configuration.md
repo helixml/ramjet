@@ -106,12 +106,50 @@ logs, metrics, or journals.
 | `DS4_EXACT_ROUTE_MAX_LOAD_DELTA` | `0` | Maximum additional load allowed on an exact winner. |
 | `DS4_EXACT_ROUTE_CANARY_BPS` | `0` | Stable placement cohort size in basis points, from `0` to `10000`. Zero is instant rollback. |
 | `DS4_EXACT_ROUTE_CANARY_KEY` | unset | 32–256-byte HMAC key required when the placement cohort is nonzero. |
+| `DS4_UPSTREAM_ADMISSION_MODE` | `http` | `http` admits a replica after `/v1/models`. `compatibility` additionally requires one atomic `/v1/mini-dynamo/identity` response to match the pinned manifest. |
+| `DS4_UPSTREAM_ADMISSION_TIMEOUT_MS` | `5000` | Absolute timeout, at most 30 seconds, for the atomic serving-identity request. Independent of tokenization timeouts. |
 
 Exact routing requires `DS4_TOKENIZER_MODE=local-shadow`, a pinned manifest,
 and exactly one inventory source: direct KV events or snapshot companions.
 Placement additionally requires `DS4_AFFINITY=prefix`; snapshot inventories are
 shadow-only. Any timeout, attestation failure, event gap, revision change, or
 missing `X-Session-ID` preserves the approximate route.
+
+Compatibility admission is an independent serving gate. It requires
+`DS4_TOKENIZER_MODE=local-shadow` plus the SHA-pinned manifest so local golden
+validation exists and at least two upstreams, but it does not require KV events
+or enable exact routing.
+A mismatching replica is removed from ordinary serving until a later probe
+passes; the other healthy replica remains available. Keep the default `http`
+mode unless every upstream implements the identity contract below. Inspect
+`compatibility_attested` in `/health`,
+`ds4proxy_upstream_compatibility_admitted`, and
+`ds4proxy_upstream_admission_checks_total` before opting in.
+
+The identity endpoint must capture one engine process atomically and return a
+bounded schema-v1 document. `incarnation` is an opaque, per-process value of
+1–256 ASCII alphanumeric/`.`/`_`/`:`/`-` bytes. mini-dynamo validates it but
+never logs, labels, journals, or retains it.
+
+```json
+{
+  "schema_version": 1,
+  "incarnation": "boot-id:process-start",
+  "model": {"id": "...", "root": "...", "max_model_len": 393216},
+  "engine": {"version": "...", "image_digest": "sha256:..."},
+  "tokenizer": {"sha256": "..."},
+  "renderer": {"profile": "..."}
+}
+```
+
+Compatibility mode fences all replicas at LB startup and probes those initially
+fenced replicas with at most eight probes in flight. It therefore returns 503
+until at least one atomic identity succeeds. Later rounds recheck unhealthy
+replicas first and fence each healthy replica for its own bounded check. If only
+one admitted peer remains, that peer keeps serving during its bounded atomic
+recheck; a match refreshes admission, while mismatch or unavailability fences it
+immediately after the check. This avoids creating an outage merely to begin a
+probe without allowing stale identity to remain admitted indefinitely.
 
 Cold exact misses also emit a strictly observation-only projected-balance
 counterfactual. `ds4proxy_exact_route_projected_balance_total` adds each
