@@ -1,0 +1,29 @@
+# One-engine qualification only. Keep production single-homed on engine A and
+# hold the common deployment lock for every inspect/mutate/verify operation.
+services:
+  ds4-loadbalancer:
+    environment:
+      DS4_UPSTREAM: http://dspark-0731:8000
+      DS4_KV_EVENT_LIVE_ENDPOINTS: tcp://dspark-0731:5557
+      DS4_KV_EVENT_REPLAY_ENDPOINTS: tcp://dspark-0731:5558
+
+  dspark-0731-b:
+    image: voipmonitor/vllm:infernal-invocation-vllmdc2934e-b12xd48c62b-fi1ac6942-cu133-torch213-20260814-r12@sha256:7bb6994afe2b9b2307afb87f926ffe2fdc938254dc98f45692f836bc85654849
+    entrypoint:
+      - /usr/local/bin/lmcache-mp-wrapper.sh
+      - /usr/local/bin/serve-ds4-flash.sh
+    # Keep the qualified r4 launch contract explicit. Candidate defaults must
+    # not silently turn an engine-version comparison into a settings change.
+    environment:
+      MODEL_PATH: /workspace/model
+      MODEL_REVISION: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
+      TOKENIZER_REVISION: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
+      DRAFT_SAMPLE_METHOD: probabilistic
+      REJECTION_SAMPLE_METHOD: standard
+      GRAPH: "96"
+      LOAD_FORMAT: instanttensor
+      INSTANTTENSOR_BACKEND: BUFFERED
+      LMCACHE_MODE: "off"
+    volumes:
+      - /prod/engine-cache/infernal-invocation-cu133-r12:/cache
+      - /prod/engine-cache/infernal-invocation-cu133-r12/tmp:/container-tmp

@@ -75,6 +75,7 @@ steps:
       - python3 deploy/dspark_0731/validate-serving-identity-compose.py
       - python3 deploy/dspark_0731/validate-dspark-guard-compose.py
       - python3 deploy/dspark_0731/infernal-r11-candidate/validate-compose.py
+      - python3 deploy/dspark_0731/infernal-r12-candidate/validate-compose.py
       - python3 -m unittest bench.test_persistent_jit_cache_compose bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose
 
   - name: quality-complete
@@ -293,6 +294,7 @@ steps:
       - python3 deploy/dspark_0731/validate-serving-identity-compose.py
       - python3 deploy/dspark_0731/validate-dspark-guard-compose.py
       - python3 deploy/dspark_0731/infernal-r11-candidate/validate-compose.py
+      - python3 deploy/dspark_0731/infernal-r12-candidate/validate-compose.py
       - python3 -m unittest bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose
 
   - name: release-quality-complete
