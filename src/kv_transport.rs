@@ -924,7 +924,13 @@ mod tests {
             .expect("the blocking replay deadline must remain bounded");
         assert_eq!(replay, Err(KvTransportError::ReplayTimeoutUndrained));
         assert!(started.elapsed() >= Duration::from_millis(15));
-        server.await.unwrap();
+        // Bounded join: if the request were ever lost to the same handshake
+        // race, this recv would block forever and the failure would present as
+        // a hung suite rather than a failed assertion.
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("the replay request must reach the router")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -991,7 +997,17 @@ mod tests {
             replay_endpoint: Some(replay_endpoint.to_string()),
             topic: "kv".to_owned(),
             connect_timeout: Duration::from_secs(2),
-            replay_timeout: Duration::from_millis(100),
+            // Deliberately not the 100ms used elsewhere. `replay` hands the
+            // request to ZMQ and then drops the source when the deadline
+            // fires, which discards anything still queued behind an
+            // incomplete DEALER->ROUTER handshake. On a loaded runner that
+            // handshake can outlast 100ms, the ROUTER then never observes the
+            // request, and the identity assertion below times out instead --
+            // Drone build 395 failed exactly that way while the same tree
+            // passed on 396. The value only has to outlast connection setup:
+            // the server never answers `first`, so the timeout it asserts is
+            // deterministic at any length.
+            replay_timeout: Duration::from_secs(1),
             max_replay_batches: 8,
             max_replay_tail_batches: 2,
             wire_limits: KvWireLimits::default(),
@@ -999,7 +1015,7 @@ mod tests {
 
         let mut first = ZmqKvEventSource::connect(config.clone()).await.unwrap();
         let first_replay = tokio::spawn(async move { first.replay(0, 0).await });
-        let first_request = tokio::time::timeout(Duration::from_secs(2), replay_server.recv())
+        let first_request = tokio::time::timeout(Duration::from_secs(5), replay_server.recv())
             .await
             .unwrap()
             .unwrap();
@@ -1011,7 +1027,7 @@ mod tests {
 
         let mut second = ZmqKvEventSource::connect(config).await.unwrap();
         let second_replay = tokio::spawn(async move { second.replay(0, 0).await });
-        let second_request = tokio::time::timeout(Duration::from_secs(2), replay_server.recv())
+        let second_request = tokio::time::timeout(Duration::from_secs(5), replay_server.recv())
             .await
             .unwrap()
             .unwrap();
