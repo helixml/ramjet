@@ -108,9 +108,25 @@ class P2PPrerequisiteTest(unittest.TestCase):
         self.assertEqual(short_fence.returncode, 2)
         self.assertIn("60-second quiet fence", short_fence.stderr)
 
+        # The moratorium is lifted for a supervised window, so force it back on
+        # in the child: this asserts the fence still blocks whenever it is
+        # armed, rather than asserting the flag's current value.
+        launcher = (
+            "import importlib.util, sys; "
+            "sys.path.insert(0, sys.argv.pop(1)); "
+            "import node06_operational_moratorium as m; "
+            "m.MORATORIUM_ACTIVE=True; "
+            "spec = importlib.util.spec_from_file_location('phase_b', sys.argv.pop(1)); "
+            "mod = importlib.util.module_from_spec(spec); "
+            "sys.modules['phase_b'] = mod; spec.loader.exec_module(mod); "
+            "raise SystemExit(mod.main(sys.argv[1:]))"
+        )
         blocked = subprocess.run(
             [
-                "python3",
+                sys.executable,
+                "-c",
+                launcher,
+                str(ROOT / "bench"),
                 str(HARNESS),
                 "--run-gpu-scout",
                 "--acknowledge-production-risk",

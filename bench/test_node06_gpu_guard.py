@@ -591,9 +591,12 @@ class Node06GpuGuardTests(unittest.TestCase):
             fake = root / "nvidia-smi"
             fake.write_text(f"#!/bin/sh\ntouch {telemetry}\nexit 1\n")
             fake.chmod(0o755)
+            # Assert the mechanism, not the flag's current value: the
+            # moratorium is lifted for a supervised window, and re-arming it
+            # must still block before any telemetry or journal side effect.
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
                 io.StringIO()
-            ):
+            ), mock.patch.object(moratorium, "MORATORIUM_ACTIVE", True):
                 result = guard.main(
                     [
                         "--nvidia-smi",
