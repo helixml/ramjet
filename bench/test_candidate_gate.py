@@ -1,7 +1,12 @@
 import argparse
+import base64
 import fcntl
+import hashlib
 import json
+import os
 import pathlib
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -10,8 +15,13 @@ from candidate_gate import (
     CommandResult,
     ContainerIdentity,
     GateError,
+    MAX_ARTIFACT_BYTES,
     NODE06_PROFILE,
+    PERFORMANCE_ENV_NAMES,
+    PERFORMANCE_ENV_PREFIXES,
+    PROCESS_PROBE,
     ProcessIdentity,
+    RUNTIME_SECRET_ENV_NAMES,
     SubprocessRunner,
     admission_contract,
     build_stages,
@@ -228,6 +238,65 @@ class CandidateGateTest(unittest.TestCase):
             for command in runner.commands
             if command[0] in {"agent_correctness", "c8_scout", "full_matrix"}
         ]
+
+    def run_process_probe(
+        self,
+        *,
+        process_argv=None,
+        process_environment=None,
+        environment_names=("B12X_MODE", "NCCL_DEBUG"),
+        artifact_paths=None,
+    ):
+        proc_root = pathlib.Path(tempfile.mkdtemp(prefix="proc-", dir=self.root))
+        pid_root = proc_root / "4242"
+        pid_root.mkdir()
+        argv = process_argv or (
+            "/usr/bin/python3",
+            "/usr/local/bin/vllm",
+            "serve",
+            "deepseek-v4-flash",
+            "--max-model-len=393216",
+        )
+        environment = process_environment or (
+            "HOSTNAME=fixture",
+            "NCCL_DEBUG=INFO",
+            "B12X_MODE=standard",
+            "VLLM_API_KEY=redacted-by-probe",
+        )
+        start_ticks = 321
+        stat_fields = ["S", *("0" for _ in range(18)), str(start_ticks)]
+        (pid_root / "cmdline").write_bytes(
+            b"\0".join(value.encode("utf-8") for value in argv) + b"\0"
+        )
+        (pid_root / "environ").write_bytes(
+            b"\0".join(value.encode("utf-8") for value in environment) + b"\0"
+        )
+        (pid_root / "stat").write_text(
+            f"4242 (vllm worker) {' '.join(stat_fields)}\n", encoding="utf-8"
+        )
+        boot_seconds = 1_765_000_000
+        (proc_root / "stat").write_text(
+            f"cpu 1 2 3 4\nbtime {boot_seconds}\n", encoding="utf-8"
+        )
+        paths = artifact_paths or ()
+        policy = {
+            "prefixes": PERFORMANCE_ENV_PREFIXES,
+            "names": sorted(PERFORMANCE_ENV_NAMES),
+            "secret_names": sorted(RUNTIME_SECRET_ENV_NAMES),
+            "max_artifact_bytes": MAX_ARTIFACT_BYTES,
+        }
+        encoded = tuple(
+            base64.b64encode(json.dumps(value, separators=(",", ":")).encode()).decode()
+            for value in (sorted(environment_names), list(paths), policy)
+        )
+        result = subprocess.run(
+            (sys.executable, "-c", PROCESS_PROBE, *encoded, str(proc_root)),
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+        return result, argv, environment, boot_seconds, start_ticks
 
     def test_full_gate_runs_strict_order_and_reaches_matrix_only_after_scout(self):
         runner = FakeRunner(self.identity)
@@ -623,8 +692,97 @@ class CandidateGateTest(unittest.TestCase):
         self.assertEqual(actual, expected)
         argv = called.call_args.args[0]
         self.assertEqual(argv[:4], ("docker", "exec", "candidate", "python3"))
+        self.assertEqual(argv[-1], "/proc")
         self.assertNotIn("NCCL_DEBUG=", " ".join(argv))
         self.assertNotIn("B12X_MODE=", " ".join(argv))
+
+    def test_embedded_process_probe_attests_synthetic_proc_identity(self):
+        launcher = self.root / "launcher"
+        model_config = self.root / "config.json"
+        launcher.write_bytes(b"qualified-launcher")
+        model_config.write_bytes(b'{"model":"fixture"}')
+        artifact_paths = (str(launcher), str(model_config))
+
+        result, argv, _environment, boot_seconds, start_ticks = self.run_process_probe(
+            artifact_paths=artifact_paths
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertEqual(result.stderr, b"")
+        self.assertLess(len(result.stdout), 4096)
+        observed = json.loads(result.stdout)
+        canonical = lambda value: hashlib.sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        serving = argv[2:]
+        expected_environment = {
+            "B12X_MODE": "standard",
+            "NCCL_DEBUG": "INFO",
+        }
+        expected_artifacts = [
+            {"path": path, "sha256": hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()}
+            for path in artifact_paths
+        ]
+        self.assertEqual(
+            observed,
+            {
+                "process_started_unix_ns": boot_seconds * 1_000_000_000
+                + start_ticks * 1_000_000_000 // os.sysconf("SC_CLK_TCK"),
+                "serving_argv_sha256": hashlib.sha256(
+                    b"\0".join(value.encode() for value in serving)
+                ).hexdigest(),
+                "environment_sha256": canonical(expected_environment),
+                "artifacts_sha256": canonical(expected_artifacts),
+            },
+        )
+        self.assertNotIn(b"redacted-by-probe", result.stdout)
+        self.assertNotIn(b"standard", result.stdout)
+
+    def test_embedded_process_probe_fails_closed_on_live_mismatch(self):
+        artifact = self.root / "launcher"
+        artifact.write_bytes(b"qualified-launcher")
+        symlink = self.root / "launcher-link"
+        symlink.symlink_to(artifact)
+        cases = (
+            {
+                "name": "sensitive serving option",
+                "process_argv": (
+                    "/usr/bin/python3",
+                    "/usr/local/bin/vllm",
+                    "serve",
+                    "deepseek-v4-flash",
+                    "--api-key=must-not-be-accepted",
+                ),
+                "artifact_paths": (str(artifact),),
+                "error": b"sensitive serving option",
+            },
+            {
+                "name": "unreviewed performance environment",
+                "process_environment": (
+                    "B12X_MODE=standard",
+                    "NCCL_DEBUG=INFO",
+                    "VLLM_FUTURE_PERF_KNOB=enabled",
+                ),
+                "artifact_paths": (str(artifact),),
+                "error": b"unexpected performance environment",
+            },
+            {
+                "name": "symlinked artifact",
+                "artifact_paths": (str(symlink),),
+                "error": b"OSError",
+            },
+        )
+        for case in cases:
+            with self.subTest(case["name"]):
+                kwargs = {
+                    key: value
+                    for key, value in case.items()
+                    if key not in {"name", "error"}
+                }
+                result, *_ = self.run_process_probe(**kwargs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, b"")
+                self.assertIn(case["error"], result.stderr)
 
     def test_unreviewed_performance_environment_is_fail_closed(self):
         for name in (
