@@ -38,7 +38,7 @@ services:
       - "127.0.0.1:8007:9090"
     volumes:
       # Read-only tokenizer artifact for the opt-in Rust local-shadow mode.
-      - ${MODEL_DIR:-/prod/models/sglang/DeepSeek-V4-Flash-0731}/tokenizer.json:/models/tokenizer.json:ro
+      - ${MODEL_DIR:-/prod/models/DeepSeek-V4-Flash-0731}/tokenizer.json:/models/tokenizer.json:ro
     environment:
       DS4_UPSTREAM: ${DS4_UPSTREAM:-http://dspark-0731:8000,http://dspark-0731-b:8000}
       DS4_UPSTREAM_TOKEN: ${VLLM_API_KEY:-dspark-local}
@@ -134,8 +134,8 @@ services:
     ports:
       - "127.0.0.1:${HOST_PORT:-8012}:8000"
     volumes:
-      - ${MODEL_DIR:-/prod/models/sglang/DeepSeek-V4-Flash-0731}:/workspace/model:ro
-      - /prod/sglang-cache:/root/.cache
+      - ${MODEL_DIR:-/prod/models/DeepSeek-V4-Flash-0731}:/workspace/model:ro
+      - /prod/engine-cache:/root/.cache
     deploy:
       resources:
         reservations:
@@ -213,8 +213,8 @@ services:
     ports:
       - "127.0.0.1:8013:8000"
     volumes:
-      - ${MODEL_DIR:-/prod/models/sglang/DeepSeek-V4-Flash-0731}:/workspace/model:ro
-      - /prod/sglang-cache:/root/.cache
+      - ${MODEL_DIR:-/prod/models/DeepSeek-V4-Flash-0731}:/workspace/model:ro
+      - /prod/engine-cache:/root/.cache
     deploy:
       resources:
         reservations:

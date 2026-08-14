@@ -1,5 +1,76 @@
 # node06 experiment journal
 
+## 2026-08-14 — serving-path tmpfs decoupling and engine-neutral model paths
+
+Follow-up to the #156 outage: node06 served nothing for ~50 minutes after the
+12:10 UTC reboot because the snapshot-companion overlay had bind-mounted seven
+`/run` sources into the **serving** `ds4-loadbalancer`. `/run` is tmpfs, nothing
+recreates it at boot, and runc failed the mount at container init (exit 127).
+A create-time failure is not a process exit, so `restart: unless-stopped` never
+retried and `RestartCount` stayed `0` — there was no crash loop to notice.
+
+**#157 — serving-path isolation.** The LB's snapshot wiring moved out of
+`docker-compose.snapshot-companion.yaml` into a separate
+`docker-compose.snapshot-lb.yaml`. The companion overlay now adds only
+companion and provisioner services and provably does not modify the LB, so
+"the serving path gains a `/run` mount" is a discrete `-f` argument rather than
+a side effect. `validate-snapshot-production-compose.py` gained two checks:
+`validate_serving_path_isolation()` renders the base stack and the base stack
+plus companion overlay and rejects any volatile bind mount or changed runtime
+identity on `ds4-loadbalancer`; `validate_boot_authority()` rejects an LB
+authority mount with no tmpfiles.d parent behind it. Six new tests; 397 Python
+tests pass in 8.7s and the validator runs in 0.45s.
+
+**#158 — boot authority.** `deploy/dspark_0731/systemd/` adds a tmpfiles.d
+fragment (directory parents only, with the companion's own setgid/ownership
+policy) and a `oneshot` unit running `setup_snapshot_production_host.py` plus
+its read-only `--check`. The unit is ordered `Before=docker.service` but pulled
+in by `WantedBy=`, not `RequiredBy=`. That is a deliberate deviation from the
+issue text: `RequiredBy=` would make provisioner failure block Docker and
+therefore block serving, contradicting the same issue's own acceptance bullet
+that failure must leave only the companion down. Not installed on node06.
+
+**#159 — liveness alerting (partial).** `ds4proxy_*` series are exported *by*
+the LB, so when the LB is the thing that is down they disappear rather than
+going to zero, and `ds4proxy_upstream_up == 0` structurally cannot fire.
+`DS4ServingAbsent` (`absent()`, 3m) and `DS4EnginesResidentButNotServing`
+(8 GPUs holding weights `and on() absent(...)`, 10m) were added to
+`clusters/bunker/monitoring/` with promtool unit tests replaying the outage
+shape; `./scripts/test-prometheus-rules.sh` is green. Two `absent()` subtleties
+cost a cycle each: a series stays resolvable for the 5m lookback after its last
+sample, and `count()` drops all labels while `absent()` keeps its selector's
+equality matchers, so the `and` needs `on()`. Still outstanding: the Caddy
+upstream-502 alert and the synthetic authenticated probe, both of which need a
+new scrape target on node06 rather than a rules change.
+
+**Engine-neutral model paths.** `/prod/models/sglang/DeepSeek-V4-Flash-0731` and
+`/prod/sglang-cache` were named for an engine this stack does not run. Both were
+renamed to `/prod/models/DeepSeek-V4-Flash-0731` and `/prod/engine-cache`, in
+the canonical Compose, the bench metadata scripts, the three infernal candidate
+overlays, and the infra mirror. `/prod/models/sglang/` keeps `DeepSeek-V4-Flash-FP8`
+and `dsv4-sm120`, which the still-present `sglang_dsv4/launch.sh` genuinely uses;
+that launcher's `CACHE_DIR` default was repointed so it would not dangle.
+
+Executed on node06 under the deployment lock. Both renames are same-dataset
+`rename(2)` (`prod/models` and `prod` are the two ZFS datasets), so the 152G
+model tree and 152G cache moved in **0s** and the `down`/rename/`up` compose
+window was **10s**. The engines then paid an ordinary cold weight reload:
+both answered `/v1/models` at **~570s**. Verified after: both
+`ds4proxy_upstream_up` = 1, a real completion through `:8006` (200, usage
+reconciled), engine mounts resolving to the new paths, and zero
+traceback/CUDA/NCCL/OOM/Xid markers in either engine's post-restart log. 14
+`503`s on `endpoint="other"` were live traffic arriving during the warmup
+window. This was a path rename only — no image, flag, or routing change.
+
+Note for the next deploy: node06's live Compose has drifted **behind** this
+repository's canonical file (node06 has `GPU_MEM_UTIL: "0.90"` and
+`VLLM_USE_B12X_FP8_GEMM: "0"`; canonical has `GPU_MEMORY_UTILIZATION: "0.975"`
+plus admission, DSpark-guard and session-affinity blocks node06 lacks). The
+node06 edit was therefore made in place and restricted to the two path classes;
+running `sync-compose.sh` or deploying the canonical file as-is would smuggle an
+unqualified GPU-memory change into an unrelated rollout. Reconciling that drift
+is its own qualified experiment.
+
 ## 2026-08-14 — exact-placement admission reservation reconciliation
 
 Issue #146's local reconciliation was implemented without node06 access or new

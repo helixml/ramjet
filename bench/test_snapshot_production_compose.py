@@ -27,8 +27,66 @@ class SnapshotProductionComposeTest(unittest.TestCase):
 
     def test_real_production_overlay_is_valid(self):
         validator.validate_source_bind_policy()
+        validator.validate_source_bind_policy(validator.LB_OVERLAY)
         validator.validate_documents(self.companion, self.full)
         validator.validate_caddy()
+
+    def test_serving_path_has_no_tmpfs_mounts_without_the_lb_overlay(self):
+        # The #156 recurrence guard: a reboot wipes /run, so the serving LB
+        # must be creatable with none of that state present.
+        validator.validate_serving_path_isolation()
+        for document in (
+            validator.render(companion=False, attestation=False, lb_overlay=False),
+            validator.render(companion=True, attestation=True, lb_overlay=False),
+        ):
+            service = document["services"]["ds4-loadbalancer"]
+            self.assertEqual(validator.tmpfs_bind_sources(service), [])
+
+    def test_companion_overlay_alone_leaves_the_load_balancer_untouched(self):
+        base = validator.render(companion=False, attestation=False, lb_overlay=False)
+        with_companions = validator.render(
+            companion=True, attestation=True, lb_overlay=False
+        )
+        self.assertEqual(
+            base["services"]["ds4-loadbalancer"],
+            with_companions["services"]["ds4-loadbalancer"],
+        )
+        self.assertIn("snapshot-companion-a", with_companions["services"])
+
+    def test_unguarded_serving_tmpfs_mount_is_rejected(self):
+        document = validator.render(companion=False, attestation=False, lb_overlay=False)
+        document["services"]["ds4-loadbalancer"].setdefault("volumes", []).append(
+            {
+                "type": "bind",
+                "source": "/run/mini-dynamo-not-provisioned",
+                "target": "/run/mini-dynamo-not-provisioned",
+                "read_only": True,
+                "bind": {"create_host_path": False},
+            }
+        )
+        with self.assertRaisesRegex(validator.ValidationError, "no boot-time unit"):
+            validator.validate_boot_authority(document)
+
+    def test_every_lb_authority_mount_is_boot_provisioned(self):
+        # With the LB overlay applied the mounts are legitimate, but each one
+        # must have a tmpfiles.d parent behind it.
+        validator.validate_boot_authority(self.companion)
+        service = self.companion["services"]["ds4-loadbalancer"]
+        self.assertTrue(validator.tmpfs_bind_sources(service))
+
+    def test_authority_unit_orders_but_does_not_gate_docker(self):
+        directives = validator.unit_directives()
+        self.assertIn("docker.service", directives["Before"])
+        self.assertIn("docker.service", directives["WantedBy"])
+        # RequiredBy would make provisioner failure block serving. The unit
+        # explains that in prose, so assert on directives rather than text.
+        self.assertNotIn("docker.service", directives.get("RequiredBy", set()))
+
+    def test_missing_boot_provisioner_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            empty = pathlib.Path(directory) / "absent.conf"
+            with self.assertRaisesRegex(validator.ValidationError, "boot-time tmpfiles"):
+                validator.boot_provisioned_paths(empty)
 
     def test_explicit_shadow_render_is_valid_and_still_disables_raw_events(self):
         companion = validator.render(
