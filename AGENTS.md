@@ -403,6 +403,35 @@ lock. A corrupt existing output, older process start, or changed evidence for
 the same process must fail closed without replacement. Do not turn transient
 capture metadata such as capture time into incarnation identity.
 
+`idle_drain` decides when one engine may be parked during a quiet window; it
+never stops anything. The LB sits in the production request path and must not
+hold a Docker socket, which is root-equivalent on the host: the policy publishes
+`desired_running` and `safe_to_stop` per upstream and a separately privileged
+actor converges the containers. Keep the asymmetry — draining is gated by a
+cooldown and the warm floor, resuming is immediate and bypasses every rate
+limit, because being short of capacity costs a five-minute cold start while
+parking late costs watt-minutes. An unhealthy replica never counts toward the
+warm floor, the floor is clamped to at least one, and `drain` mode is rejected
+outright below two upstreams. Keep the drain flag separate from health in the
+router: `upstream_up` must keep reporting reachability so a parked replica is
+never confused with a failing one. Qualify with `DS4_IDLE_DRAIN_MODE=observe`
+against real traffic before enforcing; observe advances the state machine and
+publishes intent but fences nothing and never reports `safe_to_stop`. The drain
+knobs are expressed in seconds (`DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS`,
+`_COOLDOWN_SECONDS`, `_GRACE_SECONDS`, `_INTERVAL_SECONDS`) rather than the
+`_MS` spelling used elsewhere; there is deliberately no millisecond alias, so a
+stale `_MS` variable is inert rather than a thousand-fold misconfiguration.
+Restoring the warm floor runs on every tick, not only on traffic: a park that
+was safe when made becomes unsafe if the replica that stayed warm later fails,
+and during an idle window no request would arrive to notice. Keep
+`ds4proxy_idle_drain_state` labelled identically to `ds4proxy_upstream_up`; the
+Grafana readiness panel joins them on `upstream` to render a parked engine as
+grey PAUSED instead of green READY.
+
+```bash
+cargo test --locked idle_drain
+```
+
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
 Validate the trusted socket parent on every connect, use a fresh OS-random

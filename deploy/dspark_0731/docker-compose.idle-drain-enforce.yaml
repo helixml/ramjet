@@ -1,0 +1,40 @@
+# Enforcement overlay for the idle-driven single-engine drain policy.
+#
+# Render this ONLY after an observe-mode soak
+# (docker-compose.idle-drain-observe.yaml) has shown that the exported drain
+# state tracks the real traffic pattern. In this mode the load balancer stops
+# routing to a parked replica.
+#
+# What this overlay does and does not do:
+#
+#   * It withholds one replica from routing during a quiet window, and reports
+#     when that replica is fenced and quiet via
+#     ds4proxy_idle_drain_safe_to_stop.
+#   * It does NOT stop any container. Acting on the intent belongs to a
+#     separately privileged actor. Never grant the load balancer a Docker
+#     socket; it is in the production request path and a socket there is
+#     root-equivalent on the host.
+#
+# Safety properties enforced by the binary, not by this file:
+#
+#   * The warm floor can never fall below one serving replica.
+#   * An unhealthy replica never counts toward the warm floor, so the policy
+#     cannot park its way down to a fleet that only looks safe on paper.
+#   * Any request resumes every parked replica immediately, bypassing the
+#     cooldown. Routing resumes at once; a container the privileged actor
+#     actually stopped still has to pass its own health probe, which after a
+#     cold start is about five minutes on node06.
+#
+# That last point is the operational risk worth naming: once a stopped engine
+# is genuinely down, the fleet runs single-homed until it finishes restarting.
+# Size DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS so that only windows you are willing to
+# serve single-homed ever trigger a stop.
+services:
+  ds4-loadbalancer:
+    environment:
+      DS4_IDLE_DRAIN_MODE: drain
+      DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS: "900"
+      DS4_IDLE_DRAIN_MIN_WARM: "1"
+      DS4_IDLE_DRAIN_COOLDOWN_SECONDS: "300"
+      DS4_IDLE_DRAIN_GRACE_SECONDS: "30"
+      DS4_IDLE_DRAIN_INTERVAL_SECONDS: "15"

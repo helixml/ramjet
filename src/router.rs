@@ -132,6 +132,20 @@ struct UpstreamState {
     inflight: usize,
     load: usize,
     healthy: bool,
+    /// Withheld from routing by the idle-drain policy. Kept separate from
+    /// `healthy` so a parked replica is never confused with a failing one:
+    /// `upstream_up` continues to report reachability, and only the dedicated
+    /// drain gauges explain why an available replica is not receiving traffic.
+    drained: bool,
+}
+
+impl UpstreamState {
+    /// Whether this replica may receive new requests. Both conditions are
+    /// checked everywhere routing admits work, so a drain cannot be bypassed by
+    /// a path that only consulted health.
+    fn serving(&self) -> bool {
+        self.healthy && !self.drained
+    }
 }
 
 struct Inner {
@@ -175,6 +189,7 @@ impl Router {
                 inflight: 0,
                 load: 0,
                 healthy: true,
+                drained: false,
             })
             .collect();
         Self {
@@ -261,7 +276,7 @@ impl Router {
                     load: state.load,
                     #[allow(clippy::cast_precision_loss)]
                     weighted: affinity as f64 - self.config.alpha * state.load as f64,
-                    healthy: state.healthy,
+                    healthy: state.serving(),
                 }
             })
             .collect::<Vec<_>>();
@@ -370,7 +385,7 @@ impl Router {
         {
             let mut inner = self.inner.lock();
             let state = inner.states.get_mut(upstream)?;
-            if !state.healthy {
+            if !state.serving() {
                 return None;
             }
             state.inflight += 1;
@@ -388,6 +403,38 @@ impl Router {
         if let Some(state) = self.inner.lock().states.get_mut(upstream) {
             state.healthy = healthy;
         }
+    }
+
+    /// Withholds an upstream from routing without touching its health.
+    ///
+    /// Used by the idle-drain policy. Clearing the flag restores routing
+    /// immediately; the replica still has to pass its own health probe before
+    /// it is admitted, so resuming a container that has not finished starting
+    /// cannot route traffic into it.
+    pub fn set_drained(&self, upstream: usize, drained: bool) {
+        if let Some(state) = self.inner.lock().states.get_mut(upstream) {
+            state.drained = drained;
+        }
+    }
+
+    /// Whether an upstream is currently withheld by the idle-drain policy.
+    #[must_use]
+    pub fn drained(&self, upstream: usize) -> bool {
+        self.inner
+            .lock()
+            .states
+            .get(upstream)
+            .is_some_and(|state| state.drained)
+    }
+
+    /// Requests currently dispatched to an upstream, for drain observation.
+    #[must_use]
+    pub fn inflight(&self, upstream: usize) -> usize {
+        self.inner
+            .lock()
+            .states
+            .get(upstream)
+            .map_or(0, |state| state.inflight)
     }
 
     pub fn state(&self, upstream: usize) -> Option<(usize, usize, usize, bool)> {
@@ -709,6 +756,68 @@ mod tests {
         router.set_healthy(winner, false);
         let decision = router.route(&body);
         assert_eq!(decision.candidates.last(), Some(&winner));
+    }
+
+    #[test]
+    fn drained_upstream_sorts_last_and_is_not_a_serving_candidate() {
+        let router = Router::new(config());
+        let body = chat("sys", "hello");
+        let winner = router.route(&body).candidates[0];
+        router.observe(winner, &router.fingerprints(&body));
+        // Warm prefix affinity would normally pin this request to `winner`.
+        router.set_drained(winner, true);
+        let decision = router.route(&body);
+        assert_eq!(decision.candidates.last(), Some(&winner));
+        let drained = decision
+            .candidate_state
+            .iter()
+            .find(|state| state.index == winner)
+            .expect("candidate present");
+        assert!(
+            !drained.healthy,
+            "a drained replica must not be offered as a serving candidate"
+        );
+    }
+
+    #[test]
+    fn drain_is_independent_of_health_and_reversible() {
+        let router = Router::new(config());
+        let upstream = router.route(&chat("sys", "hello")).candidates[0];
+        router.set_drained(upstream, true);
+        assert!(router.drained(upstream));
+        // Draining must not rewrite health: the replica is still reachable, and
+        // `upstream_up` has to keep saying so.
+        assert_eq!(router.state(upstream).map(|state| state.3), Some(true));
+        router.set_drained(upstream, false);
+        assert!(!router.drained(upstream));
+    }
+
+    #[test]
+    fn dispatch_reservation_refuses_a_drained_replica() {
+        let router = Arc::new(Router::new(config()));
+        let upstream = router.route(&chat("sys", "hello")).candidates[0];
+        router.set_drained(upstream, true);
+        assert!(router.acquire_if_healthy(upstream, 4).is_none());
+        assert_eq!(router.inflight(upstream), 0);
+        // Resuming restores admission without any health transition.
+        router.set_drained(upstream, false);
+        let guard = router.acquire_if_healthy(upstream, 4).expect("resumed");
+        assert_eq!(router.inflight(upstream), 1);
+        drop(guard);
+        assert_eq!(router.inflight(upstream), 0);
+    }
+
+    #[test]
+    fn draining_an_unhealthy_replica_keeps_it_out_after_it_recovers() {
+        let router = Arc::new(Router::new(config()));
+        let upstream = router.route(&chat("sys", "hello")).candidates[0];
+        router.set_healthy(upstream, false);
+        router.set_drained(upstream, true);
+        // Health recovering alone must not readmit a replica the policy parked.
+        router.set_healthy(upstream, true);
+        assert!(router.acquire_if_healthy(upstream, 1).is_none());
+        router.set_drained(upstream, false);
+        assert!(router.acquire_if_healthy(upstream, 1).is_some());
     }
 
     #[test]
