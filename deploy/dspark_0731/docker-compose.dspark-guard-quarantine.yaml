@@ -1,0 +1,24 @@
+# Explicit enforcement overlay for the durable DSpark degeneration guard.
+#
+# Render this only together with docker-compose.compatibility-identity.yaml.
+# The host directory must be prepared before Compose; create_host_path=false
+# prevents Docker from silently creating a root-owned but unvalidated path.
+services:
+  ds4-loadbalancer:
+    volumes:
+      - type: bind
+        source: ${DSPARK_GUARD_STATE_DIR:-/run/mini-dynamo-dspark-guard.invalid}
+        target: /run/mini-dynamo-dspark-guard
+        read_only: false
+        bind:
+          create_host_path: false
+    environment:
+      DS4_UPSTREAM_ADMISSION_MODE: compatibility
+      DS4_DSPARK_GUARD_MODE: quarantine
+      DS4_DSPARK_GUARD_INTERVAL_MS: "5000"
+      DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS: "3"
+      DS4_DSPARK_GUARD_MIN_PROPOSED_TOKENS: "256"
+      DS4_DSPARK_GUARD_EXPECTED_POSITIONS: "5"
+      DS4_DSPARK_GUARD_STATE_PATH: /run/mini-dynamo-dspark-guard/state.json
+      DS4_DSPARK_GUARD_STATE_OWNER_UID: "0"
+      DS4_DSPARK_GUARD_STATE_GROUP_GID: "0"

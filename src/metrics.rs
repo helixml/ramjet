@@ -35,6 +35,14 @@ pub struct Metrics {
     pub upstream_probe_errors: CounterVec,
     pub upstream_compatibility_admitted: GaugeVec,
     pub upstream_admission_checks: CounterVec,
+    pub dspark_guard_state: GaugeVec,
+    pub dspark_guard_windows: CounterVec,
+    pub dspark_guard_quarantines: CounterVec,
+    pub dspark_guard_persistence_failures: CounterVec,
+    pub dspark_guard_measurement_available: GaugeVec,
+    pub dspark_guard_strict_acceptance: GaugeVec,
+    pub dspark_guard_effective_tokens_per_step: GaugeVec,
+    pub dspark_guard_position_acceptance: GaugeVec,
     pub upstream_errors: CounterVec,
     pub client_disconnects: CounterVec,
     pub last_upstream_success: GaugeVec,
@@ -261,6 +269,46 @@ impl Metrics {
                 "ds4proxy_upstream_admission_checks_total",
                 "Atomic serving-identity checks by bounded outcome",
                 &["upstream", "outcome"],
+            )?,
+            dspark_guard_state: gauge(
+                "ds4proxy_dspark_guard_state",
+                "One-hot DSpark reliability state by opaque replica ordinal",
+                &["replica", "state"],
+            )?,
+            dspark_guard_windows: counter(
+                "ds4proxy_dspark_guard_windows_total",
+                "DSpark reliability samples by opaque replica ordinal and bounded outcome",
+                &["replica", "outcome"],
+            )?,
+            dspark_guard_quarantines: counter(
+                "ds4proxy_dspark_guard_quarantines_total",
+                "DSpark reliability quarantines by opaque replica ordinal and bounded reason",
+                &["replica", "reason"],
+            )?,
+            dspark_guard_persistence_failures: counter(
+                "ds4proxy_dspark_guard_persistence_failures_total",
+                "DSpark durable quarantine failures by opaque replica ordinal and fixed operation",
+                &["replica", "operation"],
+            )?,
+            dspark_guard_measurement_available: gauge(
+                "ds4proxy_dspark_guard_measurement_available",
+                "Whether the latest DSpark window produced internally consistent deltas",
+                &["replica"],
+            )?,
+            dspark_guard_strict_acceptance: gauge(
+                "ds4proxy_dspark_guard_strict_acceptance_ratio",
+                "Accepted divided by proposed draft tokens in the latest valid window",
+                &["replica"],
+            )?,
+            dspark_guard_effective_tokens_per_step: gauge(
+                "ds4proxy_dspark_guard_effective_tokens_per_step",
+                "One target token plus accepted draft tokens per draft step in the latest valid window",
+                &["replica"],
+            )?,
+            dspark_guard_position_acceptance: gauge(
+                "ds4proxy_dspark_guard_position_acceptance_ratio",
+                "Accepted draft tokens at one fixed position divided by draft steps in the latest valid window",
+                &["replica", "position"],
             )?,
             upstream_errors: counter(
                 "ds4proxy_upstream_errors_total",
@@ -814,6 +862,14 @@ impl Metrics {
             Box::new(self.upstream_probe_errors.clone()),
             Box::new(self.upstream_compatibility_admitted.clone()),
             Box::new(self.upstream_admission_checks.clone()),
+            Box::new(self.dspark_guard_state.clone()),
+            Box::new(self.dspark_guard_windows.clone()),
+            Box::new(self.dspark_guard_quarantines.clone()),
+            Box::new(self.dspark_guard_persistence_failures.clone()),
+            Box::new(self.dspark_guard_measurement_available.clone()),
+            Box::new(self.dspark_guard_strict_acceptance.clone()),
+            Box::new(self.dspark_guard_effective_tokens_per_step.clone()),
+            Box::new(self.dspark_guard_position_acceptance.clone()),
             Box::new(self.upstream_errors.clone()),
             Box::new(self.client_disconnects.clone()),
             Box::new(self.last_upstream_success.clone()),
@@ -952,6 +1008,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One inventory for the complete public metric surface.
     fn registers_core_serving_tokenizer_and_exact_route_metrics() {
         let registry = Registry::new();
         let metrics = Metrics::new(&registry).unwrap();
@@ -971,6 +1028,38 @@ mod tests {
             .upstream_admission_checks
             .with_label_values(&["upstream-0", "match"])
             .inc();
+        metrics
+            .dspark_guard_state
+            .with_label_values(&["0", "healthy"])
+            .set(1.0);
+        metrics
+            .dspark_guard_windows
+            .with_label_values(&["0", "healthy"])
+            .inc();
+        metrics
+            .dspark_guard_quarantines
+            .with_label_values(&["0", "zero_acceptance"])
+            .inc();
+        metrics
+            .dspark_guard_persistence_failures
+            .with_label_values(&["0", "quarantine"])
+            .inc();
+        metrics
+            .dspark_guard_measurement_available
+            .with_label_values(&["0"])
+            .set(1.0);
+        metrics
+            .dspark_guard_strict_acceptance
+            .with_label_values(&["0"])
+            .set(0.5);
+        metrics
+            .dspark_guard_effective_tokens_per_step
+            .with_label_values(&["0"])
+            .set(3.0);
+        metrics
+            .dspark_guard_position_acceptance
+            .with_label_values(&["0", "0"])
+            .set(0.8);
         metrics.prompt_tokens.with_label_values(&["chat"]).inc();
         metrics.cached_tokens.with_label_values(&["chat"]).inc();
         metrics
@@ -1028,6 +1117,14 @@ mod tests {
             "ds4proxy_upstream_up",
             "ds4proxy_upstream_compatibility_admitted",
             "ds4proxy_upstream_admission_checks_total",
+            "ds4proxy_dspark_guard_state",
+            "ds4proxy_dspark_guard_windows_total",
+            "ds4proxy_dspark_guard_quarantines_total",
+            "ds4proxy_dspark_guard_persistence_failures_total",
+            "ds4proxy_dspark_guard_measurement_available",
+            "ds4proxy_dspark_guard_strict_acceptance_ratio",
+            "ds4proxy_dspark_guard_effective_tokens_per_step",
+            "ds4proxy_dspark_guard_position_acceptance_ratio",
             "ds4proxy_prompt_tokens_total",
             "ds4proxy_cached_prompt_tokens_total",
             "ds4proxy_cache_requests_total",

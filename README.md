@@ -26,9 +26,10 @@ same OpenAI API; engines need no mini-dynamo-specific integration.
 | --- | --- | --- |
 | Bounded prefix fingerprints find the replica most likely to reuse prior work. | Size-weighted reservations spread cold prefills and concurrent decodes. | Active health probes, retryable failover, and immediate disconnect cancellation keep capacity honest. |
 
-The router is stateless, privacy-bounded, and deliberately useful without raw
-KV-cache events. The production path is just the proxy plus your existing
-OpenAI-compatible engines.
+The ordinary router is stateless, privacy-bounded, and deliberately useful
+without raw KV-cache events. Optional DSpark enforcement persists only opaque
+quarantine commitments so an LB restart cannot forget a bad EngineCore. The
+production path remains the proxy plus your existing OpenAI-compatible engines.
 
 ## Measured on real hardware
 
@@ -97,6 +98,12 @@ deeper raw overlap.
 - Optional SHA-pinned model/template compatibility admission for engines that
   expose the atomic identity contract, with fail-closed per-replica recovery;
   the node06 guide includes an opt-in, no-extra-hop vLLM middleware candidate.
+- Optional DSpark reliability observation and sticky per-replica quarantine
+  when active K5 acceptance collapses to zero across multiple complete metric
+  windows; enforcement fsyncs an opaque EngineCore commitment and only a
+  different compatibility-attested EngineCore can durably rearm it. A
+  precommitted dirty marker keeps unresolved replicas fenced after an unclean
+  LB exit or failed state mutation.
 - Stable `ds4proxy_*` Prometheus metrics on port `9090`.
 - Opaque `X-Mini-Dynamo-Upstream` route correlation without leaking hosts.
 - Bounded memory, request sanitization, model metadata rewriting, and upstream

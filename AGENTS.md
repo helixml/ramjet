@@ -426,6 +426,33 @@ and must not become flaky CI thresholds.
 node06 is a Tailscale host running two vLLM+DSpark TP4 instances behind this
 LB. Connect with the SSH alias (config already set up):
 
+For DSpark reliability changes, keep the GPU-free loop focused and exercise
+the real routing boundary with loopback upstreams:
+
+```bash
+cargo test --locked dspark_guard
+cargo test --locked dspark_guard_store
+cargo test --locked proxy::tests::dspark
+cargo test --locked proxy::tests::all_dspark
+cargo test --locked proxy::tests::observe_mode_polls
+python3 -m unittest bench.test_dspark_guard_host bench.test_dspark_guard_compose
+```
+
+`DS4_DSPARK_GUARD_MODE` stays `off` in the canonical deployment until cooling
+is repaired. Re-entry starts with one TP4 pair in `observe`; require the exact
+r34 K5 series shape and a clean false-positive interval before dual-pair
+observe. Never skip directly to `quarantine`: enforcement additionally requires
+qualified `compatibility` admission and the dedicated durable-state overlay.
+The mode-0600 file in its mode-0700 `/run` directory must be fsynced before a
+fence is published; an LB restart must restore the same EngineCore quarantine,
+and only a different canonical EngineCore-set commitment may durably rearm it.
+The store precommits a runtime-dirty marker. A failed mutation or unclean LB
+exit must leave it set; on restart, every unresolved replica stays fenced until
+its current attested EngineCore is durably quarantined. Only a clean, fully
+resolved shutdown may clear it. Frontend-only changes do not rearm. Run both the host and Compose validators
+before any enforcement render. Missing or malformed telemetry must break
+detection consecutiveness, not become an availability quarantine.
+
 ```bash
 ssh node06            # root@100.89.187.17 via Tailscale
 ```

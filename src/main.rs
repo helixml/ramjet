@@ -93,7 +93,8 @@ async fn main() -> anyhow::Result<()> {
 
     log_startup(&config);
 
-    let probe = tokio::spawn(proxy.probe_loop());
+    let probe = tokio::spawn(proxy.clone().probe_loop());
+    let dspark_guard = tokio::spawn(proxy.clone().dspark_guard_loop());
     let mut api_shutdown = shutdown_tx.subscribe();
     let mut metrics_shutdown = shutdown_tx.subscribe();
     let api_server = axum::serve(api_listener, api).with_graceful_shutdown(async move {
@@ -129,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     probe.abort();
+    dspark_guard.abort();
     kv_consumers.shutdown().await;
     snapshot_consumers.shutdown().await;
     Ok(())
@@ -140,6 +142,11 @@ fn log_startup(config: &Config) {
         upstreams = ?config.upstreams,
         upstream_admission_mode = ?config.upstream_admission_mode,
         upstream_admission_timeout_ms = config.upstream_admission_timeout_ms,
+        dspark_guard_mode = ?config.dspark_guard_mode,
+        dspark_guard_interval_ms = config.dspark_guard_interval_ms,
+        dspark_guard_consecutive_windows = config.dspark_guard_consecutive_windows,
+        dspark_guard_min_proposed_tokens = config.dspark_guard_min_proposed_tokens,
+        dspark_guard_expected_positions = config.dspark_guard_expected_positions,
         affinity = ?config.affinity,
         alpha = config.route_alpha,
         max_prefix_bytes = config.route_max_prefix_bytes,

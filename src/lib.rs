@@ -11,6 +11,8 @@ pub mod companion_service;
 pub mod compat;
 pub mod config;
 pub mod digest_index;
+pub mod dspark_guard;
+pub mod dspark_guard_store;
 pub mod exact_index;
 pub mod exact_route_inventory;
 pub mod exact_shadow;

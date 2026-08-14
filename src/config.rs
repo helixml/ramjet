@@ -17,6 +17,13 @@ const MAX_SHADOW_SOAK_ATTEMPTS: usize = 2_000_000;
 const MAX_SHADOW_SOAK_TOKEN_BYTES: usize = 256 << 20;
 const MAX_SHADOW_SOAK_TIMEOUT_MS: usize = 15 * 60 * 1_000;
 const MAX_UPSTREAM_ADMISSION_TIMEOUT_MS: usize = 30_000;
+const MAX_DSPARK_GUARD_INTERVAL_MS: usize = 60_000;
+const MIN_DSPARK_GUARD_INTERVAL_MS: usize = 1_000;
+const MAX_DSPARK_GUARD_CONSECUTIVE_WINDOWS: usize = 12;
+const MAX_DSPARK_GUARD_MIN_PROPOSED_TOKENS: usize = 10_000_000;
+const MIN_DSPARK_QUARANTINE_CONSECUTIVE_WINDOWS: usize = 3;
+const MIN_DSPARK_QUARANTINE_PROPOSED_TOKENS: usize = 256;
+const MAX_DSPARK_GUARD_EXPECTED_POSITIONS: usize = 16;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -24,6 +31,14 @@ pub struct Config {
     pub upstream_token: Option<String>,
     pub upstream_admission_mode: UpstreamAdmissionMode,
     pub upstream_admission_timeout_ms: usize,
+    pub dspark_guard_mode: DsparkGuardMode,
+    pub dspark_guard_interval_ms: usize,
+    pub dspark_guard_consecutive_windows: usize,
+    pub dspark_guard_min_proposed_tokens: usize,
+    pub dspark_guard_expected_positions: usize,
+    pub dspark_guard_state_path: Option<PathBuf>,
+    pub dspark_guard_state_owner_uid: u32,
+    pub dspark_guard_state_group_gid: u32,
     pub max_tokens_strip: i64,
     pub advertise_ctx_margin: i64,
     pub route_alpha: f64,
@@ -91,6 +106,13 @@ pub enum Affinity {
 pub enum UpstreamAdmissionMode {
     Http,
     Compatibility,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DsparkGuardMode {
+    Off,
+    Observe,
+    Quarantine,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -345,6 +367,93 @@ impl Config {
             &exact_route,
             &serving_runtime,
         )?;
+        let dspark_guard_mode = dspark_guard_mode(&mut get, upstream_admission_mode)?;
+        let dspark_guard_interval_ms = bounded_positive(
+            &mut get,
+            "DS4_DSPARK_GUARD_INTERVAL_MS",
+            5_000,
+            MAX_DSPARK_GUARD_INTERVAL_MS,
+        )?;
+        if dspark_guard_interval_ms < MIN_DSPARK_GUARD_INTERVAL_MS {
+            return Err(invalid(
+                "DS4_DSPARK_GUARD_INTERVAL_MS",
+                dspark_guard_interval_ms.to_string(),
+                "an integer from 1000 through 60000",
+            ));
+        }
+        let dspark_guard_consecutive_windows = bounded_positive(
+            &mut get,
+            "DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS",
+            3,
+            MAX_DSPARK_GUARD_CONSECUTIVE_WINDOWS,
+        )?;
+        if dspark_guard_consecutive_windows < 2 {
+            return Err(invalid(
+                "DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS",
+                dspark_guard_consecutive_windows.to_string(),
+                "an integer from 2 through 12",
+            ));
+        }
+        let dspark_guard_min_proposed_tokens = bounded_positive(
+            &mut get,
+            "DS4_DSPARK_GUARD_MIN_PROPOSED_TOKENS",
+            256,
+            MAX_DSPARK_GUARD_MIN_PROPOSED_TOKENS,
+        )?;
+        if dspark_guard_mode == DsparkGuardMode::Quarantine
+            && dspark_guard_consecutive_windows < MIN_DSPARK_QUARANTINE_CONSECUTIVE_WINDOWS
+        {
+            return Err(invalid(
+                "DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS",
+                dspark_guard_consecutive_windows.to_string(),
+                "at least 3 when DS4_DSPARK_GUARD_MODE=quarantine",
+            ));
+        }
+        if dspark_guard_mode == DsparkGuardMode::Quarantine
+            && dspark_guard_min_proposed_tokens < MIN_DSPARK_QUARANTINE_PROPOSED_TOKENS
+        {
+            return Err(invalid(
+                "DS4_DSPARK_GUARD_MIN_PROPOSED_TOKENS",
+                dspark_guard_min_proposed_tokens.to_string(),
+                "at least 256 when DS4_DSPARK_GUARD_MODE=quarantine",
+            ));
+        }
+        let dspark_guard_expected_positions = bounded_positive(
+            &mut get,
+            "DS4_DSPARK_GUARD_EXPECTED_POSITIONS",
+            5,
+            MAX_DSPARK_GUARD_EXPECTED_POSITIONS,
+        )?;
+        let raw_dspark_guard_state_path =
+            get("DS4_DSPARK_GUARD_STATE_PATH").filter(|value| !value.is_empty());
+        let dspark_guard_state_path = raw_dspark_guard_state_path
+            .as_deref()
+            .and_then(|value| normalized_absolute_path(value, MAX_SNAPSHOT_ROUTE_PATH_BYTES));
+        if raw_dspark_guard_state_path.is_some() && dspark_guard_state_path.is_none() {
+            return Err(invalid(
+                "DS4_DSPARK_GUARD_STATE_PATH",
+                "<redacted>".to_owned(),
+                "a normalized absolute path no longer than 4096 bytes",
+            ));
+        }
+        if dspark_guard_mode == DsparkGuardMode::Quarantine && dspark_guard_state_path.is_none() {
+            return Err(invalid(
+                "DS4_DSPARK_GUARD_STATE_PATH",
+                String::new(),
+                "an absolute pre-created state file in quarantine mode",
+            ));
+        }
+        if dspark_guard_mode != DsparkGuardMode::Quarantine && dspark_guard_state_path.is_some() {
+            return Err(invalid(
+                "DS4_DSPARK_GUARD_STATE_PATH",
+                "configured".to_owned(),
+                "unset unless DS4_DSPARK_GUARD_MODE=quarantine",
+            ));
+        }
+        let dspark_guard_state_owner_uid =
+            parse(&mut get, "DS4_DSPARK_GUARD_STATE_OWNER_UID", 0_u32, "a UID")?;
+        let dspark_guard_state_group_gid =
+            parse(&mut get, "DS4_DSPARK_GUARD_STATE_GROUP_GID", 0_u32, "a GID")?;
         if snapshot_route.mode == SnapshotRouteMode::Shadow
             && exact_route.mode != ExactRouteMode::Shadow
         {
@@ -372,6 +481,14 @@ impl Config {
                 5_000,
                 MAX_UPSTREAM_ADMISSION_TIMEOUT_MS,
             )?,
+            dspark_guard_mode,
+            dspark_guard_interval_ms,
+            dspark_guard_consecutive_windows,
+            dspark_guard_min_proposed_tokens,
+            dspark_guard_expected_positions,
+            dspark_guard_state_path,
+            dspark_guard_state_owner_uid,
+            dspark_guard_state_group_gid,
             max_tokens_strip: parse(&mut get, "DS4_MAX_TOKENS_STRIP", 100_000, "an integer")?,
             advertise_ctx_margin: parse(
                 &mut get,
@@ -434,6 +551,33 @@ impl Config {
             snapshot_route_reconnect_max_ms: snapshot_route.reconnect_max_ms,
         })
     }
+}
+
+fn dspark_guard_mode(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    admission_mode: UpstreamAdmissionMode,
+) -> Result<DsparkGuardMode, ConfigError> {
+    let mode = match get("DS4_DSPARK_GUARD_MODE").as_deref().unwrap_or("off") {
+        "off" => DsparkGuardMode::Off,
+        "observe" => DsparkGuardMode::Observe,
+        "quarantine" => DsparkGuardMode::Quarantine,
+        value => {
+            return Err(invalid(
+                "DS4_DSPARK_GUARD_MODE",
+                value.to_owned(),
+                "off, observe, or quarantine",
+            ));
+        }
+    };
+    if mode == DsparkGuardMode::Quarantine && admission_mode != UpstreamAdmissionMode::Compatibility
+    {
+        return Err(invalid(
+            "DS4_DSPARK_GUARD_MODE",
+            "quarantine".to_owned(),
+            "quarantine requires DS4_UPSTREAM_ADMISSION_MODE=compatibility",
+        ));
+    }
+    Ok(mode)
 }
 
 fn upstream_admission_mode(
@@ -1344,6 +1488,14 @@ mod tests {
         assert_eq!(config.upstreams[0].as_str(), "http://ds4-flash:8000/");
         assert_eq!(config.upstream_admission_mode, UpstreamAdmissionMode::Http);
         assert_eq!(config.upstream_admission_timeout_ms, 5_000);
+        assert_eq!(config.dspark_guard_mode, DsparkGuardMode::Off);
+        assert_eq!(config.dspark_guard_interval_ms, 5_000);
+        assert_eq!(config.dspark_guard_consecutive_windows, 3);
+        assert_eq!(config.dspark_guard_min_proposed_tokens, 256);
+        assert_eq!(config.dspark_guard_expected_positions, 5);
+        assert!(config.dspark_guard_state_path.is_none());
+        assert_eq!(config.dspark_guard_state_owner_uid, 0);
+        assert_eq!(config.dspark_guard_state_group_gid, 0);
         assert!((config.route_alpha - 4.0).abs() < f64::EPSILON);
         assert_eq!(config.route_chunk_bytes, 2_048);
         assert_eq!(config.route_max_prefix_bytes, 2 << 20);
@@ -1857,6 +2009,39 @@ mod tests {
             Some("/compat/serving-runtime.json")
         );
 
+        let mut guarded = values.clone();
+        guarded.insert("DS4_DSPARK_GUARD_MODE", "quarantine");
+        guarded.insert(
+            "DS4_DSPARK_GUARD_STATE_PATH",
+            "/run/mini-dynamo-dspark-guard/state.json",
+        );
+        assert_eq!(
+            Config::from_lookup(|key| guarded.get(key).map(ToString::to_string))
+                .unwrap()
+                .dspark_guard_mode,
+            DsparkGuardMode::Quarantine
+        );
+        let mut missing_guard_state = guarded.clone();
+        missing_guard_state.remove("DS4_DSPARK_GUARD_STATE_PATH");
+        assert!(matches!(
+            Config::from_lookup(|name| missing_guard_state.get(name).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_DSPARK_GUARD_STATE_PATH",
+                ..
+            })
+        ));
+        for (key, value) in [
+            ("DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS", "2"),
+            ("DS4_DSPARK_GUARD_MIN_PROPOSED_TOKENS", "255"),
+        ] {
+            let mut unsafe_guard = guarded.clone();
+            unsafe_guard.insert(key, value);
+            assert!(matches!(
+                Config::from_lookup(|name| unsafe_guard.get(name).map(ToString::to_string)),
+                Err(ConfigError::InvalidValue { key: rejected, .. }) if rejected == key
+            ));
+        }
+
         let mut missing_runtime = values.clone();
         missing_runtime.remove("DS4_SERVING_RUNTIME_MANIFEST_PATH");
         missing_runtime.remove("DS4_SERVING_RUNTIME_MANIFEST_SHA256");
@@ -1873,6 +2058,84 @@ mod tests {
             Config::from_lookup(|key| invalid.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
                 key: "DS4_UPSTREAM_ADMISSION_MODE",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn dspark_guard_is_explicit_bounded_and_quarantine_requires_identity_admission() {
+        let observe = HashMap::from([
+            ("DS4_DSPARK_GUARD_MODE", "observe"),
+            ("DS4_DSPARK_GUARD_INTERVAL_MS", "1000"),
+            ("DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS", "4"),
+            ("DS4_DSPARK_GUARD_MIN_PROPOSED_TOKENS", "512"),
+            ("DS4_DSPARK_GUARD_EXPECTED_POSITIONS", "5"),
+        ]);
+        let config = Config::from_lookup(|key| observe.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(config.dspark_guard_mode, DsparkGuardMode::Observe);
+        assert_eq!(config.dspark_guard_interval_ms, 1_000);
+        assert_eq!(config.dspark_guard_consecutive_windows, 4);
+        assert_eq!(config.dspark_guard_min_proposed_tokens, 512);
+        assert_eq!(config.dspark_guard_expected_positions, 5);
+
+        for path in ["relative/state.json", "/run/guard/../state.json"] {
+            let values = HashMap::from([
+                ("DS4_DSPARK_GUARD_MODE", "observe"),
+                ("DS4_DSPARK_GUARD_STATE_PATH", path),
+            ]);
+            assert!(matches!(
+                Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+                Err(ConfigError::InvalidValue {
+                    key: "DS4_DSPARK_GUARD_STATE_PATH",
+                    ..
+                })
+            ));
+        }
+        let observe_with_state = HashMap::from([
+            ("DS4_DSPARK_GUARD_MODE", "observe"),
+            (
+                "DS4_DSPARK_GUARD_STATE_PATH",
+                "/run/mini-dynamo-dspark-guard/state.json",
+            ),
+        ]);
+        assert!(matches!(
+            Config::from_lookup(|key| observe_with_state.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_DSPARK_GUARD_STATE_PATH",
+                ..
+            })
+        ));
+
+        let quarantine = HashMap::from([("DS4_DSPARK_GUARD_MODE", "quarantine")]);
+        assert!(matches!(
+            Config::from_lookup(|key| quarantine.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_DSPARK_GUARD_MODE",
+                ..
+            })
+        ));
+
+        for (key, value) in [
+            ("DS4_DSPARK_GUARD_INTERVAL_MS", "999"),
+            ("DS4_DSPARK_GUARD_INTERVAL_MS", "60001"),
+            ("DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS", "1"),
+            ("DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS", "13"),
+            ("DS4_DSPARK_GUARD_MIN_PROPOSED_TOKENS", "10000001"),
+            ("DS4_DSPARK_GUARD_EXPECTED_POSITIONS", "17"),
+        ] {
+            let values = HashMap::from([(key, value)]);
+            assert!(matches!(
+                Config::from_lookup(|name| values.get(name).map(ToString::to_string)),
+                Err(ConfigError::InvalidValue { key: rejected, .. }) if rejected == key
+            ));
+        }
+
+        let invalid = HashMap::from([("DS4_DSPARK_GUARD_MODE", "automatic")]);
+        assert!(matches!(
+            Config::from_lookup(|key| invalid.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_DSPARK_GUARD_MODE",
                 ..
             })
         ));
