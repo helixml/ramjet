@@ -570,7 +570,9 @@ output path for every run; the gate never overwrites evidence.
 
 The 104-source/100K compact-index qualification has a separate deployment
 owner, `bench/node06_shadow_soak_gate.py`, and now refuses to start unless it is
-inside `bench/node06_gpu_guard.py`. Launch the pair as a detached transient
+inside `bench/node06_gpu_guard.py`. Copy
+`bench/node06_operational_moratorium.py` beside the guard whenever these scripts
+are staged. Launch the pair as a detached transient
 systemd service using the command in `AGENTS.md`; do not attach the workload and
 rollback lifetime to SSH. The outer guard observes all eight GPUs, admits a
 65C-or-cooler start, aborts at 78C or on lost telemetry, and owns a separate

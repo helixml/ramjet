@@ -603,7 +603,8 @@ snapshot-shadow/soak-off baseline on success, failure, timeout, or handled
 signal. It reads the bearer from the protected deployment `.env` internally;
 never put that token in argv or a systemd property. Copy the gate together with
 `snapshot_recovery_gate.py`, `shadow_soak.py`, `cachebench.py`, and
-`engine_metrics.py`, and `node06_gpu_guard.py`, then detach it from
+`engine_metrics.py`, `node06_gpu_guard.py`, and
+`node06_operational_moratorium.py`, then detach it from
 Tailscale/SSH. Both journals live below a precreated owner-only directory; do
 not put the thermal journal or bearer in argv-visible systemd properties:
 
