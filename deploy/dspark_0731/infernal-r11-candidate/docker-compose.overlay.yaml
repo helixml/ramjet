@@ -12,6 +12,18 @@ services:
     entrypoint:
       - /usr/local/bin/lmcache-mp-wrapper.sh
       - /usr/local/bin/serve-ds4-flash.sh
+    # Keep the qualified r4 launch contract explicit. Candidate defaults must
+    # not silently turn an engine-version comparison into a settings change.
+    environment:
+      MODEL_PATH: /workspace/model
+      MODEL_REVISION: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
+      TOKENIZER_REVISION: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
+      DRAFT_SAMPLE_METHOD: probabilistic
+      REJECTION_SAMPLE_METHOD: standard
+      GRAPH: "96"
+      LOAD_FORMAT: instanttensor
+      INSTANTTENSOR_BACKEND: BUFFERED
+      LMCACHE_MODE: "off"
     volumes:
       - /prod/sglang-cache/infernal-invocation-cu133-r11:/cache
       - /prod/sglang-cache/infernal-invocation-cu133-r11/tmp:/container-tmp

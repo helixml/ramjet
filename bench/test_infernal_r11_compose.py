@@ -48,6 +48,24 @@ class InfernalR11ComposeTest(unittest.TestCase):
         with self.assertRaisesRegex(validator.ValidationError, "unrelated"):
             validator.validate(self.base, document)
 
+    def test_qualified_launcher_setting_cannot_become_implicit(self) -> None:
+        for name in validator.MATCHED_ENGINE_ENVIRONMENT:
+            with self.subTest(name=name):
+                document = copy.deepcopy(self.candidate)
+                del document["services"]["dspark-0731-b"]["environment"][name]
+                with self.assertRaisesRegex(
+                    validator.ValidationError, "unrelated engine-B"
+                ):
+                    validator.validate(self.base, document)
+
+    def test_lmcache_cannot_be_enabled_during_engine_comparison(self) -> None:
+        document = copy.deepcopy(self.candidate)
+        document["services"]["dspark-0731-b"]["environment"][
+            "LMCACHE_MODE"
+        ] = "on"
+        with self.assertRaisesRegex(validator.ValidationError, "unrelated engine-B"):
+            validator.validate(self.base, document)
+
     def test_unrelated_top_level_change_is_rejected(self) -> None:
         document = copy.deepcopy(self.candidate)
         document["networks"]["default"]["name"] = "changed"

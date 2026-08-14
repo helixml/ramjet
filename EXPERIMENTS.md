@@ -5765,9 +5765,10 @@ GPU work ran.
 ## 2026-08-14 — r118 Infernal r11 transfer-size preflight
 
 The immutable r4 and r11 registry manifests were compared without downloading
-layers. r4 contains 78 layers and 12.750GiB compressed; r11 contains 79 layers
-and 12.791GiB compressed. They share 51 layers totaling 9.849GiB. Relative to
-a retained exact r4 cache, r11 therefore needs 28 non-shared layers totaling
+layers. r4 contains 95 layer descriptors resolving to 78 unique blobs and
+12.750GiB compressed; r11 contains 96 descriptors resolving to 79 unique blobs
+and 12.791GiB compressed. They share 51 blobs totaling 9.849GiB. Relative to
+a retained exact r4 cache, r11 therefore needs 28 non-shared blobs totaling
 2.942GiB; without r4, the cold transfer remains the full 12.791GiB. The read
 took 8.3s and did not touch node06, Docker's local layer store, or any GPU.
 
@@ -5781,3 +5782,30 @@ Config history also shows r11 declaring ExLlamaV3 paths and revision
 `704aefd743b390af4bd0fb429d1906f9b964c7d8`; r4 does not expose the same
 config labels. The planned DS4 trial selects B12X-A16, so this is recorded as
 another image/config delta, not assumed to be an active performance path.
+
+## 2026-08-14 — r119 Infernal r11 complete config-delta admission
+
+The earlier no-pull gate selected important provenance labels but did not bind
+the complete effective image environment. A complete registry comparison found
+five r11-only ExLlamaV3 variables and 24 changed existing variables. Most of
+the latter are versioned cache paths, but `PYTHONPATH` gains ExLlamaV3 and
+`CUTLASS_DSL_VERSION` changes from 4.5.2 to 4.6.2. Both images' CUTLASS labels
+claim 4.6.2, so this is a real metadata inconsistency but not yet proof that the
+installed package bytes differ. The pulled-image runtime/package probe remains
+mandatory before GPU assignment. The named Kimi base-ID and native blob changes
+also remain explicit reasons not to describe r11 as a vLLM-only trial.
+
+Manifest schema v2 now binds the exact full environment delta, all
+`local-inference.*` label additions/changes/removals, all other image-config
+fields, layer descriptor counts, unique blob counts, compressed byte totals,
+and shared/candidate-only blob shape. The live Docker Hub gate passed in 2.615s
+without downloading a layer. The focused Infernal suite passed 40/40 in 0.118s.
+
+The candidate Compose overlay now pins all nine qualified r4 launcher inputs
+that had been left to r11 defaults: model path and model/tokenizer revision,
+probabilistic draft sampling, standard rejection sampling, graph 96,
+InstantTensor buffered loading, and `LMCACHE_MODE=off`. Its semantic render
+gate passed and has negative coverage for every required setting. Production A
+remains unchanged, the LB remains single-homed on A, and candidate B remains on
+GPUs 4-7 and port 8013. node06 was still unreachable, so no image pull, GPU,
+container, or live deployment was touched.

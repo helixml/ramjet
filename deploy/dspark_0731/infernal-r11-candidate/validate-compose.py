@@ -27,6 +27,17 @@ SINGLE_HOME = {
     "DS4_KV_EVENT_LIVE_ENDPOINTS": "tcp://dspark-0731:5557",
     "DS4_KV_EVENT_REPLAY_ENDPOINTS": "tcp://dspark-0731:5558",
 }
+MATCHED_ENGINE_ENVIRONMENT = {
+    "MODEL_PATH": "/workspace/model",
+    "MODEL_REVISION": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+    "TOKENIZER_REVISION": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+    "DRAFT_SAMPLE_METHOD": "probabilistic",
+    "REJECTION_SAMPLE_METHOD": "standard",
+    "GRAPH": "96",
+    "LOAD_FORMAT": "instanttensor",
+    "INSTANTTENSOR_BACKEND": "BUFFERED",
+    "LMCACHE_MODE": "off",
+}
 EXTRA_VOLUMES = [
     {
         "type": "bind",
@@ -87,6 +98,7 @@ def validate(base: dict[str, Any], candidate: dict[str, Any]) -> None:
     expected_b = copy.deepcopy(base_services["dspark-0731-b"])
     expected_b["image"] = CANDIDATE_IMAGE
     expected_b["entrypoint"] = ENTRYPOINT
+    expected_b.setdefault("environment", {}).update(MATCHED_ENGINE_ENVIRONMENT)
     expected_b.setdefault("volumes", []).extend(copy.deepcopy(EXTRA_VOLUMES))
     if services.get("dspark-0731-b") != expected_b:
         fail("r11 overlay changes unrelated engine-B settings")
