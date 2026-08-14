@@ -392,24 +392,36 @@ impl CompatibilityManifest {
     ///
     /// The endpoint response binds model, engine image, tokenizer, renderer,
     /// and a process incarnation in one bounded JSON document. The opaque
-    /// incarnation is validated but never logged, labeled, or retained.
+    /// incarnation is validated but never logged or labeled. Callers that need
+    /// restart fencing may retain only the returned SHA-256 commitment.
     #[must_use]
     pub fn serving_identity_outcome(
         &self,
         runtime: &ServingRuntimeManifest,
         body: &[u8],
     ) -> ServingIdentityOutcome {
+        self.serving_identity_evidence(runtime, body).0
+    }
+
+    /// Validate an atomic serving identity and return an opaque process-only
+    /// commitment when it matches the pinned runtime contract.
+    #[must_use]
+    pub fn serving_identity_evidence(
+        &self,
+        runtime: &ServingRuntimeManifest,
+        body: &[u8],
+    ) -> (ServingIdentityOutcome, Option<[u8; 32]>) {
         let Ok(identity) = serde_json::from_slice::<ServingIdentityResponse>(body) else {
-            return ServingIdentityOutcome::Decode;
+            return (ServingIdentityOutcome::Decode, None);
         };
         if identity.schema_version != 3 {
-            return ServingIdentityOutcome::SchemaMismatch;
+            return (ServingIdentityOutcome::SchemaMismatch, None);
         }
         if !valid_incarnation(&identity.incarnation.frontend) {
-            return ServingIdentityOutcome::FrontendIncarnationInvalid;
+            return (ServingIdentityOutcome::FrontendIncarnationInvalid, None);
         }
         if identity.incarnation.engine_core.len() != runtime.engine.core_process_count {
-            return ServingIdentityOutcome::CoreProcessMismatch;
+            return (ServingIdentityOutcome::CoreProcessMismatch, None);
         }
         let mut core_incarnations = HashSet::with_capacity(identity.incarnation.engine_core.len());
         if identity.incarnation.engine_core.iter().any(|value| {
@@ -417,45 +429,69 @@ impl CompatibilityManifest {
                 || value == &identity.incarnation.frontend
                 || !core_incarnations.insert(value)
         }) {
-            return ServingIdentityOutcome::CoreIncarnationInvalid;
+            return (ServingIdentityOutcome::CoreIncarnationInvalid, None);
         }
         if identity.model.id != self.model.id
             || identity.model.root != self.model.root
             || identity.model.max_model_len != self.model.max_model_len
         {
-            return ServingIdentityOutcome::ModelMismatch;
+            return (ServingIdentityOutcome::ModelMismatch, None);
         }
         if identity.engine.version != self.engine.version
             || identity.engine.image_digest != self.engine.image_digest
         {
-            return ServingIdentityOutcome::EngineMismatch;
+            return (ServingIdentityOutcome::EngineMismatch, None);
         }
         if identity.engine.core_process_count != runtime.engine.core_process_count {
-            return ServingIdentityOutcome::CoreProcessMismatch;
+            return (ServingIdentityOutcome::CoreProcessMismatch, None);
         }
         if identity.engine.kv_events != runtime.engine.kv_events {
-            return ServingIdentityOutcome::KvEventsMismatch;
+            return (ServingIdentityOutcome::KvEventsMismatch, None);
         }
         if identity.runtime.argv != runtime.process.argv_sha256 {
-            return ServingIdentityOutcome::LaunchMismatch;
+            return (ServingIdentityOutcome::LaunchMismatch, None);
         }
         if identity.runtime.environment != runtime.process.environment_sha256 {
-            return ServingIdentityOutcome::EnvironmentMismatch;
+            return (ServingIdentityOutcome::EnvironmentMismatch, None);
         }
         if identity.runtime.packages != runtime.process.packages_sha256 {
-            return ServingIdentityOutcome::PackageMismatch;
+            return (ServingIdentityOutcome::PackageMismatch, None);
         }
         if identity.runtime.artifacts != runtime.process.artifacts_sha256 {
-            return ServingIdentityOutcome::ArtifactMismatch;
+            return (ServingIdentityOutcome::ArtifactMismatch, None);
         }
         if identity.tokenizer.sha256 != self.tokenizer.sha256 {
-            return ServingIdentityOutcome::TokenizerMismatch;
+            return (ServingIdentityOutcome::TokenizerMismatch, None);
         }
         if identity.renderer.profile != self.renderer.profile {
-            return ServingIdentityOutcome::RendererMismatch;
+            return (ServingIdentityOutcome::RendererMismatch, None);
         }
-        ServingIdentityOutcome::Match
+        (
+            ServingIdentityOutcome::Match,
+            Some(engine_core_incarnation_commitment(&identity.incarnation)),
+        )
     }
+}
+
+fn engine_core_incarnation_commitment(incarnation: &ServingIncarnation) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"mini-dynamo-engine-core-incarnation-v1\0");
+    digest.update((incarnation.engine_core.len() as u64).to_le_bytes());
+    let mut cores = incarnation
+        .engine_core
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    cores.sort_unstable();
+    for core in cores {
+        digest_component(&mut digest, core.as_bytes());
+    }
+    digest.finalize().into()
+}
+
+fn digest_component(digest: &mut Sha256, component: &[u8]) {
+    digest.update((component.len() as u64).to_le_bytes());
+    digest.update(component);
 }
 
 impl ServingRuntimeManifest {
@@ -804,6 +840,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One exhaustive cross-layer identity contract.
     fn atomic_serving_identity_binds_every_compatibility_layer_and_incarnation() {
         let manifest = test_compatibility_manifest();
         let runtime = ServingRuntimeManifest {
@@ -860,6 +897,26 @@ mod tests {
             manifest.serving_identity_outcome(&runtime, &body),
             ServingIdentityOutcome::Match
         );
+        let (_, commitment) = manifest.serving_identity_evidence(&runtime, &body);
+        let pretty = serde_json::to_vec_pretty(&identity).unwrap();
+        assert_eq!(
+            manifest.serving_identity_evidence(&runtime, &pretty).1,
+            commitment
+        );
+        let mut restarted = identity.clone();
+        restarted["incarnation"]["frontend"] =
+            serde_json::Value::String("boot-1234:11:102".to_owned());
+        let (outcome, restarted_commitment) =
+            manifest.serving_identity_evidence(&runtime, &serde_json::to_vec(&restarted).unwrap());
+        assert_eq!(outcome, ServingIdentityOutcome::Match);
+        assert_eq!(restarted_commitment, commitment);
+
+        restarted["incarnation"]["engine_core"][0] =
+            serde_json::Value::String("boot-1234:12:103".to_owned());
+        let (outcome, restarted_core_commitment) =
+            manifest.serving_identity_evidence(&runtime, &serde_json::to_vec(&restarted).unwrap());
+        assert_eq!(outcome, ServingIdentityOutcome::Match);
+        assert_ne!(restarted_core_commitment, commitment);
 
         let mut mismatched = identity;
         mismatched["engine"]["image_digest"] =
@@ -902,6 +959,30 @@ mod tests {
             );
             mismatched["runtime"][field] = original;
         }
+    }
+
+    #[test]
+    fn engine_core_commitment_ignores_frontend_and_core_list_order() {
+        let first = ServingIncarnation {
+            frontend: "boot:1:10".to_owned(),
+            engine_core: vec!["boot:2:20".to_owned(), "boot:3:30".to_owned()],
+        };
+        let reordered = ServingIncarnation {
+            frontend: "boot:4:40".to_owned(),
+            engine_core: vec!["boot:3:30".to_owned(), "boot:2:20".to_owned()],
+        };
+        assert_eq!(
+            engine_core_incarnation_commitment(&first),
+            engine_core_incarnation_commitment(&reordered)
+        );
+        let changed = ServingIncarnation {
+            frontend: reordered.frontend,
+            engine_core: vec!["boot:3:30".to_owned(), "boot:5:50".to_owned()],
+        };
+        assert_ne!(
+            engine_core_incarnation_commitment(&first),
+            engine_core_incarnation_commitment(&changed)
+        );
     }
 
     #[test]

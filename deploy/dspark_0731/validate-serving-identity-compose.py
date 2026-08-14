@@ -397,6 +397,8 @@ def validate_enabled(
     lb_environment = load_balancer.get("environment", {})
     if lb_environment.get("DS4_UPSTREAM_ADMISSION_MODE") != "http":
         fail("identity overlay may not opt the load balancer into admission")
+    if lb_environment.get("DS4_DSPARK_GUARD_MODE") != "off":
+        fail("identity overlay may not opt the load balancer into DSpark enforcement")
     if (
         lb_environment.get("DS4_EXACT_ROUTE_MANIFEST_PATH")
         != LB_RENDERER_MANIFEST_TARGET

@@ -13,6 +13,7 @@ use axum::body::Bytes;
 use dynamo_protocols::types::CreateChatCompletionRequest;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, TextInput, deepseek_formatter_for};
 use futures_util::StreamExt;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
@@ -121,6 +122,7 @@ struct RuntimeAttestation {
     identity_remote: RemoteTokenizer,
     ready: Arc<Vec<AtomicBool>>,
     admission_ready: Arc<Vec<AtomicBool>>,
+    engine_core_incarnation_commitments: Arc<Vec<RwLock<Option<[u8; 32]>>>>,
     revision: Arc<AtomicU64>,
     metrics: Arc<Metrics>,
 }
@@ -710,6 +712,20 @@ impl TokenizerObserver {
             .map(|ready| ready.load(Ordering::Acquire))
     }
 
+    #[must_use]
+    pub(crate) fn compatibility_engine_core_incarnation_commitment(
+        &self,
+        upstream: usize,
+    ) -> Option<[u8; 32]> {
+        self.attestation
+            .as_ref()?
+            .engine_core_incarnation_commitments
+            .get(upstream)?
+            .read()
+            .as_ref()
+            .copied()
+    }
+
     /// Enqueues a post-request shadow observation without waiting for capacity.
     pub(crate) fn submit(
         &self,
@@ -844,6 +860,9 @@ impl RuntimeAttestation {
         let admission_ready = (0..remote.upstreams.len())
             .map(|_| AtomicBool::new(false))
             .collect();
+        let engine_core_incarnation_commitments = (0..remote.upstreams.len())
+            .map(|_| RwLock::new(None))
+            .collect();
         Self {
             manifest,
             serving_runtime,
@@ -851,6 +870,7 @@ impl RuntimeAttestation {
             identity_remote,
             ready: Arc::new(ready),
             admission_ready: Arc::new(admission_ready),
+            engine_core_incarnation_commitments: Arc::new(engine_core_incarnation_commitments),
             revision: Arc::new(AtomicU64::new(0)),
             metrics,
         }
@@ -901,14 +921,22 @@ impl RuntimeAttestation {
         let body = match self.identity_remote.identity(upstream).await {
             Ok(body) => body,
             Err(error) => {
+                self.clear_engine_core_incarnation_commitment(upstream);
                 self.record_admission_outcome(upstream, error.label());
                 return CompatibilityAdmission::Unavailable;
             }
         };
-        let outcome = self
+        let (outcome, commitment) = self
             .manifest
-            .serving_identity_outcome(serving_runtime, &body);
+            .serving_identity_evidence(serving_runtime, &body);
         let ready = outcome == ServingIdentityOutcome::Match;
+        if let Some(commitment) = commitment {
+            if let Some(slot) = self.engine_core_incarnation_commitments.get(upstream) {
+                *slot.write() = Some(commitment);
+            }
+        } else {
+            self.clear_engine_core_incarnation_commitment(upstream);
+        }
         self.record_admission_outcome(upstream, outcome.label());
         if ready {
             CompatibilityAdmission::Match
@@ -962,6 +990,9 @@ impl RuntimeAttestation {
             return;
         };
         state.store(ready, Ordering::Release);
+        if !ready {
+            self.clear_engine_core_incarnation_commitment(upstream);
+        }
         let Some(url) = self.identity_remote.upstreams.get(upstream) else {
             return;
         };
@@ -970,6 +1001,12 @@ impl RuntimeAttestation {
             .upstream_compatibility_admitted
             .with_label_values(&[label])
             .set(if ready { 1.0 } else { 0.0 });
+    }
+
+    fn clear_engine_core_incarnation_commitment(&self, upstream: usize) {
+        if let Some(slot) = self.engine_core_incarnation_commitments.get(upstream) {
+            *slot.write() = None;
+        }
     }
 
     fn record_admission_outcome(&self, upstream: usize, outcome: &str) {

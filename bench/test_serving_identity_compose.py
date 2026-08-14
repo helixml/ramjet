@@ -35,6 +35,13 @@ class ServingIdentityComposeTest(unittest.TestCase):
         with self.assertRaisesRegex(validator.ValidationError, "may not opt"):
             validator.validate_enabled(document)
 
+        document = validator.render(enabled=True)
+        document["services"]["ds4-loadbalancer"]["environment"][
+            "DS4_DSPARK_GUARD_MODE"
+        ] = "quarantine"
+        with self.assertRaisesRegex(validator.ValidationError, "DSpark enforcement"):
+            validator.validate_enabled(document)
+
     def test_manifest_pin_and_mount_are_independent_gates(self):
         document = validator.render(enabled=True)
         service = document["services"][validator.ENGINES[0]]

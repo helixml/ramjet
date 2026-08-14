@@ -4,19 +4,30 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::Context;
 use axum::{
     body::{Body, Bytes, to_bytes},
     extract::{Path, State},
     http::{HeaderMap, HeaderName, Method, Request, Response, StatusCode, Uri},
 };
 use futures_util::StreamExt;
+use parking_lot::Mutex;
 use serde::Serialize;
-use tokio::{sync::mpsc, time::Instant};
+use sha2::{Digest, Sha256};
+use tokio::{
+    sync::mpsc,
+    time::{Instant, Interval, MissedTickBehavior},
+};
 use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 
 use crate::{
-    config::{Config, UpstreamAdmissionMode},
+    config::{Config, DsparkGuardMode, UpstreamAdmissionMode},
+    dspark_guard::{
+        AttestedEngineCoreIncarnation, DsparkCounters, DsparkGuard, IncarnationOutcome,
+        MAX_PROMETHEUS_BYTES, Observation, ParseFailure, WindowOutcome, parse_prometheus,
+    },
+    dspark_guard_store::{DsparkGuardStore, DsparkGuardStorePolicy},
     exact_route_inventory::ExactRouteInventory,
     exact_shadow::ExactRouteSnapshot,
     journal::{RouteAnnotations, RouteJournal},
@@ -35,6 +46,54 @@ const MAX_REQUEST_BODY: usize = 64 << 20;
 const MAX_PROBE_BODY: usize = 64 << 10;
 const MAX_CONCURRENT_UPSTREAM_PROBES: usize = 8;
 const STREAM_BUFFER_CHUNKS: usize = 8;
+const DSPARK_METRICS_TIMEOUT: Duration = Duration::from_secs(2);
+const DSPARK_RELIABILITY_STATES: &[&str] = &[
+    "disabled",
+    "baseline",
+    "healthy",
+    "idle",
+    "suspect",
+    "would_quarantine",
+    "quarantined",
+    "persistence_failure",
+    "unavailable",
+];
+const DSPARK_WINDOW_OUTCOMES: &[&str] = &[
+    "baseline",
+    "clean",
+    "zero_acceptance",
+    "idle",
+    "counter_reset",
+    "inconsistent",
+    "oversized",
+    "invalid_utf8",
+    "too_many_lines",
+    "line_too_long",
+    "invalid_expected_positions",
+    "malformed",
+    "missing",
+    "partial",
+    "non_finite",
+    "duplicate",
+    "multiple_series",
+    "mismatched_labels",
+    "unexpected_position",
+    "capacity",
+    "overflow",
+];
+
+fn dspark_poll_interval(period: Duration) -> Interval {
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    interval
+}
+
+fn dspark_upstream_commitment(upstream: &Url) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"mini-dynamo-dspark-upstream-v1\0");
+    digest.update(upstream.as_str().trim_end_matches('/').as_bytes());
+    digest.finalize().into()
+}
 
 #[derive(Clone)]
 pub struct Proxy {
@@ -50,6 +109,8 @@ struct Inner {
     journal: RouteJournal,
     session_affinity: SessionAffinity,
     tokenizer: TokenizerObserver,
+    dspark_guards: Arc<[DsparkGuardReplica]>,
+    dspark_guard_store: Option<Arc<DsparkGuardStore>>,
 }
 
 #[derive(Serialize)]
@@ -65,6 +126,8 @@ struct HealthResponse {
 struct ReplicaHealth {
     index: usize,
     healthy: bool,
+    reliability_state: &'static str,
+    quarantined: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     compatibility_attested: Option<bool>,
     inflight: usize,
@@ -72,6 +135,390 @@ struct ReplicaHealth {
     approximate_index_entries: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     exact_inventory: Option<ExactInventoryHealth>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReliabilityState {
+    Disabled,
+    Baseline,
+    Healthy,
+    Idle,
+    Suspect,
+    WouldQuarantine,
+    Quarantined,
+    PersistenceFailure,
+    Unavailable,
+}
+
+impl ReliabilityState {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Baseline => "baseline",
+            Self::Healthy => "healthy",
+            Self::Idle => "idle",
+            Self::Suspect => "suspect",
+            Self::WouldQuarantine => "would_quarantine",
+            Self::Quarantined => "quarantined",
+            Self::PersistenceFailure => "persistence_failure",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+struct DsparkGuardReplica {
+    mode: DsparkGuardMode,
+    inner: Mutex<DsparkGuardReplicaInner>,
+}
+
+struct DsparkGuardReplicaInner {
+    guard: DsparkGuard,
+    probe_healthy: bool,
+    state: ReliabilityState,
+    durable_fence: DurableFenceState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DurableFenceState {
+    Ready,
+    StartupUncertain,
+    AwaitingAttestation,
+    PendingQuarantine([u8; 32]),
+    RearmPersistenceFailure,
+}
+
+impl DurableFenceState {
+    const fn blocks_serving(self) -> bool {
+        !matches!(self, Self::Ready)
+    }
+
+    const fn persistence_failed(self) -> bool {
+        matches!(
+            self,
+            Self::StartupUncertain | Self::PendingQuarantine(_) | Self::RearmPersistenceFailure
+        )
+    }
+}
+
+struct GuardApplication {
+    observation: Observation,
+    state: ReliabilityState,
+    quarantine_reason: Option<&'static str>,
+    persistence_failure: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+struct GuardPublication<'a> {
+    router: &'a Router,
+    metrics: &'a Metrics,
+    upstream: usize,
+    upstream_label: &'a str,
+    store: Option<&'a DsparkGuardStore>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct GuardTransition {
+    rearmed: bool,
+    quarantine_reason: Option<&'static str>,
+    persistence_failure: Option<&'static str>,
+}
+
+impl GuardTransition {
+    fn merge(&mut self, next: Self) {
+        self.rearmed |= next.rearmed;
+        if next.quarantine_reason.is_some() {
+            self.quarantine_reason = next.quarantine_reason;
+        }
+        if next.persistence_failure.is_some() {
+            self.persistence_failure = next.persistence_failure;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ReliabilitySnapshot {
+    state: ReliabilityState,
+    quarantined: bool,
+    effective_healthy: bool,
+}
+
+impl DsparkGuardReplica {
+    fn new(
+        config: &Config,
+        probe_healthy: bool,
+        restored_quarantine: Option<[u8; 32]>,
+        startup_uncertain: bool,
+    ) -> anyhow::Result<Self> {
+        let minimum_proposed_tokens = u64::try_from(config.dspark_guard_min_proposed_tokens)
+            .context("DSpark proposed-token threshold exceeds u64")?;
+        let mut guard = DsparkGuard::new(
+            config.dspark_guard_expected_positions,
+            config.dspark_guard_consecutive_windows,
+            minimum_proposed_tokens,
+        )
+        .map_err(|error| anyhow::anyhow!("invalid DSpark guard configuration: {error:?}"))?;
+        if let Some(commitment) = restored_quarantine {
+            guard.restore_quarantine(AttestedEngineCoreIncarnation::from_commitment(commitment));
+        }
+        Ok(Self {
+            mode: config.dspark_guard_mode,
+            inner: Mutex::new(DsparkGuardReplicaInner {
+                guard,
+                probe_healthy,
+                state: if startup_uncertain {
+                    ReliabilityState::PersistenceFailure
+                } else if restored_quarantine.is_some() {
+                    ReliabilityState::Quarantined
+                } else if config.dspark_guard_mode == DsparkGuardMode::Off {
+                    ReliabilityState::Disabled
+                } else {
+                    ReliabilityState::Baseline
+                },
+                durable_fence: if startup_uncertain {
+                    DurableFenceState::StartupUncertain
+                } else {
+                    DurableFenceState::Ready
+                },
+            }),
+        })
+    }
+
+    fn status(&self) -> ReliabilitySnapshot {
+        let inner = self.inner.lock();
+        inner.snapshot()
+    }
+
+    fn publish_probe_health(
+        &self,
+        router: &Router,
+        metrics: &Metrics,
+        upstream: usize,
+        upstream_label: &str,
+        healthy: bool,
+    ) -> bool {
+        let mut inner = self.inner.lock();
+        inner.probe_healthy = healthy;
+        inner.publish_effective_health(router, metrics, upstream, upstream_label)
+    }
+
+    fn apply(
+        &self,
+        publication: GuardPublication<'_>,
+        sample: Result<DsparkCounters, ParseFailure>,
+        attested_engine_core: Option<[u8; 32]>,
+    ) -> GuardApplication {
+        let mut inner = self.inner.lock();
+        let mut transition = inner.reconcile_engine_core(
+            publication.upstream,
+            attested_engine_core,
+            publication.store,
+        );
+        let observation = inner.guard.observe(sample);
+        if self.mode == DsparkGuardMode::Quarantine
+            && observation.threshold_met
+            && !inner.guard.quarantined()
+            && inner.durable_fence == DurableFenceState::Ready
+        {
+            transition.merge(inner.enforce_quarantine(
+                publication.upstream,
+                attested_engine_core,
+                publication.store,
+            ));
+        }
+        inner.state = if inner.durable_fence.persistence_failed() {
+            ReliabilityState::PersistenceFailure
+        } else if inner.guard.quarantined() {
+            ReliabilityState::Quarantined
+        } else if transition.rearmed || observation.outcome == WindowOutcome::Baseline {
+            ReliabilityState::Baseline
+        } else {
+            match observation.outcome {
+                WindowOutcome::Clean => ReliabilityState::Healthy,
+                WindowOutcome::Idle => ReliabilityState::Idle,
+                WindowOutcome::ZeroAcceptance if observation.threshold_met => {
+                    ReliabilityState::WouldQuarantine
+                }
+                WindowOutcome::ZeroAcceptance => ReliabilityState::Suspect,
+                WindowOutcome::Baseline => ReliabilityState::Baseline,
+                WindowOutcome::CounterReset
+                | WindowOutcome::Inconsistent
+                | WindowOutcome::Parse(_) => ReliabilityState::Unavailable,
+            }
+        };
+        inner.publish_effective_health(
+            publication.router,
+            publication.metrics,
+            publication.upstream,
+            publication.upstream_label,
+        );
+        GuardApplication {
+            observation,
+            state: inner.state,
+            quarantine_reason: transition.quarantine_reason,
+            persistence_failure: transition.persistence_failure,
+        }
+    }
+}
+
+impl DsparkGuardReplicaInner {
+    fn reconcile_engine_core(
+        &mut self,
+        upstream: usize,
+        commitment: Option<[u8; 32]>,
+        store: Option<&DsparkGuardStore>,
+    ) -> GuardTransition {
+        let Some(commitment) = commitment else {
+            return GuardTransition::default();
+        };
+        let incarnation = AttestedEngineCoreIncarnation::from_commitment(commitment);
+        if self.durable_fence == DurableFenceState::StartupUncertain {
+            if store
+                .is_some_and(|store| store.persist_uncertain_fence(upstream, commitment).is_ok())
+            {
+                self.guard.restore_quarantine(incarnation);
+                self.durable_fence = DurableFenceState::Ready;
+                return GuardTransition {
+                    quarantine_reason: Some("unclean_restart"),
+                    ..GuardTransition::default()
+                };
+            }
+            return GuardTransition {
+                persistence_failure: Some("quarantine"),
+                ..GuardTransition::default()
+            };
+        }
+        if self.durable_fence == DurableFenceState::AwaitingAttestation {
+            self.durable_fence = DurableFenceState::Ready;
+            return self.enforce_quarantine(upstream, Some(commitment), store);
+        }
+        if let DurableFenceState::PendingQuarantine(pending) = self.durable_fence {
+            if pending != commitment {
+                self.durable_fence = DurableFenceState::Ready;
+                return GuardTransition {
+                    rearmed: self.guard.attest_incarnation(incarnation)
+                        == IncarnationOutcome::Rearmed,
+                    ..GuardTransition::default()
+                };
+            }
+            if store.is_some_and(|store| store.persist_quarantine(upstream, commitment).is_ok()) {
+                self.guard.restore_quarantine(incarnation);
+                self.durable_fence = DurableFenceState::Ready;
+                return GuardTransition {
+                    quarantine_reason: Some("zero_acceptance"),
+                    ..GuardTransition::default()
+                };
+            }
+            return GuardTransition {
+                persistence_failure: Some("quarantine"),
+                ..GuardTransition::default()
+            };
+        }
+        if !self.guard.quarantined() {
+            return GuardTransition {
+                rearmed: self.guard.attest_incarnation(incarnation) == IncarnationOutcome::Rearmed,
+                ..GuardTransition::default()
+            };
+        }
+        let Some((store, quarantined)) = store.and_then(|store| {
+            store
+                .quarantined_engine_core(upstream)
+                .map(|quarantined| (store, quarantined))
+        }) else {
+            self.durable_fence = DurableFenceState::RearmPersistenceFailure;
+            return GuardTransition {
+                persistence_failure: Some("rearm"),
+                ..GuardTransition::default()
+            };
+        };
+        if quarantined == commitment {
+            let _ = self.guard.attest_incarnation(incarnation);
+            self.durable_fence = DurableFenceState::Ready;
+            return GuardTransition::default();
+        }
+        if store
+            .persist_rearm(upstream, quarantined, commitment)
+            .is_err()
+        {
+            self.durable_fence = DurableFenceState::RearmPersistenceFailure;
+            return GuardTransition {
+                persistence_failure: Some("rearm"),
+                ..GuardTransition::default()
+            };
+        }
+        self.durable_fence = DurableFenceState::Ready;
+        GuardTransition {
+            rearmed: self.guard.attest_incarnation(incarnation) == IncarnationOutcome::Rearmed,
+            ..GuardTransition::default()
+        }
+    }
+
+    fn enforce_quarantine(
+        &mut self,
+        upstream: usize,
+        commitment: Option<[u8; 32]>,
+        store: Option<&DsparkGuardStore>,
+    ) -> GuardTransition {
+        let Some(commitment) = commitment else {
+            self.durable_fence = DurableFenceState::AwaitingAttestation;
+            if let Some(store) = store {
+                let _ = store.poison_runtime(upstream);
+            }
+            return GuardTransition {
+                quarantine_reason: Some("unattested_threshold"),
+                ..GuardTransition::default()
+            };
+        };
+        let Some(store) = store else {
+            self.durable_fence = DurableFenceState::PendingQuarantine(commitment);
+            return GuardTransition {
+                persistence_failure: Some("quarantine"),
+                ..GuardTransition::default()
+            };
+        };
+        if store.persist_quarantine(upstream, commitment).is_ok() {
+            self.durable_fence = DurableFenceState::Ready;
+            self.guard
+                .restore_quarantine(AttestedEngineCoreIncarnation::from_commitment(commitment));
+            return GuardTransition {
+                quarantine_reason: Some("zero_acceptance"),
+                ..GuardTransition::default()
+            };
+        }
+        self.durable_fence = DurableFenceState::PendingQuarantine(commitment);
+        GuardTransition {
+            persistence_failure: Some("quarantine"),
+            ..GuardTransition::default()
+        }
+    }
+
+    fn snapshot(&self) -> ReliabilitySnapshot {
+        let quarantined = self.guard.quarantined() || self.durable_fence.blocks_serving();
+        ReliabilitySnapshot {
+            state: self.state,
+            quarantined,
+            effective_healthy: self.probe_healthy && !quarantined,
+        }
+    }
+
+    /// Publish both serving authority and its public gauge while the owning
+    /// per-replica lock is held. This prevents an older guard/probe result from
+    /// overwriting a newer health decision after it releases the lock.
+    fn publish_effective_health(
+        &self,
+        router: &Router,
+        metrics: &Metrics,
+        upstream: usize,
+        upstream_label: &str,
+    ) -> bool {
+        let effective =
+            self.probe_healthy && !self.guard.quarantined() && !self.durable_fence.blocks_serving();
+        router.set_healthy(upstream, effective);
+        metrics
+            .upstream_up
+            .with_label_values(&[upstream_label])
+            .set(f64::from(effective));
+        effective
+    }
 }
 
 #[derive(Serialize)]
@@ -116,12 +563,63 @@ impl Drop for RoutedLoad {
     }
 }
 
+fn initialize_dspark_guard_metrics(
+    metrics: &Metrics,
+    replica: &str,
+    state: ReliabilityState,
+    expected_positions: usize,
+) {
+    for label in DSPARK_RELIABILITY_STATES {
+        metrics
+            .dspark_guard_state
+            .with_label_values(&[replica, label])
+            .set(f64::from(*label == state.label()));
+    }
+    for outcome in DSPARK_WINDOW_OUTCOMES {
+        metrics
+            .dspark_guard_windows
+            .with_label_values(&[replica, outcome])
+            .inc_by(0.0);
+    }
+    for reason in ["zero_acceptance", "unclean_restart", "unattested_threshold"] {
+        metrics
+            .dspark_guard_quarantines
+            .with_label_values(&[replica, reason])
+            .inc_by(0.0);
+    }
+    for operation in ["quarantine", "rearm"] {
+        metrics
+            .dspark_guard_persistence_failures
+            .with_label_values(&[replica, operation])
+            .inc_by(0.0);
+    }
+    metrics
+        .dspark_guard_measurement_available
+        .with_label_values(&[replica])
+        .set(0.0);
+    metrics
+        .dspark_guard_strict_acceptance
+        .with_label_values(&[replica])
+        .set(0.0);
+    metrics
+        .dspark_guard_effective_tokens_per_step
+        .with_label_values(&[replica])
+        .set(0.0);
+    for position in 0..expected_positions {
+        metrics
+            .dspark_guard_position_acceptance
+            .with_label_values(&[replica, &position.to_string()])
+            .set(0.0);
+    }
+}
+
 impl Proxy {
     /// Builds the proxy and its optional tokenizer workers.
     ///
     /// # Errors
     ///
-    /// Returns an error when explicit local tokenizer initialization fails.
+    /// Returns an error when explicit local tokenizer initialization or the
+    /// `DSpark` reliability configuration fails.
     #[allow(clippy::needless_pass_by_value)]
     pub fn new(
         config: Config,
@@ -148,7 +646,8 @@ impl Proxy {
     ///
     /// # Errors
     ///
-    /// Returns an error when explicit local tokenizer initialization fails.
+    /// Returns an error when explicit local tokenizer initialization or the
+    /// `DSpark` reliability configuration fails.
     pub fn new_with_exact_inventories(
         config: Config,
         client: reqwest::Client,
@@ -164,7 +663,7 @@ impl Proxy {
             Arc::clone(&metrics),
             Arc::clone(&exact_inventories),
         )?;
-        Ok(Self::from_parts(
+        Self::from_parts(
             config,
             client,
             metrics,
@@ -173,7 +672,7 @@ impl Proxy {
             journal,
             session_affinity,
             tokenizer,
-        ))
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -186,7 +685,65 @@ impl Proxy {
         journal: RouteJournal,
         session_affinity: SessionAffinity,
         tokenizer: TokenizerObserver,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        let initial_probe_health =
+            config.upstream_admission_mode != UpstreamAdmissionMode::Compatibility;
+        let upstream_commitments = config
+            .upstreams
+            .iter()
+            .map(dspark_upstream_commitment)
+            .collect::<Vec<_>>();
+        let dspark_guard_store = if config.dspark_guard_mode == DsparkGuardMode::Quarantine {
+            let path = config
+                .dspark_guard_state_path
+                .as_deref()
+                .context("DSpark quarantine state path is missing")?;
+            Some(Arc::new(
+                DsparkGuardStore::open(
+                    path,
+                    DsparkGuardStorePolicy {
+                        owner_uid: config.dspark_guard_state_owner_uid,
+                        group_gid: config.dspark_guard_state_group_gid,
+                    },
+                    &upstream_commitments,
+                )
+                .context("open durable DSpark quarantine state")?,
+            ))
+        } else {
+            None
+        };
+        let dspark_guards: Arc<[DsparkGuardReplica]> = (0..config.upstreams.len())
+            .map(|index| {
+                DsparkGuardReplica::new(
+                    &config,
+                    initial_probe_health,
+                    dspark_guard_store
+                        .as_ref()
+                        .and_then(|store| store.quarantined_engine_core(index)),
+                    dspark_guard_store
+                        .as_ref()
+                        .is_some_and(|store| store.requires_uncertain_fence(index)),
+                )
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into();
+        for (index, guard) in dspark_guards.iter().enumerate() {
+            let replica = index.to_string();
+            initialize_dspark_guard_metrics(
+                metrics.as_ref(),
+                &replica,
+                guard.status().state,
+                config.dspark_guard_expected_positions,
+            );
+            let upstream_label = config.upstreams[index].as_str().trim_end_matches('/');
+            guard.publish_probe_health(
+                &router,
+                metrics.as_ref(),
+                index,
+                upstream_label,
+                initial_probe_health,
+            );
+        }
         if config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility {
             for (index, upstream) in config.upstreams.iter().enumerate() {
                 router.set_healthy(index, false);
@@ -200,7 +757,7 @@ impl Proxy {
                     .set(0.0);
             }
         }
-        Self {
+        Ok(Self {
             inner: Arc::new(Inner {
                 config,
                 client,
@@ -210,8 +767,10 @@ impl Proxy {
                 journal,
                 session_affinity,
                 tokenizer,
+                dspark_guards,
+                dspark_guard_store,
             }),
-        }
+        })
     }
 
     #[must_use]
@@ -251,7 +810,7 @@ impl Proxy {
         let replicas = (0..proxy.inner.config.upstreams.len())
             .filter_map(|index| {
                 proxy.inner.router.state(index).map(
-                    |(inflight, load_units, approximate_index_entries, healthy)| {
+                    |(inflight, load_units, approximate_index_entries, _router_healthy)| {
                         let exact_inventory =
                             proxy.inner.exact_inventories.get(index).map(|inventory| {
                                 let status = inventory.status();
@@ -270,10 +829,21 @@ impl Proxy {
                                     .compatibility_attested(index)
                                     .unwrap_or(false)
                             });
-                        let healthy = healthy && compatibility_attested.unwrap_or(true);
+                        let reliability = proxy.inner.dspark_guards.get(index).map_or(
+                            ReliabilitySnapshot {
+                                state: ReliabilityState::Unavailable,
+                                quarantined: false,
+                                effective_healthy: false,
+                            },
+                            DsparkGuardReplica::status,
+                        );
+                        let healthy =
+                            reliability.effective_healthy && compatibility_attested.unwrap_or(true);
                         ReplicaHealth {
                             index,
                             healthy,
+                            reliability_state: reliability.state.label(),
+                            quarantined: reliability.quarantined,
                             compatibility_attested,
                             inflight,
                             load_units,
@@ -470,7 +1040,7 @@ impl Proxy {
                         StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE
                     ) && attempt + 1 < serving_candidates.len() =>
                 {
-                    self.inner.router.set_healthy(candidate, false);
+                    self.publish_upstream_health(candidate, false);
                     self.record_upstream_request(candidate, response.status());
                     drop(load);
                 }
@@ -487,7 +1057,7 @@ impl Proxy {
                 }
                 Err(error) => {
                     last_error = Some(upstream_error_reason(&error));
-                    self.inner.router.set_healthy(candidate, false);
+                    self.publish_upstream_health(candidate, false);
                     drop(load);
                 }
             }
@@ -969,6 +1539,172 @@ impl Proxy {
         }
     }
 
+    pub async fn dspark_guard_loop(self) {
+        if self.inner.config.dspark_guard_mode == DsparkGuardMode::Off {
+            return;
+        }
+        let mut interval = dspark_poll_interval(Duration::from_millis(
+            u64::try_from(self.inner.config.dspark_guard_interval_ms).unwrap_or(u64::MAX),
+        ));
+        loop {
+            interval.tick().await;
+            self.dspark_guard_round().await;
+        }
+    }
+
+    async fn dspark_guard_round(&self) {
+        futures_util::stream::iter(0..self.inner.config.upstreams.len())
+            .for_each_concurrent(Some(MAX_CONCURRENT_UPSTREAM_PROBES), |upstream| {
+                self.poll_dspark_guard(upstream)
+            })
+            .await;
+    }
+
+    async fn poll_dspark_guard(&self, upstream: usize) {
+        let sample = match self.fetch_dspark_metrics(upstream).await {
+            Ok(body) => parse_prometheus(&body, self.inner.config.dspark_guard_expected_positions),
+            Err(failure) => Err(failure),
+        };
+        let attested_engine_core = self
+            .inner
+            .tokenizer
+            .compatibility_attested(upstream)
+            .is_some_and(|ready| ready)
+            .then(|| {
+                self.inner
+                    .tokenizer
+                    .compatibility_engine_core_incarnation_commitment(upstream)
+            })
+            .flatten();
+        let Some(guard) = self.inner.dspark_guards.get(upstream) else {
+            return;
+        };
+        let upstream_label = self.upstream_label(upstream);
+        let application = guard.apply(
+            GuardPublication {
+                router: &self.inner.router,
+                metrics: self.inner.metrics.as_ref(),
+                upstream,
+                upstream_label: &upstream_label,
+                store: self.inner.dspark_guard_store.as_deref(),
+            },
+            sample,
+            attested_engine_core,
+        );
+        self.record_dspark_guard(upstream, &application);
+        if let Some(reason) = application.quarantine_reason {
+            tracing::error!(
+                replica = upstream,
+                reason,
+                "DSpark reliability guard quarantined replica"
+            );
+        }
+        if let Some(operation) = application.persistence_failure {
+            tracing::error!(
+                replica = upstream,
+                operation,
+                "DSpark reliability guard persistence failed closed"
+            );
+        }
+    }
+
+    async fn fetch_dspark_metrics(&self, upstream: usize) -> Result<Vec<u8>, ParseFailure> {
+        let uri = Uri::from_static("/metrics");
+        let url = upstream_url(&self.inner.config.upstreams[upstream], &uri);
+        let mut request = self.inner.client.get(url).timeout(DSPARK_METRICS_TIMEOUT);
+        if let Some(token) = &self.inner.config.upstream_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.map_err(|_| ParseFailure::Missing)?;
+        if response.status() != StatusCode::OK {
+            return Err(ParseFailure::Missing);
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_PROMETHEUS_BYTES as u64)
+        {
+            return Err(ParseFailure::Oversized);
+        }
+        let mut body = Vec::with_capacity(
+            response
+                .content_length()
+                .and_then(|length| usize::try_from(length).ok())
+                .unwrap_or(64 << 10)
+                .min(MAX_PROMETHEUS_BYTES),
+        );
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| ParseFailure::Missing)?;
+            if body.len().saturating_add(chunk.len()) > MAX_PROMETHEUS_BYTES {
+                return Err(ParseFailure::Oversized);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+
+    fn record_dspark_guard(&self, upstream: usize, application: &GuardApplication) {
+        let replica = upstream.to_string();
+        self.inner
+            .metrics
+            .dspark_guard_windows
+            .with_label_values(&[replica.as_str(), application.observation.outcome.label()])
+            .inc();
+        for state in DSPARK_RELIABILITY_STATES {
+            self.inner
+                .metrics
+                .dspark_guard_state
+                .with_label_values(&[replica.as_str(), state])
+                .set(f64::from(*state == application.state.label()));
+        }
+        if let Some(reason) = application.quarantine_reason {
+            self.inner
+                .metrics
+                .dspark_guard_quarantines
+                .with_label_values(&[replica.as_str(), reason])
+                .inc();
+        }
+        if let Some(operation) = application.persistence_failure {
+            self.inner
+                .metrics
+                .dspark_guard_persistence_failures
+                .with_label_values(&[replica.as_str(), operation])
+                .inc();
+        }
+        let measurement_available = application.observation.measurement.is_some();
+        self.inner
+            .metrics
+            .dspark_guard_measurement_available
+            .with_label_values(&[replica.as_str()])
+            .set(f64::from(measurement_available));
+        if let Some(measurement) = &application.observation.measurement {
+            self.inner
+                .metrics
+                .dspark_guard_strict_acceptance
+                .with_label_values(&[replica.as_str()])
+                .set(counter_ratio(
+                    measurement.accepted_tokens,
+                    measurement.proposed_tokens,
+                ));
+            self.inner
+                .metrics
+                .dspark_guard_effective_tokens_per_step
+                .with_label_values(&[replica.as_str()])
+                .set(if measurement.draft_steps == 0 {
+                    0.0
+                } else {
+                    1.0 + counter_ratio(measurement.accepted_tokens, measurement.draft_steps)
+                });
+            for (position, accepted) in measurement.accepted_per_position.iter().enumerate() {
+                self.inner
+                    .metrics
+                    .dspark_guard_position_acceptance
+                    .with_label_values(&[replica.as_str(), &position.to_string()])
+                    .set(counter_ratio(*accepted, measurement.draft_steps));
+            }
+        }
+    }
+
     async fn probe_round(&self) {
         let mut unhealthy = Vec::new();
         let mut healthy = Vec::new();
@@ -1025,7 +1761,7 @@ impl Proxy {
         if self.inner.config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility
             && fence_before_check
         {
-            self.inner.router.set_healthy(upstream, false);
+            self.publish_upstream_health(upstream, false);
             self.inner
                 .metrics
                 .upstream_up
@@ -1108,14 +1844,9 @@ impl Proxy {
     }
 
     fn mark_probe(&self, upstream: usize, healthy: bool, reason: &str) {
-        self.inner.router.set_healthy(upstream, healthy);
+        let effective_healthy = self.publish_upstream_health(upstream, healthy);
         let label = self.upstream_label(upstream);
-        self.inner
-            .metrics
-            .upstream_up
-            .with_label_values(&[&label])
-            .set(if healthy { 1.0 } else { 0.0 });
-        if healthy {
+        if effective_healthy {
             self.inner
                 .metrics
                 .last_upstream_success
@@ -1125,9 +1856,29 @@ impl Proxy {
             self.inner
                 .metrics
                 .upstream_probe_errors
-                .with_label_values(&[&label, reason])
+                .with_label_values(&[
+                    label.as_str(),
+                    if healthy && !effective_healthy {
+                        "dspark_quarantined"
+                    } else {
+                        reason
+                    },
+                ])
                 .inc();
         }
+    }
+
+    fn publish_upstream_health(&self, upstream: usize, probe_healthy: bool) -> bool {
+        let upstream_label = self.upstream_label(upstream);
+        self.inner.dspark_guards.get(upstream).is_some_and(|guard| {
+            guard.publish_probe_health(
+                &self.inner.router,
+                self.inner.metrics.as_ref(),
+                upstream,
+                &upstream_label,
+                probe_healthy,
+            )
+        })
     }
 
     /// Proxies a native Prometheus endpoint selected by opaque upstream ordinal.
@@ -1315,6 +2066,15 @@ fn f64_to_usize(value: f64) -> Option<usize> {
     Some(value as usize)
 }
 
+#[allow(clippy::cast_precision_loss)]
+fn counter_ratio(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
 fn unix_seconds() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1326,7 +2086,11 @@ fn unix_seconds() -> f64 {
 mod tests {
     use std::{
         collections::HashMap,
-        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        fmt::Write as _,
+        fs,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        path::PathBuf,
+        sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     };
 
     use axum::{Router as AxumRouter, routing::any};
@@ -1345,6 +2109,42 @@ mod tests {
     struct DropSignal {
         dropped: Arc<AtomicBool>,
         notify: Arc<tokio::sync::Notify>,
+    }
+
+    static NEXT_DSPARK_STATE_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDsparkState {
+        root: PathBuf,
+    }
+
+    impl TestDsparkState {
+        fn configure(config: &mut Config) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "md-proxy-dspark-state-{}-{}",
+                std::process::id(),
+                NEXT_DSPARK_STATE_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&root).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            let state = root.join("state.json");
+            fs::write(
+                &state,
+                b"{\"schema_version\":1,\"runtime_dirty\":false,\"quarantines\":[]}",
+            )
+            .unwrap();
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+            let metadata = fs::symlink_metadata(&root).unwrap();
+            config.dspark_guard_state_path = Some(state);
+            config.dspark_guard_state_owner_uid = metadata.uid();
+            config.dspark_guard_state_group_gid = metadata.gid();
+            Self { root }
+        }
+    }
+
+    impl Drop for TestDsparkState {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
     }
 
     impl Drop for DropSignal {
@@ -1413,6 +2213,53 @@ mod tests {
         Proxy::new(config, reqwest::Client::new(), metrics, router, inventories).unwrap()
     }
 
+    fn guarded_proxy(upstreams: &[Url]) -> (Proxy, TestDsparkState) {
+        let joined = upstreams
+            .iter()
+            .map(Url::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut config = Config::from_lookup(|key| match key {
+            "DS4_UPSTREAM" => Some(joined.clone()),
+            "DS4_DSPARK_GUARD_MODE" => Some("observe".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        // Production config requires compatibility admission before this mode;
+        // the integration test injects the already-attested commitment below.
+        config.dspark_guard_mode = DsparkGuardMode::Quarantine;
+        let state = TestDsparkState::configure(&mut config);
+        (proxy_for_config(config, Arc::from([])), state)
+    }
+
+    fn dspark_counters(window: u64) -> DsparkCounters {
+        DsparkCounters::synthetic(window, window * 256, 0, vec![0; 5].into_boxed_slice())
+    }
+
+    fn quarantine_replica(proxy: &Proxy, upstream: usize, commitment: u8) {
+        let guard = &proxy.inner.dspark_guards[upstream];
+        let incarnation = Some([commitment; 32]);
+        let upstream_label = proxy.upstream_label(upstream);
+        for window in 0..=3 {
+            let application = guard.apply(
+                GuardPublication {
+                    router: &proxy.inner.router,
+                    metrics: proxy.inner.metrics.as_ref(),
+                    upstream,
+                    upstream_label: &upstream_label,
+                    store: proxy.inner.dspark_guard_store.as_deref(),
+                },
+                Ok(dspark_counters(window)),
+                incarnation,
+            );
+            proxy.record_dspark_guard(upstream, &application);
+        }
+        let status = guard.status();
+        assert_eq!(status.state, ReliabilityState::Quarantined);
+        assert!(status.quarantined);
+        assert!(!status.effective_healthy);
+    }
+
     fn proxy_for_config_with_manifest(config: Config, manifest: CompatibilityManifest) -> Proxy {
         let registry = Registry::new();
         let metrics = Arc::new(Metrics::new(&registry).unwrap());
@@ -1447,6 +2294,7 @@ mod tests {
             session_affinity,
             tokenizer,
         )
+        .unwrap()
     }
 
     fn test_compatibility_manifest() -> CompatibilityManifest {
@@ -1976,7 +2824,7 @@ mod tests {
         let (healthy_url, healthy_task) = start_upstream(healthy).await;
         let (unhealthy_url, unhealthy_task) = start_upstream(unhealthy).await;
         let proxy = proxy_for(&[healthy_url, unhealthy_url]);
-        proxy.router().set_healthy(1, false);
+        proxy.publish_upstream_health(1, false);
 
         for _ in 0..4 {
             let request = Request::builder()
@@ -2002,7 +2850,7 @@ mod tests {
             Url::parse("http://127.0.0.1:1").unwrap(),
             Url::parse("http://127.0.0.1:2").unwrap(),
         ]);
-        proxy.router().set_healthy(1, false);
+        proxy.publish_upstream_health(1, false);
         let response = Proxy::health(State(proxy.clone())).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
@@ -2013,6 +2861,8 @@ mod tests {
         assert_eq!(health["total_replicas"], 2);
         assert_eq!(health["replicas"][0]["healthy"], true);
         assert_eq!(health["replicas"][1]["healthy"], false);
+        assert_eq!(health["replicas"][0]["reliability_state"], "disabled");
+        assert_eq!(health["replicas"][0]["quarantined"], false);
         assert!(health["replicas"][0].get("exact_inventory").is_none());
         assert!(
             health["replicas"][0]
@@ -2020,13 +2870,461 @@ mod tests {
                 .is_none()
         );
 
-        proxy.router().set_healthy(0, false);
+        proxy.publish_upstream_health(0, false);
         let response = Proxy::health(State(proxy)).await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "unhealthy");
         assert_eq!(health["healthy_replicas"], 0);
+    }
+
+    #[tokio::test]
+    async fn dspark_quarantine_survives_health_probe_and_fails_over_without_dialing_replica() {
+        let quarantined_requests = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&quarantined_requests);
+        let quarantined = AxumRouter::new().fallback(any(move || {
+            let observed = Arc::clone(&observed);
+            async move {
+                observed.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::OK, "must not be called")
+            }
+        }));
+        let healthy = AxumRouter::new().fallback(any(|| async {
+            (
+                StatusCode::OK,
+                [("content-type", "application/json")],
+                r#"{"ok":true}"#,
+            )
+        }));
+        let (healthy_url, healthy_task) = start_upstream(healthy).await;
+        let (quarantined_url, quarantined_task) = start_upstream(quarantined).await;
+        let (proxy, _state) = guarded_proxy(&[healthy_url, quarantined_url]);
+        quarantine_replica(&proxy, 1, 7);
+
+        assert!(!proxy.publish_upstream_health(1, true));
+        assert!(!proxy.router().state(1).unwrap().3);
+        for _ in 0..4 {
+            let response = proxy
+                .serve(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/v1/chat/completions")
+                        .body(Body::from(
+                            r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-mini-dynamo-upstream"], "0");
+            let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        }
+        assert_eq!(quarantined_requests.load(Ordering::Relaxed), 0);
+
+        let response = Proxy::health(State(proxy)).await;
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(!text.contains("127.0.0.1"));
+        assert!(!text.contains("070707"));
+        let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(health["replicas"][1]["reliability_state"], "quarantined");
+        assert_eq!(health["replicas"][1]["quarantined"], true);
+        healthy_task.abort();
+        quarantined_task.abort();
+    }
+
+    #[tokio::test]
+    async fn all_dspark_quarantined_returns_503_without_dialing_either_replica() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let upstream = |requests: Arc<AtomicUsize>| {
+            AxumRouter::new().fallback(any(move || {
+                let requests = Arc::clone(&requests);
+                async move {
+                    requests.fetch_add(1, Ordering::Relaxed);
+                    (StatusCode::OK, "must not be called")
+                }
+            }))
+        };
+        let (url_a, task_a) = start_upstream(upstream(Arc::clone(&requests))).await;
+        let (url_b, task_b) = start_upstream(upstream(Arc::clone(&requests))).await;
+        let (proxy, _state) = guarded_proxy(&[url_a, url_b]);
+        quarantine_replica(&proxy, 0, 1);
+        quarantine_replica(&proxy, 1, 2);
+        let config = proxy.inner.config.clone();
+        drop(proxy);
+        let proxy = proxy_for_config(config, Arc::from([]));
+
+        let response = proxy
+            .serve(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(requests.load(Ordering::Relaxed), 0);
+        task_a.abort();
+        task_b.abort();
+    }
+
+    #[test]
+    fn durable_quarantine_survives_lb_restart_and_only_changed_core_rearms() {
+        let upstreams = [
+            Url::parse("http://127.0.0.1:1").unwrap(),
+            Url::parse("http://127.0.0.1:2").unwrap(),
+        ];
+        let (proxy, _state) = guarded_proxy(&upstreams);
+        quarantine_replica(&proxy, 0, 7);
+        let config = proxy.inner.config.clone();
+        drop(proxy);
+
+        let restored = proxy_for_config(config, Arc::from([]));
+        let status = restored.inner.dspark_guards[0].status();
+        assert_eq!(status.state, ReliabilityState::Quarantined);
+        assert!(status.quarantined);
+        assert!(!restored.publish_upstream_health(0, true));
+
+        let label = restored.upstream_label(0);
+        let same = restored.inner.dspark_guards[0].apply(
+            GuardPublication {
+                router: &restored.inner.router,
+                metrics: restored.inner.metrics.as_ref(),
+                upstream: 0,
+                upstream_label: &label,
+                store: restored.inner.dspark_guard_store.as_deref(),
+            },
+            Ok(dspark_counters(4)),
+            Some([7; 32]),
+        );
+        restored.record_dspark_guard(0, &same);
+        assert!(restored.inner.dspark_guards[0].status().quarantined);
+        assert!(!restored.router().state(0).unwrap().3);
+
+        let changed = restored.inner.dspark_guards[0].apply(
+            GuardPublication {
+                router: &restored.inner.router,
+                metrics: restored.inner.metrics.as_ref(),
+                upstream: 0,
+                upstream_label: &label,
+                store: restored.inner.dspark_guard_store.as_deref(),
+            },
+            Ok(dspark_counters(5)),
+            Some([8; 32]),
+        );
+        restored.record_dspark_guard(0, &changed);
+        let status = restored.inner.dspark_guards[0].status();
+        assert_eq!(status.state, ReliabilityState::Baseline);
+        assert!(!status.quarantined);
+        assert!(status.effective_healthy);
+
+        let config = restored.inner.config.clone();
+        drop(restored);
+        let reloaded = proxy_for_config(config, Arc::from([]));
+        assert!(!reloaded.inner.dspark_guards[0].status().quarantined);
+    }
+
+    #[test]
+    fn failed_durable_rearm_keeps_the_replica_fenced() {
+        let upstreams = [
+            Url::parse("http://127.0.0.1:1").unwrap(),
+            Url::parse("http://127.0.0.1:2").unwrap(),
+        ];
+        let (proxy, state) = guarded_proxy(&upstreams);
+        quarantine_replica(&proxy, 0, 7);
+        fs::set_permissions(&state.root, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let label = proxy.upstream_label(0);
+        let application = proxy.inner.dspark_guards[0].apply(
+            GuardPublication {
+                router: &proxy.inner.router,
+                metrics: proxy.inner.metrics.as_ref(),
+                upstream: 0,
+                upstream_label: &label,
+                store: proxy.inner.dspark_guard_store.as_deref(),
+            },
+            Ok(dspark_counters(4)),
+            Some([8; 32]),
+        );
+        proxy.record_dspark_guard(0, &application);
+        let status = proxy.inner.dspark_guards[0].status();
+        assert_eq!(status.state, ReliabilityState::PersistenceFailure);
+        assert!(status.quarantined);
+        assert!(!status.effective_healthy);
+        assert!(!proxy.router().state(0).unwrap().3);
+        let failures = proxy
+            .inner
+            .metrics
+            .dspark_guard_persistence_failures
+            .with_label_values(&["0", "rearm"])
+            .get();
+        assert!((failures - 1.0).abs() < f64::EPSILON);
+
+        fs::set_permissions(&state.root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn failed_quarantine_add_remains_fenced_across_lb_restart() {
+        let upstreams = [Url::parse("http://127.0.0.1:1").unwrap()];
+        let (proxy, state) = guarded_proxy(&upstreams);
+        let label = proxy.upstream_label(0);
+        for window in 0..3 {
+            let application = proxy.inner.dspark_guards[0].apply(
+                GuardPublication {
+                    router: &proxy.inner.router,
+                    metrics: proxy.inner.metrics.as_ref(),
+                    upstream: 0,
+                    upstream_label: &label,
+                    store: proxy.inner.dspark_guard_store.as_deref(),
+                },
+                Ok(dspark_counters(window)),
+                Some([7; 32]),
+            );
+            proxy.record_dspark_guard(0, &application);
+        }
+        fs::set_permissions(&state.root, fs::Permissions::from_mode(0o500)).unwrap();
+        let failed = proxy.inner.dspark_guards[0].apply(
+            GuardPublication {
+                router: &proxy.inner.router,
+                metrics: proxy.inner.metrics.as_ref(),
+                upstream: 0,
+                upstream_label: &label,
+                store: proxy.inner.dspark_guard_store.as_deref(),
+            },
+            Ok(dspark_counters(3)),
+            Some([7; 32]),
+        );
+        proxy.record_dspark_guard(0, &failed);
+        assert_eq!(failed.persistence_failure, Some("quarantine"));
+        assert!(!proxy.router().state(0).unwrap().3);
+
+        let config = proxy.inner.config.clone();
+        fs::set_permissions(&state.root, fs::Permissions::from_mode(0o700)).unwrap();
+        drop(proxy);
+        let restarted = proxy_for_config(config, Arc::from([]));
+        let uncertain = restarted.inner.dspark_guards[0].status();
+        assert_eq!(uncertain.state, ReliabilityState::PersistenceFailure);
+        assert!(uncertain.quarantined);
+        assert!(!restarted.publish_upstream_health(0, true));
+
+        let label = restarted.upstream_label(0);
+        let recovered = restarted.inner.dspark_guards[0].apply(
+            GuardPublication {
+                router: &restarted.inner.router,
+                metrics: restarted.inner.metrics.as_ref(),
+                upstream: 0,
+                upstream_label: &label,
+                store: restarted.inner.dspark_guard_store.as_deref(),
+            },
+            Ok(dspark_counters(4)),
+            Some([7; 32]),
+        );
+        restarted.record_dspark_guard(0, &recovered);
+        assert_eq!(recovered.quarantine_reason, Some("unclean_restart"));
+        assert_eq!(
+            restarted.inner.dspark_guards[0].status().state,
+            ReliabilityState::Quarantined
+        );
+        assert!(!restarted.router().state(0).unwrap().3);
+    }
+
+    #[test]
+    fn threshold_without_current_attestation_fences_probe_race_immediately() {
+        let upstreams = [Url::parse("http://127.0.0.1:1").unwrap()];
+        let (proxy, _state) = guarded_proxy(&upstreams);
+        let label = proxy.upstream_label(0);
+        for window in 0..3 {
+            let application = proxy.inner.dspark_guards[0].apply(
+                GuardPublication {
+                    router: &proxy.inner.router,
+                    metrics: proxy.inner.metrics.as_ref(),
+                    upstream: 0,
+                    upstream_label: &label,
+                    store: proxy.inner.dspark_guard_store.as_deref(),
+                },
+                Ok(dspark_counters(window)),
+                Some([7; 32]),
+            );
+            proxy.record_dspark_guard(0, &application);
+        }
+
+        // Model the worst ordering: the guard poll read no current
+        // attestation, then a successful compatibility probe published health
+        // before the poll acquired the per-replica guard lock.
+        assert!(proxy.publish_upstream_health(0, true));
+        let unresolved = proxy.inner.dspark_guards[0].apply(
+            GuardPublication {
+                router: &proxy.inner.router,
+                metrics: proxy.inner.metrics.as_ref(),
+                upstream: 0,
+                upstream_label: &label,
+                store: proxy.inner.dspark_guard_store.as_deref(),
+            },
+            Ok(dspark_counters(3)),
+            None,
+        );
+        proxy.record_dspark_guard(0, &unresolved);
+        assert_eq!(unresolved.quarantine_reason, Some("unattested_threshold"));
+        assert!(proxy.inner.dspark_guards[0].status().quarantined);
+        assert!(!proxy.router().state(0).unwrap().3);
+        assert!(!proxy.publish_upstream_health(0, true));
+
+        let persisted = proxy.inner.dspark_guards[0].apply(
+            GuardPublication {
+                router: &proxy.inner.router,
+                metrics: proxy.inner.metrics.as_ref(),
+                upstream: 0,
+                upstream_label: &label,
+                store: proxy.inner.dspark_guard_store.as_deref(),
+            },
+            Ok(dspark_counters(4)),
+            Some([8; 32]),
+        );
+        proxy.record_dspark_guard(0, &persisted);
+        assert_eq!(persisted.quarantine_reason, Some("zero_acceptance"));
+        assert_eq!(
+            proxy.inner.dspark_guards[0].status().state,
+            ReliabilityState::Quarantined
+        );
+        assert!(!proxy.router().state(0).unwrap().3);
+
+        let same_current_core = proxy.inner.dspark_guards[0].apply(
+            GuardPublication {
+                router: &proxy.inner.router,
+                metrics: proxy.inner.metrics.as_ref(),
+                upstream: 0,
+                upstream_label: &label,
+                store: proxy.inner.dspark_guard_store.as_deref(),
+            },
+            Ok(dspark_counters(5)),
+            Some([8; 32]),
+        );
+        proxy.record_dspark_guard(0, &same_current_core);
+        assert!(proxy.inner.dspark_guards[0].status().quarantined);
+        assert!(!proxy.router().state(0).unwrap().3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dspark_poll_interval_delays_instead_of_bursting_after_a_slow_scrape() {
+        let mut interval = dspark_poll_interval(Duration::from_secs(1));
+        interval.tick().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        interval.tick().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), interval.tick())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn stale_guard_observation_cannot_restore_upstream_metric_after_probe_failure() {
+        let upstream = Url::parse("http://127.0.0.1:1").unwrap();
+        let proxy = proxy_for(std::slice::from_ref(&upstream));
+        let guard = &proxy.inner.dspark_guards[0];
+        let label = proxy.upstream_label(0);
+        let stale = guard.apply(
+            GuardPublication {
+                router: &proxy.inner.router,
+                metrics: proxy.inner.metrics.as_ref(),
+                upstream: 0,
+                upstream_label: &label,
+                store: None,
+            },
+            Ok(dspark_counters(0)),
+            None,
+        );
+        assert!(!proxy.publish_upstream_health(0, false));
+        proxy.record_dspark_guard(0, &stale);
+        assert!(!proxy.router().state(0).unwrap().3);
+        assert!(
+            proxy
+                .inner
+                .metrics
+                .upstream_up
+                .with_label_values(&[upstream.as_str().trim_end_matches('/')])
+                .get()
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_mode_polls_native_metrics_without_fencing_at_threshold() {
+        let samples = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&samples);
+        let upstream = AxumRouter::new().fallback(any(move |request: Request<Body>| {
+            let observed = Arc::clone(&observed);
+            async move {
+                if request.uri().path() != "/metrics" {
+                    return Response::new(Body::from("ok"));
+                }
+                let window = observed.fetch_add(1, Ordering::Relaxed);
+                let proposed = window * 256;
+                let mut body = format!(
+                    "vllm:spec_decode_num_drafts_total {window}\n\
+                     vllm:spec_decode_num_draft_tokens_total {proposed}\n\
+                     vllm:spec_decode_num_accepted_tokens_total 0\n"
+                );
+                for position in 0..5 {
+                    writeln!(
+                        body,
+                        "vllm:spec_decode_num_accepted_tokens_per_pos_total{{position=\"{position}\"}} 0"
+                    )
+                    .unwrap();
+                }
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/plain")
+                    .body(Body::from(body))
+                    .unwrap()
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let joined = url.to_string();
+        let config = Config::from_lookup(|key| match key {
+            "DS4_UPSTREAM" => Some(joined.clone()),
+            "DS4_DSPARK_GUARD_MODE" => Some("observe".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+
+        for _ in 0..4 {
+            proxy.poll_dspark_guard(0).await;
+        }
+        assert_eq!(samples.load(Ordering::Relaxed), 4);
+        assert!(proxy.router().state(0).unwrap().3);
+        let status = proxy.inner.dspark_guards[0].status();
+        assert_eq!(status.state, ReliabilityState::WouldQuarantine);
+        assert!(!status.quarantined);
+        assert!(status.effective_healthy);
+        let measurement_available = proxy
+            .inner
+            .metrics
+            .dspark_guard_measurement_available
+            .with_label_values(&["0"])
+            .get();
+        let effective = proxy
+            .inner
+            .metrics
+            .dspark_guard_effective_tokens_per_step
+            .with_label_values(&["0"])
+            .get();
+        let position = proxy
+            .inner
+            .metrics
+            .dspark_guard_position_acceptance
+            .with_label_values(&["0", "4"])
+            .get();
+        assert!((measurement_available - 1.0).abs() < f64::EPSILON);
+        assert!((effective - 1.0).abs() < f64::EPSILON);
+        assert!(position.abs() < f64::EPSILON);
+        task.abort();
     }
 
     #[tokio::test]
@@ -2097,6 +3395,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One end-to-end admission/fencing/recovery lifecycle.
     async fn compatibility_admission_fences_during_check_mismatch_and_recovers() {
         let identity_matches = Arc::new(AtomicBool::new(true));
         let block_identity = Arc::new(AtomicBool::new(false));
@@ -2151,6 +3450,11 @@ mod tests {
         assert!(!proxy.router().state(0).unwrap().3);
         proxy.probe(0).await;
         assert!(proxy.router().state(0).unwrap().3);
+        let first_incarnation = proxy
+            .inner
+            .tokenizer
+            .compatibility_engine_core_incarnation_commitment(0);
+        assert!(first_incarnation.is_some());
         let request = Request::builder()
             .method(Method::POST)
             .uri("/v1/chat/completions")
@@ -2170,10 +3474,24 @@ mod tests {
             .expect("identity check must start");
         assert!(!proxy.router().state(0).unwrap().3);
         assert_eq!(proxy.inner.tokenizer.compatibility_attested(0), Some(false));
+        assert!(
+            proxy
+                .inner
+                .tokenizer
+                .compatibility_engine_core_incarnation_commitment(0)
+                .is_none()
+        );
         identity_release.notify_one();
         checking.await.unwrap();
         block_identity.store(false, Ordering::Release);
         assert!(!proxy.router().state(0).unwrap().3);
+        assert!(
+            proxy
+                .inner
+                .tokenizer
+                .compatibility_engine_core_incarnation_commitment(0)
+                .is_none()
+        );
 
         let request = Request::builder()
             .method(Method::POST)
@@ -2191,6 +3509,13 @@ mod tests {
         identity_matches.store(true, Ordering::Release);
         proxy.probe(0).await;
         assert!(proxy.router().state(0).unwrap().3);
+        assert_eq!(
+            proxy
+                .inner
+                .tokenizer
+                .compatibility_engine_core_incarnation_commitment(0),
+            first_incarnation
+        );
         task.abort();
     }
 

@@ -58,6 +58,32 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   serving/failover attempt. Unit tests cover exclusion, zero-healthy behavior,
   retryable failover, and probe recovery; a node06 negative canary sent 4/4
   requests only to the healthy replica.
+- 🔨 **DSpark degeneration circuit breaker (#32).** r116 adds a default-off
+  Rust-native `off|observe|quarantine` guard over bounded native vLLM metrics.
+  A trip requires at least three consecutive active windows, minimum real
+  proposal volume, aggregate accepted delta zero, and exact zero deltas at
+  every configured K5 position. Missing, partial, duplicate, non-finite,
+  reset, idle, oversized, multi-series, label-domain-mismatched, and internally
+  inconsistent samples break the streak and cannot quarantine. Observe mode exposes the counterfactual only;
+  enforcing mode atomically fences new traffic, survives ordinary health-probe
+  success, fails over to the healthy replica, and returns 503 without dialing
+  when every replica is fenced. Quarantine is fsynced to a protected bounded
+  state file before publication and survives LB recreation. It clears only
+  after a different canonical schema-v3 compatibility-attested EngineCore-set
+  commitment is durably recorded; frontend-only changes cannot rearm it, and
+  raw process identity is never retained or exposed. A precommitted
+  runtime-dirty marker converts an unclean exit or failed mutation into
+  restart-time fencing of every unresolved replica; persistence failure stays
+  fenced. Valid windows export strict and
+  per-position acceptance plus effective tokens per draft step by opaque
+  replica ordinal. Local parser/state-machine tests plus
+  loopback routing tests cover transient zeros, adversarial exposition, probe
+  races, single-replica failover, and all-replica containment. Live completion
+  remains open: after cooling repair, verify the exact r34 counter shape and
+  false-positive rate on one TP4 pair in `observe`, then dual-pair observe
+  before separately considering compatibility admission and enforcement. BOS
+  repetition detection and a bounded per-request completion policy remain the
+  next independent Phase-C containment slices.
 - ✅ **Single-parse approximate preparation.** One JSON parse now feeds both
   compatibility mutations and canonical route fingerprints; cache observation
   reuses the prepared vector. Release-mode preparation is 0.49ms at 256KiB and

@@ -216,19 +216,62 @@ real installed Python 3.12 `site-packages` import path, the KV publisher and
 sampling floor exactly match their qualified JSON values, every bind is
 read-only and cannot create a host path,
 both manifest pins, their cross-link, and all mounted artifacts match committed
-bytes, and the LB remains in `http` admission mode. It also
+bytes, and the LB remains in `http` admission mode with the DSpark reliability
+guard `off`. It also
 validates any `EXTRA_VLLM_ARGS_A_IDENTITY` or
 `EXTRA_VLLM_ARGS_B_IDENTITY` override present in the environment; an override
 must retain the exact three required arguments.
+
+### Durable DSpark quarantine profile
+
+`docker-compose.dspark-guard-quarantine.yaml` is a separate enforcement
+profile. It is deliberately absent from the base and identity-only renders. It
+enables compatibility admission and mounts one protected host `/run` directory
+read-write so an engine quarantine survives LB crashes and container
+recreation. The bounded state document contains only opaque replica, upstream,
+and EngineCore SHA-256 commitments; never URLs, raw process identities, prompts,
+or responses.
+
+Prepare and validate the fixed host authority, then render the combined profile
+without starting anything:
+
+```bash
+sudo python3 deploy/dspark_0731/setup_dspark_guard_host.py
+sudo python3 deploy/dspark_0731/setup_dspark_guard_host.py --check
+python3 deploy/dspark_0731/validate-dspark-guard-compose.py
+DSPARK_GUARD_STATE_DIR=/run/mini-dynamo-dspark-guard \
+  docker compose -f deploy/dspark_0731/docker-compose.yaml \
+    -f deploy/dspark_0731/docker-compose.compatibility-identity.yaml \
+    -f deploy/dspark_0731/docker-compose.dspark-guard-quarantine.yaml \
+    config --quiet
+```
+
+The setup helper exclusively creates the mode-0700 root-owned directory and
+mode-0600 canonical state file on `/run` tmpfs, fsyncs both, and otherwise only
+validates existing material. The LB holds an exclusive lifetime directory lock,
+rejects unsafe, corrupt, noncanonical, or topology-mismatched state at startup,
+fsyncs quarantine before publishing the fence, and durably removes the record
+before admitting a changed EngineCore. A failed add or removal remains fenced
+and is exported as `persistence_failure`. The state is marked runtime-dirty
+before startup. An unclean exit or poisoned mutation therefore makes the next
+LB fence every unresolved replica and durably quarantine its then-attested
+EngineCore; only a clean, fully resolved shutdown clears that marker.
+
+This is an admission artifact, not authorization to roll node06. Keep it off
+until cooling is repaired, identity admission passes a rolling one-engine
+qualification, and guard `observe` proves the exact live r34 counter/label
+shape and false-positive rate first on one TP4 pair and then both pairs. Every
+operational recreate must still hold the common deployment lock.
 
 Do not apply this overlay to both engines together. First verify the pinned
 image still supports vLLM's `--middleware` import contract, single-home
 production on the peer, and recreate only the candidate engine. Test the direct
 endpoint with the existing engine bearer, then run the deterministic agent
 smoke and performance scout. Roll the second engine only after the candidate is
-clean. **Keep `DS4_UPSTREAM_ADMISSION_MODE=http`; this candidate MUST NOT be
-used to enable compatibility admission, even when both endpoint documents
-match.** The middleware verifies the live vLLM distribution, configured model
+clean. The identity-only profile must keep
+`DS4_UPSTREAM_ADMISSION_MODE=http`; only the separately rendered durable guard
+profile may request compatibility admission after all its prerequisites pass.
+The middleware verifies the live vLLM distribution, configured model
 name/context, and tokenizer bytes. It still re-publishes the manifest's model
 root and renderer profile only after the real initialized `/v1/models` and all
 ten renderer/token-ID goldens match. Compose—not the process—still provides the

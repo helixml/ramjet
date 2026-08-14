@@ -73,7 +73,8 @@ steps:
       - python3 deploy/dspark_0731/validate-snapshot-companion-compose.py
       - python3 deploy/dspark_0731/validate-snapshot-production-compose.py
       - python3 deploy/dspark_0731/validate-serving-identity-compose.py
-      - python3 -m unittest bench.test_persistent_jit_cache_compose bench.test_snapshot_production_compose bench.test_serving_identity_compose
+      - python3 deploy/dspark_0731/validate-dspark-guard-compose.py
+      - python3 -m unittest bench.test_persistent_jit_cache_compose bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host
 
   - name: quality-complete
     image: alpine:3.23
@@ -289,7 +290,8 @@ steps:
       - python3 deploy/dspark_0731/validate-snapshot-companion-compose.py
       - python3 deploy/dspark_0731/validate-snapshot-production-compose.py
       - python3 deploy/dspark_0731/validate-serving-identity-compose.py
-      - python3 -m unittest bench.test_snapshot_production_compose bench.test_serving_identity_compose
+      - python3 deploy/dspark_0731/validate-dspark-guard-compose.py
+      - python3 -m unittest bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host
 
   - name: release-quality-complete
     image: alpine:3.23

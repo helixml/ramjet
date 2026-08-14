@@ -5632,3 +5632,77 @@ tests, and the warm locked release build in 8.07s wall; all 306 Python tests in
 capture-script syntax, and diff checks in 0.78s. The focused 51-test
 guard/candidate/shadow loop took 3.43s, dominated by real parent-death and
 process-tree regressions. No GPU or remote host was touched.
+
+## 2026-08-14 — r116 default-off DSpark degeneration circuit breaker
+
+With node06 deliberately untouched after the cooling failure, the open-issue
+audit kept #41 open rather than substituting local evidence for its interrupted
+live gate. Its authenticated LB-only recovery is already qualified at 1.138s
+p95, but the revision-stable 104-source/100,000-comparison journal did not
+complete before the host disappeared. The highest-value independent GPU-free
+gap was therefore #32 Phase C: the proxy could observe DSpark acceptance in
+bounded benchmark intervals, but it could not contain the reported sustained
+all-position-zero failure while keeping the healthy replica available.
+
+r116 adds a Rust-native `off|observe|quarantine` guard. Each engine is polled
+independently through a two-second, 4MiB-bounded native `/metrics` request. The
+strict parser accepts only the four required cumulative DSpark families and
+exactly one coherent label domain, requires every configured K position, and
+rejects multiple series rather than aggregating away a shard reset. It also
+rejects malformed, duplicate, partial, non-finite, oversized,
+unexpected-position, label-mismatched, identity-changing, or overflowed
+samples. Detection requires positive draft steps, at least 256 new proposed
+tokens, aggregate accepted delta zero, and zero accepted deltas at all five K5
+positions for three consecutive complete windows. Idle, reset, inconsistent,
+or unavailable windows break consecutiveness and can never cause an
+availability action.
+
+`observe` publishes only fixed-cardinality state and window telemetry. Valid
+windows additionally expose strict acceptance, effective tokens per draft
+step, and per-position acceptance ratios by opaque replica ordinal.
+`quarantine` uses the same detector but atomically composes its sticky fence
+with ordinary HTTP/compatibility health. A later successful `/v1/models` probe
+cannot re-admit the process; new traffic fails over to a healthy peer, and if
+all peers are fenced the proxy returns 503 without dialing either engine.
+Clean or idle metrics do not clear the fence. Rearming requires a different
+schema-v3 compatibility-attested EngineCore commitment; frontend-only identity
+changes and EngineCore list order cannot rearm a quarantined engine. Before the
+router fence is published, quarantine is committed to a canonical, bounded,
+mode-0600 state file under a lifetime-locked mode-0700 directory. The
+same-directory fsynced replacement survives LB reconstruction and is removed
+only after the changed EngineCore commitment is durably published. A store
+failure remains fail-closed and is visible through fixed-cardinality health and
+metrics. A runtime-dirty marker is committed before startup; after an unclean
+exit or poisoned mutation, the next LB starts every unresolved replica fenced
+and persists its currently attested EngineCore as quarantined before serving.
+Only a clean, fully resolved shutdown clears that marker. The validated raw
+incarnations, URLs, and paths are never logged,
+labeled, or journaled; the state contains only opaque domain-separated SHA-256
+commitments and replica ordinals. Configuration therefore refuses enforcing
+mode unless compatibility admission and a normalized protected state path are
+both explicit.
+
+The default deployment and identity overlay remain `off`, so this change adds
+no engine polling or request-path work to the current serving contract. Compose
+validation now rejects accidental DSpark enforcement in the diagnostic
+identity profile. After cooling repair the live order is one TP4 pair in
+`observe`, exact r34 metric-shape and false-positive qualification, then
+dual-pair observe. The committed quarantine overlay and host setup/validation
+tools are admission artifacts only; enforcement remains a separate
+compatibility-admission decision. BOS-repetition detection and a bounded
+per-request completion policy remain independent follow-ups.
+
+Local evidence: all 412 Rust unit tests and 38 integration tests passed. The
+focused 32-test DSpark/store/config/proxy loop proved strict parsing,
+probe-resistant quarantine, one-peer failover, two-peer 503/no-dial
+containment, pre-commit disk/memory preservation, restart persistence, and
+changed-EngineCore-only durable rearm. It also covers the worst ordering where
+a compatibility probe succeeds after a guard poll reads no attestation: the
+threshold immediately fences, later persists a different exact EngineCore, and
+a second observation of that same core remains quarantined. Independent safety
+review found no remaining release blocker. Warning-denied all-target Clippy passed.
+The five-case agent corpus and all 311 Python tests passed in 10.61s wall; the
+DSpark host/Compose tests, production validators, base render, and diff checks
+passed in 0.46s. The final widened Rust lane, including the edited thin-LTO
+release relink, passed in 48.21s (release build 39.96s). No GPU, remote host,
+image, or live deployment was touched.

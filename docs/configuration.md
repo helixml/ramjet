@@ -41,11 +41,62 @@ secret manager.
 | `DS4_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
 | `RUST_LOG` | `info` | Standard tracing filter, for example `mini_dynamo=debug`. |
 
-`GET /health` returns opaque replica ordinals, serving health, inflight work,
-load units, and index size. It returns `200 ok` when every replica is healthy,
+`GET /health` returns opaque replica ordinals, serving health, DSpark
+reliability state, inflight work, load units, and index size. It returns `200 ok` when every replica is healthy,
 `200 degraded` when at least one can serve, and `503 unhealthy` when none can
 serve. Successful proxied responses include `X-Mini-Dynamo-Upstream` with an
 opaque replica ordinal.
+
+### DSpark reliability guard (experimental)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DS4_DSPARK_GUARD_MODE` | `off` | `off`, telemetry-only `observe`, or enforcing `quarantine`. |
+| `DS4_DSPARK_GUARD_INTERVAL_MS` | `5000` | Native engine `/metrics` polling interval, from 1–60 seconds. Missed ticks delay instead of bursting. Each request has a separate two-second timeout and 4MiB body cap. |
+| `DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS` | `3` | Consecutive qualifying zero-acceptance windows required, from 2 through 12. |
+| `DS4_DSPARK_GUARD_MIN_PROPOSED_TOKENS` | `256` | Minimum proposed draft tokens in each qualifying window. |
+| `DS4_DSPARK_GUARD_EXPECTED_POSITIONS` | `5` | Exact speculative positions required in every sample; use `5` for fixed K5. |
+| `DS4_DSPARK_GUARD_STATE_PATH` | unset | Required only for `quarantine`: normalized absolute path to a pre-created mode-0600 durable state file in a protected mode-0700 directory. |
+| `DS4_DSPARK_GUARD_STATE_OWNER_UID` | `0` | Required owner UID for the durable state file and directory. |
+| `DS4_DSPARK_GUARD_STATE_GROUP_GID` | `0` | Required group GID for the durable state file and directory. |
+
+The guard detects the production-shaped DSpark failure where an active engine
+continues proposing draft work but accepts exactly zero tokens at every K5
+position across multiple windows. Until a live image proves another shape, the
+parser fails closed unless each counter family and position has exactly one
+coherent label domain; this prevents one shard reset from being hidden by
+another shard's increment. Missing, partial, duplicate, multi-series,
+mismatched-label, non-finite, reset, idle, oversized, or internally
+inconsistent counters break the streak and never trigger quarantine. `observe`
+records the same decision without changing routing.
+
+`quarantine` atomically removes the affected replica from new serving attempts;
+the healthy peer remains available, and two quarantined replicas produce a 503
+without dialing either engine. Quarantine is sticky across LB crashes and
+container recreates: the file is fsynced before the serving fence is published,
+and a persistence failure itself fails closed. Re-admission first durably
+removes the record and then requires a different canonical SHA-256 commitment
+of the compatibility-attested EngineCore incarnation set. A frontend-only
+identity change cannot rearm it. Enforcing mode therefore requires
+`DS4_UPSTREAM_ADMISSION_MODE=compatibility` and the protected state path. Raw
+incarnations and upstream URLs are never stored. The bounded schema-v1 file
+also precommits a runtime-dirty marker. After an unclean LB exit or a failed
+store mutation, every replica without an existing record starts fenced and its
+currently attested EngineCore is durably quarantined before it can serve; an
+ordinary clean LB shutdown clears the marker. The file
+contains only opaque replica ordinals and SHA-256 commitments. Start with
+`observe` and qualify both false-positive behavior and counter shape before
+enabling enforcement.
+
+Inspect each replica's fixed `reliability_state` and `quarantined` fields in
+`/health`, plus `ds4proxy_dspark_guard_state`,
+`ds4proxy_dspark_guard_windows_total`, and
+`ds4proxy_dspark_guard_quarantines_total`. Durable publication failures use the
+fixed `persistence_failure` state and
+`ds4proxy_dspark_guard_persistence_failures_total`. Valid windows also export strict
+acceptance, effective tokens per draft step, and per-position acceptance ratios
+with a separate measurement-available gauge. Replica labels are opaque ordinals;
+no process identity, metric payload, prompt, or completion content is exposed.
 
 ### Opaque session affinity (experimental)
 
@@ -143,7 +194,11 @@ mode unless every upstream implements the identity contract below. Inspect
 The identity endpoint must capture the frontend and every expected EngineCore
 atomically and return a bounded schema-v3 document. Each incarnation is an
 opaque value of 1–256 ASCII alphanumeric/`.`/`_`/`:`/`-` bytes. mini-dynamo
-validates these values but never logs, labels, journals, or retains them.
+validates these values but never logs, labels, journals, or retains the raw
+values. Enforcing DSpark reliability mode retains only a canonical SHA-256
+commitment of the sorted EngineCore incarnation set. It persists that opaque
+commitment before fencing traffic, so neither a frontend restart nor an LB
+restart lets the same EngineCore clear its own quarantine.
 
 ```json
 {
@@ -347,6 +402,10 @@ families are:
 - `ds4proxy_cache_ttft_seconds` for streaming time to first generated content.
 - `ds4proxy_session_affinity_total` for bounded prospective pair, health, load,
   and score outcomes when session shadow mode is enabled.
+- `ds4proxy_dspark_guard_state` and `ds4proxy_dspark_guard_windows_total` for
+  DSpark degeneration observation; strict/per-position acceptance and
+  effective-tokens-per-step gauges describe each valid window, while
+  quarantine transitions use a separate fixed-reason counter.
 
 With `DS4_ROUTE_JOURNAL=true`, replay bounded decision snapshots without
 changing live traffic:

@@ -69,6 +69,15 @@ services:
       # Optional serving admission stays permissive until separately qualified.
       DS4_UPSTREAM_ADMISSION_MODE: ${DS4_UPSTREAM_ADMISSION_MODE:-http}
       DS4_UPSTREAM_ADMISSION_TIMEOUT_MS: ${DS4_UPSTREAM_ADMISSION_TIMEOUT_MS:-5000}
+      # DSpark degeneration detection stays off until cooling repair and a
+      # one-TP4 observe-mode qualification. Quarantine additionally requires
+      # compatibility admission plus the separate durable-state overlay; only
+      # a changed attested EngineCore set can durably rearm.
+      DS4_DSPARK_GUARD_MODE: ${DS4_DSPARK_GUARD_MODE:-off}
+      DS4_DSPARK_GUARD_INTERVAL_MS: ${DS4_DSPARK_GUARD_INTERVAL_MS:-5000}
+      DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS: ${DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS:-3}
+      DS4_DSPARK_GUARD_MIN_PROPOSED_TOKENS: ${DS4_DSPARK_GUARD_MIN_PROPOSED_TOKENS:-256}
+      DS4_DSPARK_GUARD_EXPECTED_POSITIONS: ${DS4_DSPARK_GUARD_EXPECTED_POSITIONS:-5}
       DS4_EXACT_ROUTE_WORKERS: ${DS4_EXACT_ROUTE_WORKERS:-8}
       DS4_EXACT_ROUTE_TIMEOUT_MS: ${DS4_EXACT_ROUTE_TIMEOUT_MS:-250}
       # Placement stays disabled by default. A nonzero percentage additionally
