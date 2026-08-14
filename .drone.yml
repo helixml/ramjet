@@ -70,7 +70,8 @@ steps:
       - docker compose -f deploy/dspark_0731/docker-compose.yaml config --quiet
       - python3 deploy/dspark_0731/validate-snapshot-companion-compose.py
       - python3 deploy/dspark_0731/validate-snapshot-production-compose.py
-      - python3 -m unittest bench.test_snapshot_production_compose
+      - python3 deploy/dspark_0731/validate-serving-identity-compose.py
+      - python3 -m unittest bench.test_snapshot_production_compose bench.test_serving_identity_compose
 
   - name: quality-complete
     image: alpine:3.23
@@ -285,7 +286,8 @@ steps:
       - docker compose -f deploy/dspark_0731/docker-compose.yaml config --quiet
       - python3 deploy/dspark_0731/validate-snapshot-companion-compose.py
       - python3 deploy/dspark_0731/validate-snapshot-production-compose.py
-      - python3 -m unittest bench.test_snapshot_production_compose
+      - python3 deploy/dspark_0731/validate-serving-identity-compose.py
+      - python3 -m unittest bench.test_snapshot_production_compose bench.test_serving_identity_compose
 
   - name: release-quality-complete
     image: alpine:3.23

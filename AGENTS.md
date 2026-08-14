@@ -145,6 +145,24 @@ BENCH_MODE=exact-rss target/release/examples/digest_index_bench
 BENCH_MODE=digest-rss target/release/examples/digest_index_bench
 ```
 
+For the issue #15 in-process vLLM identity endpoint, use the sub-second Python
+and Compose loop; the middleware/overlay are not Cargo package inputs, so a
+Rust rebuild proves nothing and only slows iteration:
+
+```bash
+python3 -m unittest bench.test_engine_identity_middleware \
+  bench.test_serving_identity_compose
+python3 deploy/dspark_0731/validate-serving-identity-compose.py
+```
+
+The validator respects `EXTRA_VLLM_ARGS_{A,B}_IDENTITY` and the two rendered
+bind-source overrides, hashes both mounted artifacts, and must keep base
+Compose admission at `http`. The overlay is not permission to roll both
+engines or enable LB compatibility admission. First preflight the pinned
+image's `--middleware` import contract without GPUs, single-home production on
+the peer, then recreate and qualify only one engine. Record the render,
+preflight, restart, and first endpoint/request wall times separately.
+
 The digest index is a memory/recovery optimization, not a faster lookup path.
 Its pre-shadow gates are: no overclaims in differential tests, matched 80K
 lookup at most 250us and 5x raw exact, 524K at most 2ms, 36,612-record import

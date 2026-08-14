@@ -84,12 +84,20 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   bounded parallel groups; steady rounds try unhealthy peers first. The last
   admitted replica stays live only during its bounded atomic recheck, then a
   mismatch or unavailable identity fences it. Mismatch/recovery is covered
-  through real proxy dispatch. The control-plane half is complete but
-  node06's engine image does not yet expose this endpoint, so the Compose
-  default remains `http` and no live enablement is admissible. The larger issue
-  #15 bundle still needs driver/CUDA/NCCL, kernel/patch, topology, normalized
-  argv/environment, compile-cache identity, representative warmups, endpoint
-  publication, and immutable engine-image qualification.
+  through real proxy dispatch. r109 adds a default-off, in-process vLLM ASGI
+  diagnostic endpoint candidate: it independently authenticates, verifies the
+  live vLLM version/model/context/tokenizer, derives the serving frontend's
+  boot/process incarnation, and leaves ordinary inference on the direct vLLM
+  path. A semantic Compose validator proves the base stack remains unchanged,
+  pins r34's immutable image and real import path, and requires exact qualified
+  KV-publisher/sampling JSON. The endpoint still re-publishes unverified
+  renderer/model-root fields and does not identify EngineCore, so it is not an
+  admission authority: the Compose default remains `http` and no enablement is
+  admissible. The larger issue #15 bundle still needs driver/CUDA/NCCL,
+  kernel/patch, topology,
+  normalized argv/environment, compile-cache identity, representative warmups,
+  complete runtime-manifest generation, and immutable engine-image
+  qualification.
 - 🔨 **Exact KV-event shadow index.** The transport-independent sequence fence
   now starts untrusted, requests bounded contiguous replay on gaps, increments
   generations on restart/unrecoverable recovery, and admits exact state after

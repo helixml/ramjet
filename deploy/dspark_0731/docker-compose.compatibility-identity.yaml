@@ -1,0 +1,50 @@
+# Opt-in, production-shaped vLLM identity endpoint for issue #15.
+#
+# This overlay adds one in-process ASGI path; inference still reaches vLLM
+# directly and does not cross a sidecar proxy. Keep the base Compose admission
+# mode at `http` until the overlay has passed a rolling node06 qualification.
+services:
+  dspark-0731:
+    # This endpoint describes only this immutable image. A candidate image
+    # needs its own manifest and overlay; an IMAGE_A/IMAGE override must not
+    # silently inherit r34's identity.
+    image: voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b
+    volumes:
+      - type: bind
+        source: ${MINI_DYNAMO_SERVING_IDENTITY_MIDDLEWARE_SOURCE:-./engine_identity_middleware.py}
+        target: /opt/vllm/vllm/mini_dynamo_engine_identity.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SOURCE:-../../compat/deepseek-v4-r34.json}
+        target: /opt/mini-dynamo/compatibility.json
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_PATH: /opt/mini-dynamo/compatibility.json
+      MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SHA256: 4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa
+      MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH: /workspace/model/tokenizer.json
+      EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_A_IDENTITY---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""} --override-generation-config {"top_p":0.95} --middleware vllm.mini_dynamo_engine_identity.ServingIdentityMiddleware}'
+
+  dspark-0731-b:
+    image: voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b
+    volumes:
+      - type: bind
+        source: ${MINI_DYNAMO_SERVING_IDENTITY_MIDDLEWARE_SOURCE:-./engine_identity_middleware.py}
+        target: /opt/vllm/vllm/mini_dynamo_engine_identity.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SOURCE:-../../compat/deepseek-v4-r34.json}
+        target: /opt/mini-dynamo/compatibility.json
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_PATH: /opt/mini-dynamo/compatibility.json
+      MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SHA256: 4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa
+      MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH: /workspace/model/tokenizer.json
+      EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_B_IDENTITY---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""} --override-generation-config {"top_p":0.95} --middleware vllm.mini_dynamo_engine_identity.ServingIdentityMiddleware}'

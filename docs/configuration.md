@@ -151,6 +151,20 @@ recheck; a match refreshes admission, while mismatch or unavailability fences it
 immediately after the check. This avoids creating an outage merely to begin a
 probe without allowing stale identity to remain admitted indefinitely.
 
+For the node06 vLLM stack,
+`deploy/dspark_0731/docker-compose.compatibility-identity.yaml` provides the
+candidate engine endpoint in-process through vLLM's `--middleware` extension.
+It authenticates independently with the engine bearer so middleware ordering
+cannot expose the document, and startup verifies the live vLLM package, served
+model, context length, and tokenizer digest. The overlay is deliberately
+separate from the base Compose, pins the immutable r34 image, and does not
+enable LB admission. It does not live-verify the manifest renderer/model-root
+claims, attest vLLM's separate EngineCore process, or bind the complete runtime
+bundle. Validate it with `validate-serving-identity-compose.py` and roll one
+engine at a time. This candidate is diagnostic only: keep the LB in `http`
+mode even after both direct endpoints and normal inference pass. Compatibility
+mode requires a later complete runtime-bundle publisher.
+
 Cold exact misses also emit a strictly observation-only projected-balance
 counterfactual. `ds4proxy_exact_route_projected_balance_total` adds each
 replica's exact resident tokens to a conservative, current-request-equivalent
