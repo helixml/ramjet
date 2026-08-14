@@ -4,6 +4,7 @@ import unittest
 from unittest import mock
 
 from serving_cost_audit import (
+    admitted_load_units,
     audit,
     bounded_output_limit,
     decode_observation,
@@ -348,7 +349,7 @@ class ServingCostAuditTest(unittest.TestCase):
             bounded_output_limit(boolean_policy)["telemetry_state"], "invalid"
         )
         future = start(6, 1)
-        future.update(v=8, endpoint="chat", output_limit=output_limit())
+        future.update(v=9, endpoint="chat", output_limit=output_limit())
         self.assertEqual(bounded_output_limit(future)["telemetry_state"], "invalid")
 
     def test_output_limit_analysis_retains_unmatched_start_as_missing_finish(self):
@@ -412,6 +413,50 @@ class ServingCostAuditTest(unittest.TestCase):
         )
         self.assertIsNone(observation(request_start, zero_timing))
         self.assertIsNone(decode_observation(request_start, zero_timing)["ttft_ms"])
+
+    def test_admitted_reservation_prefers_the_journal_v8_finish_value(self):
+        # Under failover the served upstream is not the initially selected
+        # candidate, so the acquired reservation is the authoritative cost.
+        served = start(1, 2)
+        served["candidates"].append(
+            {
+                "upstream": 1,
+                "rank": 1,
+                "overlap_blocks": 0,
+                "affinity_blocks": 0,
+                "load_units": 0,
+                "request_load_units": 7,
+                "healthy": True,
+            }
+        )
+        failed_over = finish(
+            1, prompt=10, cached=0, ttft=20, duration=40, completion=2
+        )
+        failed_over.update({"v": 8, "upstream": 1, "request_load_units": 5})
+
+        self.assertEqual(admitted_load_units(served, failed_over), 5)
+        item = observation(served, failed_over)
+        self.assertEqual(item["request_load_units"], 5)
+        self.assertEqual(
+            decode_observation(served, failed_over)["request_load_bucket"], "5_8"
+        )
+
+    def test_admitted_reservation_falls_back_to_the_candidate_estimate(self):
+        legacy = finish(1, prompt=10, cached=0, ttft=20, duration=40, completion=2)
+        self.assertEqual(admitted_load_units(start(1, 3), legacy), 3)
+
+        for invalid in (0, -1, True, "4", None):
+            with self.subTest(invalid=invalid):
+                record = dict(legacy, v=8, request_load_units=invalid)
+                self.assertEqual(admitted_load_units(start(1, 3), record), 3)
+
+        unknown = dict(legacy, v=8, upstream=9)
+        self.assertIsNone(admitted_load_units(start(1, 3), unknown))
+
+    def test_v8_records_keep_validated_output_limit_telemetry(self):
+        record = dict(start(1, 2), v=8, endpoint="chat", output_limit=output_limit())
+        self.assertEqual(bounded_output_limit(record)["telemetry_state"], "valid")
+        self.assertEqual(bounded_output_limit(record)["requested_bucket"], "65_256")
 
     def test_cli_accepts_prefixed_logs_and_emits_json(self):
         lines = "\n".join(

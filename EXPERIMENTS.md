@@ -1,5 +1,32 @@
 # node06 experiment journal
 
+## 2026-08-14 — exact-placement admission reservation reconciliation
+
+Issue #146's local reconciliation was implemented without node06 access or new
+serving measurements. Exact placement previously chose a warm replica while the
+admission reservation stayed at the approximate block estimate computed before
+the exact inventory was consulted, so a fully warm request still reserved
+cold-prefill capacity. A shared `RequestLoadEstimator` now derives the
+approximate and exact-overlap reservations under one quantum and cap.
+
+The recompute is atomic across healthy candidates and fails closed to the
+original reservations when any healthy candidate lacks a trusted overlap, so a
+partially trusted inventory cannot produce a mixed accounting view. Replica
+selection is unchanged: the gain/load gates still run against the pre-route
+estimate. The recompute is confined to `placement` mode and applies whether or
+not the exact winner moves the request; `shadow` mode remains strictly
+observation-only and never alters admission accounting.
+
+Journal v8 adds the reservation actually acquired to the finish record, which
+under failover is the reserving candidate's value rather than the initially
+selected candidate's estimate. Replay accepts v1-v8 and the serving-cost audit
+prefers the admitted value with a v1-v7 candidate-estimate fallback.
+
+Local gate: 425 Rust tests plus integrations, 391 Python tests, Clippy,
+formatting, and the release build passed. No node06 experiment result was
+produced and no live performance claim should be inferred from this entry; the
+reservation change has not been observed against production traffic.
+
 ## 2026-08-14 — node06 cooling/AC operational moratorium
 
 The operator prohibited all node06 request-generating tests after the cooling

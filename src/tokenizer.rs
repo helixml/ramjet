@@ -37,7 +37,7 @@ use crate::{
     },
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
-    router::Decision,
+    router::{Decision, RequestLoadEstimator},
     session::{OpaqueSession, hmac_sha256},
     shadow_soak::{
         CaptureResult, ShadowSoak, ShadowSoakAttestation, ShadowSoakConfig, ShadowSoakSource,
@@ -291,11 +291,17 @@ impl TokenizerObserver {
         metrics: Arc<Metrics>,
         inventories: Arc<[ExactRouteInventory]>,
     ) -> anyhow::Result<Self> {
+        let load_estimator = RequestLoadEstimator::new(
+            config.route_chunk_bytes,
+            config.route_load_unit_bytes,
+            config.route_max_load_units,
+        );
         let exact_shadow = ExactRouteShadow::with_inventories(
             inventories,
             Arc::clone(&metrics),
             config.route_alpha,
             config.route_max_overlap_blocks,
+            load_estimator,
         );
         let mut pre_route = None;
         let mut attestation = None;
@@ -551,6 +557,7 @@ impl TokenizerObserver {
         &self,
         endpoint: Endpoint,
         tokens: &PreRouteTokens,
+        request_bytes: usize,
         assignment: CanaryAssignment,
         decision: &mut Decision,
     ) {
@@ -575,6 +582,7 @@ impl TokenizerObserver {
         self.exact_shadow.route_pre_route(
             endpoint,
             &tokens.tokens.token_ids,
+            request_bytes,
             decision,
             self.exact_placement,
             mode,

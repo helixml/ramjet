@@ -987,6 +987,7 @@ impl Proxy {
             self.inner.tokenizer.route_pre_route(
                 endpoint,
                 tokens,
+                prepared.body.len(),
                 canary_assignment,
                 &mut decision,
             );
@@ -1021,21 +1022,24 @@ impl Proxy {
             },
         );
 
+        // Carry each candidate's own reservation rather than re-deriving it in
+        // the retry loop: a failover target must acquire and journal its own
+        // units, never the originally selected candidate's.
         let serving_candidates = decision
             .candidates
             .iter()
-            .copied()
-            .filter(|candidate| {
+            .filter_map(|candidate| {
                 decision
                     .candidate_state
                     .iter()
                     .find(|state| state.index == *candidate)
-                    .is_some_and(|state| state.healthy)
+                    .filter(|state| state.healthy)
+                    .map(|state| (*candidate, state.request_load_units))
             })
             .collect::<Vec<_>>();
         let mut last_error = None;
         let mut selected = None;
-        for (attempt, &candidate) in serving_candidates.iter().enumerate() {
+        for (attempt, &(candidate, units)) in serving_candidates.iter().enumerate() {
             let url = upstream_url(&self.inner.config.upstreams[candidate], &parts.uri);
             let mut outbound = self
                 .inner
@@ -1043,11 +1047,6 @@ impl Proxy {
                 .request(parts.method.clone(), url)
                 .body(body.clone());
             outbound = outbound.headers(filtered_headers(&parts.headers));
-            let units = decision
-                .candidate_state
-                .iter()
-                .find(|state| state.index == candidate)
-                .map_or(decision.load_units, |state| state.request_load_units);
             let Some(load) = self.acquire_if_healthy(candidate, units) else {
                 continue;
             };
@@ -1070,7 +1069,7 @@ impl Proxy {
                             "upstream failover"
                         );
                     }
-                    selected = Some((candidate, response, load));
+                    selected = Some((candidate, response, load, units));
                     break;
                 }
                 Err(error) => {
@@ -1081,7 +1080,7 @@ impl Proxy {
             }
         }
 
-        let Some((upstream, response, load_guard)) = selected else {
+        let Some((upstream, response, load_guard, request_load_units)) = selected else {
             let reason = last_error.unwrap_or("no_healthy_upstream");
             let status = match reason {
                 "timeout" => StatusCode::GATEWAY_TIMEOUT,
@@ -1095,6 +1094,7 @@ impl Proxy {
                 None,
                 None,
                 "upstream_error",
+                None,
                 None,
                 status.as_u16(),
                 0,
@@ -1127,6 +1127,7 @@ impl Proxy {
                     endpoint_label,
                     upstream,
                     response,
+                    request_load_units,
                     load_guard,
                     inflight_guard,
                     journal_sequence,
@@ -1168,6 +1169,7 @@ impl Proxy {
                     exact_route_snapshot,
                     decision,
                     pending_shadow_source,
+                    request_load_units,
                     load_guard,
                     inflight_guard,
                     journal_sequence,
@@ -1196,6 +1198,7 @@ impl Proxy {
         exact_route_snapshot: Option<ExactRouteSnapshot>,
         decision: Decision,
         pending_shadow_source: Option<crate::shadow_soak::ShadowSoakSource>,
+        request_load_units: usize,
         mut load_guard: RoutedLoad,
         _inflight_guard: InflightGuard,
         journal_sequence: Option<u64>,
@@ -1320,6 +1323,7 @@ impl Proxy {
             first_token,
             result,
             Some(upstream),
+            Some(request_load_units),
             status.as_u16(),
             bytes_out,
             &usage,
@@ -1347,6 +1351,7 @@ impl Proxy {
         endpoint: &str,
         upstream: usize,
         response: reqwest::Response,
+        request_load_units: usize,
         _load_guard: RoutedLoad,
         _inflight_guard: InflightGuard,
         journal_sequence: Option<u64>,
@@ -1367,6 +1372,7 @@ impl Proxy {
                     None,
                     "complete",
                     Some(upstream),
+                    Some(request_load_units),
                     200,
                     result.len(),
                     &Accumulator::default(),

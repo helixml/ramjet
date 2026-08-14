@@ -14,7 +14,7 @@ use crate::{
     usage::Accumulator,
 };
 
-const VERSION: u8 = 7;
+const VERSION: u8 = 8;
 
 pub struct RouteJournal {
     enabled: bool,
@@ -65,6 +65,8 @@ pub struct FinishRecord<'a> {
     unix_ms: u128,
     result: &'a str,
     upstream: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_load_units: Option<usize>,
     status: u16,
     duration_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,6 +160,7 @@ impl RouteJournal {
         first_token: Option<Duration>,
         result: &str,
         upstream: Option<usize>,
+        request_load_units: Option<usize>,
         status: u16,
         response_bytes: usize,
         usage: &Accumulator,
@@ -172,6 +175,7 @@ impl RouteJournal {
             unix_ms: unix_millis(),
             result,
             upstream,
+            request_load_units,
             status,
             duration_ms: millis(elapsed),
             first_byte_ms: first_byte.map(millis),
@@ -297,7 +301,7 @@ mod tests {
         }
         assert!(encoded.contains("\"chosen\":1"));
         assert!(encoded.contains("\"served_chosen\":1"));
-        assert!(encoded.contains("\"v\":7"));
+        assert!(encoded.contains("\"v\":8"));
         assert!(encoded.contains("\"phase_aware_load\":false"));
         assert!(encoded.contains("\"exact_canary\":\"treatment\""));
         assert!(encoded.contains(
@@ -306,5 +310,34 @@ mod tests {
         assert!(encoded.contains(
             "\"output_limit\":{\"policy_version\":1,\"requested_bucket\":\"4097_plus\",\"requested_source\":\"max_completion_tokens\",\"effective_bucket\":\"unset\",\"effective_source\":\"none\",\"mutation\":\"max_completion_tokens_stripped\",\"stream_mode\":\"streaming\"}"
         ));
+    }
+
+    #[test]
+    fn finish_record_exposes_only_the_admitted_reservation() {
+        let record = FinishRecord {
+            v: VERSION,
+            event: "finish",
+            seq: 42,
+            unix_ms: 1,
+            result: "complete",
+            upstream: Some(1),
+            request_load_units: Some(4),
+            status: 200,
+            duration_ms: 10.0,
+            first_byte_ms: Some(2.0),
+            ttft_ms: Some(3.0),
+            response_bytes: 128,
+            prompt_tokens: Some(8.0),
+            cached_tokens: Some(4.0),
+            completion_tokens: Some(2.0),
+        };
+
+        let encoded = serde_json::to_string(&record).unwrap();
+        assert!(encoded.contains("\"v\":8"));
+        assert!(encoded.contains("\"upstream\":1"));
+        assert!(encoded.contains("\"request_load_units\":4"));
+        for forbidden in ["prompt_text", "token_ids", "fingerprint"] {
+            assert!(!encoded.contains(forbidden));
+        }
     }
 }

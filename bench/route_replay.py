@@ -45,7 +45,7 @@ def records(lines):
         version = record.get("v")
         if (
             type(version) is int
-            and version in (1, 2, 3, 4, 5, 6, 7)
+            and version in (1, 2, 3, 4, 5, 6, 7, 8)
             and record.get("event") in ("start", "finish")
         ):
             yield record

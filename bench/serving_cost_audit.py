@@ -122,6 +122,26 @@ def served_candidate(start, finish):
     )
 
 
+def positive_load_units(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def admitted_load_units(start, finish):
+    """Return the reservation actually acquired for the served upstream.
+
+    Journal v8 records the admitted reservation on the finish event, which is
+    authoritative under failover: the serving loop acquires the reserving
+    candidate's units, which need not be the initially selected candidate's
+    estimate. Older records only carry the pre-route candidate estimate.
+    """
+    admitted = finish.get("request_load_units")
+    if positive_load_units(admitted):
+        return admitted
+    candidate = served_candidate(start, finish)
+    estimate = None if candidate is None else candidate.get("request_load_units")
+    return estimate if positive_load_units(estimate) else None
+
+
 def bounded_output_limit(start):
     """Return only fixed-cardinality output-limit telemetry labels."""
     version = start.get("v")
@@ -145,7 +165,7 @@ def bounded_output_limit(start):
     }.get(endpoint, set())
     valid = (
         type(version) is int
-        and version == 7
+        and version in (7, 8)
         and isinstance(raw, dict)
         and set(raw) == OUTPUT_LIMIT_FIELDS
         and type(raw.get("policy_version")) is int
@@ -236,10 +256,7 @@ def decode_observation(start, finish):
         candidate_tpot = (duration - ttft) / (completion - 1)
         if positive_number(candidate_tpot):
             tpot = candidate_tpot
-    candidate = served_candidate(start, finish)
-    load_units = None if candidate is None else candidate.get("request_load_units")
-    if type(load_units) is not int or load_units < 1:
-        load_units = None
+    load_units = admitted_load_units(start, finish)
     if load_units is None:
         load_bucket = "missing"
     elif load_units == 1:
@@ -382,14 +399,7 @@ def observation(start, finish):
         return None
     if cached > prompt or duration < ttft:
         return None
-    candidate = served_candidate(start, finish)
-    request_load_units = None if candidate is None else candidate.get("request_load_units")
-    if (
-        not isinstance(request_load_units, int)
-        or isinstance(request_load_units, bool)
-        or request_load_units < 1
-    ):
-        request_load_units = None
+    request_load_units = admitted_load_units(start, finish)
     uncached = float(prompt - cached)
     service_ms_per_uncached_token = float(ttft) / uncached if uncached > 0 else None
     tpot_ms = None

@@ -320,8 +320,30 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   decisions; production has not yet produced an organic move. Collect
   representative organic
   move/gain/load distributions before
-  considering a narrowly admitted placement rollout. Raw token IDs, block
-  hashes, and prompts remain out of logs.
+  considering a narrowly admitted placement rollout. r129 closes the last
+  inconsistency between exact placement and admission accounting (#146): the
+  reservation was still the approximate block estimate computed before the
+  exact inventory was consulted, so a fully warm request reserved cold-prefill
+  capacity. A shared `RequestLoadEstimator` now derives both the approximate
+  and exact-overlap reservations under one bounded quantum and cap. The
+  recompute runs only in `placement` mode, whether or not the exact winner
+  moves the request; `shadow` remains strictly observation-only and never
+  alters admission accounting. It is atomic
+  across healthy candidates and fails closed to the original reservations when
+  any healthy candidate lacks a trusted overlap, so a partially trusted
+  inventory can never produce a mixed accounting view. Placement selection is
+  unchanged: the gain/load gates still run against the pre-route estimate.
+  Journal v8 additionally records the reservation actually acquired on the
+  finish record; replay accepts v1-v8 and the serving-cost audit prefers the
+  admitted value with a v1-v7 fallback. Two rollout properties are worth
+  stating before any placement interval: the recompute feeds the upstream load
+  that *subsequent* approximate decisions read, so warm-engine steering is a
+  deliberate feedback loop rather than a no-op; and a stale approximate index
+  over an evicted prefix makes the exact reservation rise, so
+  `ds4proxy_upstream_load_units` may step up on first rollout without a
+  regression. Raw
+  token IDs, block hashes, and prompts remain out of logs. This is local work
+  only — no node06 observation has been performed under the cooling moratorium.
 - ✅ **Replay cancellation and publisher-backpressure resilience.** r23 proved
   that vLLM's synchronous ROUTER can burst a 1,292-batch / 29.9MB replay in
   77ms through libzmq while the async pure-Rust ZMTP receiver can stall before
@@ -611,7 +633,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   endpoint-specific field source, compatibility-strip action, and stream mode
   from the existing single JSON parse. OpenAI chat prefers
   `max_completion_tokens` over `max_tokens`; Completions/Anthropic use
-  `max_tokens`, and Responses uses `max_output_tokens`. Replay accepts v1-v7.
+  `max_tokens`, and Responses uses `max_output_tokens`. Replay accepts v1-v8.
   Serving-cost audit schema v2 joins the bounded observation to actual output,
   total/decode duration, TTFT/TPOT, cancellation, endpoint, stream mode, and a
   fixed initial-load bucket, with successful and failed outcome distributions

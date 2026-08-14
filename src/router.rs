@@ -21,6 +21,65 @@ pub struct RouterConfig {
     pub affinity: Affinity,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RequestLoadEstimator {
+    chunk_bytes: usize,
+    load_unit_bytes: usize,
+    max_load_units: usize,
+}
+
+impl RequestLoadEstimator {
+    pub(crate) fn new(chunk_bytes: usize, load_unit_bytes: usize, max_load_units: usize) -> Self {
+        assert!(chunk_bytes > 0, "route chunk size must be positive");
+        assert!(load_unit_bytes > 0, "route load unit must be positive");
+        assert!(max_load_units > 0, "maximum route load must be positive");
+        Self {
+            chunk_bytes,
+            load_unit_bytes,
+            max_load_units,
+        }
+    }
+
+    pub(crate) fn from_router_config(config: &RouterConfig) -> Self {
+        Self::new(
+            config.chunk_bytes,
+            config.load_unit_bytes,
+            config.max_load_units,
+        )
+    }
+
+    pub(crate) fn estimate_blocks(self, body_bytes: usize, overlap_blocks: usize) -> usize {
+        self.estimate_reusable_bytes(body_bytes, overlap_blocks.saturating_mul(self.chunk_bytes))
+    }
+
+    pub(crate) fn estimate_exact_tokens(
+        self,
+        body_bytes: usize,
+        overlap_tokens: usize,
+        prompt_tokens: usize,
+    ) -> Option<usize> {
+        if prompt_tokens == 0 || overlap_tokens > prompt_tokens {
+            return None;
+        }
+        let reusable =
+            (body_bytes as u128).saturating_mul(overlap_tokens as u128) / (prompt_tokens as u128);
+        Some(
+            self.estimate_reusable_bytes(
+                body_bytes,
+                usize::try_from(reusable).unwrap_or(usize::MAX),
+            ),
+        )
+    }
+
+    fn estimate_reusable_bytes(self, body_bytes: usize, reusable_bytes: usize) -> usize {
+        body_bytes
+            .saturating_sub(reusable_bytes)
+            .div_ceil(self.load_unit_bytes)
+            .max(1)
+            .min(self.max_load_units)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Decision {
     pub candidates: Vec<usize>,
@@ -92,6 +151,7 @@ struct Score {
 
 pub struct Router {
     config: RouterConfig,
+    load_estimator: RequestLoadEstimator,
     inner: Mutex<Inner>,
 }
 
@@ -105,6 +165,7 @@ impl Router {
     pub fn new(config: RouterConfig) -> Self {
         assert!(!config.upstreams.is_empty(), "router needs an upstream");
         let capacity = NonZeroUsize::new(config.index_capacity).expect("positive index capacity");
+        let load_estimator = RequestLoadEstimator::from_router_config(&config);
         let states = config
             .upstreams
             .iter()
@@ -118,6 +179,7 @@ impl Router {
             .collect();
         Self {
             config,
+            load_estimator,
             inner: Mutex::new(Inner { states, rr: 0 }),
         }
     }
@@ -244,7 +306,9 @@ impl Router {
                 overlap_blocks: score.overlap,
                 affinity_blocks: score.affinity,
                 load_units: score.load,
-                request_load_units: self.estimated_load_units(body_bytes, score.overlap),
+                request_load_units: self
+                    .load_estimator
+                    .estimate_blocks(body_bytes, score.overlap),
                 healthy: score.healthy,
             })
             .collect();
@@ -254,7 +318,9 @@ impl Router {
             overlap_blocks: winner.overlap,
             total_blocks: fingerprints.len(),
             affinity_blocks: winner.affinity,
-            load_units: self.estimated_load_units(body_bytes, winner.overlap),
+            load_units: self
+                .load_estimator
+                .estimate_blocks(body_bytes, winner.overlap),
             rotation,
             outcome,
         }
@@ -330,15 +396,6 @@ impl Router {
             .states
             .get(upstream)
             .map(|state| (state.inflight, state.load, state.index.len(), state.healthy))
-    }
-
-    fn estimated_load_units(&self, body_bytes: usize, overlap_blocks: usize) -> usize {
-        let uncached =
-            body_bytes.saturating_sub(overlap_blocks.saturating_mul(self.config.chunk_bytes));
-        uncached
-            .div_ceil(self.config.load_unit_bytes)
-            .max(1)
-            .min(self.config.max_load_units)
     }
 }
 
@@ -561,6 +618,32 @@ mod tests {
             ],
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn request_load_estimator_is_shared_bounded_and_conservative() {
+        let estimator = RequestLoadEstimator::new(2_048, 32 << 10, 8);
+        assert_eq!(estimator.estimate_blocks(1 << 20, 0), 8);
+        assert_eq!(estimator.estimate_blocks(1 << 20, 512), 1);
+        assert_eq!(estimator.estimate_exact_tokens(1 << 20, 0, 4_096), Some(8));
+        assert_eq!(
+            estimator.estimate_exact_tokens(1 << 20, 2_048, 4_096),
+            Some(8)
+        );
+        assert_eq!(
+            RequestLoadEstimator::new(2_048, 128 << 10, 8).estimate_exact_tokens(
+                1 << 20,
+                2_048,
+                4_096
+            ),
+            Some(4)
+        );
+        assert_eq!(
+            estimator.estimate_exact_tokens(1 << 20, 4_096, 4_096),
+            Some(1)
+        );
+        assert_eq!(estimator.estimate_exact_tokens(1 << 20, 1, 0), None);
+        assert_eq!(estimator.estimate_exact_tokens(1 << 20, 4_097, 4_096), None);
     }
 
     #[test]
