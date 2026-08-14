@@ -52,6 +52,12 @@ METRICS_URLS = [
     for value in os.environ.get("METRICS_URLS", os.environ.get("METRICS_URL", "")).split(",")
     if value.strip()
 ]
+REQUIRE_RECONCILED = os.environ.get(
+    "BENCH_REQUIRE_RECONCILED_SPECULATION", "0"
+)
+if REQUIRE_RECONCILED not in {"0", "1"}:
+    raise SystemExit("BENCH_REQUIRE_RECONCILED_SPECULATION must be 0 or 1")
+REQUIRE_RECONCILED = REQUIRE_RECONCILED == "1"
 
 
 def percentile(values, fraction):
@@ -181,6 +187,13 @@ decode_rates = [
 ]
 ttfts = [item["ttft"] for item in good if item.get("ttft") is not None]
 aggregate_rates = [item["completion_tokens"] / item["wall_seconds"] for item in batches]
+dspark = speculative_delta(
+    metrics_before,
+    metric_snapshot(),
+    sum(item.get("completion_tokens", 0) for item in good),
+    len(good),
+    expected_enabled=os.environ.get("BENCH_SPEC_MODE", "enabled") == "enabled",
+)
 result = {
     "label": os.environ.get("SWEEP_LABEL", "run"),
     "base": BASE,
@@ -201,16 +214,13 @@ result = {
         route: sum(1 for item in good if item.get("route") == route)
         for route in sorted({item.get("route") for item in good if item.get("route") is not None})
     },
-    "dspark": speculative_delta(
-        metrics_before,
-        metric_snapshot(),
-        sum(item.get("completion_tokens", 0) for item in good),
-        len(good),
-        expected_enabled=os.environ.get("BENCH_SPEC_MODE", "enabled") == "enabled",
-    ),
+    "dspark": dspark,
 }
 errors = [item["error"] for item in requests if not item.get("ok")]
 if errors:
     result["errors"] = errors
+measurement_ok = not REQUIRE_RECONCILED or dspark.get("reconciled") is True
+if not measurement_ok:
+    result["measurement_error"] = "speculation_not_reconciled"
 print(json.dumps(result, sort_keys=True))
-raise SystemExit(0 if not errors else 1)
+raise SystemExit(0 if not errors and measurement_ok else 1)

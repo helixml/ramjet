@@ -1,4 +1,5 @@
 import argparse
+import fcntl
 import json
 import pathlib
 import tempfile
@@ -9,19 +10,50 @@ from candidate_gate import (
     CommandResult,
     ContainerIdentity,
     GateError,
+    NODE06_PROFILE,
+    ProcessIdentity,
     SubprocessRunner,
+    admission_contract,
+    build_stages,
     plan_contract,
+    performance_environment_name,
     run_gate,
+    validate_node06_profile,
 )
 from node06_gpu_guard import GuardError
 
 
 class FakeRunner:
-    def __init__(self, identity, failures=None, logs=None, inspect_sequence=None):
+    def __init__(
+        self,
+        identity,
+        process_identity=None,
+        process_sequence=None,
+        failures=None,
+        logs=None,
+        inspect_sequence=None,
+        environment=None,
+        device_ids=("4", "5", "6", "7"),
+        unhealthy=None,
+    ):
         self.identity = identity
+        self.live_process_identity = process_identity or ProcessIdentity(
+            process_started_unix_ns=1_765_000_000_000_000_000,
+            serving_argv_sha256="598a2b1db89625a599b84614b4d57bdd990d8644cc4a5602c00dd0e973b2a2a4",
+            environment_sha256="faff2d6ad7584cebfa0dd3f53cdf997c858b60e13a4e617a382fcdebaeb5d896",
+            artifacts_sha256="11563d331a8a4d07c981f3ae7460194f21899791612f053f705fbbb0465a984b",
+        )
+        self.process_sequence = list(process_sequence or [])
         self.failures = failures or set()
         self.log_bodies = logs or {}
         self.inspect_sequence = list(inspect_sequence or [])
+        self.live_environment = environment or {
+            "DS4_UPSTREAM": "http://engine-a:8000",
+            "DS4_KV_EVENT_LIVE_ENDPOINTS": "tcp://engine-a:5557",
+            "DS4_KV_EVENT_REPLAY_ENDPOINTS": "tcp://engine-a:5558",
+        }
+        self.live_device_ids = device_ids
+        self.unhealthy = set(unhealthy or ())
         self.commands = []
 
     def inspect(self, container):
@@ -48,10 +80,30 @@ class FakeRunner:
         last_stage = next(
             command[0]
             for command in reversed(self.commands)
-            if command[0] not in {"inspect"}
+            if command[0]
+            not in {"inspect", "process_identity", "environment", "device_ids", "health"}
         )
         self.commands.append(("logs", container))
         return CommandResult(0, self.log_bodies.get(last_stage, b""), b"")
+
+    def environment(self, container):
+        self.commands.append(("environment", container))
+        return self.live_environment
+
+    def device_ids(self, container):
+        self.commands.append(("device_ids", container))
+        return self.live_device_ids
+
+    def process_identity(self, container, environment_names, artifact_paths):
+        self.commands.append(("process_identity", container))
+        if self.process_sequence:
+            return self.process_sequence.pop(0)
+        return self.live_process_identity
+
+    def health(self, url):
+        self.commands.append(("health", url))
+        if url in self.unhealthy:
+            raise GateError("engine health probe failed")
 
 
 class CandidateGateTest(unittest.TestCase):
@@ -72,18 +124,36 @@ class CandidateGateTest(unittest.TestCase):
         self.agent_path = self.root / "agent.json"
         self.output = self.root / "gate.jsonl"
         self.artifacts = self.root / "artifacts"
+        self.candidate_manifest_path = self.root / "candidate-manifest.json"
+        self.runtime_manifest_path = self.root / "runtime-manifest.json"
+        repository = pathlib.Path(__file__).resolve().parents[1]
+        committed = repository / "deploy/dspark_0731/infernal-r11-candidate"
+        self.candidate_manifest_path.write_bytes((committed / "manifest.json").read_bytes())
+        self.runtime_manifest_path.write_bytes(
+            (committed / "serving-runtime.json").read_bytes()
+        )
+        self.candidate_manifest_path.chmod(0o600)
+        self.runtime_manifest_path.chmod(0o600)
+        admission = admission_contract(
+            self.candidate_manifest_path, self.runtime_manifest_path
+        )
         self.live = {
-            "configured_image": "example.invalid/engine@sha256:manifest",
-            "image_id": "sha256:manifest",
-            "image_descriptor_digest": "sha256:manifest",
-            "image_config_digest": "sha256:config",
-            "model_revision": "model-revision",
-            "tokenizer_revision": "model-revision",
+            "configured_image": admission["configured_image"],
+            # Docker 29/containerd may expose the manifest descriptor as
+            # ``.Image`` while the separately captured config digest remains
+            # the traditional image ID.
+            "image_id": admission["image_descriptor_digest"],
+            "image_descriptor_digest": admission["image_descriptor_digest"],
+            "image_config_digest": admission["image_config_digest"],
+            "model_revision": admission["model_revision"],
+            "tokenizer_revision": admission["tokenizer_revision"],
             "tokenizer_sha256": "a" * 64,
             "config_sha256": "b" * 64,
-            "runtime_packages": {"vllm": "1.0"},
+            "runtime_packages": admission["runtime_packages"],
             "effective_contract": {"max_model_len": "393216"},
             "argv_sha256": "c" * 64,
+            "serving_argv_sha256": admission["serving_argv_sha256"],
+            "process_started_unix_ns": 1_765_000_000_000_000_000,
             "started_at": "2026-08-13T00:00:00Z",
             "restart_count": 0,
         }
@@ -98,6 +168,7 @@ class CandidateGateTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        self.engine_path.chmod(0o600)
         self.agent = {
             "engine_image": self.live["configured_image"],
             "model_revision": self.live["model_revision"],
@@ -107,6 +178,7 @@ class CandidateGateTest(unittest.TestCase):
             "gpu_count": 4,
         }
         self.agent_path.write_text(json.dumps(self.agent), encoding="utf-8")
+        self.agent_path.chmod(0o600)
         self.identity = ContainerIdentity(
             image_id=self.live["image_id"],
             configured_image=self.live["configured_image"],
@@ -121,9 +193,21 @@ class CandidateGateTest(unittest.TestCase):
 
     def args(self, through="smoke", resume=False):
         return argparse.Namespace(
+            profile="infernal-r11-b",
             base="http://127.0.0.1:8013",
             model="deepseek-v4-flash",
             container="candidate",
+            candidate_manifest=self.candidate_manifest_path,
+            runtime_manifest=self.runtime_manifest_path,
+            expected_gpu_count=4,
+            engine_metrics="http://127.0.0.1:8013/metrics",
+            deployment_lock=self.root / "deployment.lock",
+            load_balancer_container="load-balancer",
+            expected_lb_upstream="http://engine-a:8000",
+            expected_lb_live_endpoints="tcp://engine-a:5557",
+            expected_lb_replay_endpoints="tcp://engine-a:5558",
+            expected_device_ids=("4", "5", "6", "7"),
+            healthy_peer_health_url="http://127.0.0.1:8012/health",
             engine_metadata=self.engine_path,
             agent_metadata=self.agent_path,
             output=self.output,
@@ -156,10 +240,8 @@ class CandidateGateTest(unittest.TestCase):
             [record["status"] for record in self.records()],
             ["passed", "passed", "passed", "passed"],
         )
-        self.assertEqual(
-            {path.name for path in self.artifacts.iterdir()},
-            {"agent_correctness.jsonl", "c8_scout.jsonl", "full_matrix.jsonl"},
-        )
+        artifact_stages = {path.name.rsplit("-", 1)[0] for path in self.artifacts.iterdir()}
+        self.assertEqual(artifact_stages, {"agent_correctness", "c8_scout", "full_matrix"})
 
     def test_agent_failure_stops_before_any_performance_work(self):
         runner = FakeRunner(self.identity, failures={"agent_correctness"})
@@ -194,8 +276,71 @@ class CandidateGateTest(unittest.TestCase):
         )
         self.assertEqual(run_gate(self.args("matrix"), runner), 1)
         failed = self.records()[-1]
-        self.assertEqual(failed["error_class"], "identity_changed")
+        self.assertEqual(failed["error_class"], "runtime_authority_changed")
         self.assertNotIn("full_matrix", self.stages_run(runner))
+
+    def test_vllm_child_restart_inside_same_container_fails_closed(self):
+        original = ProcessIdentity(
+            process_started_unix_ns=self.live["process_started_unix_ns"],
+            serving_argv_sha256="598a2b1db89625a599b84614b4d57bdd990d8644cc4a5602c00dd0e973b2a2a4",
+            environment_sha256="faff2d6ad7584cebfa0dd3f53cdf997c858b60e13a4e617a382fcdebaeb5d896",
+            artifacts_sha256="11563d331a8a4d07c981f3ae7460194f21899791612f053f705fbbb0465a984b",
+        )
+        restarted = ProcessIdentity(
+            **{**original.__dict__, "process_started_unix_ns": original.process_started_unix_ns + 1}
+        )
+        runner = FakeRunner(
+            self.identity, process_identity=original, process_sequence=[original, original, restarted]
+        )
+        self.assertEqual(run_gate(self.args("matrix"), runner), 1)
+        self.assertEqual(self.records()[-1]["error_class"], "runtime_authority_changed")
+        self.assertIn("process_started_unix_ns", self.records()[-1]["error"])
+
+    def test_live_environment_or_artifact_drift_fails_before_requests(self):
+        for field in ("environment_sha256", "artifacts_sha256"):
+            process = ProcessIdentity(
+                process_started_unix_ns=self.live["process_started_unix_ns"],
+                serving_argv_sha256="598a2b1db89625a599b84614b4d57bdd990d8644cc4a5602c00dd0e973b2a2a4",
+                environment_sha256="faff2d6ad7584cebfa0dd3f53cdf997c858b60e13a4e617a382fcdebaeb5d896",
+                artifacts_sha256="11563d331a8a4d07c981f3ae7460194f21899791612f053f705fbbb0465a984b",
+            )
+            process = ProcessIdentity(**{**process.__dict__, field: "9" * 64})
+            with self.subTest(field=field):
+                runner = FakeRunner(self.identity, process_identity=process)
+                self.assertEqual(run_gate(self.args(), runner), 1)
+                self.assertEqual(self.stages_run(runner), [])
+                self.assertIn(field, self.records()[-1]["error"])
+                self.output.unlink()
+
+    def test_profile_pins_exact_committed_admission_bytes(self):
+        self.candidate_manifest_path.write_bytes(
+            self.candidate_manifest_path.read_bytes() + b"\n"
+        )
+        self.candidate_manifest_path.chmod(0o600)
+        runner = FakeRunner(self.identity)
+        with self.assertRaisesRegex(GateError, "candidate_manifest_sha256"):
+            run_gate(self.args(), runner)
+        self.assertEqual(runner.commands, [])
+
+    def test_admission_and_journal_reject_unsafe_files(self):
+        committed = self.root / "manifest-target.json"
+        committed.write_bytes(self.candidate_manifest_path.read_bytes())
+        committed.chmod(0o600)
+        self.candidate_manifest_path.unlink()
+        self.candidate_manifest_path.symlink_to(committed)
+        with self.assertRaisesRegex(GateError, "invalid JSON metadata"):
+            run_gate(self.args(), FakeRunner(self.identity))
+
+        self.candidate_manifest_path.unlink()
+        self.candidate_manifest_path.write_bytes(committed.read_bytes())
+        self.candidate_manifest_path.chmod(0o600)
+        target = self.root / "journal-target"
+        target.write_text("do not overwrite", encoding="utf-8")
+        target.chmod(0o600)
+        self.output.symlink_to(target)
+        with self.assertRaisesRegex(GateError, "journal is unavailable"):
+            run_gate(self.args(resume=True), FakeRunner(self.identity))
+        self.assertEqual(target.read_text(encoding="utf-8"), "do not overwrite")
 
     def test_resume_skips_green_smoke_only_for_same_candidate_and_plan(self):
         first = FakeRunner(self.identity)
@@ -231,6 +376,145 @@ class CandidateGateTest(unittest.TestCase):
             run_gate(self.args(), runner)
         self.assertEqual(runner.commands, [])
 
+    def test_live_image_and_runtime_must_match_both_admission_manifests(self):
+        for field, value, pattern in (
+            (
+                "configured_image",
+                "example.invalid/other@sha256:" + "1" * 64,
+                "configured_image",
+            ),
+            (
+                "image_config_digest",
+                "sha256:" + "9" * 64,
+                "image_config_digest",
+            ),
+            (
+                "serving_argv_sha256",
+                "9" * 64,
+                "serving_argv_sha256",
+            ),
+        ):
+            with self.subTest(field=field):
+                original = self.live[field]
+                self.live[field] = value
+                self.engine_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "live": self.live,
+                            "receipt": None,
+                            "verified": None,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                runner = FakeRunner(self.identity)
+                with self.assertRaisesRegex(GateError, pattern):
+                    run_gate(self.args(), runner)
+                self.assertEqual(runner.commands, [])
+                self.live[field] = original
+        self.engine_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "live": self.live,
+                    "receipt": None,
+                    "verified": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_candidate_requires_exact_four_gpu_agent_metadata(self):
+        self.agent["gpu_count"] = 8
+        self.agent_path.write_text(json.dumps(self.agent), encoding="utf-8")
+        runner = FakeRunner(self.identity)
+        with self.assertRaisesRegex(GateError, "gpu_count"):
+            run_gate(self.args(), runner)
+        self.assertEqual(runner.commands, [])
+
+    def test_live_isolation_fails_before_request_work(self):
+        failures = (
+            FakeRunner(
+                self.identity,
+                environment={
+                    "DS4_UPSTREAM": "http://engine-a:8000,http://candidate:8000",
+                    "DS4_KV_EVENT_LIVE_ENDPOINTS": "tcp://engine-a:5557",
+                    "DS4_KV_EVENT_REPLAY_ENDPOINTS": "tcp://engine-a:5558",
+                },
+            ),
+            FakeRunner(self.identity, device_ids=("0", "1", "2", "3")),
+            FakeRunner(
+                self.identity,
+                unhealthy={"http://127.0.0.1:8012/health"},
+            ),
+        )
+        for runner in failures:
+            with self.subTest(commands=runner.commands):
+                self.assertEqual(run_gate(self.args(), runner), 1)
+                self.assertEqual(self.stages_run(runner), [])
+                self.assertEqual(self.records()[-1]["status"], "failed")
+                self.output.unlink()
+
+    def test_common_deployment_lock_excludes_a_second_owner(self):
+        lock_path = self.args().deployment_lock
+        with lock_path.open("w") as lock:
+            lock_path.chmod(0o600)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            runner = FakeRunner(self.identity)
+            with self.assertRaisesRegex(GateError, "common lock"):
+                run_gate(self.args(), runner)
+            self.assertEqual(runner.commands, [])
+
+    def test_cli_cannot_weaken_the_fixed_node06_isolation_profile(self):
+        profile = argparse.Namespace(**NODE06_PROFILE)
+        profile.deployment_lock = pathlib.Path(profile.deployment_lock)
+        validate_node06_profile(profile)
+        for field in NODE06_PROFILE:
+            candidate = argparse.Namespace(**vars(profile))
+            setattr(candidate, field, "different")
+            with self.subTest(field=field), self.assertRaisesRegex(
+                GateError, field
+            ):
+                validate_node06_profile(candidate)
+
+    def test_committed_r11_admission_manifests_validate(self):
+        admission = admission_contract(
+            self.candidate_manifest_path, self.runtime_manifest_path
+        )
+        self.assertEqual(
+            admission["image_descriptor_digest"],
+            "sha256:01b973d1ae132882bcc1bf62ea232f6aabe649dd4a89b961d81f3c41cc53f971",
+        )
+        self.assertEqual(admission["runtime_packages"]["b12x"], "1.2.3")
+        self.assertEqual(
+            admission["serving_argv_sha256"],
+            "598a2b1db89625a599b84614b4d57bdd990d8644cc4a5602c00dd0e973b2a2a4",
+        )
+
+    def test_every_request_stage_requires_native_counter_reconciliation(self):
+        runner = FakeRunner(self.identity)
+        self.assertEqual(run_gate(self.args("matrix"), runner), 0)
+        stages = {
+            name: dict(environment)
+            for name, environment in runner.commands
+            if name in {"agent_correctness", "c8_scout", "full_matrix"}
+        }
+        agent = next(
+            stage
+            for stage in build_stages(self.args())
+            if stage.name == "agent_correctness"
+        )
+        self.assertIn("--require-reconciled-speculation", agent.argv)
+        self.assertIn(self.args().engine_metrics, agent.argv)
+        for name in ("c8_scout", "full_matrix"):
+            self.assertEqual(
+                stages[name]["BENCH_REQUIRE_RECONCILED_SPECULATION"], "1"
+            )
+            self.assertEqual(
+                stages[name]["METRICS_URL"], self.args().engine_metrics
+            )
+
     def test_thermal_guard_is_required_before_metadata_or_container_access(self):
         for failure in ("missing capability", "invalid capability"):
             runner = FakeRunner(self.identity)
@@ -243,12 +527,22 @@ class CandidateGateTest(unittest.TestCase):
             self.assertFalse(self.output.exists())
 
     def test_plan_binds_stable_guard_policy_without_breaking_resume(self):
-        plan = plan_contract(self.args(), self.agent, self.guard_contract)
+        admission = admission_contract(
+            self.candidate_manifest_path, self.runtime_manifest_path
+        )
+        plan = plan_contract(
+            self.args(), self.agent, admission, self.guard_contract
+        )
         self.assertEqual(
             plan["thermal_guard"], {"expected_gpus": 8, "abort_c": 78.0}
         )
+        self.assertEqual(plan["profile"], "infernal-r11-b")
+        self.assertEqual(plan["deployment_lock"], str(self.args().deployment_lock))
         replacement = {**self.guard_contract, "run_id": "2" * 32}
-        self.assertEqual(plan, plan_contract(self.args(), self.agent, replacement))
+        self.assertEqual(
+            plan,
+            plan_contract(self.args(), self.agent, admission, replacement),
+        )
 
     def test_records_link_the_specific_guard_run(self):
         runner = FakeRunner(self.identity)
@@ -270,9 +564,11 @@ class CandidateGateTest(unittest.TestCase):
     def test_real_runner_uses_a_secret_free_bounded_inspect_format(self):
         child = mock.Mock(returncode=0)
         child.communicate.return_value = (
-                b"sha256:manifest\texample.invalid/engine@sha256:manifest\t"
-                b"2026-08-13T00:00:00Z\t0\ttrue\n",
-                b"",
+            (
+                f"{self.identity.image_id}\t{self.identity.configured_image}\t"
+                f"{self.identity.started_at}\t0\ttrue\n"
+            ).encode(),
+            b"",
         )
         with (
             mock.patch("candidate_gate.subprocess.Popen", return_value=child) as called,
@@ -292,6 +588,65 @@ class CandidateGateTest(unittest.TestCase):
         child_env = called.call_args.kwargs["env"]
         self.assertEqual(child_env["BENCH_TOKEN"], "secret")
         self.assertNotIn("BENCH_PROMPT", child_env)
+
+    def test_real_runner_requires_one_exact_nvidia_device_request(self):
+        for value, pattern in (
+            ([{"Driver": "nvidia", "DeviceIDs": ["4", "5", "6", "7"]}], None),
+            ([
+                {"Driver": "nvidia", "DeviceIDs": ["4", "5", "6", "7"]},
+                {"Driver": "other", "DeviceIDs": ["0"]},
+            ], "invalid shape"),
+        ):
+            child = mock.Mock(returncode=0)
+            child.communicate.return_value = (json.dumps(value).encode(), b"")
+            with mock.patch("candidate_gate.subprocess.Popen", return_value=child):
+                if pattern is None:
+                    self.assertEqual(
+                        SubprocessRunner().device_ids("candidate"),
+                        ("4", "5", "6", "7"),
+                    )
+                else:
+                    with self.assertRaisesRegex(GateError, pattern):
+                        SubprocessRunner().device_ids("candidate")
+
+    def test_real_runner_process_probe_returns_only_bounded_hashes(self):
+        expected = FakeRunner(self.identity).live_process_identity
+        child = mock.Mock(returncode=0)
+        child.communicate.return_value = (
+            json.dumps(expected.__dict__, separators=(",", ":")).encode(),
+            b"",
+        )
+        with mock.patch("candidate_gate.subprocess.Popen", return_value=child) as called:
+            actual = SubprocessRunner().process_identity(
+                "candidate", ("NCCL_DEBUG", "B12X_MODE"), ("/launcher",)
+            )
+        self.assertEqual(actual, expected)
+        argv = called.call_args.args[0]
+        self.assertEqual(argv[:4], ("docker", "exec", "candidate", "python3"))
+        self.assertNotIn("NCCL_DEBUG=", " ".join(argv))
+        self.assertNotIn("B12X_MODE=", " ".join(argv))
+
+    def test_unreviewed_performance_environment_is_fail_closed(self):
+        for name in (
+            "VLLM_NEW_SCHEDULER_KNOB",
+            "NCCL_UNREVIEWED_MODE",
+            "CUDA_FUTURE_SETTING",
+            "LD_AUDIT",
+            "MAX_NUM_SEQS",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(performance_environment_name(name))
+        for name in ("HOSTNAME", "PWD", "VLLM_API_KEY", "HF_TOKEN"):
+            with self.subTest(name=name):
+                self.assertFalse(performance_environment_name(name))
+
+        child = mock.Mock(returncode=1)
+        child.communicate.return_value = (b"", b"unexpected performance environment")
+        with mock.patch("candidate_gate.subprocess.Popen", return_value=child):
+            with self.assertRaisesRegex(GateError, "process inspection failed"):
+                SubprocessRunner().process_identity(
+                    "candidate", ("NCCL_DEBUG",), ("/launcher",)
+                )
 
 
 if __name__ == "__main__":

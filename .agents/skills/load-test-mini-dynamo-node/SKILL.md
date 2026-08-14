@@ -70,11 +70,12 @@ Default to one direct TP4 engine while the healthy peer serves production.
 Point native metrics at the same engine and require client/native request and
 token reconciliation. Use fresh input namespaces for every cell.
 
-- Engine image or scheduler candidate: capture immutable engine and agent
-  metadata and verify the candidate directory's exact manifest/runtime receipt,
-  then run `bench/candidate_gate.py` through `smoke`; resume through `scout`
-  and `matrix` only while each prior stage is green. The gate does not own
-  engine startup or rollback, so do not treat it as a deployment supervisor.
+- Infernal r11 on engine B: capture immutable engine and agent metadata in an
+  owner-only experiment directory and run `bench/candidate_gate.py --profile
+  infernal-r11-b` through `smoke`; resume through `scout` and `matrix` only
+  while each prior stage is green. The gate is deliberately pinned to the
+  exact committed r11 admission bytes; add and review a new profile before
+  qualifying another image. It does not own engine startup or rollback.
 - Direct decode TPS/TTFT: use `bench/engine_matrix.sh` or a focused
   `bench/codebench.py` cell with `METRICS_URL` set to that engine.
 - Agent/tool correctness: use `bench/agentbench.py` with the direct engine's
