@@ -600,7 +600,7 @@ mod tests {
     use crate::{
         exact_index::{ExactIndexLimits, FencedExactKvInventory},
         kv_wire::KvEventBatch,
-        router::{CandidateState, Outcome},
+        router::{CandidateState, Outcome, RequestLoadEstimator},
     };
 
     struct Attestation {
@@ -700,6 +700,7 @@ mod tests {
                 Arc::clone(metrics),
                 4.0,
                 32,
+                RequestLoadEstimator::new(2, 128, 8),
             ),
             Arc::new(Attestation {
                 unready_attempts: AtomicUsize::new(unready_attempts),
@@ -824,6 +825,7 @@ mod tests {
                 Arc::clone(&metrics),
                 4.0,
                 32,
+                RequestLoadEstimator::new(2, 128, 8),
             ),
             Arc::new(Attestation {
                 unready_attempts: AtomicUsize::new(usize::MAX),

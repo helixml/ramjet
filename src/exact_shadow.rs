@@ -7,11 +7,12 @@
 
 use std::{sync::Arc, time::Instant};
 
+#[cfg(test)]
+use crate::kv_consumer::SharedFencedInventory;
 use crate::{
     exact_route_inventory::{ExactInventoryLookupError, ExactInventoryMarker, ExactRouteInventory},
-    kv_consumer::SharedFencedInventory,
     metrics::Metrics,
-    router::{CandidateState, Decision, Outcome},
+    router::{CandidateState, Decision, Outcome, RequestLoadEstimator},
     shims::Endpoint,
 };
 
@@ -22,6 +23,7 @@ pub struct ExactRouteShadow {
     metrics: Arc<Metrics>,
     alpha: f64,
     max_overlap_units: usize,
+    load_estimator: RequestLoadEstimator,
 }
 
 #[derive(Clone, Debug)]
@@ -233,13 +235,15 @@ struct ShadowResult {
 }
 
 impl ExactRouteShadow {
+    #[cfg(test)]
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
-    pub fn new(
+    pub(crate) fn new(
         inventories: Arc<[SharedFencedInventory]>,
         metrics: Arc<Metrics>,
         alpha: f64,
         max_overlap_units: usize,
+        load_estimator: RequestLoadEstimator,
     ) -> Self {
         Self::with_inventories(
             inventories
@@ -250,15 +254,17 @@ impl ExactRouteShadow {
             metrics,
             alpha,
             max_overlap_units,
+            load_estimator,
         )
     }
 
     #[must_use]
-    pub fn with_inventories(
+    pub(crate) fn with_inventories(
         inventories: Arc<[ExactRouteInventory]>,
         metrics: Arc<Metrics>,
         alpha: f64,
         max_overlap_units: usize,
+        load_estimator: RequestLoadEstimator,
     ) -> Self {
         let placement_capable = !inventories.is_empty()
             && inventories
@@ -270,6 +276,7 @@ impl ExactRouteShadow {
             metrics,
             alpha,
             max_overlap_units,
+            load_estimator,
         }
     }
 
@@ -317,10 +324,11 @@ impl ExactRouteShadow {
     /// before the selected engine can mutate its cache. Placement remains
     /// unchanged in shadow mode while the same conservative placement policy
     /// is still evaluated for telemetry.
-    pub fn route_pre_route(
+    pub(crate) fn route_pre_route(
         &self,
         endpoint: Endpoint,
         token_ids: &[u32],
+        request_bytes: usize,
         decision: &mut Decision,
         policy: ExactPlacementPolicy,
         mode: ExactPlacementMode,
@@ -370,10 +378,20 @@ impl ExactRouteShadow {
         {
             apply_placement(
                 winner,
+                request_bytes,
                 token_ids.len(),
                 decision,
                 result,
                 self.max_overlap_units,
+                self.load_estimator,
+            );
+        } else if mode.applies() {
+            recompute_exact_reservations(
+                request_bytes,
+                token_ids.len(),
+                decision,
+                result,
+                self.load_estimator,
             );
         }
         self.metrics
@@ -932,10 +950,12 @@ fn load_equivalent_token_pressure(
 
 fn apply_placement(
     winner: usize,
+    request_bytes: usize,
     prompt_tokens: usize,
     decision: &mut Decision,
     exact: &PreRouteResult,
     max_overlap_units: usize,
+    load_estimator: RequestLoadEstimator,
 ) {
     decision.candidates.retain(|candidate| *candidate != winner);
     decision.candidates.insert(0, winner);
@@ -963,6 +983,53 @@ fn apply_placement(
     decision.affinity_blocks = winner_state.affinity_blocks;
     decision.load_units = winner_state.request_load_units;
     decision.outcome = Outcome::Exact;
+    recompute_exact_reservations(
+        request_bytes,
+        prompt_tokens,
+        decision,
+        exact,
+        load_estimator,
+    );
+}
+
+fn recompute_exact_reservations(
+    request_bytes: usize,
+    prompt_tokens: usize,
+    decision: &mut Decision,
+    exact: &PreRouteResult,
+    load_estimator: RequestLoadEstimator,
+) {
+    let Some(selected) = decision.candidates.first().copied() else {
+        return;
+    };
+    let mut updates = Vec::with_capacity(decision.candidate_state.len());
+    for candidate in decision
+        .candidate_state
+        .iter()
+        .filter(|candidate| candidate.healthy)
+    {
+        let Some(overlap_tokens) = exact.overlaps.get(candidate.index).copied().flatten() else {
+            return;
+        };
+        let Some(units) =
+            load_estimator.estimate_exact_tokens(request_bytes, overlap_tokens, prompt_tokens)
+        else {
+            return;
+        };
+        updates.push((candidate.index, units));
+    }
+    let Some(selected_units) = updates
+        .iter()
+        .find_map(|(index, units)| (*index == selected).then_some(*units))
+    else {
+        return;
+    };
+    for candidate in &mut decision.candidate_state {
+        if let Some((_, units)) = updates.iter().find(|(index, _)| *index == candidate.index) {
+            candidate.request_load_units = *units;
+        }
+    }
+    decision.load_units = selected_units;
 }
 
 fn overlap_units(tokens: usize, prompt_tokens: usize, total_units: usize) -> usize {
@@ -1017,6 +1084,17 @@ mod tests {
         }
     }
 
+    fn set_reservations(decision: &mut Decision, units: [usize; 2]) {
+        for candidate in &mut decision.candidate_state {
+            candidate.request_load_units = units[candidate.index];
+        }
+        decision.load_units = units[decision.candidates[0]];
+    }
+
+    fn estimator() -> RequestLoadEstimator {
+        RequestLoadEstimator::new(2, 128, 8)
+    }
+
     fn batch(events: Vec<KvEvent>) -> KvEventBatch {
         KvEventBatch {
             timestamp: 1.0,
@@ -1068,6 +1146,7 @@ mod tests {
             Arc::new(Metrics::new(&Registry::new()).unwrap()),
             1.0,
             8,
+            estimator(),
         );
         let route = decision();
         let original = route.clone();
@@ -1123,6 +1202,7 @@ mod tests {
             Arc::clone(&metrics),
             1.0,
             8,
+            estimator(),
         );
         let snapshot = shadow.capture(&decision());
 
@@ -1160,6 +1240,7 @@ mod tests {
             Arc::clone(&metrics),
             1.0,
             8,
+            estimator(),
         );
         let snapshot = shadow.capture(&decision());
         alternative
@@ -1189,6 +1270,7 @@ mod tests {
             Arc::clone(&metrics),
             1.0,
             8,
+            estimator(),
         );
         let mut route = decision();
         let original = route.clone();
@@ -1196,6 +1278,7 @@ mod tests {
             shadow.route_pre_route(
                 Endpoint::Chat,
                 &[1, 2, 3, 4],
+                1_024,
                 &mut route,
                 ExactPlacementPolicy {
                     min_gain_tokens: 4,
@@ -1245,13 +1328,20 @@ mod tests {
             .collect();
         let registry = Registry::new();
         let metrics = Arc::new(Metrics::new(&registry).unwrap());
-        let shadow = ExactRouteShadow::with_inventories(inventories, Arc::clone(&metrics), 1.0, 8);
+        let shadow = ExactRouteShadow::with_inventories(
+            inventories,
+            Arc::clone(&metrics),
+            1.0,
+            8,
+            estimator(),
+        );
         let mut route = decision();
         let original = route.clone();
 
         shadow.route_pre_route(
             Endpoint::Chat,
             &[1, 2, 3, 4],
+            1_024,
             &mut route,
             ExactPlacementPolicy {
                 min_gain_tokens: 0,
@@ -1283,14 +1373,21 @@ mod tests {
         let emptier = trusted_inventory(Vec::new());
         let registry = Registry::new();
         let metrics = Arc::new(Metrics::new(&registry).unwrap());
-        let shadow =
-            ExactRouteShadow::new(Arc::from([fuller, emptier]), Arc::clone(&metrics), 1.0, 8);
-        let original = decision();
+        let shadow = ExactRouteShadow::new(
+            Arc::from([fuller, emptier]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+            estimator(),
+        );
+        let mut original = decision();
+        set_reservations(&mut original, [8, 8]);
         for mode in [ExactPlacementMode::Shadow, ExactPlacementMode::Placement] {
             let mut route = original.clone();
             shadow.route_pre_route(
                 Endpoint::Chat,
                 &[9, 10, 11, 12],
+                1_024,
                 &mut route,
                 ExactPlacementPolicy {
                     min_gain_tokens: 4,
@@ -1329,11 +1426,14 @@ mod tests {
             Arc::clone(&metrics),
             1.0,
             8,
+            estimator(),
         );
         let mut route = decision();
+        set_reservations(&mut route, [8, 8]);
         shadow.route_pre_route(
             Endpoint::Chat,
             &[9, 10, 11, 12],
+            1_024,
             &mut route,
             ExactPlacementPolicy {
                 min_gain_tokens: 4,
@@ -1355,13 +1455,19 @@ mod tests {
         let emptier = trusted_inventory(Vec::new());
         let registry = Registry::new();
         let metrics = Arc::new(Metrics::new(&registry).unwrap());
-        let shadow =
-            ExactRouteShadow::new(Arc::from([fuller, emptier]), Arc::clone(&metrics), 1.0, 8);
+        let shadow = ExactRouteShadow::new(
+            Arc::from([fuller, emptier]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+            estimator(),
+        );
         let mut route = decision();
         route.candidate_state[1].load_units = 1;
         shadow.route_pre_route(
             Endpoint::Chat,
             &[9, 10, 11, 12],
+            1_024,
             &mut route,
             ExactPlacementPolicy {
                 min_gain_tokens: 4,
@@ -1389,8 +1495,13 @@ mod tests {
         let emptier = trusted_inventory(Vec::new());
         let registry = Registry::new();
         let metrics = Arc::new(Metrics::new(&registry).unwrap());
-        let shadow =
-            ExactRouteShadow::new(Arc::from([fuller, emptier]), Arc::clone(&metrics), 1.0, 8);
+        let shadow = ExactRouteShadow::new(
+            Arc::from([fuller, emptier]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+            estimator(),
+        );
         let mut route = decision();
         route.candidate_state[1].load_units = 2;
         let original = route.clone();
@@ -1398,6 +1509,7 @@ mod tests {
         shadow.route_pre_route(
             Endpoint::Chat,
             &[9, 10, 11, 12],
+            1_024,
             &mut route,
             ExactPlacementPolicy {
                 min_gain_tokens: 4,
@@ -1433,13 +1545,19 @@ mod tests {
         let fuller = trusted_inventory(vec![store_hash(7, &[1, 2, 3, 4, 5, 6, 7, 8])]);
         let emptier = trusted_inventory(Vec::new());
         let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
-        let shadow =
-            ExactRouteShadow::new(Arc::from([fuller, emptier]), Arc::clone(&metrics), 1.0, 8);
+        let shadow = ExactRouteShadow::new(
+            Arc::from([fuller, emptier]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+            estimator(),
+        );
         let mut route = decision();
 
         shadow.route_pre_route(
             Endpoint::Chat,
             &[9, 10, 11, 12],
+            1_024,
             &mut route,
             ExactPlacementPolicy {
                 min_gain_tokens: 4,
@@ -1480,11 +1598,14 @@ mod tests {
             Arc::clone(&metrics),
             1.0,
             8,
+            estimator(),
         );
         let mut route = decision();
+        set_reservations(&mut route, [8, 8]);
         shadow.route_pre_route(
             Endpoint::Chat,
             &[1, 2, 3, 4],
+            1_024,
             &mut route,
             ExactPlacementPolicy {
                 min_gain_tokens: 4,
@@ -1495,6 +1616,9 @@ mod tests {
         assert_eq!(route.candidates, [1, 0]);
         assert_eq!(route.candidate_state[0].index, 1);
         assert_eq!(route.candidate_state[0].rank, 0);
+        assert_eq!(route.candidate_state[0].request_load_units, 1);
+        assert_eq!(route.candidate_state[1].request_load_units, 8);
+        assert_eq!(route.load_units, 1);
         assert_eq!(route.outcome, Outcome::Exact);
         assert!(
             (metrics
@@ -1508,6 +1632,152 @@ mod tests {
     }
 
     #[test]
+    fn placement_recomputes_partial_to_warmer_reservations() {
+        let selected = trusted_inventory(vec![store_hash(7, &[1, 2])]);
+        let alternative = trusted_inventory(vec![store_hash(8, &[1, 2, 3, 4])]);
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative]),
+            Arc::new(Metrics::new(&Registry::new()).unwrap()),
+            1.0,
+            8,
+            estimator(),
+        );
+        let mut route = decision();
+        set_reservations(&mut route, [8, 8]);
+
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            1_024,
+            &mut route,
+            ExactPlacementPolicy {
+                min_gain_tokens: 2,
+                max_load_delta: 0,
+            },
+            ExactPlacementMode::Placement,
+        );
+
+        assert_eq!(route.candidates, [1, 0]);
+        assert_eq!(route.candidate_state[0].request_load_units, 4);
+        assert_eq!(route.candidate_state[1].request_load_units, 6);
+        assert_eq!(route.load_units, 4);
+    }
+
+    #[test]
+    fn placement_preserves_an_unchanged_selected_reservation() {
+        let selected = trusted_inventory(vec![store_hash(7, &[1, 2])]);
+        let alternative = trusted_inventory(Vec::new());
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative]),
+            Arc::new(Metrics::new(&Registry::new()).unwrap()),
+            1.0,
+            8,
+            estimator(),
+        );
+        let mut route = decision();
+        set_reservations(&mut route, [4, 8]);
+
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4],
+            1_024,
+            &mut route,
+            ExactPlacementPolicy {
+                min_gain_tokens: 1,
+                max_load_delta: 0,
+            },
+            ExactPlacementMode::Placement,
+        );
+
+        assert_eq!(route.candidates, [0, 1]);
+        assert_eq!(route.candidate_state[0].request_load_units, 4);
+        assert_eq!(route.load_units, 4);
+    }
+
+    #[test]
+    fn placement_keeps_cold_reservations_capped() {
+        let shadow = ExactRouteShadow::new(
+            Arc::from([trusted_inventory(Vec::new()), trusted_inventory(Vec::new())]),
+            Arc::new(Metrics::new(&Registry::new()).unwrap()),
+            1.0,
+            8,
+            estimator(),
+        );
+        let mut route = decision();
+        set_reservations(&mut route, [8, 8]);
+
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4],
+            4_096,
+            &mut route,
+            ExactPlacementPolicy {
+                min_gain_tokens: 1,
+                max_load_delta: 0,
+            },
+            ExactPlacementMode::Placement,
+        );
+
+        assert_eq!(route.candidate_state[0].request_load_units, 8);
+        assert_eq!(route.candidate_state[1].request_load_units, 8);
+        assert_eq!(route.load_units, 8);
+    }
+
+    #[test]
+    fn placement_keeps_original_reservations_when_inventory_is_untrusted() {
+        let untrusted = Arc::new(parking_lot::RwLock::new(FencedExactKvInventory::new(
+            8,
+            ExactIndexLimits::default(),
+        )));
+        let shadow = ExactRouteShadow::new(
+            Arc::from([trusted_inventory(vec![store(&[1, 2])]), untrusted]),
+            Arc::new(Metrics::new(&Registry::new()).unwrap()),
+            1.0,
+            8,
+            estimator(),
+        );
+        let mut route = decision();
+        set_reservations(&mut route, [5, 7]);
+        let original = route.clone();
+
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4],
+            1_024,
+            &mut route,
+            ExactPlacementPolicy {
+                min_gain_tokens: 1,
+                max_load_delta: 0,
+            },
+            ExactPlacementMode::Placement,
+        );
+
+        assert_eq!(route, original);
+    }
+
+    #[test]
+    fn exact_reservation_update_is_atomic_on_missing_overlap() {
+        let mut route = decision();
+        set_reservations(&mut route, [3, 6]);
+        let original = route.clone();
+        let exact = PreRouteResult {
+            shadow: ShadowResult {
+                outcome: ShadowOutcome::Agree,
+                selected_tokens: 2,
+                best_tokens: 2,
+            },
+            overlaps: vec![Some(2), None],
+            resident_tokens: vec![Some(2), Some(0)],
+            prompt_tokens: 4,
+            winner: Some(0),
+        };
+
+        recompute_exact_reservations(1_024, 4, &mut route, &exact, estimator());
+
+        assert_eq!(route, original);
+    }
+
+    #[test]
     fn placement_gain_and_load_gates_keep_the_approximate_choice() {
         let selected = trusted_inventory(Vec::new());
         let alternative = trusted_inventory(vec![store(&[1, 2, 3, 4])]);
@@ -1517,11 +1787,13 @@ mod tests {
             Arc::clone(&metrics),
             1.0,
             8,
+            estimator(),
         );
         let mut gain_gated = decision();
         shadow.route_pre_route(
             Endpoint::Chat,
             &[1, 2, 3, 4],
+            1_024,
             &mut gain_gated,
             ExactPlacementPolicy {
                 min_gain_tokens: 5,
@@ -1536,6 +1808,7 @@ mod tests {
         shadow.route_pre_route(
             Endpoint::Chat,
             &[1, 2, 3, 4],
+            1_024,
             &mut load_gated,
             ExactPlacementPolicy {
                 min_gain_tokens: 4,
@@ -1574,6 +1847,7 @@ mod tests {
             Arc::clone(&metrics),
             1.0,
             8,
+            estimator(),
         );
         let mut route = decision();
         route.candidate_state[1].load_units = 1;
@@ -1581,6 +1855,7 @@ mod tests {
         shadow.route_pre_route(
             Endpoint::Chat,
             &[1, 2, 3, 4],
+            1_024,
             &mut route,
             ExactPlacementPolicy {
                 min_gain_tokens: 4,
@@ -1609,15 +1884,22 @@ mod tests {
             ExactIndexLimits::default(),
         )));
         assert!(
-            ExactRouteShadow::new(Arc::from([trusted.clone()]), Arc::clone(&metrics), 1.0, 8)
-                .ready()
+            ExactRouteShadow::new(
+                Arc::from([trusted.clone()]),
+                Arc::clone(&metrics),
+                1.0,
+                8,
+                estimator()
+            )
+            .ready()
         );
         assert!(
             !ExactRouteShadow::new(
                 Arc::from([trusted, untrusted]),
                 Arc::clone(&metrics),
                 1.0,
-                8
+                8,
+                estimator(),
             )
             .ready()
         );

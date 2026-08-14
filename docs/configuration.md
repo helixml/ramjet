@@ -169,6 +169,16 @@ Placement additionally requires `DS4_AFFINITY=prefix`; snapshot inventories are
 shadow-only. Any timeout, attestation failure, event gap, revision change, or
 missing `X-Session-ID` preserves the approximate route.
 
+When exact placement applies, admission reservations are recomputed from the
+exact warm-prefix overlap instead of the approximate block estimate that was
+derived before the inventory was consulted. A request whose prefix is already
+resident therefore reserves proportionally less capacity, bounded by the same
+`DS4_ROUTE_LOAD_UNIT_BYTES` quantum and `DS4_ROUTE_MAX_LOAD_UNITS` cap. The
+recompute is atomic across healthy candidates and fails closed: if any healthy
+candidate lacks a trusted overlap, every original reservation is preserved. It
+never changes which replica is selected — placement is decided first, and the
+gain/load gates still run against the pre-route estimate.
+
 Compatibility admission is an independent serving gate. It requires
 `DS4_TOKENIZER_MODE=local-shadow` plus the SHA-pinned manifest so local golden
 validation exists, the separately SHA-pinned serving-runtime manifest, and at
@@ -467,9 +477,14 @@ stream, initial-load bucket, completion-token, total/decode duration, TTFT,
 TPOT, failure, and client-disconnect summaries. Headline latency/token
 distributions include successful completions only; each outcome has a separate
 distribution so early disconnects cannot look like cheaper successful work.
+Journal v8 adds `request_load_units` to the finish record: the reservation
+actually acquired for the served upstream. Under failover that is the reserving
+candidate's value, not the initially selected candidate's estimate, so the
+audit prefers it and falls back to the pre-route candidate estimate for v1-v7
+traces. It is a bounded integer and carries no prefix identity.
 Journal v1-v6 records remain readable and are
-labelled `legacy`; missing or semantically impossible v7 telemetry is collapsed
-to `invalid` instead of propagating an arbitrary label. This is evidence
+labelled `legacy`; missing or semantically impossible v7/v8 telemetry is
+collapsed to `invalid` instead of propagating an arbitrary label. This is evidence
 collection only. No output bucket affects scoring, replica choice, or load
 admission.
 
