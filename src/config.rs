@@ -51,6 +51,8 @@ pub struct Config {
     pub exact_route_mode: ExactRouteMode,
     pub exact_route_manifest_path: Option<String>,
     pub exact_route_manifest_sha256: Option<String>,
+    pub serving_runtime_manifest_path: Option<String>,
+    pub serving_runtime_manifest_sha256: Option<String>,
     pub exact_route_workers: usize,
     pub exact_route_timeout_ms: usize,
     pub exact_route_min_gain_tokens: usize,
@@ -198,6 +200,11 @@ struct ExactRouteSettings {
     canary_key: Option<SecretString>,
 }
 
+struct ServingRuntimeSettings {
+    manifest_path: Option<String>,
+    manifest_sha256: Option<String>,
+}
+
 struct SessionAffinitySettings {
     mode: SessionAffinityMode,
     key: Option<SecretString>,
@@ -330,8 +337,14 @@ impl Config {
         let snapshot_route = snapshot_route_settings(&mut get, upstreams.len())?;
         let exact_route =
             exact_route_settings(&mut get, &tokenizer, &kv_events, &snapshot_route, affinity)?;
-        let upstream_admission_mode =
-            upstream_admission_mode(&mut get, upstreams.len(), &tokenizer, &exact_route)?;
+        let serving_runtime = serving_runtime_settings(&mut get)?;
+        let upstream_admission_mode = upstream_admission_mode(
+            &mut get,
+            upstreams.len(),
+            &tokenizer,
+            &exact_route,
+            &serving_runtime,
+        )?;
         if snapshot_route.mode == SnapshotRouteMode::Shadow
             && exact_route.mode != ExactRouteMode::Shadow
         {
@@ -391,6 +404,8 @@ impl Config {
             exact_route_mode: exact_route.mode,
             exact_route_manifest_path: exact_route.manifest_path,
             exact_route_manifest_sha256: exact_route.manifest_sha256,
+            serving_runtime_manifest_path: serving_runtime.manifest_path,
+            serving_runtime_manifest_sha256: serving_runtime.manifest_sha256,
             exact_route_workers: exact_route.workers,
             exact_route_timeout_ms: exact_route.timeout_ms,
             exact_route_min_gain_tokens: exact_route.min_gain_tokens,
@@ -426,6 +441,7 @@ fn upstream_admission_mode(
     upstream_count: usize,
     tokenizer: &TokenizerSettings,
     exact_route: &ExactRouteSettings,
+    serving_runtime: &ServingRuntimeSettings,
 ) -> Result<UpstreamAdmissionMode, ConfigError> {
     let mode = match get("DS4_UPSTREAM_ADMISSION_MODE")
         .as_deref()
@@ -463,8 +479,49 @@ fn upstream_admission_mode(
                 "compatibility admission requires a path and SHA-pinned manifest",
             ));
         }
+        if serving_runtime.manifest_path.is_none() || serving_runtime.manifest_sha256.is_none() {
+            return Err(invalid(
+                "DS4_UPSTREAM_ADMISSION_MODE",
+                "compatibility".to_owned(),
+                "compatibility admission requires a path and SHA-pinned serving runtime manifest",
+            ));
+        }
     }
     Ok(mode)
+}
+
+fn serving_runtime_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+) -> Result<ServingRuntimeSettings, ConfigError> {
+    let manifest_path = get("DS4_SERVING_RUNTIME_MANIFEST_PATH").filter(|value| !value.is_empty());
+    let manifest_sha256 = get("DS4_SERVING_RUNTIME_MANIFEST_SHA256")
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    if let Some(value) = &manifest_sha256
+        && !valid_sha256(value)
+    {
+        return Err(invalid(
+            "DS4_SERVING_RUNTIME_MANIFEST_SHA256",
+            value.clone(),
+            "a 64-character hexadecimal SHA-256",
+        ));
+    }
+    if manifest_path.is_some() != manifest_sha256.is_some() {
+        let key = if manifest_path.is_none() {
+            "DS4_SERVING_RUNTIME_MANIFEST_PATH"
+        } else {
+            "DS4_SERVING_RUNTIME_MANIFEST_SHA256"
+        };
+        return Err(invalid(
+            key,
+            String::new(),
+            "a path and SHA-256 must be configured together",
+        ));
+    }
+    Ok(ServingRuntimeSettings {
+        manifest_path,
+        manifest_sha256,
+    })
 }
 
 fn session_affinity_settings(
@@ -1320,6 +1377,8 @@ mod tests {
         ));
         assert!(config.exact_route_manifest_path.is_none());
         assert!(config.exact_route_manifest_sha256.is_none());
+        assert!(config.serving_runtime_manifest_path.is_none());
+        assert!(config.serving_runtime_manifest_sha256.is_none());
         assert_eq!(config.exact_route_workers, 4);
         assert_eq!(config.exact_route_timeout_ms, 250);
         assert_eq!(config.exact_route_min_gain_tokens, 8_192);
@@ -1778,6 +1837,14 @@ mod tests {
                 "DS4_EXACT_ROUTE_MANIFEST_SHA256",
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             ),
+            (
+                "DS4_SERVING_RUNTIME_MANIFEST_PATH",
+                "/compat/serving-runtime.json",
+            ),
+            (
+                "DS4_SERVING_RUNTIME_MANIFEST_SHA256",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            ),
         ]);
         let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
         assert_eq!(
@@ -1785,6 +1852,21 @@ mod tests {
             UpstreamAdmissionMode::Compatibility
         );
         assert_eq!(config.exact_route_mode, ExactRouteMode::Off);
+        assert_eq!(
+            config.serving_runtime_manifest_path.as_deref(),
+            Some("/compat/serving-runtime.json")
+        );
+
+        let mut missing_runtime = values.clone();
+        missing_runtime.remove("DS4_SERVING_RUNTIME_MANIFEST_PATH");
+        missing_runtime.remove("DS4_SERVING_RUNTIME_MANIFEST_SHA256");
+        assert!(matches!(
+            Config::from_lookup(|key| missing_runtime.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_UPSTREAM_ADMISSION_MODE",
+                ..
+            })
+        ));
 
         let invalid = HashMap::from([("DS4_UPSTREAM_ADMISSION_MODE", "permissive")]);
         assert!(matches!(
@@ -1794,6 +1876,62 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn serving_runtime_pins_are_paired_valid_and_stageable_under_http() {
+        let partial = HashMap::from([(
+            "DS4_SERVING_RUNTIME_MANIFEST_PATH",
+            "/compat/serving-runtime.json",
+        )]);
+        assert!(matches!(
+            Config::from_lookup(|key| partial.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_SERVING_RUNTIME_MANIFEST_SHA256",
+                ..
+            })
+        ));
+        let reverse_partial = HashMap::from([(
+            "DS4_SERVING_RUNTIME_MANIFEST_SHA256",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )]);
+        assert!(matches!(
+            Config::from_lookup(|key| reverse_partial.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_SERVING_RUNTIME_MANIFEST_PATH",
+                ..
+            })
+        ));
+        let invalid_sha = HashMap::from([
+            (
+                "DS4_SERVING_RUNTIME_MANIFEST_PATH",
+                "/compat/serving-runtime.json",
+            ),
+            ("DS4_SERVING_RUNTIME_MANIFEST_SHA256", "not-a-digest"),
+        ]);
+        assert!(matches!(
+            Config::from_lookup(|key| invalid_sha.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_SERVING_RUNTIME_MANIFEST_SHA256",
+                ..
+            })
+        ));
+        let staged = HashMap::from([
+            (
+                "DS4_SERVING_RUNTIME_MANIFEST_PATH",
+                "/compat/serving-runtime.json",
+            ),
+            (
+                "DS4_SERVING_RUNTIME_MANIFEST_SHA256",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            ),
+        ]);
+        let staged = Config::from_lookup(|key| staged.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(staged.upstream_admission_mode, UpstreamAdmissionMode::Http);
+        assert_eq!(
+            staged.serving_runtime_manifest_path.as_deref(),
+            Some("/compat/serving-runtime.json")
+        );
     }
 
     #[test]

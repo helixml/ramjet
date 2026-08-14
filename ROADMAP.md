@@ -97,10 +97,19 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   initialized model registry and every committed `/tokenize` golden through
   the inner ASGI app, with health before/after and cooperative timeout cleanup;
   later calls recheck health. The proof is cached only after a complete match.
-  It still does not identify the EngineCore/KV-publisher PID or bind the full
-  runtime bundle, so it is not an admission authority: the Compose default
-  remains `http` and no enablement is admissible. The larger issue #15 bundle
-  still needs driver/CUDA/NCCL,
+  r111 keeps that renderer/tokenizer authority at schema v1 and its unchanged
+  SHA-256 `4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa`.
+  A separate default-off serving-runtime manifest is independently pinned and
+  linked back to that exact digest. Its schema-v2 endpoint reports the
+  frontend and EngineCore boot/PID/start-time incarnations, proves the exact
+  live typed `KVEventsConfig`, and brackets a stable direct child that owns
+  exactly one wildcard listening socket for each configured event/replay port
+  in the frontend's network namespace. This is process and socket ownership
+  evidence, not proof that the KV publisher thread is alive, events are
+  advancing, sequence zero is retained, or replay is complete and timely.
+  Live event/replay qualification is therefore still mandatory, the Compose
+  default remains `http`, and no enablement is admissible. The larger issue
+  #15 bundle still needs driver/CUDA/NCCL,
   kernel/patch, topology,
   normalized argv/environment, compile-cache identity, representative warmups,
   complete runtime-manifest generation, and immutable engine-image

@@ -169,6 +169,7 @@ fn log_startup(config: &Config) {
         shadow_soak_max_token_bytes = config.shadow_soak_max_token_bytes,
         shadow_soak_timeout_ms = config.shadow_soak_timeout_ms,
         exact_route_manifest = config.exact_route_manifest_path.is_some(),
+        serving_runtime_manifest = config.serving_runtime_manifest_path.is_some(),
         kv_event_mode = ?config.kv_event_mode,
         kv_event_sources = config.kv_event_sources.len(),
         kv_event_replay_limit = config.kv_event_replay_limit,

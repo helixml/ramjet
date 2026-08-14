@@ -145,18 +145,18 @@ BENCH_MODE=exact-rss target/release/examples/digest_index_bench
 BENCH_MODE=digest-rss target/release/examples/digest_index_bench
 ```
 
-For the issue #15 in-process vLLM identity endpoint, use the sub-second Python
-and Compose loop; the middleware/overlay are not Cargo package inputs, so a
-Rust rebuild proves nothing and only slows iteration:
+For the issue #15 in-process vLLM identity endpoint, keep each language in its
+focused loop:
 
 ```bash
+cargo test --locked compat::tests
 python3 -m unittest bench.test_engine_identity_middleware \
   bench.test_serving_identity_compose
 python3 deploy/dspark_0731/validate-serving-identity-compose.py
 ```
 
-The validator respects `EXTRA_VLLM_ARGS_{A,B}_IDENTITY` and the two rendered
-bind-source overrides, hashes both mounted artifacts, and must keep base
+The validator respects `EXTRA_VLLM_ARGS_{A,B}_IDENTITY` and the three rendered
+bind-source overrides, hashes all three artifact types, and must keep base
 Compose admission at `http`. The overlay is not permission to roll both
 engines or enable LB compatibility admission. First preflight the pinned
 image's `--middleware` import contract without GPUs, single-home production on
@@ -171,6 +171,19 @@ bounded emergency cancellation; directly cancelling the route wrapper leaks
 both children in the pinned fork. Keep the exact-decorator-shaped regression
 green. Successful renderer proof may be process-cached, but live `/health`
 remains mandatory on every identity response.
+
+Keep renderer/tokenizer and serving-runtime authority separate. The
+compatibility manifest remains schema v1 with SHA-256
+`4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa`;
+the default-off serving-runtime manifest must be independently pinned and
+must link back to that digest. Runtime proof must use the exact pinned vLLM
+types, stable direct-child EngineCore incarnation, live typed KV-event config,
+shared network namespace, and exact child-owned wildcard listener for every
+configured event/replay port, with process state checked before and after.
+Never describe this binding as publisher-thread liveness, event progress,
+retained sequence-zero, or replay readiness. Those remain node06 live
+event/replay qualification gates, and LB admission remains `http` until they
+and the rest of issue #15 are closed.
 
 The digest index is a memory/recovery optimization, not a faster lookup path.
 Its pre-shadow gates are: no overclaims in differential tests, matched 80K

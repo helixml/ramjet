@@ -13,6 +13,7 @@ import hashlib
 import hmac
 from importlib import metadata as importlib_metadata
 import json
+from multiprocessing.process import BaseProcess
 import os
 import re
 import stat
@@ -27,6 +28,9 @@ MAX_TOKEN_BYTES = 4096
 MAX_INTERNAL_RESPONSE_BYTES = 1 << 20
 MAX_GOLDENS = 64
 MAX_ADMITTED_CLASSES = 32
+MAX_CORE_PROCESSES = 64
+MAX_CORE_FDS = 16_384
+MAX_PROC_NET_BYTES = 4 << 20
 DEFAULT_VERIFY_TIMEOUT_MS = 4000
 INTERNAL_CANCELLATION_GRACE_SECONDS = 0.25
 _HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -58,19 +62,22 @@ class ServingIdentityMiddleware:
         "_goldens",
         "_identity",
         "_live_verified",
+        "_runtime",
         "_token",
         "_verification_lock",
+        "_verified_core_incarnations",
         "_verify_timeout_seconds",
     )
 
     def __init__(self, app: ASGIApp) -> None:
         self._app = app
         try:
-            self._identity, self._goldens = _load_identity()
+            self._identity, self._goldens, self._runtime = _load_identity()
             _verify_runtime(self._identity)
             self._token = _load_token()
             self._verify_timeout_seconds = _load_verify_timeout()
             self._live_verified = False
+            self._verified_core_incarnations: tuple[str, ...] | None = None
             self._verification_lock = asyncio.Lock()
         except Exception:
             # Startup errors must never echo paths, tokens, or manifest content.
@@ -93,28 +100,45 @@ class ServingIdentityMiddleware:
             return
 
         try:
-            await asyncio.wait_for(
+            core_incarnations, live_kv_events = await asyncio.wait_for(
                 self._ensure_live_compatibility(scope),
                 timeout=self._verify_timeout_seconds,
             )
+            frontend_incarnation = _process_incarnation()
         except Exception:
             await _json_response(send, 503, b'{"error":"identity_unavailable"}')
             return
 
         identity = dict(self._identity)
-        identity["incarnation"] = _process_incarnation()
+        engine = dict(identity["engine"])
+        engine["core_process_count"] = len(core_incarnations)
+        engine["kv_events"] = live_kv_events
+        identity["engine"] = engine
+        identity["incarnation"] = {
+            "frontend": frontend_incarnation,
+            "engine_core": list(core_incarnations),
+        }
         body = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
         await _json_response(send, 200, body)
 
-    async def _ensure_live_compatibility(self, scope: dict[str, Any]) -> None:
+    async def _ensure_live_compatibility(
+        self, scope: dict[str, Any]
+    ) -> tuple[tuple[str, ...], dict[str, Any]]:
         if self._live_verified:
             await _verify_live_health(self._app, scope, self._token)
-            return
+            current = _live_engine_runtime(scope, self._runtime["engine"])
+            if current[0] != self._verified_core_incarnations:
+                raise ValueError("engine core incarnation changed")
+            return current
         async with self._verification_lock:
             if self._live_verified:
                 await _verify_live_health(self._app, scope, self._token)
-                return
+                current = _live_engine_runtime(scope, self._runtime["engine"])
+                if current[0] != self._verified_core_incarnations:
+                    raise ValueError("engine core incarnation changed")
+                return current
             await _verify_live_health(self._app, scope, self._token)
+            before = _live_engine_runtime(scope, self._runtime["engine"])
             await _verify_live_model(
                 self._app,
                 scope,
@@ -132,10 +156,17 @@ class ServingIdentityMiddleware:
             # Bracket the frontend-only model/render checks with EngineClient
             # liveness. A core failure during verification must not publish.
             await _verify_live_health(self._app, scope, self._token)
+            after = _live_engine_runtime(scope, self._runtime["engine"])
+            if before != after:
+                raise ValueError("engine core incarnation changed")
+            self._verified_core_incarnations = after[0]
             self._live_verified = True
+            return after
 
 
-def _load_identity() -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+def _load_identity() -> tuple[
+    dict[str, Any], tuple[dict[str, Any], ...], dict[str, Any]
+]:
     path = os.environ["MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_PATH"]
     expected = os.environ["MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SHA256"]
     if _HEX_SHA256.fullmatch(expected) is None:
@@ -191,13 +222,104 @@ def _load_identity() -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
     if not admitted.issubset({golden["name"] for golden in goldens}):
         raise ValueError("missing admitted golden")
     identity = {
-        "schema_version": 1,
+        "schema_version": 2,
         "model": model,
         "engine": engine,
         "tokenizer": tokenizer,
         "renderer": renderer,
     }
-    return identity, goldens
+    runtime = _load_runtime_contract(expected)
+    return identity, goldens, runtime
+
+
+def _load_runtime_contract(compatibility_sha256: str) -> dict[str, Any]:
+    path = os.environ["MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_PATH"]
+    expected = os.environ["MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SHA256"]
+    if _HEX_SHA256.fullmatch(expected) is None:
+        raise ValueError("invalid runtime manifest digest")
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= MAX_MANIFEST_BYTES:
+            raise ValueError("invalid runtime manifest file")
+        raw = bytearray()
+        while len(raw) <= MAX_MANIFEST_BYTES:
+            chunk = os.read(
+                descriptor, min(65536, MAX_MANIFEST_BYTES + 1 - len(raw))
+            )
+            if not chunk:
+                break
+            raw.extend(chunk)
+        if len(raw) != metadata.st_size or len(raw) > MAX_MANIFEST_BYTES:
+            raise ValueError("runtime manifest changed while loading")
+        if not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), expected):
+            raise ValueError("runtime manifest digest mismatch")
+        runtime = json.loads(raw)
+    finally:
+        os.close(descriptor)
+    if not isinstance(runtime, dict) or set(runtime) != {
+        "schema_version",
+        "compatibility_manifest_sha256",
+        "engine",
+    }:
+        raise ValueError("invalid runtime manifest schema")
+    if (
+        runtime.get("schema_version") != 1
+        or runtime.get("compatibility_manifest_sha256") != compatibility_sha256
+    ):
+        raise ValueError("runtime manifest compatibility mismatch")
+    engine = _exact_object(runtime, "engine", {"core_process_count", "kv_events"})
+    count = engine.get("core_process_count")
+    if type(count) is not int or not 0 < count <= MAX_CORE_PROCESSES:
+        raise ValueError("invalid engine core process count")
+    engine["kv_events"] = _kv_events_contract(engine.get("kv_events"))
+    return {
+        "schema_version": 1,
+        "compatibility_manifest_sha256": compatibility_sha256,
+        "engine": engine,
+    }
+
+
+def _kv_events_contract(value: Any) -> dict[str, Any]:
+    keys = {
+        "enable_kv_cache_events",
+        "publisher",
+        "endpoint",
+        "replay_endpoint",
+        "buffer_steps",
+        "hwm",
+        "max_queue_size",
+        "topic",
+    }
+    if not isinstance(value, dict) or set(value) != keys:
+        raise ValueError("invalid KV event schema")
+    result = dict(value)
+    if result["enable_kv_cache_events"] is not True or result["publisher"] != "zmq":
+        raise ValueError("invalid KV event publisher")
+    ports = [_wildcard_tcp_port(result[name]) for name in ("endpoint", "replay_endpoint")]
+    if ports[0] == ports[1]:
+        raise ValueError("duplicate KV event endpoint")
+    for name in ("buffer_steps", "hwm", "max_queue_size"):
+        if type(result[name]) is not int or not 0 < result[name] <= 1_000_000_000:
+            raise ValueError("invalid KV event capacity")
+    if not isinstance(result["topic"], str) or len(result["topic"].encode()) > 4096:
+        raise ValueError("invalid KV event topic")
+    return result
+
+
+def _wildcard_tcp_port(endpoint: Any) -> int:
+    if not isinstance(endpoint, str) or not endpoint.startswith("tcp://*:"):
+        raise ValueError("invalid KV event endpoint")
+    raw = endpoint.removeprefix("tcp://*:")
+    if not raw.isascii() or not raw.isdigit():
+        raise ValueError("invalid KV event endpoint")
+    port = int(raw)
+    if not 0 < port <= 65535:
+        raise ValueError("invalid KV event endpoint")
+    return port
 
 
 def _exact_object(manifest: dict[str, Any], name: str, keys: set[str]) -> dict[str, Any]:
@@ -416,6 +538,181 @@ def _token_ids_sha256(tokens: list[int]) -> str:
     return digest.hexdigest()
 
 
+def _live_engine_runtime(
+    scope: dict[str, Any], expected_engine: dict[str, Any]
+) -> tuple[tuple[str, ...], dict[str, Any]]:
+    app = scope.get("app")
+    state = getattr(app, "state", None)
+    client = getattr(state, "engine_client", None)
+    if not _exact_type(client, "vllm.v1.engine.async_llm", "AsyncLLM"):
+        raise ValueError("unexpected serving engine client")
+    core = getattr(client, "engine_core", None)
+    if not _exact_type(core, "vllm.v1.engine.core_client", "AsyncMPClient"):
+        raise ValueError("unexpected engine core client")
+    resources = getattr(core, "resources", None)
+    manager = getattr(resources, "engine_manager", None)
+    if not _exact_type(
+        manager, "vllm.v1.engine.utils", "CoreEngineProcManager"
+    ):
+        raise ValueError("unexpected engine core manager")
+    processes = getattr(manager, "processes", None)
+    if (
+        type(processes) is not list
+        or len(processes) != expected_engine["core_process_count"]
+    ):
+        raise ValueError("engine core process count mismatch")
+
+    config = getattr(getattr(core, "vllm_config", None), "kv_events_config", None)
+    if not _exact_type(config, "vllm.config.kv_events", "KVEventsConfig"):
+        raise ValueError("unexpected KV event config")
+    live_config = {
+        name: getattr(config, name, None)
+        for name in expected_engine["kv_events"]
+    }
+    if live_config != expected_engine["kv_events"]:
+        raise ValueError("live KV event config mismatch")
+    expected_ports = {
+        _wildcard_tcp_port(live_config["endpoint"]),
+        _wildcard_tcp_port(live_config["replay_endpoint"]),
+    }
+
+    incarnations = tuple(
+        sorted(
+            _inspect_core_process(process, expected_ports)
+            for process in processes
+        )
+    )
+    if len(set(incarnations)) != len(incarnations):
+        raise ValueError("duplicate engine core incarnation")
+    return incarnations, live_config
+
+
+def _exact_type(value: Any, module: str, name: str) -> bool:
+    kind = type(value)
+    return kind.__module__ == module and kind.__name__ == name
+
+
+def _inspect_core_process(process: Any, expected_ports: set[int]) -> str:
+    if not isinstance(process, BaseProcess):
+        raise ValueError("invalid engine core process")
+    pid = process.pid
+    if (
+        type(pid) is not int
+        or pid <= 1
+        or pid == os.getpid()
+        or process.exitcode is not None
+        or not process.is_alive()
+    ):
+        raise ValueError("engine core process unavailable")
+    before = _proc_stat(pid)
+    if before[0] in {"Z", "X"} or before[1] != os.getpid():
+        raise ValueError("engine core process unavailable")
+    _verify_owned_listeners(pid, expected_ports)
+    after = _proc_stat(pid)
+    if (
+        after[0] in {"Z", "X"}
+        or after[1:] != before[1:]
+        or process.exitcode is not None
+        or not process.is_alive()
+    ):
+        raise ValueError("engine core process changed")
+    return f"{_boot_id()}:{pid}:{after[2]}"
+
+
+def _proc_stat(pid: int) -> tuple[str, int, int]:
+    raw = _read_small(f"/proc/{pid}/stat", 4096)
+    end = raw.rfind(")")
+    if end < 0:
+        raise ValueError("invalid process stat")
+    fields = raw[end + 2 :].split()
+    if len(fields) <= 19 or len(fields[0]) != 1:
+        raise ValueError("invalid process stat")
+    try:
+        parent_pid = int(fields[1])
+        start_ticks = int(fields[19])
+    except ValueError as error:
+        raise ValueError("invalid process stat") from error
+    if parent_pid <= 0 or start_ticks <= 0:
+        raise ValueError("invalid process stat")
+    return fields[0], parent_pid, start_ticks
+
+
+def _verify_owned_listeners(pid: int, expected_ports: set[int]) -> None:
+    frontend_net = os.stat("/proc/self/ns/net")
+    core_net = os.stat(f"/proc/{pid}/ns/net")
+    if (frontend_net.st_dev, frontend_net.st_ino) != (core_net.st_dev, core_net.st_ino):
+        raise ValueError("engine core network namespace mismatch")
+    entries = os.listdir(f"/proc/{pid}/fd")
+    if len(entries) > MAX_CORE_FDS:
+        raise ValueError("engine core file descriptor set is oversized")
+    socket_inodes: set[str] = set()
+    for entry in entries:
+        if not entry.isdigit():
+            raise ValueError("invalid engine core file descriptor")
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{entry}")
+        except FileNotFoundError:
+            # The descriptor used to enumerate this proc directory, or another
+            # unrelated descriptor, may close between listdir and readlink.
+            # Missing publisher descriptors still fail the exact ownership
+            # check below.
+            continue
+        if target.startswith("socket:[") and target.endswith("]"):
+            inode = target[8:-1]
+            if not inode.isdigit():
+                raise ValueError("invalid engine core socket")
+            socket_inodes.add(inode)
+    if len(socket_inodes) > MAX_CORE_FDS:
+        raise ValueError("engine core socket set is oversized")
+
+    matches = {port: set() for port in expected_ports}
+    for family, address_width in (("tcp", 8), ("tcp6", 32)):
+        raw = _read_bounded(f"/proc/{pid}/net/{family}", MAX_PROC_NET_BYTES)
+        lines = raw.decode("ascii").splitlines()
+        if not lines or len(lines) > MAX_CORE_FDS + 1:
+            raise ValueError("invalid process network table")
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) < 10:
+                raise ValueError("invalid process network table")
+            local = fields[1].split(":")
+            if len(local) != 2 or fields[3] != "0A":
+                continue
+            address, raw_port = local
+            try:
+                port = int(raw_port, 16)
+            except ValueError as error:
+                raise ValueError("invalid process network table") from error
+            inode = fields[9]
+            if (
+                port in matches
+                and len(address) == address_width
+                and set(address) == {"0"}
+                and inode in socket_inodes
+            ):
+                matches[port].add(inode)
+    if any(len(inodes) != 1 for inodes in matches.values()) or len(
+        set().union(*matches.values())
+    ) != len(matches):
+        raise ValueError("KV event listener ownership mismatch")
+
+
+def _read_bounded(path: str, limit: int) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        raw = bytearray()
+        while len(raw) <= limit:
+            chunk = os.read(descriptor, min(65536, limit + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        if not raw or len(raw) > limit:
+            raise ValueError("runtime evidence is oversized")
+        return bytes(raw)
+    finally:
+        os.close(descriptor)
+
+
 async def _internal_request(
     app: ASGIApp,
     base_scope: dict[str, Any],
@@ -534,7 +831,7 @@ def _authorized(scope: dict[str, Any], expected: bytes) -> bool:
 
 
 def _process_incarnation() -> str:
-    boot_id = _read_small("/proc/sys/kernel/random/boot_id", 128).strip()
+    boot_id = _boot_id()
     process_stat = _read_small("/proc/self/stat", 4096)
     end = process_stat.rfind(")")
     if end < 0:
@@ -543,12 +840,19 @@ def _process_incarnation() -> str:
     if len(fields) <= 19:
         raise RuntimeError("process identity unavailable")
     start_ticks = fields[19]
-    if _INCARNATION_COMPONENT.fullmatch(boot_id) is None or not start_ticks.isdigit() or start_ticks == "0":
+    if not start_ticks.isdigit() or start_ticks == "0":
         raise RuntimeError("process identity unavailable")
-    incarnation = f"{boot_id}:{start_ticks}"
+    incarnation = f"{boot_id}:{os.getpid()}:{start_ticks}"
     if len(incarnation) > 256:
         raise RuntimeError("process identity unavailable")
     return incarnation
+
+
+def _boot_id() -> str:
+    boot_id = _read_small("/proc/sys/kernel/random/boot_id", 128).strip()
+    if _INCARNATION_COMPONENT.fullmatch(boot_id) is None:
+        raise RuntimeError("process identity unavailable")
+    return boot_id
 
 
 def _read_small(path: str, limit: int) -> str:

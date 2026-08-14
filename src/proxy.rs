@@ -1335,8 +1335,8 @@ mod tests {
     use super::*;
     use crate::{
         compat::{
-            CompatibilityManifest, EngineIdentity, ModelIdentity, RendererIdentity,
-            TokenizerIdentity,
+            CompatibilityManifest, EngineIdentity, KvEventsIdentity, ModelIdentity,
+            RendererIdentity, ServingRuntimeEngine, ServingRuntimeManifest, TokenizerIdentity,
         },
         exact_index::{ExactIndexLimits, FencedExactKvInventory},
         kv_wire::{BlockStored, ExternalBlockHash, KvEvent, KvEventBatch},
@@ -1433,6 +1433,7 @@ mod tests {
             client.clone(),
             Arc::clone(&metrics),
             manifest,
+            test_serving_runtime_manifest(),
         );
         let journal = RouteJournal::new(config.route_journal);
         let session_affinity = SessionAffinity::new(&config, Arc::clone(&metrics));
@@ -1469,6 +1470,54 @@ mod tests {
             admitted_request_classes: vec!["plain".to_owned()],
             goldens: Vec::new(),
         }
+    }
+
+    fn test_serving_runtime_manifest() -> ServingRuntimeManifest {
+        ServingRuntimeManifest {
+            schema_version: 1,
+            compatibility_manifest_sha256: "c".repeat(64),
+            engine: ServingRuntimeEngine {
+                core_process_count: 1,
+                kv_events: KvEventsIdentity {
+                    enable_kv_cache_events: true,
+                    publisher: "zmq".to_owned(),
+                    endpoint: "tcp://*:5557".to_owned(),
+                    replay_endpoint: "tcp://*:5558".to_owned(),
+                    buffer_steps: 10_000,
+                    hwm: 100_000,
+                    max_queue_size: 100_000,
+                    topic: String::new(),
+                },
+            },
+        }
+    }
+
+    fn test_serving_identity(digest: &str) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 2,
+            "incarnation": {
+                "frontend": "boot-1:1:10",
+                "engine_core": ["boot-1:2:20"],
+            },
+            "model": {"id": "model", "root": "root", "max_model_len": 4096},
+            "engine": {
+                "version": "v1",
+                "image_digest": format!("sha256:{digest}"),
+                "core_process_count": 1,
+                "kv_events": {
+                    "enable_kv_cache_events": true,
+                    "publisher": "zmq",
+                    "endpoint": "tcp://*:5557",
+                    "replay_endpoint": "tcp://*:5558",
+                    "buffer_steps": 10000,
+                    "hwm": 100_000,
+                    "max_queue_size": 100_000,
+                    "topic": "",
+                },
+            },
+            "tokenizer": {"sha256": "b".repeat(64)},
+            "renderer": {"profile": "profile"},
+        })
     }
 
     fn trusted_inventory(tokens: &[u32]) -> SharedFencedInventory {
@@ -2086,17 +2135,7 @@ mod tests {
                             } else {
                                 "c".repeat(64)
                             };
-                            Response::new(Body::from(
-                                serde_json::json!({
-                                    "schema_version": 1,
-                                    "incarnation": "boot-1:process-1",
-                                    "model": {"id": "model", "root": "root", "max_model_len": 4096},
-                                    "engine": {"version": "v1", "image_digest": format!("sha256:{digest}")},
-                                    "tokenizer": {"sha256": "b".repeat(64)},
-                                    "renderer": {"profile": "profile"},
-                                })
-                                .to_string(),
-                            ))
+                            Response::new(Body::from(test_serving_identity(&digest).to_string()))
                         }
                         _ => {
                             inference_requests.fetch_add(1, Ordering::Relaxed);
@@ -2168,15 +2207,7 @@ mod tests {
                 )),
                 "/version" => Response::new(Body::from(r#"{"version":"v1"}"#)),
                 "/v1/mini-dynamo/identity" => Response::new(Body::from(
-                    serde_json::json!({
-                        "schema_version": 1,
-                        "incarnation": "boot-1:process-1",
-                        "model": {"id": "model", "root": "root", "max_model_len": 4096},
-                        "engine": {"version": "v1", "image_digest": format!("sha256:{}", "a".repeat(64))},
-                        "tokenizer": {"sha256": "b".repeat(64)},
-                        "renderer": {"profile": "profile"},
-                    })
-                    .to_string(),
+                    test_serving_identity(&"a".repeat(64)).to_string(),
                 )),
                 _ => Response::new(Body::empty()),
             }
@@ -2241,17 +2272,7 @@ mod tests {
                             } else {
                                 "c".repeat(64)
                             };
-                            Response::new(Body::from(
-                                serde_json::json!({
-                                    "schema_version": 1,
-                                    "incarnation": "boot-1:process-1",
-                                    "model": {"id": "model", "root": "root", "max_model_len": 4096},
-                                    "engine": {"version": "v1", "image_digest": format!("sha256:{digest}")},
-                                    "tokenizer": {"sha256": "b".repeat(64)},
-                                    "renderer": {"profile": "profile"},
-                                })
-                                .to_string(),
-                            ))
+                            Response::new(Body::from(test_serving_identity(&digest).to_string()))
                         }
                         _ => Response::new(Body::empty()),
                     }
@@ -2284,17 +2305,7 @@ mod tests {
                         } else {
                             "c".repeat(64)
                         };
-                        Response::new(Body::from(
-                            serde_json::json!({
-                                "schema_version": 1,
-                                "incarnation": "boot-1:process-1",
-                                "model": {"id": "model", "root": "root", "max_model_len": 4096},
-                                "engine": {"version": "v1", "image_digest": format!("sha256:{digest}")},
-                                "tokenizer": {"sha256": "b".repeat(64)},
-                                "renderer": {"profile": "profile"},
-                            })
-                            .to_string(),
-                        ))
+                        Response::new(Body::from(test_serving_identity(&digest).to_string()))
                     }
                     _ => Response::new(Body::empty()),
                 }
@@ -2394,15 +2405,7 @@ mod tests {
                         calls.fetch_add(1, Ordering::Relaxed);
                         permits.acquire().await.unwrap().forget();
                         Response::new(Body::from(
-                            serde_json::json!({
-                                "schema_version": 1,
-                                "incarnation": "boot-1:process-1",
-                                "model": {"id": "model", "root": "root", "max_model_len": 4096},
-                                "engine": {"version": "v1", "image_digest": format!("sha256:{}", "a".repeat(64))},
-                                "tokenizer": {"sha256": "b".repeat(64)},
-                                "renderer": {"profile": "profile"},
-                            })
-                            .to_string(),
+                            test_serving_identity(&"a".repeat(64)).to_string(),
                         ))
                     }
                     _ => Response::new(Body::empty()),

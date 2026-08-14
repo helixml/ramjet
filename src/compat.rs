@@ -7,7 +7,7 @@
 use std::{collections::HashSet, path::Path};
 
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -15,6 +15,7 @@ const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 const MAX_GOLDENS: usize = 64;
 const MAX_ADMITTED_CLASSES: usize = 32;
 const MAX_INCARNATION_BYTES: usize = 256;
+const MAX_KV_EVENT_CAPACITY: usize = 1_000_000_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +42,34 @@ pub struct ModelIdentity {
 pub struct EngineIdentity {
     pub version: String,
     pub image_digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KvEventsIdentity {
+    pub enable_kv_cache_events: bool,
+    pub publisher: String,
+    pub endpoint: String,
+    pub replay_endpoint: String,
+    pub buffer_steps: usize,
+    pub hwm: usize,
+    pub max_queue_size: usize,
+    pub topic: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServingRuntimeManifest {
+    pub schema_version: u32,
+    pub compatibility_manifest_sha256: String,
+    pub engine: ServingRuntimeEngine,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServingRuntimeEngine {
+    pub core_process_count: usize,
+    pub kv_events: KvEventsIdentity,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,9 +111,12 @@ pub enum ServingIdentityOutcome {
     Match,
     Decode,
     SchemaMismatch,
-    IncarnationInvalid,
+    FrontendIncarnationInvalid,
+    CoreIncarnationInvalid,
+    CoreProcessMismatch,
     ModelMismatch,
     EngineMismatch,
+    KvEventsMismatch,
     TokenizerMismatch,
     RendererMismatch,
 }
@@ -96,9 +128,12 @@ impl ServingIdentityOutcome {
             Self::Match => "match",
             Self::Decode => "decode",
             Self::SchemaMismatch => "schema_mismatch",
-            Self::IncarnationInvalid => "incarnation_invalid",
+            Self::FrontendIncarnationInvalid => "frontend_incarnation_invalid",
+            Self::CoreIncarnationInvalid => "core_incarnation_invalid",
+            Self::CoreProcessMismatch => "core_process_mismatch",
             Self::ModelMismatch => "model_mismatch",
             Self::EngineMismatch => "engine_mismatch",
+            Self::KvEventsMismatch => "kv_events_mismatch",
             Self::TokenizerMismatch => "tokenizer_mismatch",
             Self::RendererMismatch => "renderer_mismatch",
         }
@@ -142,11 +177,27 @@ struct VersionResponse {
 #[serde(deny_unknown_fields)]
 struct ServingIdentityResponse {
     schema_version: u32,
-    incarnation: String,
+    incarnation: ServingIncarnation,
     model: ModelIdentity,
-    engine: EngineIdentity,
+    engine: ServingEngineIdentity,
     tokenizer: TokenizerIdentity,
     renderer: RendererIdentity,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServingEngineIdentity {
+    version: String,
+    image_digest: String,
+    core_process_count: usize,
+    kv_events: KvEventsIdentity,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServingIncarnation {
+    frontend: String,
+    engine_core: Vec<String>,
 }
 
 impl CompatibilityManifest {
@@ -291,20 +342,30 @@ impl CompatibilityManifest {
     /// and a process incarnation in one bounded JSON document. The opaque
     /// incarnation is validated but never logged, labeled, or retained.
     #[must_use]
-    pub fn serving_identity_outcome(&self, body: &[u8]) -> ServingIdentityOutcome {
+    pub fn serving_identity_outcome(
+        &self,
+        runtime: &ServingRuntimeManifest,
+        body: &[u8],
+    ) -> ServingIdentityOutcome {
         let Ok(identity) = serde_json::from_slice::<ServingIdentityResponse>(body) else {
             return ServingIdentityOutcome::Decode;
         };
-        if identity.schema_version != 1 {
+        if identity.schema_version != 2 {
             return ServingIdentityOutcome::SchemaMismatch;
         }
-        if identity.incarnation.is_empty()
-            || identity.incarnation.len() > MAX_INCARNATION_BYTES
-            || !identity.incarnation.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
-            })
-        {
-            return ServingIdentityOutcome::IncarnationInvalid;
+        if !valid_incarnation(&identity.incarnation.frontend) {
+            return ServingIdentityOutcome::FrontendIncarnationInvalid;
+        }
+        if identity.incarnation.engine_core.len() != runtime.engine.core_process_count {
+            return ServingIdentityOutcome::CoreProcessMismatch;
+        }
+        let mut core_incarnations = HashSet::with_capacity(identity.incarnation.engine_core.len());
+        if identity.incarnation.engine_core.iter().any(|value| {
+            !valid_incarnation(value)
+                || value == &identity.incarnation.frontend
+                || !core_incarnations.insert(value)
+        }) {
+            return ServingIdentityOutcome::CoreIncarnationInvalid;
         }
         if identity.model.id != self.model.id
             || identity.model.root != self.model.root
@@ -317,6 +378,12 @@ impl CompatibilityManifest {
         {
             return ServingIdentityOutcome::EngineMismatch;
         }
+        if identity.engine.core_process_count != runtime.engine.core_process_count {
+            return ServingIdentityOutcome::CoreProcessMismatch;
+        }
+        if identity.engine.kv_events != runtime.engine.kv_events {
+            return ServingIdentityOutcome::KvEventsMismatch;
+        }
         if identity.tokenizer.sha256 != self.tokenizer.sha256 {
             return ServingIdentityOutcome::TokenizerMismatch;
         }
@@ -325,6 +392,89 @@ impl CompatibilityManifest {
         }
         ServingIdentityOutcome::Match
     }
+}
+
+impl ServingRuntimeManifest {
+    /// Load and validate the serving-only runtime contract and its operator pin.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for an unreadable, oversized, unpinned, malformed, or
+    /// compatibility-unlinked document.
+    pub fn load(
+        path: &Path,
+        expected_manifest_sha256: &str,
+        compatibility_manifest_sha256: &str,
+    ) -> anyhow::Result<Self> {
+        let metadata = std::fs::metadata(path)
+            .with_context(|| format!("stat serving runtime manifest {}", path.display()))?;
+        anyhow::ensure!(
+            metadata.len() <= MAX_MANIFEST_BYTES,
+            "serving runtime manifest exceeds 1 MiB"
+        );
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("read serving runtime manifest {}", path.display()))?;
+        anyhow::ensure!(
+            sha256_hex(&bytes) == expected_manifest_sha256,
+            "serving runtime manifest SHA-256 mismatch"
+        );
+        let manifest: Self =
+            serde_json::from_slice(&bytes).context("decode versioned serving runtime manifest")?;
+        manifest.validate(compatibility_manifest_sha256)?;
+        Ok(manifest)
+    }
+
+    fn validate(&self, compatibility_manifest_sha256: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.schema_version == 1,
+            "unsupported serving runtime schema"
+        );
+        anyhow::ensure!(
+            self.compatibility_manifest_sha256 == compatibility_manifest_sha256
+                && valid_sha256(&self.compatibility_manifest_sha256),
+            "serving runtime manifest compatibility link mismatch"
+        );
+        anyhow::ensure!(
+            (1..=64).contains(&self.engine.core_process_count),
+            "serving runtime engine core process count is invalid"
+        );
+        self.engine.kv_events.validate()
+    }
+}
+
+impl KvEventsIdentity {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.enable_kv_cache_events, "KV events are not enabled");
+        anyhow::ensure!(self.publisher == "zmq", "unsupported KV event publisher");
+        for (endpoint, name) in [(&self.endpoint, "live"), (&self.replay_endpoint, "replay")] {
+            anyhow::ensure!(
+                endpoint
+                    .strip_prefix("tcp://*:")
+                    .is_some_and(|port| port.parse::<u16>().is_ok_and(|port| port > 0)),
+                "invalid KV event {name} endpoint"
+            );
+        }
+        anyhow::ensure!(
+            self.endpoint != self.replay_endpoint,
+            "KV event endpoints must be distinct"
+        );
+        anyhow::ensure!(
+            (1..=MAX_KV_EVENT_CAPACITY).contains(&self.buffer_steps)
+                && (1..=MAX_KV_EVENT_CAPACITY).contains(&self.hwm)
+                && (1..=MAX_KV_EVENT_CAPACITY).contains(&self.max_queue_size),
+            "invalid KV event capacity"
+        );
+        anyhow::ensure!(self.topic.len() <= 4096, "KV event topic is oversized");
+        Ok(())
+    }
+}
+
+fn valid_incarnation(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_INCARNATION_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
 fn unique_nonempty(values: &[String], kind: &str) -> anyhow::Result<HashSet<String>> {
@@ -431,20 +581,51 @@ mod tests {
             admitted_request_classes: vec!["plain".to_owned()],
             goldens: Vec::new(),
         };
+        let runtime = ServingRuntimeManifest {
+            schema_version: 1,
+            compatibility_manifest_sha256: "c".repeat(64),
+            engine: ServingRuntimeEngine {
+                core_process_count: 1,
+                kv_events: KvEventsIdentity {
+                    enable_kv_cache_events: true,
+                    publisher: "zmq".to_owned(),
+                    endpoint: "tcp://*:5557".to_owned(),
+                    replay_endpoint: "tcp://*:5558".to_owned(),
+                    buffer_steps: 10_000,
+                    hwm: 100_000,
+                    max_queue_size: 100_000,
+                    topic: String::new(),
+                },
+            },
+        };
         let identity = serde_json::json!({
-            "schema_version": 1,
-            "incarnation": "boot-1234:process-9",
+            "schema_version": 2,
+            "incarnation": {
+                "frontend": "boot-1234:9:100",
+                "engine_core": ["boot-1234:10:101"],
+            },
             "model": {"id": "model", "root": "root", "max_model_len": 4096},
             "engine": {
                 "version": "v1",
                 "image_digest": format!("sha256:{}", "a".repeat(64)),
+                "core_process_count": 1,
+                "kv_events": {
+                    "enable_kv_cache_events": true,
+                    "publisher": "zmq",
+                    "endpoint": "tcp://*:5557",
+                    "replay_endpoint": "tcp://*:5558",
+                    "buffer_steps": 10000,
+                    "hwm": 100_000,
+                    "max_queue_size": 100_000,
+                    "topic": "",
+                },
             },
             "tokenizer": {"sha256": "b".repeat(64)},
             "renderer": {"profile": "profile"},
         });
         let body = serde_json::to_vec(&identity).unwrap();
         assert_eq!(
-            manifest.serving_identity_outcome(&body),
+            manifest.serving_identity_outcome(&runtime, &body),
             ServingIdentityOutcome::Match
         );
 
@@ -452,16 +633,125 @@ mod tests {
         mismatched["engine"]["image_digest"] =
             serde_json::Value::String(format!("sha256:{}", "c".repeat(64)));
         assert_eq!(
-            manifest.serving_identity_outcome(&serde_json::to_vec(&mismatched).unwrap()),
+            manifest.serving_identity_outcome(&runtime, &serde_json::to_vec(&mismatched).unwrap()),
             ServingIdentityOutcome::EngineMismatch
         );
         mismatched["engine"]["image_digest"] =
             serde_json::Value::String(format!("sha256:{}", "a".repeat(64)));
-        mismatched["incarnation"] = serde_json::Value::String("unsafe value".to_owned());
+        mismatched["incarnation"]["engine_core"][0] =
+            serde_json::Value::String("unsafe value".to_owned());
         assert_eq!(
-            manifest.serving_identity_outcome(&serde_json::to_vec(&mismatched).unwrap()),
-            ServingIdentityOutcome::IncarnationInvalid
+            manifest.serving_identity_outcome(&runtime, &serde_json::to_vec(&mismatched).unwrap()),
+            ServingIdentityOutcome::CoreIncarnationInvalid
         );
+        mismatched["incarnation"]["engine_core"][0] =
+            serde_json::Value::String("boot-1234:10:101".to_owned());
+        mismatched["engine"]["kv_events"]["hwm"] = serde_json::json!(99_999);
+        assert_eq!(
+            manifest.serving_identity_outcome(&runtime, &serde_json::to_vec(&mismatched).unwrap()),
+            ServingIdentityOutcome::KvEventsMismatch
+        );
+    }
+
+    #[test]
+    fn serving_identity_rejects_legacy_schema_and_duplicate_cores() {
+        let manifest: CompatibilityManifest =
+            serde_json::from_slice(include_bytes!("../compat/deepseek-v4-r34.json")).unwrap();
+        let runtime: ServingRuntimeManifest = serde_json::from_slice(include_bytes!(
+            "../compat/deepseek-v4-r34-serving-runtime.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            manifest.serving_identity_outcome(&runtime, br#"{"schema_version":1}"#),
+            ServingIdentityOutcome::Decode
+        );
+
+        let mut identity = serde_json::json!({
+            "schema_version": 2,
+            "incarnation": {
+                "frontend": "boot:1:10",
+                "engine_core": ["boot:2:20", "boot:2:20"],
+            },
+            "model": {
+                "id": manifest.model.id,
+                "root": manifest.model.root,
+                "max_model_len": manifest.model.max_model_len,
+            },
+            "engine": {
+                "version": manifest.engine.version,
+                "image_digest": manifest.engine.image_digest,
+                "core_process_count": 2,
+                "kv_events": runtime.engine.kv_events,
+            },
+            "tokenizer": {"sha256": manifest.tokenizer.sha256},
+            "renderer": {"profile": manifest.renderer.profile},
+        });
+        let two_core_runtime = ServingRuntimeManifest {
+            schema_version: 1,
+            compatibility_manifest_sha256: runtime.compatibility_manifest_sha256,
+            engine: ServingRuntimeEngine {
+                core_process_count: 2,
+                kv_events: runtime.engine.kv_events,
+            },
+        };
+        assert_eq!(
+            manifest.serving_identity_outcome(
+                &two_core_runtime,
+                &serde_json::to_vec(&identity).unwrap()
+            ),
+            ServingIdentityOutcome::CoreIncarnationInvalid
+        );
+        identity["schema_version"] = serde_json::json!(1);
+        assert_eq!(
+            manifest.serving_identity_outcome(
+                &two_core_runtime,
+                &serde_json::to_vec(&identity).unwrap()
+            ),
+            ServingIdentityOutcome::SchemaMismatch
+        );
+    }
+
+    #[test]
+    fn serving_runtime_manifest_rejects_malformed_or_divergent_authority() {
+        let baseline: Value = serde_json::from_slice(include_bytes!(
+            "../compat/deepseek-v4-r34-serving-runtime.json"
+        ))
+        .unwrap();
+        let compatibility_sha = "4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa";
+        let mut cases = Vec::new();
+        for (pointer, value) in [
+            ("/schema_version", serde_json::json!(2)),
+            ("/engine/core_process_count", serde_json::json!(0)),
+            ("/engine/kv_events/publisher", serde_json::json!("null")),
+            (
+                "/engine/kv_events/endpoint",
+                serde_json::json!("tcp://*:٥٥٥٧"),
+            ),
+            (
+                "/engine/kv_events/replay_endpoint",
+                serde_json::json!("tcp://*:5557"),
+            ),
+            ("/engine/kv_events/buffer_steps", serde_json::json!(0)),
+            (
+                "/engine/kv_events/hwm",
+                serde_json::json!(MAX_KV_EVENT_CAPACITY + 1),
+            ),
+        ] {
+            let mut candidate = baseline.clone();
+            *candidate.pointer_mut(pointer).unwrap() = value;
+            cases.push(candidate);
+        }
+        let mut unknown = baseline;
+        unknown["engine"]["kv_events"]["unknown"] = serde_json::json!(true);
+        cases.push(unknown);
+
+        for candidate in cases {
+            let rejected = serde_json::from_value::<ServingRuntimeManifest>(candidate)
+                .map_or(true, |manifest| {
+                    manifest.validate(compatibility_sha).is_err()
+                });
+            assert!(rejected);
+        }
     }
 
     #[test]
@@ -476,5 +766,30 @@ mod tests {
             .unwrap();
         assert_eq!(manifest.goldens.len(), 10);
         assert_eq!(manifest.admitted_request_classes.len(), 9);
+
+        let runtime_path = Path::new("compat/deepseek-v4-r34-serving-runtime.json");
+        let runtime = ServingRuntimeManifest::load(
+            runtime_path,
+            "a8937e6a5801fef6df3df58d341950d65b515896212c30ce6695c90df17f65a4",
+            "4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa",
+        )
+        .unwrap();
+        assert_eq!(runtime.engine.core_process_count, 1);
+        assert!(
+            ServingRuntimeManifest::load(
+                runtime_path,
+                &"0".repeat(64),
+                "4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa",
+            )
+            .is_err()
+        );
+        assert!(
+            ServingRuntimeManifest::load(
+                runtime_path,
+                "a8937e6a5801fef6df3df58d341950d65b515896212c30ce6695c90df17f65a4",
+                &"f".repeat(64),
+            )
+            .is_err()
+        );
     }
 }
