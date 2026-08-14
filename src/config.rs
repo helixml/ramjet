@@ -11,6 +11,11 @@ const MAX_SNAPSHOT_ROUTE_SOCKET_PATH_BYTES: usize = 64;
 const MAX_SNAPSHOT_ROUTE_PATH_BYTES: usize = 4_096;
 const MAX_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS: usize = 15 * 60 * 1_000;
 const MAX_SNAPSHOT_ROUTE_RECONNECT_MS: usize = 60_000;
+const MAX_SHADOW_SOAK_SOURCES: usize = 256;
+const MAX_SHADOW_SOAK_COMPARISONS: usize = 1_000_000;
+const MAX_SHADOW_SOAK_ATTEMPTS: usize = 2_000_000;
+const MAX_SHADOW_SOAK_TOKEN_BYTES: usize = 256 << 20;
+const MAX_SHADOW_SOAK_TIMEOUT_MS: usize = 15 * 60 * 1_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -45,6 +50,12 @@ pub struct Config {
     pub exact_route_max_load_delta: usize,
     pub exact_route_canary_bps: usize,
     pub exact_route_canary_key: Option<SecretString>,
+    pub shadow_soak_mode: ShadowSoakMode,
+    pub shadow_soak_source_target: usize,
+    pub shadow_soak_comparison_target: usize,
+    pub shadow_soak_attempt_limit: usize,
+    pub shadow_soak_max_token_bytes: usize,
+    pub shadow_soak_timeout_ms: usize,
     pub kv_event_mode: KvEventMode,
     pub kv_event_sources: Vec<KvEventSourceConfig>,
     pub kv_event_replay_limit: usize,
@@ -84,6 +95,12 @@ pub enum ExactRouteMode {
     Off,
     Shadow,
     Placement,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShadowSoakMode {
+    Off,
+    Capture,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,6 +189,15 @@ struct SnapshotRouteSettings {
     reconnect_max_ms: usize,
 }
 
+struct ShadowSoakSettings {
+    mode: ShadowSoakMode,
+    source_target: usize,
+    comparison_target: usize,
+    attempt_limit: usize,
+    max_token_bytes: usize,
+    timeout_ms: usize,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct SecretString(String);
 
@@ -241,6 +267,7 @@ impl Config {
         if upstreams.is_empty() {
             return Err(ConfigError::NoUpstreams);
         }
+        let upstream_token = get("DS4_UPSTREAM_TOKEN").filter(|value| !value.is_empty());
 
         let route_alpha = parse(
             &mut get,
@@ -280,10 +307,17 @@ impl Config {
                 "DS4_EXACT_ROUTE_MODE=shadow",
             ));
         }
+        let shadow_soak = shadow_soak_settings(
+            &mut get,
+            &tokenizer,
+            &exact_route,
+            &snapshot_route,
+            upstream_token.is_some(),
+        )?;
 
         Ok(Self {
             upstreams,
-            upstream_token: get("DS4_UPSTREAM_TOKEN").filter(|value| !value.is_empty()),
+            upstream_token,
             max_tokens_strip: parse(&mut get, "DS4_MAX_TOKENS_STRIP", 100_000, "an integer")?,
             advertise_ctx_margin: parse(
                 &mut get,
@@ -318,6 +352,12 @@ impl Config {
             exact_route_max_load_delta: exact_route.max_load_delta,
             exact_route_canary_bps: exact_route.canary_bps,
             exact_route_canary_key: exact_route.canary_key,
+            shadow_soak_mode: shadow_soak.mode,
+            shadow_soak_source_target: shadow_soak.source_target,
+            shadow_soak_comparison_target: shadow_soak.comparison_target,
+            shadow_soak_attempt_limit: shadow_soak.attempt_limit,
+            shadow_soak_max_token_bytes: shadow_soak.max_token_bytes,
+            shadow_soak_timeout_ms: shadow_soak.timeout_ms,
             kv_event_mode: kv_events.mode,
             kv_event_sources: kv_events.sources,
             kv_event_replay_limit: kv_events.replay_limit,
@@ -435,6 +475,90 @@ fn exact_route_settings(
         )?,
         canary_bps,
         canary_key,
+    })
+}
+
+fn shadow_soak_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    tokenizer: &TokenizerSettings,
+    exact_route: &ExactRouteSettings,
+    snapshot_route: &SnapshotRouteSettings,
+    has_upstream_token: bool,
+) -> Result<ShadowSoakSettings, ConfigError> {
+    let mode = match get("DS4_SHADOW_SOAK_MODE").as_deref().unwrap_or("off") {
+        "off" => ShadowSoakMode::Off,
+        "capture" => ShadowSoakMode::Capture,
+        value => {
+            return Err(invalid(
+                "DS4_SHADOW_SOAK_MODE",
+                value.to_owned(),
+                "off or capture",
+            ));
+        }
+    };
+    let source_target = bounded_positive(
+        get,
+        "DS4_SHADOW_SOAK_SOURCE_TARGET",
+        104,
+        MAX_SHADOW_SOAK_SOURCES,
+    )?;
+    let comparison_target = bounded_positive(
+        get,
+        "DS4_SHADOW_SOAK_COMPARISON_TARGET",
+        100_000,
+        MAX_SHADOW_SOAK_COMPARISONS,
+    )?;
+    let attempt_limit = bounded_positive(
+        get,
+        "DS4_SHADOW_SOAK_ATTEMPT_LIMIT",
+        110_000,
+        MAX_SHADOW_SOAK_ATTEMPTS,
+    )?;
+    let max_token_bytes = bounded_positive(
+        get,
+        "DS4_SHADOW_SOAK_MAX_TOKEN_BYTES",
+        96 << 20,
+        MAX_SHADOW_SOAK_TOKEN_BYTES,
+    )?;
+    let timeout_ms = bounded_positive(
+        get,
+        "DS4_SHADOW_SOAK_TIMEOUT_MS",
+        300_000,
+        MAX_SHADOW_SOAK_TIMEOUT_MS,
+    )?;
+    if attempt_limit < comparison_target {
+        return Err(invalid(
+            "DS4_SHADOW_SOAK_ATTEMPT_LIMIT",
+            attempt_limit.to_string(),
+            "at least DS4_SHADOW_SOAK_COMPARISON_TARGET",
+        ));
+    }
+    if mode == ShadowSoakMode::Capture {
+        if tokenizer.mode != TokenizerMode::LocalShadow
+            || exact_route.mode != ExactRouteMode::Shadow
+            || snapshot_route.mode != SnapshotRouteMode::Shadow
+        {
+            return Err(invalid(
+                "DS4_SHADOW_SOAK_MODE",
+                "capture".to_owned(),
+                "capture requires local tokenization and snapshot exact shadow",
+            ));
+        }
+        if !has_upstream_token {
+            return Err(invalid(
+                "DS4_SHADOW_SOAK_MODE",
+                "capture".to_owned(),
+                "capture requires DS4_UPSTREAM_TOKEN authentication",
+            ));
+        }
+    }
+    Ok(ShadowSoakSettings {
+        mode,
+        source_target,
+        comparison_target,
+        attempt_limit,
+        max_token_bytes,
+        timeout_ms,
     })
 }
 
@@ -1022,6 +1146,12 @@ mod tests {
         assert_eq!(config.exact_route_max_load_delta, 0);
         assert_eq!(config.exact_route_canary_bps, 0);
         assert!(config.exact_route_canary_key.is_none());
+        assert_eq!(config.shadow_soak_mode, ShadowSoakMode::Off);
+        assert_eq!(config.shadow_soak_source_target, 104);
+        assert_eq!(config.shadow_soak_comparison_target, 100_000);
+        assert_eq!(config.shadow_soak_attempt_limit, 110_000);
+        assert_eq!(config.shadow_soak_max_token_bytes, 96 << 20);
+        assert_eq!(config.shadow_soak_timeout_ms, 300_000);
         assert_eq!(config.kv_event_mode, KvEventMode::Off);
         assert!(config.kv_event_sources.is_empty());
         assert_eq!(config.kv_event_replay_limit, 1_024);
@@ -1168,6 +1298,36 @@ mod tests {
         for protected in ["a.sock", "a-session", "a-digest", "a-attest", "12001"] {
             assert!(!debug.contains(protected));
         }
+
+        values.insert("DS4_SHADOW_SOAK_MODE", "capture");
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_SHADOW_SOAK_MODE",
+                ..
+            })
+        ));
+        values.insert("DS4_UPSTREAM_TOKEN", "private-token");
+        values.insert("DS4_SHADOW_SOAK_SOURCE_TARGET", "104");
+        values.insert("DS4_SHADOW_SOAK_COMPARISON_TARGET", "100000");
+        values.insert("DS4_SHADOW_SOAK_ATTEMPT_LIMIT", "100001");
+        values.insert("DS4_SHADOW_SOAK_MAX_TOKEN_BYTES", "100663296");
+        let soak = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(soak.shadow_soak_mode, ShadowSoakMode::Capture);
+        assert_eq!(soak.shadow_soak_source_target, 104);
+        assert_eq!(soak.shadow_soak_comparison_target, 100_000);
+        assert_eq!(soak.shadow_soak_attempt_limit, 100_001);
+        assert_eq!(soak.shadow_soak_max_token_bytes, 96 << 20);
+        assert_eq!(soak.shadow_soak_timeout_ms, 300_000);
+        values.insert("DS4_SHADOW_SOAK_ATTEMPT_LIMIT", "99999");
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_SHADOW_SOAK_ATTEMPT_LIMIT",
+                ..
+            })
+        ));
+        values.insert("DS4_SHADOW_SOAK_ATTEMPT_LIMIT", "100001");
 
         values.insert("DS4_KV_EVENT_MODE", "shadow");
         values.insert("DS4_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:1,tcp://b:1");

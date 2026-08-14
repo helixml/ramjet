@@ -24,6 +24,7 @@ pub mod metrics;
 pub mod prepare;
 pub mod proxy;
 pub mod router;
+pub mod shadow_soak;
 pub mod shims;
 pub mod snapshot_actor;
 pub mod snapshot_bootstrap;

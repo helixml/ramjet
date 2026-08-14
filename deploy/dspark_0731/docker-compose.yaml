@@ -69,6 +69,15 @@ services:
       # requires a secret in the uncommitted node .env and one X-Session-ID.
       DS4_EXACT_ROUTE_CANARY_BPS: ${DS4_EXACT_ROUTE_CANARY_BPS:-0}
       DS4_EXACT_ROUTE_CANARY_KEY: ${DS4_EXACT_ROUTE_CANARY_KEY:-}
+      # One-shot served-request qualification. Marked capture requires the
+      # authenticated snapshot-shadow overlay; the later comparison loop is
+      # in-memory and does not dispatch additional inference.
+      DS4_SHADOW_SOAK_MODE: ${DS4_SHADOW_SOAK_MODE:-off}
+      DS4_SHADOW_SOAK_SOURCE_TARGET: ${DS4_SHADOW_SOAK_SOURCE_TARGET:-104}
+      DS4_SHADOW_SOAK_COMPARISON_TARGET: ${DS4_SHADOW_SOAK_COMPARISON_TARGET:-100000}
+      DS4_SHADOW_SOAK_ATTEMPT_LIMIT: ${DS4_SHADOW_SOAK_ATTEMPT_LIMIT:-110000}
+      DS4_SHADOW_SOAK_MAX_TOKEN_BYTES: ${DS4_SHADOW_SOAK_MAX_TOKEN_BYTES:-100663296}
+      DS4_SHADOW_SOAK_TIMEOUT_MS: ${DS4_SHADOW_SOAK_TIMEOUT_MS:-300000}
       # Native KV inventory remains observation-only. Shadow mode and the
       # matching per-engine r34 publishers are now the qualified defaults.
       DS4_KV_EVENT_MODE: ${DS4_KV_EVENT_MODE:-shadow}

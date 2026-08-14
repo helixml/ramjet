@@ -138,7 +138,7 @@ impl Router {
 
     pub fn route(&self, body: &[u8]) -> Decision {
         let fingerprints = self.fingerprints(body);
-        self.route_fingerprints(body.len(), &fingerprints)
+        self.route_fingerprints(body.len(), &fingerprints, true)
     }
 
     /// Prepares fingerprints once and returns them with the decision so a
@@ -147,7 +147,7 @@ impl Router {
     #[must_use]
     pub fn route_with_fingerprints(&self, body: &[u8]) -> (Decision, Vec<u64>) {
         let fingerprints = self.fingerprints(body);
-        let decision = self.route_fingerprints(body.len(), &fingerprints);
+        let decision = self.route_fingerprints(body.len(), &fingerprints, true);
         (decision, fingerprints)
     }
 
@@ -163,13 +163,21 @@ impl Router {
     }
 
     pub(crate) fn route_prepared(&self, body_bytes: usize, fingerprints: &[u64]) -> Decision {
-        self.route_fingerprints(body_bytes, fingerprints)
+        self.route_fingerprints(body_bytes, fingerprints, true)
     }
 
-    fn route_fingerprints(&self, body_bytes: usize, fingerprints: &[u64]) -> Decision {
+    fn route_fingerprints(
+        &self,
+        body_bytes: usize,
+        fingerprints: &[u64],
+        advance_rotation: bool,
+    ) -> Decision {
         let mut inner = self.inner.lock();
-        inner.rr = inner.rr.wrapping_add(1);
-        let rotation = inner.rr % inner.states.len();
+        let next_rotation = inner.rr.wrapping_add(1);
+        if advance_rotation {
+            inner.rr = next_rotation;
+        }
+        let rotation = next_rotation % inner.states.len();
         let mut scores = inner
             .states
             .iter()

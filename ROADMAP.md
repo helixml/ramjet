@@ -842,6 +842,16 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   zero trust/lookup/attestation failures and byte-identical decisions, and
   report the unique source count prominently. This is a revision/concurrency
   qualification, not 100,000 independent workload or performance samples.
+  r105 implemented that shape, but its first node06 capture exposed an
+  undifferentiated pre-dispatch 503 path and then lost host connectivity before
+  completion; it is rejected evidence. r106 signs only the two safe temporary
+  tokenizer/attestation admissions, never retries generic/upstream/health 503s,
+  uses one bounded logical-request deadline, and requires client retry reasons
+  to equal LB source-attempt counters. Its detached gate owns the common lock,
+  engine/companion identity checks, and exact baseline rollback independently
+  of SSH. The 100K gate remains open until node06 returns, the interrupted
+  trial's rollback and engine identity are verified, and one fresh r106 journal
+  passes end to end.
 - ✅ **True TTFT instrumentation.** rc6's journal and Prometheus histogram
   time the first SSE response byte, which may be a role-only chunk. Journal v3
   code now records both first byte and first generated token/tool-call delta;

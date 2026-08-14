@@ -1,10 +1,15 @@
+import email.message
+import io
 import unittest
+import urllib.error
 from unittest import mock
 
 from cachebench import (
     aggregate_engine_delta,
     cache_outcome,
     execute_waves,
+    execute_request,
+    execute_with_retries,
     fetch_lb_metrics,
     fetch_replica_inventory,
     latency_by_outcome,
@@ -323,6 +328,81 @@ ds4proxy_exact_route_projected_balance_total{endpoint="chat",outcome="would_bala
         summary = summarize(records, 1, 1, 1, 1, 1.0, lb, None, 0)
         self.assertEqual(summary["live_block_churn_pct"], 25)
         self.assertNotIn("eviction", str(summary).lower())
+
+    def test_capture_retry_is_bounded_and_only_retries_503(self):
+        outcomes = iter(
+            [
+                {
+                    "ok": False,
+                    "error": "HTTP 503",
+                    "retryable": True,
+                    "retry_reason": "tokenizer_unavailable",
+                },
+                {
+                    "ok": False,
+                    "error": "HTTP 503",
+                    "retryable": True,
+                    "retry_reason": "attestation_changed",
+                },
+                {"ok": True, "error": None},
+            ]
+        )
+        result = execute_with_retries(lambda _remaining: next(outcomes), 2, 0, 10)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["client_attempts"], 3)
+        self.assertEqual(
+            result["retry_reasons"],
+            {"attestation_changed": 1, "tokenizer_unavailable": 1},
+        )
+        result = execute_with_retries(
+            lambda _remaining: {
+                "ok": False,
+                "error": "HTTP 503",
+                "retryable": False,
+            },
+            10,
+            0,
+            10,
+        )
+        self.assertEqual(result["client_attempts"], 1)
+
+    def test_only_proxy_marked_503_is_retryable(self):
+        def response(headers):
+            error = urllib.error.HTTPError(
+                "http://lb/v1/chat/completions",
+                503,
+                "unavailable",
+                headers,
+                io.BytesIO(b"{}"),
+            )
+            with mock.patch("cachebench.urllib.request.urlopen", side_effect=error):
+                return execute_request(
+                    "http://lb", "model", "token", [], 1, 1
+                )
+
+        ordinary = response(email.message.Message())
+        self.assertFalse(ordinary["retryable"])
+        marked_headers = email.message.Message()
+        marked_headers["X-Mini-Dynamo-Shadow-Soak-Retry"] = "tokenizer_unavailable"
+        marked = response(marked_headers)
+        self.assertTrue(marked["retryable"])
+        self.assertEqual(marked["retry_reason"], "tokenizer_unavailable")
+
+    def test_capture_retry_has_one_absolute_deadline(self):
+        with mock.patch("cachebench.time.monotonic", side_effect=[10, 10.5, 11.5]):
+            result = execute_with_retries(
+                lambda _remaining: {
+                    "ok": False,
+                    "error": "HTTP 503",
+                    "retryable": True,
+                    "retry_reason": "tokenizer_unavailable",
+                },
+                20,
+                0,
+                1,
+            )
+        self.assertEqual(result["client_attempts"], 1)
+        self.assertEqual(result["retry_reasons"], {"tokenizer_unavailable": 1})
 
 
 if __name__ == "__main__":

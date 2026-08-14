@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import os
 import pathlib
 import subprocess
@@ -77,7 +78,12 @@ def fail(message: str) -> None:
 
 
 def render(
-    *, companion: bool, attestation: bool, route_mode: str = "off"
+    *,
+    companion: bool,
+    attestation: bool,
+    route_mode: str = "off",
+    soak_mode: str = "off",
+    lb_image: str | None = None,
 ) -> dict[str, Any]:
     environment = os.environ.copy()
     for suffix, domain in zip(("A", "B"), DOMAINS.values(), strict=True):
@@ -92,6 +98,9 @@ def render(
             }
         )
     environment["DS4_SNAPSHOT_ROUTE_MODE"] = route_mode
+    environment["DS4_SHADOW_SOAK_MODE"] = soak_mode
+    if lb_image is not None:
+        environment["SNAPSHOT_LB_IMAGE"] = lb_image
     command = ["docker", "compose", "-f", str(BASE), "-f", str(OVERLAY)]
     if companion:
         command.extend(["--profile", COMPANION_PROFILE])
@@ -177,11 +186,13 @@ def validate_sandbox(name: str, service: dict[str, Any], *, networked: bool) -> 
             fail(f"{name} has a broad or privileged host mount")
 
 
-def validate_lb(service: dict[str, Any], route_mode: str) -> None:
+def validate_lb(
+    service: dict[str, Any], route_mode: str, soak_mode: str, expected_image: str
+) -> None:
     if service.get("user") != f"{LB_UID}:{SESSION_GID}":
         fail("LB does not use the authenticated snapshot client identity")
     image = str(service.get("image", ""))
-    if image != EXPECTED_LB_IMAGE:
+    if image != expected_image:
         fail("LB image is not the qualified immutable release build")
     environment = service.get("environment", {})
     expected = {
@@ -191,6 +202,12 @@ def validate_lb(service: dict[str, Any], route_mode: str) -> None:
         "DS4_SNAPSHOT_ROUTE_COMPANION_UIDS": "12001,12003",
         "DS4_SNAPSHOT_ROUTE_GROUPS": "0:0,0:0",
         "DS4_SNAPSHOT_ROUTE_SECRET_OWNER_UID": "0",
+        "DS4_SHADOW_SOAK_MODE": soak_mode,
+        "DS4_SHADOW_SOAK_SOURCE_TARGET": "104",
+        "DS4_SHADOW_SOAK_COMPARISON_TARGET": "100000",
+        "DS4_SHADOW_SOAK_ATTEMPT_LIMIT": "110000",
+        "DS4_SHADOW_SOAK_MAX_TOKEN_BYTES": "100663296",
+        "DS4_SHADOW_SOAK_TIMEOUT_MS": "300000",
     }
     for key, value in expected.items():
         if str(environment.get(key)) != value:
@@ -324,6 +341,8 @@ def validate_documents(
     full_document: dict[str, Any],
     *,
     route_mode: str = "off",
+    soak_mode: str = "off",
+    expected_lb_image: str = EXPECTED_LB_IMAGE,
 ) -> None:
     companion_services = companion_document.get("services", {})
     full_services = full_document.get("services", {})
@@ -336,7 +355,16 @@ def validate_documents(
             fail("attestation profile does not contain both provisioners")
     if route_mode not in {"off", "shadow"}:
         fail("snapshot route mode is not off or shadow")
-    validate_lb(companion_services.get("ds4-loadbalancer", {}), route_mode)
+    if soak_mode not in {"off", "capture"}:
+        fail("shadow soak mode is not off or capture")
+    if soak_mode == "capture" and route_mode != "shadow":
+        fail("shadow soak capture is not paired with snapshot shadow")
+    validate_lb(
+        companion_services.get("ds4-loadbalancer", {}),
+        route_mode,
+        soak_mode,
+        expected_lb_image,
+    )
     for engine, domain in DOMAINS.items():
         validate_companion(engine, domain, companion_services[domain["companion"]])
         validate_provisioner(engine, domain, full_services[domain["provisioner"]])
@@ -371,8 +399,48 @@ def validate_documents(
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--shadow-soak-capture",
+        action="store_true",
+        help="validate the exact bounded capture experiment render",
+    )
+    parser.add_argument(
+        "--candidate-lb-image",
+        help="exact local immutable image ID for the bounded capture render",
+    )
+    args = parser.parse_args()
+    if args.candidate_lb_image and not args.shadow_soak_capture:
+        parser.error("--candidate-lb-image requires --shadow-soak-capture")
+    if args.candidate_lb_image and not args.candidate_lb_image.startswith("sha256:"):
+        parser.error("--candidate-lb-image must be an immutable sha256 image ID")
     try:
         validate_source_bind_policy()
+        if args.shadow_soak_capture:
+            capture_companion = render(
+                companion=True,
+                attestation=False,
+                route_mode="shadow",
+                soak_mode="capture",
+                lb_image=args.candidate_lb_image,
+            )
+            capture_full = render(
+                companion=True,
+                attestation=True,
+                route_mode="shadow",
+                soak_mode="capture",
+                lb_image=args.candidate_lb_image,
+            )
+            validate_documents(
+                capture_companion,
+                capture_full,
+                route_mode="shadow",
+                soak_mode="capture",
+                expected_lb_image=args.candidate_lb_image or EXPECTED_LB_IMAGE,
+            )
+            validate_caddy()
+            print("snapshot production compose validation passed: bounded capture profile")
+            return 0
         companion = render(companion=True, attestation=False)
         full = render(companion=True, attestation=True)
         validate_documents(companion, full)
@@ -381,6 +449,24 @@ def main() -> int:
         )
         shadow_full = render(companion=True, attestation=True, route_mode="shadow")
         validate_documents(shadow_companion, shadow_full, route_mode="shadow")
+        capture_companion = render(
+            companion=True,
+            attestation=False,
+            route_mode="shadow",
+            soak_mode="capture",
+        )
+        capture_full = render(
+            companion=True,
+            attestation=True,
+            route_mode="shadow",
+            soak_mode="capture",
+        )
+        validate_documents(
+            capture_companion,
+            capture_full,
+            route_mode="shadow",
+            soak_mode="capture",
+        )
         validate_caddy()
     except ValidationError as exc:
         print(f"snapshot production compose validation failed: {exc}", file=sys.stderr)

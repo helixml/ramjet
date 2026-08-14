@@ -53,6 +53,22 @@ pub struct Metrics {
     pub exact_route_residency_delta: HistogramVec,
     pub exact_route_projected_balance: CounterVec,
     pub exact_route_projected_residency_delta: HistogramVec,
+    pub shadow_soak_enabled: Gauge,
+    pub shadow_soak_phase: GaugeVec,
+    pub shadow_soak_sources: Gauge,
+    pub shadow_soak_source_token_bytes: Gauge,
+    pub shadow_soak_attempts: CounterVec,
+    pub shadow_soak_comparisons: CounterVec,
+    pub shadow_soak_source_comparisons: CounterVec,
+    pub shadow_soak_source_attempts: CounterVec,
+    pub shadow_soak_placement: CounterVec,
+    pub shadow_soak_projected_balance: CounterVec,
+    pub shadow_soak_overlap: HistogramVec,
+    pub shadow_soak_gain: Histogram,
+    pub shadow_soak_source_overlap: HistogramVec,
+    pub shadow_soak_source_gain: Histogram,
+    pub shadow_soak_complete: Gauge,
+    pub shadow_soak_duration: Gauge,
     pub compat_attested: GaugeVec,
     pub compat_attestation_checks: CounterVec,
     pub kv_event_up: GaugeVec,
@@ -393,6 +409,99 @@ impl Metrics {
                 ],
                 &["endpoint"],
             )?,
+            shadow_soak_enabled: Gauge::with_opts(Opts::new(
+                "ds4proxy_shadow_soak_enabled",
+                "Whether the bounded route-only snapshot shadow soak is enabled",
+            ))?,
+            shadow_soak_phase: gauge(
+                "ds4proxy_shadow_soak_phase",
+                "Current bounded soak phase as a one-hot fixed-label gauge",
+                &["phase"],
+            )?,
+            shadow_soak_sources: Gauge::with_opts(Opts::new(
+                "ds4proxy_shadow_soak_sources",
+                "Accepted in-memory source decisions for the bounded soak",
+            ))?,
+            shadow_soak_source_token_bytes: Gauge::with_opts(Opts::new(
+                "ds4proxy_shadow_soak_source_token_bytes",
+                "In-memory exact-token bytes retained by the bounded soak",
+            ))?,
+            shadow_soak_attempts: counter(
+                "ds4proxy_shadow_soak_attempts_total",
+                "Bounded soak attempts by revision-fenced terminal outcome",
+                &["outcome"],
+            )?,
+            shadow_soak_comparisons: counter(
+                "ds4proxy_shadow_soak_comparisons_total",
+                "Revision-stable exact versus approximate soak comparisons",
+                &["outcome"],
+            )?,
+            shadow_soak_source_comparisons: counter(
+                "ds4proxy_shadow_soak_source_comparisons_total",
+                "Contemporaneous exact versus approximate source comparisons",
+                &["outcome"],
+            )?,
+            shadow_soak_source_attempts: counter(
+                "ds4proxy_shadow_soak_source_attempts_total",
+                "Contemporaneous source exact evaluation attempts by terminal outcome",
+                &["outcome"],
+            )?,
+            shadow_soak_placement: counter(
+                "ds4proxy_shadow_soak_placement_total",
+                "Contemporaneous source placement sweep by load delta and outcome",
+                &["max_load_delta", "outcome"],
+            )?,
+            shadow_soak_projected_balance: counter(
+                "ds4proxy_shadow_soak_projected_balance_total",
+                "Contemporaneous source cold-balance sweep by load delta and outcome",
+                &["max_load_delta", "outcome"],
+            )?,
+            shadow_soak_overlap: histogram(
+                "ds4proxy_shadow_soak_overlap_tokens",
+                "Exact overlap observed by the bounded soak",
+                vec![
+                    0.0, 256.0, 1_024.0, 4_096.0, 8_192.0, 16_384.0, 32_768.0, 65_536.0, 98_304.0,
+                    131_072.0, 262_144.0, 393_216.0,
+                ],
+                &["choice"],
+            )?,
+            shadow_soak_gain: Histogram::with_opts(
+                HistogramOpts::new(
+                    "ds4proxy_shadow_soak_gain_tokens",
+                    "Additional exact cached-prefix tokens in bounded soak comparisons",
+                )
+                .buckets(vec![
+                    0.0, 256.0, 1_024.0, 4_096.0, 8_192.0, 16_384.0, 32_768.0, 65_536.0, 98_304.0,
+                    131_072.0, 262_144.0, 393_216.0,
+                ]),
+            )?,
+            shadow_soak_source_overlap: histogram(
+                "ds4proxy_shadow_soak_source_overlap_tokens",
+                "Contemporaneous exact overlap in captured source decisions",
+                vec![
+                    0.0, 256.0, 1_024.0, 4_096.0, 8_192.0, 16_384.0, 32_768.0, 65_536.0, 98_304.0,
+                    131_072.0, 262_144.0, 393_216.0,
+                ],
+                &["choice"],
+            )?,
+            shadow_soak_source_gain: Histogram::with_opts(
+                HistogramOpts::new(
+                    "ds4proxy_shadow_soak_source_gain_tokens",
+                    "Contemporaneous exact cached-prefix gain in source decisions",
+                )
+                .buckets(vec![
+                    0.0, 256.0, 1_024.0, 4_096.0, 8_192.0, 16_384.0, 32_768.0, 65_536.0, 98_304.0,
+                    131_072.0, 262_144.0, 393_216.0,
+                ]),
+            )?,
+            shadow_soak_complete: Gauge::with_opts(Opts::new(
+                "ds4proxy_shadow_soak_complete",
+                "Whether the bounded soak reached its stable comparison target",
+            ))?,
+            shadow_soak_duration: Gauge::with_opts(Opts::new(
+                "ds4proxy_shadow_soak_duration_seconds",
+                "Wall time of the completed or failed bounded soak",
+            ))?,
             compat_attested: gauge(
                 "ds4proxy_compat_attested",
                 "Whether an upstream matches the active exact-route compatibility manifest",
@@ -538,6 +647,90 @@ impl Metrics {
                     .with_label_values(&[endpoint, outcome]);
             }
         }
+        for phase in [
+            "off",
+            "collecting",
+            "ready",
+            "running",
+            "complete",
+            "failed",
+        ] {
+            metrics.shadow_soak_phase.with_label_values(&[phase]);
+        }
+        for outcome in [
+            "stable",
+            "inventory_changed",
+            "inventory_untrusted",
+            "lookup_error",
+            "candidate_mismatch",
+            "attestation_wait",
+            "attestation_changed",
+            "cancelled",
+            "attempt_limit",
+            "timeout",
+            "other",
+        ] {
+            metrics.shadow_soak_attempts.with_label_values(&[outcome]);
+        }
+        for outcome in ["agree", "would_move", "tie", "all_zero"] {
+            metrics
+                .shadow_soak_comparisons
+                .with_label_values(&[outcome]);
+            metrics
+                .shadow_soak_source_comparisons
+                .with_label_values(&[outcome]);
+        }
+        for outcome in [
+            "stable",
+            "tokenizer_unavailable",
+            "inventory_changed",
+            "inventory_untrusted",
+            "lookup_error",
+            "candidate_mismatch",
+            "attestation_changed",
+            "other",
+        ] {
+            metrics
+                .shadow_soak_source_attempts
+                .with_label_values(&[outcome]);
+        }
+        for max_load_delta in ["0", "1", "2", "4"] {
+            for outcome in [
+                "would_move",
+                "kept_agree",
+                "kept_tie",
+                "kept_all_zero",
+                "kept_ambiguous",
+                "kept_gain_gate",
+                "kept_load_gate",
+                "would_balance",
+                "kept_balance_delta_gate",
+                "kept_balance_load_gate",
+                "fallback",
+            ] {
+                metrics
+                    .shadow_soak_placement
+                    .with_label_values(&[max_load_delta, outcome]);
+            }
+            for outcome in [
+                "not_cold",
+                "kept_selected",
+                "would_balance",
+                "kept_delta_gate",
+                "kept_load_gate",
+                "fallback",
+            ] {
+                metrics
+                    .shadow_soak_projected_balance
+                    .with_label_values(&[max_load_delta, outcome]);
+            }
+        }
+        for choice in ["selected", "best"] {
+            metrics.shadow_soak_overlap.with_label_values(&[choice]);
+            metrics
+                .shadow_soak_source_overlap
+                .with_label_values(&[choice]);
+        }
         for collector in metrics.collectors() {
             registry.register(collector)?;
         }
@@ -616,6 +809,22 @@ impl Metrics {
             Box::new(self.exact_route_residency_delta.clone()),
             Box::new(self.exact_route_projected_balance.clone()),
             Box::new(self.exact_route_projected_residency_delta.clone()),
+            Box::new(self.shadow_soak_enabled.clone()),
+            Box::new(self.shadow_soak_phase.clone()),
+            Box::new(self.shadow_soak_sources.clone()),
+            Box::new(self.shadow_soak_source_token_bytes.clone()),
+            Box::new(self.shadow_soak_attempts.clone()),
+            Box::new(self.shadow_soak_comparisons.clone()),
+            Box::new(self.shadow_soak_source_comparisons.clone()),
+            Box::new(self.shadow_soak_source_attempts.clone()),
+            Box::new(self.shadow_soak_placement.clone()),
+            Box::new(self.shadow_soak_projected_balance.clone()),
+            Box::new(self.shadow_soak_overlap.clone()),
+            Box::new(self.shadow_soak_gain.clone()),
+            Box::new(self.shadow_soak_source_overlap.clone()),
+            Box::new(self.shadow_soak_source_gain.clone()),
+            Box::new(self.shadow_soak_complete.clone()),
+            Box::new(self.shadow_soak_duration.clone()),
             Box::new(self.compat_attested.clone()),
             Box::new(self.compat_attestation_checks.clone()),
             Box::new(self.kv_event_up.clone()),
@@ -786,6 +995,7 @@ mod tests {
             "ds4proxy_exact_route_placement_total",
             "ds4proxy_exact_route_projected_balance_total",
             "ds4proxy_exact_route_canary_total",
+            "ds4proxy_shadow_soak_source_attempts_total",
             "ds4proxy_compat_attested",
             "ds4proxy_kv_event_trusted",
             "ds4proxy_kv_event_blocks_total",
