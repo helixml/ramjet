@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "compatibility_manifest_sha256": "4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa",
+  "engine": {
+    "core_process_count": 1,
+    "kv_events": {
+      "enable_kv_cache_events": true,
+      "publisher": "zmq",
+      "endpoint": "tcp://*:5557",
+      "replay_endpoint": "tcp://*:5558",
+      "buffer_steps": 10000,
+      "hwm": 100000,
+      "max_queue_size": 100000,
+      "topic": ""
+    }
+  }
+}

@@ -5341,3 +5341,75 @@ completed Rust cutover has no Go module. After the final schema/test edits, a
 network-disabled import of the current middleware in the exact pinned r34
 image passed in 0.50s; the mounted file SHA-256 was
 `85362e6c35d4f7d0decf1e26b2baacb83d06243c622046cc072e98a1b4c4ca0d`.
+
+## 2026-08-14 — r111 separate serving-runtime authority and EngineCore ownership proof
+
+r111 leaves the renderer/tokenizer compatibility manifest at schema v1 and
+unchanged SHA-256
+`4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa`.
+It adds a separate default-off serving-runtime manifest at SHA-256
+`a8937e6a5801fef6df3df58d341950d65b515896212c30ce6695c90df17f65a4`.
+That document links back to the exact compatibility digest and pins one
+EngineCore plus the qualified ZMQ event endpoint `tcp://*:5557`, replay
+endpoint `tcp://*:5558`, buffer steps 10,000, HWM 100,000, maximum queue
+100,000, and empty topic. Keeping the two authority domains separate allows a
+runtime-only change to fail closed without silently changing renderer scope.
+
+The candidate schema-v2 endpoint obtains the exact pinned
+`AsyncLLM`/`AsyncMPClient`/`CoreEngineProcManager` structure, requires one live
+direct-child `BaseProcess`, and publishes separate frontend and EngineCore
+boot-ID/PID/process-start incarnations. It compares the live typed
+`KVEventsConfig` with the runtime manifest, requires the frontend and child to
+share a network namespace, and maps the child's socket FDs to exactly one
+wildcard `LISTEN` socket for each configured port. Process state is read before
+and after the socket inspection to reject exit or PID reuse during proof. Rust
+schema-v2 admission independently validates the linked manifest digest,
+incarnations, cardinality, and exact KV configuration.
+
+This evidence binds a process and its listening sockets. It does not show that
+the publisher thread is live, that events advance, that sequence zero remains
+available, or that replay is complete within its deadline. Those remain live
+node06 event/replay qualification gates, so compatibility admission remains
+default-off and `DS4_UPSTREAM_ADMISSION_MODE=http` remains required.
+
+The exact cached r34 image remains
+`voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b`
+(12,525,646,780 bytes, created `2026-08-10T18:44:25.216866263Z`). Its vLLM
+base commit is `e2666d9a65f41fc376607531453cbd57c4c71016`, integration tree
+`4d006a43928cdee01306691a766542c1e9bebb59`, integration lock
+`e5cb5140cb2ec6a52cde5403d9e8ba2b7f30d2c31df25a70e3bb5e0c09b6a403`,
+and patch SHA-256
+`8a7269851ab5bfff8f730db9af6f19ac6c0fc26620ba32108ba17cfe4e51c903`.
+The installed API, auth, health, model, tokenize, cancellation, `AsyncLLM`, and
+core-client sources were byte-identical to that pinned base commit during the
+offline audit.
+
+The intended focused development loop is:
+
+```bash
+cargo test --locked compat::tests
+python3 -m unittest bench.test_engine_identity_middleware \
+  bench.test_serving_identity_compose
+python3 deploy/dspark_0731/validate-serving-identity-compose.py
+```
+
+The final gate passed 374 Rust unit tests plus every integration and doc test
+in 6.89s, warning-denied all-target Clippy, the release build, all 262 Python
+tests in 3.222s, and the five-case agent corpus validator. The focused Python
+subset included 18 middleware and 12 Compose tests. An exact
+cached-image, network-disabled publisher probe initially exposed a real
+`/proc/<pid>/fd` enumeration race: the descriptor used by `listdir` could close
+before `readlink`, incorrectly rejecting a healthy process. r111 now ignores
+only vanished descriptors and still requires both distinct publisher socket
+inodes. The repeated exact-image probe constructed the pinned
+`ZmqEventPublisher`, verified the real 5557/5558 wildcard sockets through the
+shipped middleware, rejected a Unicode-numeral endpoint outside the Rust
+grammar, and passed in 15.44s (28,400 KiB host-observed maximum RSS for the
+Docker client/import run). The final middleware SHA-256 at that probe was
+`8e3163f5b9d0ab766508c7767a5fbd17a2e1a37db72f5c595caf8d4a1e697c3d`.
+
+At inspection time Tailscale reported
+node06 offline (`LastSeen=2026-08-14T00:40:00.1Z`), and a three-second
+batch-mode SSH probe timed out with status 255. No node06 mutation occurred;
+live endpoint behavior, event/replay readiness, serving performance, and
+rolling availability remain unmeasured for r111.

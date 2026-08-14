@@ -100,6 +100,8 @@ logs, metrics, or journals.
 | `DS4_EXACT_ROUTE_MODE` | `off` | `off`, observation-only `shadow`, or canary `placement`. |
 | `DS4_EXACT_ROUTE_MANIFEST_PATH` | unset | Compatibility manifest; required when exact routing is enabled. |
 | `DS4_EXACT_ROUTE_MANIFEST_SHA256` | unset | Expected manifest SHA-256; required when exact routing is enabled. |
+| `DS4_SERVING_RUNTIME_MANIFEST_PATH` | unset | Separate serving-runtime manifest linked to the compatibility-manifest digest; required by `compatibility` admission and safe to stage while admission remains `http`. |
+| `DS4_SERVING_RUNTIME_MANIFEST_SHA256` | unset | Expected serving-runtime manifest SHA-256; must be configured together with its path. |
 | `DS4_EXACT_ROUTE_WORKERS` | `4` | Bounded exact-index lookup workers. |
 | `DS4_EXACT_ROUTE_TIMEOUT_MS` | `250` | Exact pre-route evaluation timeout. |
 | `DS4_EXACT_ROUTE_MIN_GAIN_TOKENS` | `8192` | Minimum exact cached-token gain required to move a canary request. |
@@ -117,8 +119,11 @@ missing `X-Session-ID` preserves the approximate route.
 
 Compatibility admission is an independent serving gate. It requires
 `DS4_TOKENIZER_MODE=local-shadow` plus the SHA-pinned manifest so local golden
-validation exists and at least two upstreams, but it does not require KV events
-or enable exact routing.
+validation exists, the separately SHA-pinned serving-runtime manifest, and at
+least two upstreams. It does not enable exact routing. The runtime manifest
+binds the expected EngineCore cardinality and KV-event publisher configuration;
+its `compatibility_manifest_sha256` must equal the renderer/tokenizer manifest
+pin exactly.
 A mismatching replica is removed from ordinary serving until a later probe
 passes; the other healthy replica remains available. Keep the default `http`
 mode unless every upstream implements the identity contract below. Inspect
@@ -126,17 +131,34 @@ mode unless every upstream implements the identity contract below. Inspect
 `ds4proxy_upstream_compatibility_admitted`, and
 `ds4proxy_upstream_admission_checks_total` before opting in.
 
-The identity endpoint must capture one engine process atomically and return a
-bounded schema-v1 document. `incarnation` is an opaque, per-process value of
-1–256 ASCII alphanumeric/`.`/`_`/`:`/`-` bytes. mini-dynamo validates it but
-never logs, labels, journals, or retains it.
+The identity endpoint must capture the frontend and every expected EngineCore
+atomically and return a bounded schema-v2 document. Each incarnation is an
+opaque value of 1–256 ASCII alphanumeric/`.`/`_`/`:`/`-` bytes. mini-dynamo
+validates these values but never logs, labels, journals, or retains them.
 
 ```json
 {
-  "schema_version": 1,
-  "incarnation": "boot-id:process-start",
+  "schema_version": 2,
+  "incarnation": {
+    "frontend": "boot-id:frontend-pid:process-start",
+    "engine_core": ["boot-id:core-pid:process-start"]
+  },
   "model": {"id": "...", "root": "...", "max_model_len": 393216},
-  "engine": {"version": "...", "image_digest": "sha256:..."},
+  "engine": {
+    "version": "...",
+    "image_digest": "sha256:...",
+    "core_process_count": 1,
+    "kv_events": {
+      "enable_kv_cache_events": true,
+      "publisher": "zmq",
+      "endpoint": "tcp://*:5557",
+      "replay_endpoint": "tcp://*:5558",
+      "buffer_steps": 10000,
+      "hwm": 100000,
+      "max_queue_size": 100000,
+      "topic": ""
+    }
+  },
   "tokenizer": {"sha256": "..."},
   "renderer": {"profile": "..."}
 }
@@ -161,17 +183,22 @@ separate from the base Compose, pins the immutable r34 image, and does not
 enable LB admission. The first authenticated identity call exercises the real
 initialized `/v1/models` and all committed `/tokenize` goldens through the
 inner ASGI app, brackets them with vLLM health, and caches a complete match for
-that frontend process. Later calls still check health. The 4s inner deadline is
+that frontend process. The same proof requires the exact pinned vLLM client and
+process-manager types, a stable direct-child EngineCore incarnation, the live
+typed KV-event configuration, and exact child-owned wildcard listeners for the
+event and replay ports. Later calls still check health, process identity,
+configuration, and socket ownership. The 4s inner deadline is
 below the LB's 5s control deadline; cancellation sends an internal disconnect
 and waits for vLLM's child tasks so a timeout cannot orphan tokenization work.
 The one-time proof intentionally appears in vLLM's HTTP metrics as one models
 request and ten tokenize requests; it never reaches inference scheduling.
-This verifies the live renderer/model-root claims and monitored core lifecycle,
-but not an EngineCore/KV-publisher PID or the complete runtime bundle. Validate
-it with `validate-serving-identity-compose.py` and roll one engine at a time.
-The candidate remains diagnostic: keep the LB in `http` mode even after both
-direct endpoints and normal inference pass. Compatibility mode requires a
-later complete runtime-bundle publisher.
+This verifies the live renderer/model-root claims and binds the EngineCore
+process/configuration/listening sockets. It does not prove publisher-thread
+liveness, event advancement, replay completeness, or the complete runtime
+bundle. Validate it with `validate-serving-identity-compose.py` and roll one
+engine at a time. The candidate remains diagnostic: keep the LB in `http` mode
+until a live event/replay qualification and the remaining runtime-bundle work
+are complete.
 
 Cold exact misses also emit a strictly observation-only projected-balance
 counterfactual. `ds4proxy_exact_route_projected_balance_total` adds each

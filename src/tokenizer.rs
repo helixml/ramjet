@@ -23,7 +23,8 @@ use url::Url;
 
 use crate::{
     compat::{
-        CompatibilityManifest, RuntimeOutcome, ServingIdentityOutcome, sha256_hex, token_ids_sha256,
+        CompatibilityManifest, RuntimeOutcome, ServingIdentityOutcome, ServingRuntimeManifest,
+        sha256_hex, token_ids_sha256,
     },
     config::{
         Config, ExactRouteMode, ShadowSoakMode, TokenizerMode, TokenizerProfile,
@@ -115,6 +116,7 @@ struct PreRouteTokenizer {
 #[derive(Clone)]
 struct RuntimeAttestation {
     manifest: Arc<CompatibilityManifest>,
+    serving_runtime: Option<Arc<ServingRuntimeManifest>>,
     remote: RemoteTokenizer,
     identity_remote: RemoteTokenizer,
     ready: Arc<Vec<AtomicBool>>,
@@ -226,6 +228,7 @@ impl TokenizerObserver {
         client: reqwest::Client,
         metrics: Arc<Metrics>,
         manifest: CompatibilityManifest,
+        serving_runtime: ServingRuntimeManifest,
     ) -> Self {
         let mut base = config.clone();
         base.upstream_admission_mode = UpstreamAdmissionMode::Http;
@@ -240,6 +243,7 @@ impl TokenizerObserver {
         .expect("off-mode test observer");
         observer.attestation = Some(RuntimeAttestation::new(
             Arc::new(manifest),
+            Some(Arc::new(serving_runtime)),
             remote_tokenizer(config, client.clone()),
             remote_identity(config, client),
             metrics,
@@ -346,10 +350,29 @@ impl TokenizerObserver {
                         tokenizer_profile_label(config.tokenizer_profile),
                     )?);
                     validate_golden_tokens(&local, &manifest)?;
+                    let serving_runtime =
+                        if config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility {
+                            let path = config
+                                .serving_runtime_manifest_path
+                                .as_deref()
+                                .context("DS4_SERVING_RUNTIME_MANIFEST_PATH is required")?;
+                            let expected_sha256 = config
+                                .serving_runtime_manifest_sha256
+                                .as_deref()
+                                .context("DS4_SERVING_RUNTIME_MANIFEST_SHA256 is required")?;
+                            Some(Arc::new(ServingRuntimeManifest::load(
+                                Path::new(path),
+                                expected_sha256,
+                                manifest_sha256,
+                            )?))
+                        } else {
+                            None
+                        };
                     let remote = remote_tokenizer(config, client.clone());
                     let identity_remote = remote_identity(config, client.clone());
                     attestation = Some(RuntimeAttestation::new(
                         Arc::clone(&manifest),
+                        serving_runtime,
                         remote,
                         identity_remote,
                         Arc::clone(&metrics),
@@ -810,6 +833,7 @@ fn remote_identity(config: &Config, client: reqwest::Client) -> RemoteTokenizer 
 impl RuntimeAttestation {
     fn new(
         manifest: Arc<CompatibilityManifest>,
+        serving_runtime: Option<Arc<ServingRuntimeManifest>>,
         remote: RemoteTokenizer,
         identity_remote: RemoteTokenizer,
         metrics: Arc<Metrics>,
@@ -822,6 +846,7 @@ impl RuntimeAttestation {
             .collect();
         Self {
             manifest,
+            serving_runtime,
             remote,
             identity_remote,
             ready: Arc::new(ready),
@@ -865,6 +890,9 @@ impl RuntimeAttestation {
     }
 
     async fn evaluate_admission(&self, upstream: usize) -> CompatibilityAdmission {
+        let Some(serving_runtime) = self.serving_runtime.as_deref() else {
+            return CompatibilityAdmission::NotConfigured;
+        };
         if self.admission_ready.get(upstream).is_none()
             || self.identity_remote.upstreams.get(upstream).is_none()
         {
@@ -877,7 +905,9 @@ impl RuntimeAttestation {
                 return CompatibilityAdmission::Unavailable;
             }
         };
-        let outcome = self.manifest.serving_identity_outcome(&body);
+        let outcome = self
+            .manifest
+            .serving_identity_outcome(serving_runtime, &body);
         let ready = outcome == ServingIdentityOutcome::Match;
         self.record_admission_outcome(upstream, outcome.label());
         if ready {
@@ -1583,7 +1613,10 @@ mod tests {
     use prometheus::Registry;
 
     use super::*;
-    use crate::compat::{EngineIdentity, ModelIdentity, RendererIdentity, TokenizerIdentity};
+    use crate::compat::{
+        EngineIdentity, KvEventsIdentity, ModelIdentity, RendererIdentity, ServingRuntimeEngine,
+        TokenizerIdentity,
+    };
 
     fn route_decision() -> crate::router::Decision {
         crate::router::Decision {
@@ -1632,6 +1665,26 @@ mod tests {
                 "thinking_disabled".to_owned(),
             ],
             goldens: Vec::new(),
+        }
+    }
+
+    fn test_serving_runtime() -> ServingRuntimeManifest {
+        ServingRuntimeManifest {
+            schema_version: 1,
+            compatibility_manifest_sha256: "c".repeat(64),
+            engine: ServingRuntimeEngine {
+                core_process_count: 1,
+                kv_events: KvEventsIdentity {
+                    enable_kv_cache_events: true,
+                    publisher: "zmq".to_owned(),
+                    endpoint: "tcp://*:5557".to_owned(),
+                    replay_endpoint: "tcp://*:5558".to_owned(),
+                    buffer_steps: 10_000,
+                    hwm: 100_000,
+                    max_queue_size: 100_000,
+                    topic: String::new(),
+                },
+            },
         }
     }
 
@@ -1695,6 +1748,7 @@ mod tests {
         };
         let attestation = RuntimeAttestation::new(
             Arc::new(test_manifest("v1")),
+            Some(Arc::new(test_serving_runtime())),
             remote.clone(),
             remote,
             Arc::clone(&metrics),

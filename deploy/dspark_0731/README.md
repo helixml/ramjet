@@ -48,9 +48,14 @@ the load balancer.
 
 ## Opt-in in-process serving identity
 
-`docker-compose.compatibility-identity.yaml` is the engine half of the
+`docker-compose.compatibility-identity.yaml` is the opt-in stack overlay for the
 manifest-gated admission experiment. It mounts a standard-library-only ASGI
-middleware and the SHA-pinned compatibility manifest into each vLLM frontend.
+middleware, the SHA-pinned compatibility manifest, and a separately pinned
+serving-runtime manifest into each vLLM frontend. The compatibility manifest
+remains schema v1 at SHA-256
+`4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa`;
+the default-off runtime manifest links to that digest and pins one EngineCore
+plus the exact event/replay KV configuration.
 The exact authenticated `GET /v1/mini-dynamo/identity` path is answered in that
 same API process; every inference request still goes directly to vLLM, without
 a sidecar or another network hop. The middleware derives a fresh boot/process
@@ -59,10 +64,15 @@ and refuses startup on a missing bearer, unsafe schema, non-regular manifest,
 or digest mismatch. It also compares the live vLLM distribution version,
 served model name, context limit, and tokenizer artifact hash with the
 manifest before it can answer the endpoint. On the first authenticated control
-request, it makes bounded in-memory ASGI calls to the initialized vLLM app for
-`/v1/models`, every committed `/tokenize` golden, and `/health` before and
-after rendering. No loopback socket is opened. A complete match is cached for
-that frontend process; every later identity request still rechecks live health.
+request, it also proves the exact `AsyncLLM`/`AsyncMPClient` process structure,
+captures the EngineCore boot/PID/start-time incarnation, matches the live typed
+KV-event config, and verifies that the stable direct child owns exactly one
+wildcard listener for each configured event/replay port in the frontend's
+network namespace. It then makes bounded in-memory ASGI calls to the
+initialized vLLM app for `/v1/models`, every committed `/tokenize` golden, and
+`/health` before and after rendering. No loopback socket is opened. A complete
+match is cached for that frontend process; every later identity request still
+rechecks live health.
 The whole first proof has a 4s deadline, below the LB's 5s admission deadline.
 Because the probes deliberately traverse vLLM's real inner middleware and
 routes, the first proof contributes one `/v1/models` and ten `/tokenize`
@@ -95,25 +105,40 @@ Use node06's or the development host's warm cache. The source tree at
 `site-packages` target above passed the exact-image import.
 
 The operational node06 directory is a mirror rather than a repository
-checkout. Before its eventual one-engine trial, copy the overlay, middleware,
-validator, and exact manifest beside the operational Compose and set these two
-uncommitted `.env` paths:
+checkout. The repository validator above validates repository-local sources;
+it cannot authenticate files after they have been copied to node06. Before an
+eventual one-engine trial, first run it locally, then copy the overlay,
+middleware, compatibility manifest, and serving-runtime manifest beside the
+operational Compose and set these three uncommitted `.env` paths:
 
 ```text
 MINI_DYNAMO_SERVING_IDENTITY_MIDDLEWARE_SOURCE=./engine_identity_middleware.py
 MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SOURCE=./deepseek-v4-r34.json
+MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SOURCE=./deepseek-v4-r34-serving-runtime.json
 ```
 
-The validator hashes the rendered bind sources against the committed artifacts,
-so a stale operational copy fails before an engine is recreated.
+After transfer, compare every operational byte stream with its local source and
+render the operational Compose before acquiring the deployment lock:
 
-The validator proves that ordinary Compose has no middleware or identity
+```bash
+test "$(sha256sum deploy/dspark_0731/docker-compose.compatibility-identity.yaml | cut -d' ' -f1)" = "$(ssh node06 'sha256sum /home/luke/inference/dspark_0731/docker-compose.compatibility-identity.yaml' | cut -d' ' -f1)"
+test "$(sha256sum deploy/dspark_0731/engine_identity_middleware.py | cut -d' ' -f1)" = "$(ssh node06 'sha256sum /home/luke/inference/dspark_0731/engine_identity_middleware.py' | cut -d' ' -f1)"
+test "$(sha256sum compat/deepseek-v4-r34.json | cut -d' ' -f1)" = "$(ssh node06 'sha256sum /home/luke/inference/dspark_0731/deepseek-v4-r34.json' | cut -d' ' -f1)"
+test "$(sha256sum compat/deepseek-v4-r34-serving-runtime.json | cut -d' ' -f1)" = "$(ssh node06 'sha256sum /home/luke/inference/dspark_0731/deepseek-v4-r34-serving-runtime.json' | cut -d' ' -f1)"
+ssh node06 'cd /home/luke/inference/dspark_0731 && docker compose -f docker-compose.yaml -f docker-compose.compatibility-identity.yaml config --quiet'
+```
+
+Any mismatch or render failure stops the trial. These checks are the
+operational-copy gate; do not claim that the repository-relative validator
+inspected node06.
+
+The repository validator proves that ordinary Compose has no middleware or identity
 mounts, both opt-in engines use the immutable Gilded r34 digest and the image's
 real installed Python 3.12 `site-packages` import path, the KV publisher and
 sampling floor exactly match their qualified JSON values, every bind is
 read-only and cannot create a host path,
-the manifest pin and both mounted artifacts match committed bytes, and the LB
-remains in `http` admission mode. It also
+both manifest pins, their cross-link, and all mounted artifacts match committed
+bytes, and the LB remains in `http` admission mode. It also
 validates any `EXTRA_VLLM_ARGS_A_IDENTITY` or
 `EXTRA_VLLM_ARGS_B_IDENTITY` override present in the environment; an override
 must retain the exact three required arguments.
@@ -129,12 +154,14 @@ match.** The middleware verifies the live vLLM distribution, configured model
 name/context, and tokenizer bytes. It still re-publishes the manifest's model
 root and renderer profile only after the real initialized `/v1/models` and all
 ten renderer/token-ID goldens match. Compose—not the process—still provides the
-immutable image binding. The health bracket observes vLLM's monitored
-EngineCore lifecycle (the pinned fork has no core-respawn path), but it does not
-publish the EngineCore/KV-publisher PID. It also does not attest the complete
-driver/CUDA/NCCL/kernel/cache/warmup bundle required to close issue #15. A later
-qualified runtime-bundle publisher must close those bindings before
-compatibility admission can be enabled.
+immutable image binding. The health bracket and schema-v2 response bind the
+frontend to the exact stable EngineCore child, live typed KV configuration, and
+owned event/replay listening sockets. This does not prove publisher-thread
+liveness, event advancement, retained sequence zero, or complete and timely
+replay; those require live node06 qualification. It also does not attest the
+complete driver/CUDA/NCCL/kernel/cache/warmup bundle required to close issue
+#15. A later qualified runtime-bundle publisher must close those bindings
+before compatibility admission can be enabled.
 
 ## Offline dual-companion security harness
 
