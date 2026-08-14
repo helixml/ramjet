@@ -16,7 +16,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 
 use crate::{
-    config::Config,
+    config::{Config, UpstreamAdmissionMode},
     exact_route_inventory::ExactRouteInventory,
     exact_shadow::ExactRouteSnapshot,
     journal::{RouteAnnotations, RouteJournal},
@@ -27,12 +27,13 @@ use crate::{
     session::OpaqueSession,
     session_affinity::SessionAffinity,
     shims::{self, Endpoint},
-    tokenizer::{ExactTokens, TokenizerObserver},
+    tokenizer::{CompatibilityAdmission, ExactTokens, TokenizerObserver},
     usage::{Accumulator, feed_sse_chunk},
 };
 
 const MAX_REQUEST_BODY: usize = 64 << 20;
 const MAX_PROBE_BODY: usize = 64 << 10;
+const MAX_CONCURRENT_UPSTREAM_PROBES: usize = 8;
 const STREAM_BUFFER_CHUNKS: usize = 8;
 
 #[derive(Clone)]
@@ -54,6 +55,7 @@ struct Inner {
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
+    admission_mode: &'static str,
     healthy_replicas: usize,
     total_replicas: usize,
     replicas: Vec<ReplicaHealth>,
@@ -63,6 +65,8 @@ struct HealthResponse {
 struct ReplicaHealth {
     index: usize,
     healthy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compatibility_attested: Option<bool>,
     inflight: usize,
     load_units: usize,
     approximate_index_entries: usize,
@@ -160,7 +164,43 @@ impl Proxy {
             Arc::clone(&metrics),
             Arc::clone(&exact_inventories),
         )?;
-        Ok(Self {
+        Ok(Self::from_parts(
+            config,
+            client,
+            metrics,
+            router,
+            exact_inventories,
+            journal,
+            session_affinity,
+            tokenizer,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        config: Config,
+        client: reqwest::Client,
+        metrics: Arc<Metrics>,
+        router: Arc<Router>,
+        exact_inventories: Arc<[ExactRouteInventory]>,
+        journal: RouteJournal,
+        session_affinity: SessionAffinity,
+        tokenizer: TokenizerObserver,
+    ) -> Self {
+        if config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility {
+            for (index, upstream) in config.upstreams.iter().enumerate() {
+                router.set_healthy(index, false);
+                metrics
+                    .upstream_up
+                    .with_label_values(&[upstream.as_str().trim_end_matches('/')])
+                    .set(0.0);
+                metrics
+                    .upstream_compatibility_admitted
+                    .with_label_values(&[upstream.as_str().trim_end_matches('/')])
+                    .set(0.0);
+            }
+        }
+        Self {
             inner: Arc::new(Inner {
                 config,
                 client,
@@ -171,7 +211,7 @@ impl Proxy {
                 session_affinity,
                 tokenizer,
             }),
-        })
+        }
     }
 
     #[must_use]
@@ -221,9 +261,20 @@ impl Proxy {
                                     resident_tokens: status.resident_tokens,
                                 }
                             });
+                        let compatibility_attested = (proxy.inner.config.upstream_admission_mode
+                            == UpstreamAdmissionMode::Compatibility)
+                            .then(|| {
+                                proxy
+                                    .inner
+                                    .tokenizer
+                                    .compatibility_attested(index)
+                                    .unwrap_or(false)
+                            });
+                        let healthy = healthy && compatibility_attested.unwrap_or(true);
                         ReplicaHealth {
                             index,
                             healthy,
+                            compatibility_attested,
                             inflight,
                             load_units,
                             approximate_index_entries,
@@ -241,6 +292,7 @@ impl Proxy {
         };
         let response = HealthResponse {
             status,
+            admission_mode: upstream_admission_label(proxy.inner.config.upstream_admission_mode),
             healthy_replicas,
             total_replicas: replicas.len(),
             replicas,
@@ -251,8 +303,7 @@ impl Proxy {
             StatusCode::OK
         };
         let body = serde_json::to_vec(&response).unwrap_or_else(|_| {
-            br#"{"status":"unhealthy","healthy_replicas":0,"total_replicas":0,"replicas":[]}"#
-                .to_vec()
+            br#"{"status":"unhealthy","admission_mode":"unknown","healthy_replicas":0,"total_replicas":0,"replicas":[]}"#.to_vec()
         });
         Response::builder()
             .status(code)
@@ -265,6 +316,11 @@ impl Proxy {
     async fn serve(&self, request: Request<Body>) -> Response<Body> {
         let started = Instant::now();
         let (parts, inbound_body) = request.into_parts();
+        if parts.uri.path() == "/v1/mini-dynamo/identity"
+            || parts.uri.path().starts_with("/v1/mini-dynamo/identity/")
+        {
+            return text_error(StatusCode::NOT_FOUND, "not found");
+        }
         let capture_shadow_soak = match shadow_soak_capture_requested(
             &parts.headers,
             self.inner.config.upstream_token.as_deref(),
@@ -909,15 +965,74 @@ impl Proxy {
         let mut interval = tokio::time::interval(Duration::from_secs(15));
         loop {
             interval.tick().await;
-            for upstream in 0..self.inner.config.upstreams.len() {
+            self.probe_round().await;
+        }
+    }
+
+    async fn probe_round(&self) {
+        let mut unhealthy = Vec::new();
+        let mut healthy = Vec::new();
+        for upstream in 0..self.inner.config.upstreams.len() {
+            if self
+                .inner
+                .router
+                .state(upstream)
+                .is_some_and(|state| state.3)
+            {
+                healthy.push(upstream);
+            } else {
+                unhealthy.push(upstream);
+            }
+        }
+        let initially_all_fenced = self.inner.config.upstream_admission_mode
+            == UpstreamAdmissionMode::Compatibility
+            && healthy.is_empty();
+        futures_util::stream::iter(unhealthy)
+            .for_each_concurrent(Some(MAX_CONCURRENT_UPSTREAM_PROBES), |upstream| {
+                self.probe(upstream)
+            })
+            .await;
+        if initially_all_fenced {
+            return;
+        }
+        for upstream in healthy {
+            let healthy_count = (0..self.inner.config.upstreams.len())
+                .filter(|index| self.inner.router.state(*index).is_some_and(|state| state.3))
+                .count();
+            let target_healthy = self
+                .inner
+                .router
+                .state(upstream)
+                .is_some_and(|state| state.3);
+            if self.inner.config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility
+                && healthy_count <= 1
+                && target_healthy
+            {
+                self.probe_with_admission(upstream, false).await;
+            } else {
                 self.probe(upstream).await;
             }
         }
     }
 
     async fn probe(&self, upstream: usize) {
+        self.probe_with_admission(upstream, true).await;
+    }
+
+    async fn probe_with_admission(&self, upstream: usize, fence_before_check: bool) {
         let started = Instant::now();
         let label = self.upstream_label(upstream);
+        if self.inner.config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility
+            && fence_before_check
+        {
+            self.inner.router.set_healthy(upstream, false);
+            self.inner
+                .metrics
+                .upstream_up
+                .with_label_values(&[&label])
+                .set(0.0);
+            self.inner.tokenizer.invalidate_admission(upstream);
+        }
         let uri = Uri::from_static("/v1/models");
         let url = upstream_url(&self.inner.config.upstreams[upstream], &uri);
         let mut request = self.inner.client.get(url).timeout(Duration::from_secs(5));
@@ -925,7 +1040,7 @@ impl Proxy {
             request = request.bearer_auth(token);
         }
         let result = request.send().await;
-        let (healthy, reason, models_body) = match result {
+        let (mut healthy, mut reason, models_body) = match result {
             Ok(response) if response.status() == StatusCode::OK => {
                 if response
                     .content_length()
@@ -944,14 +1059,47 @@ impl Proxy {
             Err(error) => (false, upstream_error_reason(&error), None),
         };
         if let Some(models_body) = models_body {
-            self.inner
-                .tokenizer
-                .attest_upstream(upstream, &models_body)
-                .await;
+            if self.inner.config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility {
+                let compatibility = self
+                    .inner
+                    .tokenizer
+                    .evaluate_upstream_admission(upstream)
+                    .await;
+                match compatibility {
+                    CompatibilityAdmission::Match => {
+                        self.inner.tokenizer.publish_admission(upstream, true);
+                    }
+                    CompatibilityAdmission::Mismatch => {
+                        healthy = false;
+                        reason = "compatibility_mismatch";
+                    }
+                    CompatibilityAdmission::NotConfigured | CompatibilityAdmission::Unavailable => {
+                        healthy = false;
+                        reason = "compatibility_unavailable";
+                    }
+                }
+                self.mark_probe(upstream, healthy, reason);
+                if !healthy {
+                    self.inner.tokenizer.invalidate_admission(upstream);
+                }
+                self.inner
+                    .tokenizer
+                    .attest_upstream(upstream, &models_body)
+                    .await;
+            } else {
+                self.inner
+                    .tokenizer
+                    .attest_upstream(upstream, &models_body)
+                    .await;
+                self.mark_probe(upstream, healthy, reason);
+            }
         } else {
+            self.mark_probe(upstream, healthy, reason);
             self.inner.tokenizer.invalidate_attestation(upstream);
+            if self.inner.config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility {
+                self.inner.tokenizer.invalidate_admission(upstream);
+            }
         }
-        self.mark_probe(upstream, healthy, reason);
         self.inner
             .metrics
             .upstream_probe_time
@@ -1018,6 +1166,13 @@ impl Proxy {
             }
             Err(_) => text_error(StatusCode::BAD_GATEWAY, "upstream metrics unavailable"),
         }
+    }
+}
+
+const fn upstream_admission_label(mode: UpstreamAdmissionMode) -> &'static str {
+    match mode {
+        UpstreamAdmissionMode::Http => "http",
+        UpstreamAdmissionMode::Compatibility => "compatibility",
     }
 }
 
@@ -1179,6 +1334,10 @@ mod tests {
 
     use super::*;
     use crate::{
+        compat::{
+            CompatibilityManifest, EngineIdentity, ModelIdentity, RendererIdentity,
+            TokenizerIdentity,
+        },
         exact_index::{ExactIndexLimits, FencedExactKvInventory},
         kv_wire::{BlockStored, ExternalBlockHash, KvEvent, KvEventBatch},
     };
@@ -1254,6 +1413,64 @@ mod tests {
         Proxy::new(config, reqwest::Client::new(), metrics, router, inventories).unwrap()
     }
 
+    fn proxy_for_config_with_manifest(config: Config, manifest: CompatibilityManifest) -> Proxy {
+        let registry = Registry::new();
+        let metrics = Arc::new(Metrics::new(&registry).unwrap());
+        let router = Arc::new(Router::new(crate::router::RouterConfig {
+            upstreams: config.upstreams.clone(),
+            alpha: config.route_alpha,
+            chunk_bytes: config.route_chunk_bytes,
+            max_prefix_bytes: config.route_max_prefix_bytes,
+            max_overlap_blocks: config.route_max_overlap_blocks,
+            index_capacity: config.route_index_capacity,
+            load_unit_bytes: config.route_load_unit_bytes,
+            max_load_units: config.route_max_load_units,
+            affinity: config.affinity,
+        }));
+        let client = reqwest::Client::new();
+        let tokenizer = TokenizerObserver::with_test_attestation(
+            &config,
+            client.clone(),
+            Arc::clone(&metrics),
+            manifest,
+        );
+        let journal = RouteJournal::new(config.route_journal);
+        let session_affinity = SessionAffinity::new(&config, Arc::clone(&metrics));
+        Proxy::from_parts(
+            config,
+            client,
+            metrics,
+            router,
+            Arc::from([]),
+            journal,
+            session_affinity,
+            tokenizer,
+        )
+    }
+
+    fn test_compatibility_manifest() -> CompatibilityManifest {
+        CompatibilityManifest {
+            schema_version: 1,
+            model: ModelIdentity {
+                id: "model".to_owned(),
+                root: "root".to_owned(),
+                max_model_len: 4096,
+            },
+            engine: EngineIdentity {
+                version: "v1".to_owned(),
+                image_digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            tokenizer: TokenizerIdentity {
+                sha256: "b".repeat(64),
+            },
+            renderer: RendererIdentity {
+                profile: "profile".to_owned(),
+            },
+            admitted_request_classes: vec!["plain".to_owned()],
+            goldens: Vec::new(),
+        }
+    }
+
     fn trusted_inventory(tokens: &[u32]) -> SharedFencedInventory {
         let events = (!tokens.is_empty())
             .then(|| {
@@ -1302,6 +1519,35 @@ mod tests {
         assert!(!result.contains_key("x-mini-dynamo-upstream"));
         assert!(!result.contains_key("x-session-id"));
         assert!(!result.contains_key("x-mini-dynamo-shadow-soak"));
+    }
+
+    #[tokio::test]
+    async fn atomic_identity_control_path_is_never_publicly_proxied() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&requests);
+        let upstream = AxumRouter::new().fallback(any(move || {
+            let observed = Arc::clone(&observed);
+            async move {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Response::new(Body::from("private identity"))
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let proxy = proxy_for(&[url]);
+        for uri in [
+            "/v1/mini-dynamo/identity",
+            "/v1/mini-dynamo/identity/",
+            "/v1/mini-dynamo/identity/private",
+        ] {
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(proxy.serve(request).await.status(), StatusCode::NOT_FOUND);
+        }
+        assert_eq!(requests.load(Ordering::Relaxed), 0);
+        task.abort();
     }
 
     #[test]
@@ -1717,11 +1963,17 @@ mod tests {
         let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "degraded");
+        assert_eq!(health["admission_mode"], "http");
         assert_eq!(health["healthy_replicas"], 1);
         assert_eq!(health["total_replicas"], 2);
         assert_eq!(health["replicas"][0]["healthy"], true);
         assert_eq!(health["replicas"][1]["healthy"], false);
         assert!(health["replicas"][0].get("exact_inventory").is_none());
+        assert!(
+            health["replicas"][0]
+                .get("compatibility_attested")
+                .is_none()
+        );
 
         proxy.router().set_healthy(0, false);
         let response = Proxy::health(State(proxy)).await;
@@ -1730,6 +1982,464 @@ mod tests {
         let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "unhealthy");
         assert_eq!(health["healthy_replicas"], 0);
+    }
+
+    #[tokio::test]
+    async fn compatibility_admission_starts_fenced_and_fails_closed_without_attestation() {
+        let inference_requests = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&inference_requests);
+        let upstream = AxumRouter::new().fallback(any(move |request: Request<Body>| {
+            let observed = Arc::clone(&observed);
+            async move {
+                if request.uri().path() == "/v1/models" {
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"data":[{"id":"model"}]}"#))
+                        .unwrap();
+                }
+                observed.fetch_add(1, Ordering::Relaxed);
+                Response::new(Body::from("must not be served"))
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let joined = url.as_str().to_owned();
+        let mut config =
+            Config::from_lookup(|key| (key == "DS4_UPSTREAM").then(|| joined.clone())).unwrap();
+        // Config parsing requires a real manifest before this mode can be set.
+        // Mutating the public structure here proves the proxy still fails closed
+        // if an embedding constructs an inconsistent Config directly.
+        config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
+        let proxy = proxy_for_config(config, Arc::from([]));
+
+        assert!(!proxy.router().state(0).unwrap().3);
+        let health = Proxy::health(State(proxy.clone())).await;
+        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(health.into_body(), 1 << 20).await.unwrap();
+        let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(health["admission_mode"], "compatibility");
+
+        proxy.probe(0).await;
+        assert!(!proxy.router().state(0).unwrap().3);
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .upstream_probe_errors
+                .with_label_values(&[
+                    url.as_str().trim_end_matches('/'),
+                    "compatibility_unavailable"
+                ])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+            ))
+            .unwrap();
+        assert_eq!(
+            proxy.serve(request).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(inference_requests.load(Ordering::Relaxed), 0);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn compatibility_admission_fences_during_check_mismatch_and_recovers() {
+        let identity_matches = Arc::new(AtomicBool::new(true));
+        let block_identity = Arc::new(AtomicBool::new(false));
+        let identity_entered = Arc::new(tokio::sync::Notify::new());
+        let identity_release = Arc::new(tokio::sync::Notify::new());
+        let inference_requests = Arc::new(AtomicUsize::new(0));
+        let upstream = {
+            let identity_matches = Arc::clone(&identity_matches);
+            let block_identity = Arc::clone(&block_identity);
+            let identity_entered = Arc::clone(&identity_entered);
+            let identity_release = Arc::clone(&identity_release);
+            let inference_requests = Arc::clone(&inference_requests);
+            AxumRouter::new().fallback(any(move |request: Request<Body>| {
+                let identity_matches = Arc::clone(&identity_matches);
+                let block_identity = Arc::clone(&block_identity);
+                let identity_entered = Arc::clone(&identity_entered);
+                let identity_release = Arc::clone(&identity_release);
+                let inference_requests = Arc::clone(&inference_requests);
+                async move {
+                    match request.uri().path() {
+                        "/v1/models" => Response::new(Body::from(
+                            r#"{"data":[{"id":"model","root":"root","max_model_len":4096}]}"#,
+                        )),
+                        "/version" => Response::new(Body::from(r#"{"version":"v1"}"#)),
+                        "/v1/mini-dynamo/identity" => {
+                            if block_identity.load(Ordering::Acquire) {
+                                identity_entered.notify_one();
+                                identity_release.notified().await;
+                            }
+                            let digest = if identity_matches.load(Ordering::Acquire) {
+                                "a".repeat(64)
+                            } else {
+                                "c".repeat(64)
+                            };
+                            Response::new(Body::from(
+                                serde_json::json!({
+                                    "schema_version": 1,
+                                    "incarnation": "boot-1:process-1",
+                                    "model": {"id": "model", "root": "root", "max_model_len": 4096},
+                                    "engine": {"version": "v1", "image_digest": format!("sha256:{digest}")},
+                                    "tokenizer": {"sha256": "b".repeat(64)},
+                                    "renderer": {"profile": "profile"},
+                                })
+                                .to_string(),
+                            ))
+                        }
+                        _ => {
+                            inference_requests.fetch_add(1, Ordering::Relaxed);
+                            Response::new(Body::from(r#"{"ok":true}"#))
+                        }
+                    }
+                }
+            }))
+        };
+        let (url, task) = start_upstream(upstream).await;
+        let joined = url.as_str().to_owned();
+        let mut config =
+            Config::from_lookup(|key| (key == "DS4_UPSTREAM").then(|| joined.clone())).unwrap();
+        config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
+        let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
+
+        assert!(!proxy.router().state(0).unwrap().3);
+        proxy.probe(0).await;
+        assert!(proxy.router().state(0).unwrap().3);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+            ))
+            .unwrap();
+        assert_eq!(proxy.serve(request).await.status(), StatusCode::OK);
+        assert_eq!(inference_requests.load(Ordering::Relaxed), 1);
+
+        identity_matches.store(false, Ordering::Release);
+        block_identity.store(true, Ordering::Release);
+        let checking_proxy = proxy.clone();
+        let checking = tokio::spawn(async move { checking_proxy.probe(0).await });
+        tokio::time::timeout(Duration::from_secs(1), identity_entered.notified())
+            .await
+            .expect("identity check must start");
+        assert!(!proxy.router().state(0).unwrap().3);
+        assert_eq!(proxy.inner.tokenizer.compatibility_attested(0), Some(false));
+        identity_release.notify_one();
+        checking.await.unwrap();
+        block_identity.store(false, Ordering::Release);
+        assert!(!proxy.router().state(0).unwrap().3);
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+            ))
+            .unwrap();
+        assert_eq!(
+            proxy.serve(request).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(inference_requests.load(Ordering::Relaxed), 1);
+
+        identity_matches.store(true, Ordering::Release);
+        proxy.probe(0).await;
+        assert!(proxy.router().state(0).unwrap().3);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn compatibility_health_never_reports_a_router_admission_mixed_state() {
+        let upstream = AxumRouter::new().fallback(any(|request: Request<Body>| async move {
+            match request.uri().path() {
+                "/v1/models" => Response::new(Body::from(
+                    r#"{"data":[{"id":"model","root":"root","max_model_len":4096}]}"#,
+                )),
+                "/version" => Response::new(Body::from(r#"{"version":"v1"}"#)),
+                "/v1/mini-dynamo/identity" => Response::new(Body::from(
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "incarnation": "boot-1:process-1",
+                        "model": {"id": "model", "root": "root", "max_model_len": 4096},
+                        "engine": {"version": "v1", "image_digest": format!("sha256:{}", "a".repeat(64))},
+                        "tokenizer": {"sha256": "b".repeat(64)},
+                        "renderer": {"profile": "profile"},
+                    })
+                    .to_string(),
+                )),
+                _ => Response::new(Body::empty()),
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let joined = url.as_str().to_owned();
+        let mut config =
+            Config::from_lookup(|key| (key == "DS4_UPSTREAM").then(|| joined.clone())).unwrap();
+        config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
+        let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
+        proxy.probe(0).await;
+        assert!(proxy.router().state(0).unwrap().3);
+
+        // Simulate the only cross-source snapshot that could otherwise expose
+        // a stale router=true together with a newly published admission=false.
+        proxy.inner.tokenizer.invalidate_admission(0);
+        assert!(proxy.router().state(0).unwrap().3);
+        let health = Proxy::health(State(proxy)).await;
+        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(health.into_body(), 1 << 20).await.unwrap();
+        let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(health["replicas"][0]["healthy"], false);
+        assert_eq!(health["replicas"][0]["compatibility_attested"], false);
+        task.abort();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn compatibility_startup_probes_all_fenced_replicas_concurrently() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let slow_matches = Arc::new(AtomicBool::new(true));
+        let fast_matches = Arc::new(AtomicBool::new(true));
+        let slow_identity_calls = Arc::new(AtomicUsize::new(0));
+        let fast_identity_calls = Arc::new(AtomicUsize::new(0));
+        let fast_second_entered = Arc::new(tokio::sync::Notify::new());
+        let fast_second_release = Arc::new(tokio::sync::Notify::new());
+        let slow = {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            let slow_matches = Arc::clone(&slow_matches);
+            let identity_calls = Arc::clone(&slow_identity_calls);
+            AxumRouter::new().fallback(any(move |request: Request<Body>| {
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                let slow_matches = Arc::clone(&slow_matches);
+                let identity_calls = Arc::clone(&identity_calls);
+                async move {
+                    match request.uri().path() {
+                        "/v1/models" => Response::new(Body::from(
+                            r#"{"data":[{"id":"model","root":"root","max_model_len":4096}]}"#,
+                        )),
+                        "/version" => Response::new(Body::from(r#"{"version":"v1"}"#)),
+                        "/v1/mini-dynamo/identity" => {
+                            identity_calls.fetch_add(1, Ordering::Relaxed);
+                            entered.notify_one();
+                            if identity_calls.load(Ordering::Relaxed) == 1 {
+                                release.notified().await;
+                            }
+                            let digest = if slow_matches.load(Ordering::Acquire) {
+                                "a".repeat(64)
+                            } else {
+                                "c".repeat(64)
+                            };
+                            Response::new(Body::from(
+                                serde_json::json!({
+                                    "schema_version": 1,
+                                    "incarnation": "boot-1:process-1",
+                                    "model": {"id": "model", "root": "root", "max_model_len": 4096},
+                                    "engine": {"version": "v1", "image_digest": format!("sha256:{digest}")},
+                                    "tokenizer": {"sha256": "b".repeat(64)},
+                                    "renderer": {"profile": "profile"},
+                                })
+                                .to_string(),
+                            ))
+                        }
+                        _ => Response::new(Body::empty()),
+                    }
+                }
+            }))
+        };
+        let fast_calls = Arc::clone(&fast_identity_calls);
+        let fast_matches_for_handler = Arc::clone(&fast_matches);
+        let fast_entered = Arc::clone(&fast_second_entered);
+        let fast_release = Arc::clone(&fast_second_release);
+        let fast = AxumRouter::new().fallback(any(move |request: Request<Body>| {
+            let fast_calls = Arc::clone(&fast_calls);
+            let fast_matches = Arc::clone(&fast_matches_for_handler);
+            let fast_entered = Arc::clone(&fast_entered);
+            let fast_release = Arc::clone(&fast_release);
+            async move {
+                match request.uri().path() {
+                    "/v1/models" => Response::new(Body::from(
+                        r#"{"data":[{"id":"model","root":"root","max_model_len":4096}]}"#,
+                    )),
+                    "/version" => Response::new(Body::from(r#"{"version":"v1"}"#)),
+                    "/v1/mini-dynamo/identity" => {
+                        let call = fast_calls.fetch_add(1, Ordering::Relaxed) + 1;
+                        if call == 2 {
+                            fast_entered.notify_one();
+                            fast_release.notified().await;
+                        }
+                        let digest = if fast_matches.load(Ordering::Acquire) {
+                            "a".repeat(64)
+                        } else {
+                            "c".repeat(64)
+                        };
+                        Response::new(Body::from(
+                            serde_json::json!({
+                                "schema_version": 1,
+                                "incarnation": "boot-1:process-1",
+                                "model": {"id": "model", "root": "root", "max_model_len": 4096},
+                                "engine": {"version": "v1", "image_digest": format!("sha256:{digest}")},
+                                "tokenizer": {"sha256": "b".repeat(64)},
+                                "renderer": {"profile": "profile"},
+                            })
+                            .to_string(),
+                        ))
+                    }
+                    _ => Response::new(Body::empty()),
+                }
+            }
+        }));
+        let (slow_url, slow_task) = start_upstream(slow).await;
+        let (fast_url, fast_task) = start_upstream(fast).await;
+        let joined = format!("{slow_url},{fast_url}");
+        let mut config =
+            Config::from_lookup(|key| (key == "DS4_UPSTREAM").then(|| joined.clone())).unwrap();
+        config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
+        let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
+
+        let probing_proxy = proxy.clone();
+        let probing = tokio::spawn(async move { probing_proxy.probe_round().await });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("slow identity probe must start");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !proxy.router().state(1).unwrap().3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fast peer must admit while the first peer remains blocked");
+        assert!(!proxy.router().state(0).unwrap().3);
+        release.notify_one();
+        probing.await.unwrap();
+        assert!(proxy.router().state(0).unwrap().3);
+        assert_eq!(slow_identity_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fast_identity_calls.load(Ordering::Relaxed), 1);
+
+        slow_matches.store(false, Ordering::Release);
+        proxy.router().set_healthy(0, false);
+        let second_proxy = proxy.clone();
+        let second_round = tokio::spawn(async move { second_proxy.probe_round().await });
+        tokio::time::timeout(Duration::from_secs(1), fast_second_entered.notified())
+            .await
+            .expect("the sole admitted peer must still receive an atomic recheck");
+        assert!(proxy.router().state(1).unwrap().3);
+        assert_eq!(proxy.inner.tokenizer.compatibility_attested(1), Some(true));
+        let health = Proxy::health(State(proxy.clone())).await;
+        assert_eq!(health.status(), StatusCode::OK);
+        let body = to_bytes(health.into_body(), 1 << 20).await.unwrap();
+        let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(health["replicas"][1]["healthy"], true);
+        assert_eq!(health["replicas"][1]["compatibility_attested"], true);
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .upstream_compatibility_admitted
+                .with_label_values(&[fast_url.as_str().trim_end_matches('/')])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+        fast_matches.store(false, Ordering::Release);
+        fast_second_release.notify_one();
+        second_round.await.unwrap();
+        assert!(!proxy.router().state(0).unwrap().3);
+        assert!(!proxy.router().state(1).unwrap().3);
+        assert_eq!(proxy.inner.tokenizer.compatibility_attested(1), Some(false));
+        assert!(
+            proxy
+                .inner
+                .metrics
+                .upstream_compatibility_admitted
+                .with_label_values(&[fast_url.as_str().trim_end_matches('/')])
+                .get()
+                .abs()
+                < f64::EPSILON
+        );
+        assert_eq!(slow_identity_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(fast_identity_calls.load(Ordering::Relaxed), 2);
+        slow_task.abort();
+        fast_task.abort();
+    }
+
+    #[tokio::test]
+    async fn all_fenced_probe_fanout_is_bounded() {
+        let identity_calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let calls = Arc::clone(&identity_calls);
+        let permits = Arc::clone(&release);
+        let upstream = AxumRouter::new().fallback(any(move |request: Request<Body>| {
+            let calls = Arc::clone(&calls);
+            let permits = Arc::clone(&permits);
+            async move {
+                match request.uri().path() {
+                    "/v1/models" => Response::new(Body::from(
+                        r#"{"data":[{"id":"model","root":"root","max_model_len":4096}]}"#,
+                    )),
+                    "/version" => Response::new(Body::from(r#"{"version":"v1"}"#)),
+                    "/v1/mini-dynamo/identity" => {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        permits.acquire().await.unwrap().forget();
+                        Response::new(Body::from(
+                            serde_json::json!({
+                                "schema_version": 1,
+                                "incarnation": "boot-1:process-1",
+                                "model": {"id": "model", "root": "root", "max_model_len": 4096},
+                                "engine": {"version": "v1", "image_digest": format!("sha256:{}", "a".repeat(64))},
+                                "tokenizer": {"sha256": "b".repeat(64)},
+                                "renderer": {"profile": "profile"},
+                            })
+                            .to_string(),
+                        ))
+                    }
+                    _ => Response::new(Body::empty()),
+                }
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let upstream_count = MAX_CONCURRENT_UPSTREAM_PROBES + 1;
+        let joined = (0..upstream_count)
+            .map(|_| url.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut config =
+            Config::from_lookup(|key| (key == "DS4_UPSTREAM").then(|| joined.clone())).unwrap();
+        config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
+        let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
+
+        let probing_proxy = proxy.clone();
+        let probing = tokio::spawn(async move { probing_proxy.probe_round().await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while identity_calls.load(Ordering::Relaxed) < MAX_CONCURRENT_UPSTREAM_PROBES {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the bounded probe group must fill");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(
+            identity_calls.load(Ordering::Relaxed),
+            MAX_CONCURRENT_UPSTREAM_PROBES
+        );
+
+        release.add_permits(upstream_count);
+        probing.await.unwrap();
+        assert_eq!(identity_calls.load(Ordering::Relaxed), upstream_count);
+        assert!((0..upstream_count).all(|index| proxy.router().state(index).unwrap().3));
+        task.abort();
     }
 
     #[tokio::test]

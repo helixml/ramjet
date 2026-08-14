@@ -33,6 +33,8 @@ pub struct Metrics {
     pub upstream_up: GaugeVec,
     pub upstream_probe_time: GaugeVec,
     pub upstream_probe_errors: CounterVec,
+    pub upstream_compatibility_admitted: GaugeVec,
+    pub upstream_admission_checks: CounterVec,
     pub upstream_errors: CounterVec,
     pub client_disconnects: CounterVec,
     pub last_upstream_success: GaugeVec,
@@ -237,7 +239,7 @@ impl Metrics {
             )?,
             upstream_up: gauge(
                 "ds4proxy_upstream_up",
-                "Whether the upstream /v1/models readiness probe is succeeding",
+                "Whether the upstream passes the configured serving-admission probe",
                 &["upstream"],
             )?,
             upstream_probe_time: gauge(
@@ -249,6 +251,16 @@ impl Metrics {
                 "ds4proxy_upstream_probe_failures_total",
                 "Failed upstream readiness probes",
                 &["upstream", "reason"],
+            )?,
+            upstream_compatibility_admitted: gauge(
+                "ds4proxy_upstream_compatibility_admitted",
+                "Whether the latest atomic serving identity matches the configured manifest",
+                &["upstream"],
+            )?,
+            upstream_admission_checks: counter(
+                "ds4proxy_upstream_admission_checks_total",
+                "Atomic serving-identity checks by bounded outcome",
+                &["upstream", "outcome"],
             )?,
             upstream_errors: counter(
                 "ds4proxy_upstream_errors_total",
@@ -262,7 +274,7 @@ impl Metrics {
             )?,
             last_upstream_success: gauge(
                 "ds4proxy_last_upstream_success_timestamp_seconds",
-                "Unix timestamp of the latest successful upstream readiness probe",
+                "Unix timestamp of the latest successful upstream serving-admission probe",
                 &["upstream"],
             )?,
             upstream_requests: counter(
@@ -800,6 +812,8 @@ impl Metrics {
             Box::new(self.upstream_up.clone()),
             Box::new(self.upstream_probe_time.clone()),
             Box::new(self.upstream_probe_errors.clone()),
+            Box::new(self.upstream_compatibility_admitted.clone()),
+            Box::new(self.upstream_admission_checks.clone()),
             Box::new(self.upstream_errors.clone()),
             Box::new(self.client_disconnects.clone()),
             Box::new(self.last_upstream_success.clone()),
@@ -949,6 +963,14 @@ mod tests {
             .upstream_up
             .with_label_values(&["upstream-0"])
             .set(1.0);
+        metrics
+            .upstream_compatibility_admitted
+            .with_label_values(&["upstream-0"])
+            .set(1.0);
+        metrics
+            .upstream_admission_checks
+            .with_label_values(&["upstream-0", "match"])
+            .inc();
         metrics.prompt_tokens.with_label_values(&["chat"]).inc();
         metrics.cached_tokens.with_label_values(&["chat"]).inc();
         metrics
@@ -1004,6 +1026,8 @@ mod tests {
         for expected in [
             "ds4proxy_requests_total",
             "ds4proxy_upstream_up",
+            "ds4proxy_upstream_compatibility_admitted",
+            "ds4proxy_upstream_admission_checks_total",
             "ds4proxy_prompt_tokens_total",
             "ds4proxy_cached_prompt_tokens_total",
             "ds4proxy_cache_requests_total",

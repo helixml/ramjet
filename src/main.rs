@@ -138,6 +138,8 @@ fn log_startup(config: &Config) {
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         upstreams = ?config.upstreams,
+        upstream_admission_mode = ?config.upstream_admission_mode,
+        upstream_admission_timeout_ms = config.upstream_admission_timeout_ms,
         affinity = ?config.affinity,
         alpha = config.route_alpha,
         max_prefix_bytes = config.route_max_prefix_bytes,

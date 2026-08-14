@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 const MAX_GOLDENS: usize = 64;
 const MAX_ADMITTED_CLASSES: usize = 32;
+const MAX_INCARNATION_BYTES: usize = 256;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,6 +77,34 @@ pub enum RuntimeOutcome {
     VersionMismatch,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServingIdentityOutcome {
+    Match,
+    Decode,
+    SchemaMismatch,
+    IncarnationInvalid,
+    ModelMismatch,
+    EngineMismatch,
+    TokenizerMismatch,
+    RendererMismatch,
+}
+
+impl ServingIdentityOutcome {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Match => "match",
+            Self::Decode => "decode",
+            Self::SchemaMismatch => "schema_mismatch",
+            Self::IncarnationInvalid => "incarnation_invalid",
+            Self::ModelMismatch => "model_mismatch",
+            Self::EngineMismatch => "engine_mismatch",
+            Self::TokenizerMismatch => "tokenizer_mismatch",
+            Self::RendererMismatch => "renderer_mismatch",
+        }
+    }
+}
+
 impl RuntimeOutcome {
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -107,6 +136,17 @@ struct RuntimeModel {
 #[derive(Debug, Deserialize)]
 struct VersionResponse {
     version: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServingIdentityResponse {
+    schema_version: u32,
+    incarnation: String,
+    model: ModelIdentity,
+    engine: EngineIdentity,
+    tokenizer: TokenizerIdentity,
+    renderer: RendererIdentity,
 }
 
 impl CompatibilityManifest {
@@ -244,6 +284,47 @@ impl CompatibilityManifest {
         }
         RuntimeOutcome::Match
     }
+
+    /// Validate one atomically captured engine serving identity.
+    ///
+    /// The endpoint response binds model, engine image, tokenizer, renderer,
+    /// and a process incarnation in one bounded JSON document. The opaque
+    /// incarnation is validated but never logged, labeled, or retained.
+    #[must_use]
+    pub fn serving_identity_outcome(&self, body: &[u8]) -> ServingIdentityOutcome {
+        let Ok(identity) = serde_json::from_slice::<ServingIdentityResponse>(body) else {
+            return ServingIdentityOutcome::Decode;
+        };
+        if identity.schema_version != 1 {
+            return ServingIdentityOutcome::SchemaMismatch;
+        }
+        if identity.incarnation.is_empty()
+            || identity.incarnation.len() > MAX_INCARNATION_BYTES
+            || !identity.incarnation.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+            })
+        {
+            return ServingIdentityOutcome::IncarnationInvalid;
+        }
+        if identity.model.id != self.model.id
+            || identity.model.root != self.model.root
+            || identity.model.max_model_len != self.model.max_model_len
+        {
+            return ServingIdentityOutcome::ModelMismatch;
+        }
+        if identity.engine.version != self.engine.version
+            || identity.engine.image_digest != self.engine.image_digest
+        {
+            return ServingIdentityOutcome::EngineMismatch;
+        }
+        if identity.tokenizer.sha256 != self.tokenizer.sha256 {
+            return ServingIdentityOutcome::TokenizerMismatch;
+        }
+        if identity.renderer.profile != self.renderer.profile {
+            return ServingIdentityOutcome::RendererMismatch;
+        }
+        ServingIdentityOutcome::Match
+    }
 }
 
 fn unique_nonempty(values: &[String], kind: &str) -> anyhow::Result<HashSet<String>> {
@@ -325,6 +406,61 @@ mod tests {
         assert_eq!(
             manifest.runtime_outcome(models, br#"{"version":"v2"}"#),
             RuntimeOutcome::VersionMismatch
+        );
+    }
+
+    #[test]
+    fn atomic_serving_identity_binds_every_compatibility_layer_and_incarnation() {
+        let manifest = CompatibilityManifest {
+            schema_version: 1,
+            model: ModelIdentity {
+                id: "model".to_owned(),
+                root: "root".to_owned(),
+                max_model_len: 4096,
+            },
+            engine: EngineIdentity {
+                version: "v1".to_owned(),
+                image_digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            tokenizer: TokenizerIdentity {
+                sha256: "b".repeat(64),
+            },
+            renderer: RendererIdentity {
+                profile: "profile".to_owned(),
+            },
+            admitted_request_classes: vec!["plain".to_owned()],
+            goldens: Vec::new(),
+        };
+        let identity = serde_json::json!({
+            "schema_version": 1,
+            "incarnation": "boot-1234:process-9",
+            "model": {"id": "model", "root": "root", "max_model_len": 4096},
+            "engine": {
+                "version": "v1",
+                "image_digest": format!("sha256:{}", "a".repeat(64)),
+            },
+            "tokenizer": {"sha256": "b".repeat(64)},
+            "renderer": {"profile": "profile"},
+        });
+        let body = serde_json::to_vec(&identity).unwrap();
+        assert_eq!(
+            manifest.serving_identity_outcome(&body),
+            ServingIdentityOutcome::Match
+        );
+
+        let mut mismatched = identity;
+        mismatched["engine"]["image_digest"] =
+            serde_json::Value::String(format!("sha256:{}", "c".repeat(64)));
+        assert_eq!(
+            manifest.serving_identity_outcome(&serde_json::to_vec(&mismatched).unwrap()),
+            ServingIdentityOutcome::EngineMismatch
+        );
+        mismatched["engine"]["image_digest"] =
+            serde_json::Value::String(format!("sha256:{}", "a".repeat(64)));
+        mismatched["incarnation"] = serde_json::Value::String("unsafe value".to_owned());
+        assert_eq!(
+            manifest.serving_identity_outcome(&serde_json::to_vec(&mismatched).unwrap()),
+            ServingIdentityOutcome::IncarnationInvalid
         );
     }
 

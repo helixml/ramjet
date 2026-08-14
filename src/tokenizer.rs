@@ -22,8 +22,13 @@ use tokio::{
 use url::Url;
 
 use crate::{
-    compat::{CompatibilityManifest, RuntimeOutcome, sha256_hex, token_ids_sha256},
-    config::{Config, ExactRouteMode, ShadowSoakMode, TokenizerMode, TokenizerProfile},
+    compat::{
+        CompatibilityManifest, RuntimeOutcome, ServingIdentityOutcome, sha256_hex, token_ids_sha256,
+    },
+    config::{
+        Config, ExactRouteMode, ShadowSoakMode, TokenizerMode, TokenizerProfile,
+        UpstreamAdmissionMode,
+    },
     exact_route_inventory::ExactRouteInventory,
     exact_shadow::{
         ExactPlacementMode, ExactPlacementPolicy, ExactRouteShadow, ExactRouteSnapshot,
@@ -111,7 +116,9 @@ struct PreRouteTokenizer {
 struct RuntimeAttestation {
     manifest: Arc<CompatibilityManifest>,
     remote: RemoteTokenizer,
+    identity_remote: RemoteTokenizer,
     ready: Arc<Vec<AtomicBool>>,
+    admission_ready: Arc<Vec<AtomicBool>>,
     revision: Arc<AtomicU64>,
     metrics: Arc<Metrics>,
 }
@@ -180,6 +187,14 @@ enum LocalFailure {
     Join,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CompatibilityAdmission {
+    NotConfigured,
+    Match,
+    Mismatch,
+    Unavailable,
+}
+
 impl Failure {
     const fn label(self) -> &'static str {
         match self {
@@ -205,6 +220,33 @@ impl LocalFailure {
 }
 
 impl TokenizerObserver {
+    #[cfg(test)]
+    pub(crate) fn with_test_attestation(
+        config: &Config,
+        client: reqwest::Client,
+        metrics: Arc<Metrics>,
+        manifest: CompatibilityManifest,
+    ) -> Self {
+        let mut base = config.clone();
+        base.upstream_admission_mode = UpstreamAdmissionMode::Http;
+        base.tokenizer_mode = TokenizerMode::Off;
+        base.exact_route_mode = ExactRouteMode::Off;
+        let mut observer = Self::with_exact_inventories(
+            &base,
+            client.clone(),
+            Arc::clone(&metrics),
+            Arc::from([]),
+        )
+        .expect("off-mode test observer");
+        observer.attestation = Some(RuntimeAttestation::new(
+            Arc::new(manifest),
+            remote_tokenizer(config, client.clone()),
+            remote_identity(config, client),
+            metrics,
+        ));
+        observer
+    }
+
     /// Creates the bounded tokenizer observer.
     ///
     /// # Errors
@@ -282,7 +324,9 @@ impl TokenizerObserver {
                     tokenizer,
                     formatter,
                 });
-                if config.exact_route_mode != ExactRouteMode::Off {
+                if config.exact_route_mode != ExactRouteMode::Off
+                    || config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility
+                {
                     let manifest_path = config
                         .exact_route_manifest_path
                         .as_deref()
@@ -303,17 +347,21 @@ impl TokenizerObserver {
                     )?);
                     validate_golden_tokens(&local, &manifest)?;
                     let remote = remote_tokenizer(config, client.clone());
+                    let identity_remote = remote_identity(config, client.clone());
                     attestation = Some(RuntimeAttestation::new(
                         Arc::clone(&manifest),
                         remote,
+                        identity_remote,
                         Arc::clone(&metrics),
                     ));
-                    pre_route = Some(PreRouteTokenizer {
-                        local: Arc::clone(&local),
-                        manifest,
-                        permits: Arc::new(Semaphore::new(config.exact_route_workers)),
-                        timeout: Duration::from_millis(config.exact_route_timeout_ms as u64),
-                    });
+                    if config.exact_route_mode != ExactRouteMode::Off {
+                        pre_route = Some(PreRouteTokenizer {
+                            local: Arc::clone(&local),
+                            manifest,
+                            permits: Arc::new(Semaphore::new(config.exact_route_workers)),
+                            timeout: Duration::from_millis(config.exact_route_timeout_ms as u64),
+                        });
+                    }
                 }
                 let (sender, receiver) = mpsc::channel(config.tokenizer_queue_capacity);
                 let backend = Backend::LocalShadow {
@@ -597,16 +645,46 @@ impl TokenizerObserver {
         assignment
     }
 
-    pub async fn attest_upstream(&self, upstream: usize, models_body: &[u8]) {
+    pub(crate) async fn attest_upstream(&self, upstream: usize, models_body: &[u8]) {
         if let Some(attestation) = &self.attestation {
-            attestation.check(upstream, models_body).await;
+            let _ = attestation.check(upstream, models_body).await;
         }
+    }
+
+    pub(crate) async fn evaluate_upstream_admission(
+        &self,
+        upstream: usize,
+    ) -> CompatibilityAdmission {
+        let Some(attestation) = &self.attestation else {
+            return CompatibilityAdmission::NotConfigured;
+        };
+        attestation.evaluate_admission(upstream).await
     }
 
     pub fn invalidate_attestation(&self, upstream: usize) {
         if let Some(attestation) = &self.attestation {
             attestation.invalidate(upstream, "probe_unhealthy");
         }
+    }
+
+    pub(crate) fn invalidate_admission(&self, upstream: usize) {
+        if let Some(attestation) = &self.attestation {
+            attestation.publish_admission(upstream, false);
+        }
+    }
+
+    pub(crate) fn publish_admission(&self, upstream: usize, ready: bool) {
+        if let Some(attestation) = &self.attestation {
+            attestation.publish_admission(upstream, ready);
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn compatibility_attested(&self, upstream: usize) -> Option<bool> {
+        self.attestation
+            .as_ref()
+            .and_then(|attestation| attestation.admission_ready.get(upstream))
+            .map(|ready| ready.load(Ordering::Acquire))
     }
 
     /// Enqueues a post-request shadow observation without waiting for capacity.
@@ -720,19 +798,34 @@ fn remote_tokenizer(config: &Config, client: reqwest::Client) -> RemoteTokenizer
     }
 }
 
+fn remote_identity(config: &Config, client: reqwest::Client) -> RemoteTokenizer {
+    RemoteTokenizer {
+        client,
+        upstreams: config.upstreams.clone(),
+        token: config.upstream_token.clone(),
+        timeout: Duration::from_millis(config.upstream_admission_timeout_ms as u64),
+    }
+}
+
 impl RuntimeAttestation {
     fn new(
         manifest: Arc<CompatibilityManifest>,
         remote: RemoteTokenizer,
+        identity_remote: RemoteTokenizer,
         metrics: Arc<Metrics>,
     ) -> Self {
         let ready = (0..remote.upstreams.len())
             .map(|_| AtomicBool::new(false))
             .collect();
+        let admission_ready = (0..remote.upstreams.len())
+            .map(|_| AtomicBool::new(false))
+            .collect();
         Self {
             manifest,
             remote,
+            identity_remote,
             ready: Arc::new(ready),
+            admission_ready: Arc::new(admission_ready),
             revision: Arc::new(AtomicU64::new(0)),
             metrics,
         }
@@ -755,18 +848,43 @@ impl RuntimeAttestation {
         self.revision.load(Ordering::Acquire) == revision && self.all_ready()
     }
 
-    async fn check(&self, upstream: usize, models_body: &[u8]) {
+    async fn check(&self, upstream: usize, models_body: &[u8]) -> bool {
         if !self.begin_check(upstream) {
-            return;
+            return false;
         }
         let outcome = match self.remote.version(upstream).await {
             Ok(version) => self.manifest.runtime_outcome(models_body, &version),
             Err(error) => {
                 self.set(upstream, false, &format!("version_{}", error.label()));
-                return;
+                return false;
             }
         };
-        self.set(upstream, outcome == RuntimeOutcome::Match, outcome.label());
+        let ready = outcome == RuntimeOutcome::Match;
+        self.set(upstream, ready, outcome.label());
+        ready
+    }
+
+    async fn evaluate_admission(&self, upstream: usize) -> CompatibilityAdmission {
+        if self.admission_ready.get(upstream).is_none()
+            || self.identity_remote.upstreams.get(upstream).is_none()
+        {
+            return CompatibilityAdmission::NotConfigured;
+        }
+        let body = match self.identity_remote.identity(upstream).await {
+            Ok(body) => body,
+            Err(error) => {
+                self.record_admission_outcome(upstream, error.label());
+                return CompatibilityAdmission::Unavailable;
+            }
+        };
+        let outcome = self.manifest.serving_identity_outcome(&body);
+        let ready = outcome == ServingIdentityOutcome::Match;
+        self.record_admission_outcome(upstream, outcome.label());
+        if ready {
+            CompatibilityAdmission::Match
+        } else {
+            CompatibilityAdmission::Mismatch
+        }
     }
 
     fn invalidate(&self, upstream: usize, outcome: &str) {
@@ -806,6 +924,31 @@ impl RuntimeAttestation {
         self.metrics
             .compat_attestation_checks
             .with_label_values(&[label, outcome])
+            .inc();
+    }
+
+    fn publish_admission(&self, upstream: usize, ready: bool) {
+        let Some(state) = self.admission_ready.get(upstream) else {
+            return;
+        };
+        state.store(ready, Ordering::Release);
+        let Some(url) = self.identity_remote.upstreams.get(upstream) else {
+            return;
+        };
+        let label = url.as_str().trim_end_matches('/');
+        self.metrics
+            .upstream_compatibility_admitted
+            .with_label_values(&[label])
+            .set(if ready { 1.0 } else { 0.0 });
+    }
+
+    fn record_admission_outcome(&self, upstream: usize, outcome: &str) {
+        let Some(url) = self.identity_remote.upstreams.get(upstream) else {
+            return;
+        };
+        self.metrics
+            .upstream_admission_checks
+            .with_label_values(&[url.as_str().trim_end_matches('/'), outcome])
             .inc();
     }
 }
@@ -1312,6 +1455,28 @@ impl OAIChatLikeRequest for RenderRequest {
 }
 
 impl RemoteTokenizer {
+    async fn identity(&self, upstream: usize) -> Result<Vec<u8>, Failure> {
+        let Some(upstream) = self.upstreams.get(upstream) else {
+            return Err(Failure::Connect);
+        };
+        let mut url = upstream.clone();
+        let base_path = upstream.path().trim_end_matches('/');
+        url.set_path(&format!("{base_path}/v1/mini-dynamo/identity"));
+        url.set_query(None);
+        let mut request = self.client.get(url).timeout(self.timeout);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| classify_request_error(&error))?;
+        if !response.status().is_success() {
+            return Err(Failure::Http);
+        }
+        bounded_response_body(response, MAX_IDENTITY_BYTES).await
+    }
+
     async fn version(&self, upstream: usize) -> Result<Vec<u8>, Failure> {
         let Some(upstream) = self.upstreams.get(upstream) else {
             return Err(Failure::Connect);
@@ -1522,22 +1687,26 @@ mod tests {
         let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        let remote = RemoteTokenizer {
+            client: reqwest::Client::new(),
+            upstreams: vec![url],
+            token: None,
+            timeout: Duration::from_secs(1),
+        };
         let attestation = RuntimeAttestation::new(
             Arc::new(test_manifest("v1")),
-            RemoteTokenizer {
-                client: reqwest::Client::new(),
-                upstreams: vec![url],
-                token: None,
-                timeout: Duration::from_secs(1),
-            },
+            remote.clone(),
+            remote,
             Arc::clone(&metrics),
         );
-        attestation
-            .check(
-                0,
-                br#"{"data":[{"id":"model","root":"root","max_model_len":4096}]}"#,
-            )
-            .await;
+        assert!(
+            attestation
+                .check(
+                    0,
+                    br#"{"data":[{"id":"model","root":"root","max_model_len":4096}]}"#,
+                )
+                .await
+        );
         assert!(attestation.all_ready());
         let revision = attestation.marker().unwrap();
         assert!(attestation.still_ready(revision));
@@ -1552,6 +1721,15 @@ mod tests {
                 .abs()
                 < f64::EPSILON
         );
+        assert!(
+            !attestation
+                .check(
+                    0,
+                    br#"{"data":[{"id":"other","root":"root","max_model_len":4096}]}"#,
+                )
+                .await
+        );
+        assert!(!attestation.all_ready());
         attestation.invalidate(0, "test");
         assert!(!attestation.still_ready(revision));
         assert!(attestation.marker().is_none());

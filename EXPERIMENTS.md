@@ -5165,3 +5165,58 @@ release verification took 0.15s and produced a 12,419,480-byte stripped LB
 binary. The accidental worktree-local Cargo target was removed, recovering
 5.7GiB while preserving the shared canonical cache. node06 remained
 unreachable, so no live r107 inference or TTFT claim is made.
+
+## 2026-08-14 — r108 local compatibility serving-admission foundation
+
+Issue #15 had an availability gap between existing renderer attestation and
+ordinary inference: a mismatch fenced exact tokenization but the same replica
+could still pass `/v1/models` and receive traffic. The first r108 draft tried
+to enforce the existing separate `/v1/models` and `/version` observations. An
+independent availability review rejected it: a process restart between those
+requests could combine two incarnations, the router stayed healthy during the
+second await, initially fenced replicas were probed serially, and the timeout
+was incorrectly coupled to tokenization.
+
+The retained design adds a separate default-`http` admission policy whose
+explicit `compatibility` mode requires local golden validation plus the
+SHA-pinned manifest and one atomic engine identity response. That schema binds
+an opaque process incarnation, model ID/root/context, engine version and image
+digest, tokenizer hash, and renderer profile in a single bounded document.
+The incarnation is syntax-checked but never retained, logged, labeled, or
+journaled. A normal compatibility recheck first removes that replica from
+serving/failover; when it is the last admitted replica, its previous admission
+stays published only for the bounded request. Match admits it, mismatch keeps
+or makes it fenced, and a later match restores it. Router health is cleared
+before publishing a failed admission, preventing a post-mismatch dispatch
+window. Transport/unavailable and semantic-mismatch outcomes are separate
+bounded metrics. `/health` exposes only mode, ordinal, health, and a
+compatibility boolean.
+
+The gate is independent of KV events and does not enable exact placement.
+The node06 Compose surface exposes it with the unchanged `http` default, so
+merging or deploying this image cannot alter serving admission until an
+operator explicitly opts in. The mode requires at least two upstreams.
+Initially fenced replicas are probed concurrently; later rounds try unhealthy
+replicas first. Probe concurrency is capped at eight. The last admitted replica
+continues serving only during its bounded atomic identity request; mismatch or
+unavailability then fences it instead of preserving stale admission. A
+dedicated 5s/30s-max timeout is independent of tokenization. Focused
+config/manifest/proxy tests prove explicit parsing, atomic schema mismatch,
+startup fencing, concurrent peer admission, match-to-real-dispatch, fencing
+during an in-progress check, mismatch-to-zero-dispatch, and recovery.
+
+The engine-side atomic endpoint does not yet exist on node06, so compatibility
+mode must remain off and no live serving or performance claim is made. After
+the full local gate, the next step is to publish the endpoint from the complete
+engine runtime-bundle manifest, then single-home production on the peer and
+qualify mismatch/recovery without restarting either engine.
+
+Final qualification after independent review passed `cargo fmt --check`,
+strict all-target/all-feature Clippy (3.85s), 371 Rust unit tests plus every
+integration and doc-test (7.97s warm), agent corpus validation and 232 Python
+tests (2.18s), ordinary Compose rendering, and both snapshot Compose validators
+(0.62s). The final thin-LTO `mini-dynamo` release relink took 32.72s and produced
+a 12,446,264-byte binary. The removed Go oracle was not run because the Rust
+cutover no longer contains a Go module. The independent final audit found no
+remaining merge blocker. node06 was still unavailable, so no runtime mutation
+or inference claim was attempted.

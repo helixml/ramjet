@@ -74,6 +74,22 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   `/version`. Image digest is recorded as provenance because Docker does not
   expose it inside the proxy container. Any mismatch or identity change fences
   in-flight tokenization and falls back to approximate routing.
+- 🔨 **Manifest-gated serving admission (#15).** r108 adds an independent,
+  default-`http` admission policy. Explicit `compatibility` mode starts every
+  replica fenced and admits it only after `/v1/models` plus one bounded,
+  incarnation-bearing `/v1/mini-dynamo/identity` response atomically match the
+  model, engine-image digest/version, tokenizer, and renderer manifest. The
+  first two-endpoint draft was rejected in review because a restart could mix
+  two processes; it was not retained. Initial all-fenced peers probe in
+  bounded parallel groups; steady rounds try unhealthy peers first. The last
+  admitted replica stays live only during its bounded atomic recheck, then a
+  mismatch or unavailable identity fences it. Mismatch/recovery is covered
+  through real proxy dispatch. The control-plane half is complete but
+  node06's engine image does not yet expose this endpoint, so the Compose
+  default remains `http` and no live enablement is admissible. The larger issue
+  #15 bundle still needs driver/CUDA/NCCL, kernel/patch, topology, normalized
+  argv/environment, compile-cache identity, representative warmups, endpoint
+  publication, and immutable engine-image qualification.
 - 🔨 **Exact KV-event shadow index.** The transport-independent sequence fence
   now starts untrusted, requests bounded contiguous replay on gaps, increments
   generations on restart/unrecoverable recovery, and admits exact state after

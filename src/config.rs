@@ -16,11 +16,14 @@ const MAX_SHADOW_SOAK_COMPARISONS: usize = 1_000_000;
 const MAX_SHADOW_SOAK_ATTEMPTS: usize = 2_000_000;
 const MAX_SHADOW_SOAK_TOKEN_BYTES: usize = 256 << 20;
 const MAX_SHADOW_SOAK_TIMEOUT_MS: usize = 15 * 60 * 1_000;
+const MAX_UPSTREAM_ADMISSION_TIMEOUT_MS: usize = 30_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub upstreams: Vec<Url>,
     pub upstream_token: Option<String>,
+    pub upstream_admission_mode: UpstreamAdmissionMode,
+    pub upstream_admission_timeout_ms: usize,
     pub max_tokens_strip: i64,
     pub advertise_ctx_margin: i64,
     pub route_alpha: f64,
@@ -80,6 +83,12 @@ pub struct Config {
 pub enum Affinity {
     Prefix,
     Load,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UpstreamAdmissionMode {
+    Http,
+    Compatibility,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -321,6 +330,8 @@ impl Config {
         let snapshot_route = snapshot_route_settings(&mut get, upstreams.len())?;
         let exact_route =
             exact_route_settings(&mut get, &tokenizer, &kv_events, &snapshot_route, affinity)?;
+        let upstream_admission_mode =
+            upstream_admission_mode(&mut get, upstreams.len(), &tokenizer, &exact_route)?;
         if snapshot_route.mode == SnapshotRouteMode::Shadow
             && exact_route.mode != ExactRouteMode::Shadow
         {
@@ -341,6 +352,13 @@ impl Config {
         Ok(Self {
             upstreams,
             upstream_token,
+            upstream_admission_mode,
+            upstream_admission_timeout_ms: bounded_positive(
+                &mut get,
+                "DS4_UPSTREAM_ADMISSION_TIMEOUT_MS",
+                5_000,
+                MAX_UPSTREAM_ADMISSION_TIMEOUT_MS,
+            )?,
             max_tokens_strip: parse(&mut get, "DS4_MAX_TOKENS_STRIP", 100_000, "an integer")?,
             advertise_ctx_margin: parse(
                 &mut get,
@@ -401,6 +419,52 @@ impl Config {
             snapshot_route_reconnect_max_ms: snapshot_route.reconnect_max_ms,
         })
     }
+}
+
+fn upstream_admission_mode(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    upstream_count: usize,
+    tokenizer: &TokenizerSettings,
+    exact_route: &ExactRouteSettings,
+) -> Result<UpstreamAdmissionMode, ConfigError> {
+    let mode = match get("DS4_UPSTREAM_ADMISSION_MODE")
+        .as_deref()
+        .unwrap_or("http")
+    {
+        "http" => UpstreamAdmissionMode::Http,
+        "compatibility" => UpstreamAdmissionMode::Compatibility,
+        value => {
+            return Err(invalid(
+                "DS4_UPSTREAM_ADMISSION_MODE",
+                value.to_owned(),
+                "http or compatibility",
+            ));
+        }
+    };
+    if mode == UpstreamAdmissionMode::Compatibility {
+        if upstream_count < 2 {
+            return Err(invalid(
+                "DS4_UPSTREAM_ADMISSION_MODE",
+                "compatibility".to_owned(),
+                "compatibility admission requires at least two upstreams",
+            ));
+        }
+        if tokenizer.mode != TokenizerMode::LocalShadow {
+            return Err(invalid(
+                "DS4_UPSTREAM_ADMISSION_MODE",
+                "compatibility".to_owned(),
+                "compatibility admission requires DS4_TOKENIZER_MODE=local-shadow",
+            ));
+        }
+        if exact_route.manifest_path.is_none() || exact_route.manifest_sha256.is_none() {
+            return Err(invalid(
+                "DS4_UPSTREAM_ADMISSION_MODE",
+                "compatibility".to_owned(),
+                "compatibility admission requires a path and SHA-pinned manifest",
+            ));
+        }
+    }
+    Ok(mode)
 }
 
 fn session_affinity_settings(
@@ -1221,6 +1285,8 @@ mod tests {
     fn defaults_match_go_contract() {
         let config = Config::from_lookup(|_| None).unwrap();
         assert_eq!(config.upstreams[0].as_str(), "http://ds4-flash:8000/");
+        assert_eq!(config.upstream_admission_mode, UpstreamAdmissionMode::Http);
+        assert_eq!(config.upstream_admission_timeout_ms, 5_000);
         assert!((config.route_alpha - 4.0).abs() < f64::EPSILON);
         assert_eq!(config.route_chunk_bytes, 2_048);
         assert_eq!(config.route_max_prefix_bytes, 2 << 20);
@@ -1243,6 +1309,15 @@ mod tests {
         assert_eq!(config.tokenizer_queue_capacity, 8);
         assert_eq!(config.tokenizer_timeout_ms, 2_000);
         assert_eq!(config.exact_route_mode, ExactRouteMode::Off);
+
+        let oversized = HashMap::from([("DS4_UPSTREAM_ADMISSION_TIMEOUT_MS", "30001")]);
+        assert!(matches!(
+            Config::from_lookup(|key| oversized.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_UPSTREAM_ADMISSION_TIMEOUT_MS",
+                ..
+            })
+        ));
         assert!(config.exact_route_manifest_path.is_none());
         assert!(config.exact_route_manifest_sha256.is_none());
         assert_eq!(config.exact_route_workers, 4);
@@ -1676,6 +1751,49 @@ mod tests {
                 .exact_route_mode,
             ExactRouteMode::Shadow
         );
+    }
+
+    #[test]
+    fn compatibility_admission_is_explicit_and_requires_a_manifest() {
+        let disabled = HashMap::from([("DS4_UPSTREAM_ADMISSION_MODE", "compatibility")]);
+        assert!(matches!(
+            Config::from_lookup(|key| disabled.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_UPSTREAM_ADMISSION_MODE",
+                ..
+            })
+        ));
+
+        let values = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1,http://b:1"),
+            ("DS4_UPSTREAM_ADMISSION_MODE", "compatibility"),
+            ("DS4_TOKENIZER_MODE", "local-shadow"),
+            ("DS4_TOKENIZER_PATH", "/models/tokenizer.json"),
+            (
+                "DS4_TOKENIZER_SHA256",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            ("DS4_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
+            (
+                "DS4_EXACT_ROUTE_MANIFEST_SHA256",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        ]);
+        let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(
+            config.upstream_admission_mode,
+            UpstreamAdmissionMode::Compatibility
+        );
+        assert_eq!(config.exact_route_mode, ExactRouteMode::Off);
+
+        let invalid = HashMap::from([("DS4_UPSTREAM_ADMISSION_MODE", "permissive")]);
+        assert!(matches!(
+            Config::from_lookup(|key| invalid.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_UPSTREAM_ADMISSION_MODE",
+                ..
+            })
+        ));
     }
 
     #[test]
