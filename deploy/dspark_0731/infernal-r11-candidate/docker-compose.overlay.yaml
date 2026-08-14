@@ -1,0 +1,17 @@
+# One-engine qualification only. Keep production single-homed on engine A and
+# hold the common deployment lock for every inspect/mutate/verify operation.
+services:
+  ds4-loadbalancer:
+    environment:
+      DS4_UPSTREAM: http://dspark-0731:8000
+      DS4_KV_EVENT_LIVE_ENDPOINTS: tcp://dspark-0731:5557
+      DS4_KV_EVENT_REPLAY_ENDPOINTS: tcp://dspark-0731:5558
+
+  dspark-0731-b:
+    image: voipmonitor/vllm:infernal-invocation-vllm908522a-b12x5d648d9-fi1ac6942-cu133-torch213-20260813-r11@sha256:01b973d1ae132882bcc1bf62ea232f6aabe649dd4a89b961d81f3c41cc53f971
+    entrypoint:
+      - /usr/local/bin/lmcache-mp-wrapper.sh
+      - /usr/local/bin/serve-ds4-flash.sh
+    volumes:
+      - /prod/sglang-cache/infernal-invocation-cu133-r11:/cache
+      - /prod/sglang-cache/infernal-invocation-cu133-r11/tmp:/container-tmp
