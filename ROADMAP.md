@@ -88,15 +88,19 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   r11 image is pinned by both manifest and config digest with a direct
   engine-B-only Compose overlay and an isolated compilation cache. A no-layer
   registry gate validates both r4/r11 raw manifest digests, configs,
-  entrypoints, platforms, and selected source/runtime labels in 2.6-7.9s
-  observed warm.
+  entrypoints, platforms, the complete effective image-environment and
+  `local-inference.*` label deltas, non-env config fields, and unique compressed
+  blob shape in 2.6-7.9s observed warm. It catches five new ExLlamaV3 fields,
+  24 changed environment values, and the r4 CUTLASS label/environment
+  inconsistency before a 12.79GiB pull.
   Declared CUDA 13.3, Torch 2.13, FlashInfer 0.6.18, InstantTensor 0.1.9,
   NCCL 2.31.2, and the base vLLM/LMCache commits remain constant; the vLLM,
   B12X, and LMCache integration trees change. The named Kimi-K3 base tag is
   unchanged but its recorded content ID differs, so native binary equivalence
   is unproven. A semantic render gate restores the vendor wrapper, leaves A
-  byte-for-byte unchanged, single-homes the LB on A, and restricts B to GPUs
-  4-7. This makes r11 a high-value candidate, not a performance claim. After cooling
+  byte-for-byte unchanged, single-homes the LB on A, restricts B to GPUs 4-7,
+  and pins the nine qualified r4 launcher inputs that were previously implicit.
+  This makes r11 a high-value candidate, not a performance claim. After cooling
   repair: preflight engine arguments without GPUs, isolate one TP4 pair under
   facility/BMC observation, then stop at the first failed five-request smoke,
   c8 code/prose scout, or full direct matrix gate. Pay for a two-round r34/r11

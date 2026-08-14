@@ -2,7 +2,8 @@
 
 This directory pins the upstream r11 image as a direct, one-engine candidate.
 It does not build or patch the image. `manifest.json` locks the registry image,
-config, entrypoint, and a selected r4-to-r11 source/runtime label contract.
+config, entrypoint, the complete effective image-environment and
+`local-inference.*` label deltas, and the unique compressed layer-blob shape.
 
 The declared CUDA 13.3, Torch 2.13, FlashInfer 0.6.18, InstantTensor 0.1.9,
 NCCL 2.31.2, vLLM base commit, and LMCache base commit/version are unchanged.
@@ -21,11 +22,14 @@ python3 bench/infernal_registry_candidate.py
 python3 deploy/dspark_0731/infernal-r11-candidate/validate-compose.py
 ```
 
-Observed warm registry reads took 2.6-7.9 seconds. Run the check before a
-large pull and again immediately before a live qualification.
+Observed warm registry reads took 2.6-7.9 seconds. The 40-test local Infernal
+gate takes about 0.12 seconds. Run both before a large pull and repeat the
+registry check immediately before a live qualification.
 
-The r11 manifest contains 12.79 GiB compressed across 79 layers. It shares 51
-layers (9.85 GiB) with immutable r4, leaving 2.94 GiB/28 layers unique to r11.
+The r4/r11 manifests contain 95/96 layer descriptors and 78/79 unique layer
+blobs respectively. r11 contains 12.79 GiB of unique compressed blobs and
+shares 51 blobs (9.85 GiB) with immutable r4, leaving 2.94 GiB/28 blobs unique
+to r11.
 Do not prune the cached r4 image before the node06 pull; verify the exact r4
 digest is still present, then pull r11 once outside startup/benchmark timing.
 If r4 was pruned, budget the full 12.79 GiB cold transfer instead of treating
@@ -41,9 +45,11 @@ once.
 
 Before assigning GPUs, use the pulled image for the pinned-image-specific
 `EngineArgs` validation described in `AGENTS.md`. The overlay deliberately
-restores r11's vendor wrapper entrypoint, single-homes every LB engine/KV
-endpoint on A, and changes B only by image, entrypoint, and isolated cache
-mounts. Under the common lock, first recreate only `ds4-loadbalancer` with the
+restores r11's vendor wrapper entrypoint, pins the qualified r4 model/tokenizer
+revision, sampling, graph-96, InstantTensor, and LMCache-off launcher inputs,
+single-homes every LB engine/KV endpoint on A, and otherwise changes B only by
+image, entrypoint, and isolated cache mounts. Under the common lock, first
+recreate only `ds4-loadbalancer` with the
 base plus overlay, verify its effective environment contains no B endpoint,
 then recreate exactly `--no-deps dspark-0731-b` from the same render. Never
 start B first or run an unscoped `docker compose up`.

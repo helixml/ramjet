@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "candidate": "infernal-r11-direct",
   "candidate_image": {
     "image": "voipmonitor/vllm:infernal-invocation-vllm908522a-b12x5d648d9-fi1ac6942-cu133-torch213-20260813-r11@sha256:01b973d1ae132882bcc1bf62ea232f6aabe649dd4a89b961d81f3c41cc53f971",
@@ -99,5 +99,90 @@
     "local-inference.runtime.base-id",
     "local-inference.vllm.integration.tree",
     "local-inference.vllm.package-version"
-  ]
+  ],
+  "comparison": {
+    "environment_delta": {
+      "added": [
+        "VLLM_EXL3_ENCODER_REVISION",
+        "VLLM_EXL3_ENCODER_SOURCE",
+        "VLLM_EXL3_EXT_PATH",
+        "VLLM_EXL3_ONLINE_CACHE_DIR",
+        "VLLM_EXL3_ONLINE_CACHE_MODE"
+      ],
+      "removed": [],
+      "changed": [
+        "B12X_COMPILE_CACHE_DIR",
+        "B12X_CUTE_COMPILE_CACHE_DIR",
+        "CUDA_CACHE_PATH",
+        "CUPY_CACHE_DIR",
+        "CUTE_DSL_CACHE_DIR",
+        "CUTLASS_DSL_VERSION",
+        "DG_JIT_CACHE_DIR",
+        "FLASHINFER_WORKSPACE_BASE",
+        "LOCAL_INFERENCE_CACHE_FINGERPRINT",
+        "MINFER_FMHA_CACHE_DIR",
+        "MM_SPARSE_ATTN_AOT_CACHE",
+        "NUMBA_CACHE_DIR",
+        "PYTHONPATH",
+        "SPARKINFER_COMPILE_CACHE_DIR",
+        "TILELANG_CACHE_DIR",
+        "TORCHINDUCTOR_CACHE_DIR",
+        "TORCH_EXTENSIONS_DIR",
+        "TRITON_CACHE_DIR",
+        "TVM_CACHE_DIR",
+        "TVM_FFI_CACHE_DIR",
+        "VLLM_CACHE_DIR",
+        "VLLM_CACHE_ROOT",
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
+        "XDG_CACHE_HOME"
+      ],
+      "unchanged_count": 123
+    },
+    "local_inference_label_delta": {
+      "added": [
+        "local-inference.exllamav3.commit",
+        "local-inference.exllamav3.repo"
+      ],
+      "removed": [],
+      "changed": [
+        "local-inference.b12x.commit",
+        "local-inference.b12x.integration.lock_sha256",
+        "local-inference.b12x.integration.prs",
+        "local-inference.b12x.integration.tree",
+        "local-inference.b12x.patch_sha256",
+        "local-inference.cache.fingerprint",
+        "local-inference.docker.commit",
+        "local-inference.lmcache.integration.lock_sha256",
+        "local-inference.lmcache.integration.prs",
+        "local-inference.lmcache.integration.tree",
+        "local-inference.lmcache.patch_sha256",
+        "local-inference.release.name",
+        "local-inference.runtime.base-id",
+        "local-inference.vllm.integration.lock_sha256",
+        "local-inference.vllm.integration.prs",
+        "local-inference.vllm.integration.tree",
+        "local-inference.vllm.package-version",
+        "local-inference.vllm.patch_sha256"
+      ],
+      "unchanged_count": 43
+    },
+    "config_field_delta": {
+      "added": [],
+      "removed": [],
+      "changed": [],
+      "unchanged_count": 3
+    },
+    "layer_blobs": {
+      "baseline_descriptor_count": 95,
+      "baseline_unique_blob_count": 78,
+      "baseline_unique_compressed_bytes": 13689720114,
+      "candidate_descriptor_count": 96,
+      "candidate_unique_blob_count": 79,
+      "candidate_unique_compressed_bytes": 13734519975,
+      "shared_blob_count": 51,
+      "shared_compressed_bytes": 10575301979,
+      "candidate_only_blob_count": 28,
+      "candidate_only_compressed_bytes": 3159217996
+    }
+  }
 }

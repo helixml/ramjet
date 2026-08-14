@@ -659,17 +659,25 @@ python3 deploy/dspark_0731/infernal-r11-candidate/validate-compose.py
 
 The registry check runs all r4/r11 manifest/config reads concurrently and took
 2.6-7.9s across observed warm runs on 2026-08-14. It pins the image and config
-digests, launcher entrypoints, platforms, and selected source/runtime labels. It
-downloads no image layers and must run before the first pull and again
+digests, launcher entrypoints, platforms, complete effective image-environment
+and `local-inference.*` label deltas, non-env config fields, and unique
+compressed layer-blob shape. It downloads no image layers and must run before
+the first pull and again
 immediately before qualification. The direct image changes the vLLM, B12X,
 and LMCache integration trees while keeping their declared base commits and
 CUDA/Torch/FlashInfer/InstantTensor/NCCL versions fixed. Its named Kimi-K3 base
 tag is unchanged but the recorded base content ID is different, so do not
 claim native binary equivalence, describe it as a vLLM-only delta, or infer a
-throughput result from metadata.
+throughput result from metadata. r11 adds five ExLlamaV3 environment fields and
+changes 24 existing environment values, mostly versioned cache paths. One
+material mismatch is `CUTLASS_DSL_VERSION=4.5.2` in r4 versus `4.6.2` in r11,
+while both provenance labels say 4.6.2. Treat this as an effective-environment
+and provenance inconsistency requiring the pulled-image package probe, not as a
+proven package upgrade.
 
-Registry manifests report 12.79GiB compressed for r11. Immutable r4 and r11
-share 51 layers/9.85GiB; r11 has 28 unique layers totaling 2.94GiB. Before the
+Registry manifests contain 95/96 layer descriptors and 78/79 unique layer blobs
+for r4/r11. r11 has 12.79GiB of unique compressed blobs; the two images share
+51 blobs/9.85GiB and r11 has 28 candidate-only blobs totaling 2.94GiB. Before the
 first post-repair pull, inspect the exact r4 digest in node06's local image
 store. Preserve it until r11 is present so Docker can reuse those layers, and
 pull r11 outside engine startup and benchmark timing. If r4 is absent, budget
@@ -682,7 +690,10 @@ lock, use the committed base+overlay render to recreate only the LB first,
 verify all engine/KV endpoint lists contain only A, and then recreate exactly
 `--no-deps dspark-0731-b` from the same render. The semantic validator proves
 the overlay leaves A unchanged, restores r11's vendor wrapper entrypoint, and
-keeps B on GPUs 4-7 and port 8013. Never start B before single-homing or use an
+keeps B on GPUs 4-7 and port 8013. It also makes the qualified r4 launcher
+contract explicit: model/tokenizer revision, probabilistic draft and standard
+rejection sampling, graph 96, InstantTensor buffered loading, and LMCache off.
+Never start B before single-homing or use an
 unscoped Compose up. Model load/JIT is outside `candidate_gate.py`; isolate the TP4 pair and watch
 facility/BMC plus driver slowdown telemetry. Once healthy, capture immutable
 engine/agent metadata and run `candidate_gate.py` under a fresh eight-GPU
