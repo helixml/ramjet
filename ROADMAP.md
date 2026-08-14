@@ -100,6 +100,11 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   is unproven. A semantic render gate restores the vendor wrapper, leaves A
   byte-for-byte unchanged, single-homes the LB on A, restricts B to GPUs 4-7,
   and pins the nine qualified r4 launcher inputs that were previously implicit.
+  r120 additionally follows the exact r11 wrapper/launcher chain without a
+  model, network, or GPU and pins its 65-argument vLLM command, 216 stable
+  allowlisted non-secret environment values, eight package versions, both launch scripts, and NCCL
+  2.31.2 bytes. The warm exact receipt plus image-native CLI/EngineArgs parse
+  passes in 9.53-13.70s, moving another failure class ahead of model load.
   This makes r11 a high-value candidate, not a performance claim. After cooling
   repair: preflight engine arguments without GPUs, isolate one TP4 pair under
   facility/BMC observation, then stop at the first failed five-request smoke,

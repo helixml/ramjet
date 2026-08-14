@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the pinned r34 launch contract without allocating a GPU.
+"""Verify a pinned serving-image launch contract without allocating a GPU.
 
 The probe renders the production Compose pair, lets the exact engine launcher
 construct its final argv/environment, and replaces only the terminal vllm
@@ -31,13 +31,10 @@ BASE = DEPLOY / "docker-compose.yaml"
 OVERLAY = DEPLOY / "docker-compose.compatibility-identity.yaml"
 MANIFEST = ROOT / "compat" / "deepseek-v4-r34-serving-runtime.json"
 DEFAULT_SERVICE = "dspark-0731"
-PROBE_PATH = "/probe/vllm"
+PROBE_PATH = "/opt/venv/bin/vllm"
 MANIFEST_TARGET = "/probe/runtime.json"
-CONTAINER_PATH = (
-    "/probe:/opt/venv/bin:/usr/local/sbin:/usr/local/bin:"
-    "/usr/sbin:/usr/bin:/sbin:/bin"
-)
 MAX_CAPTURE_BYTES = 1 << 20
+ENGINE_ARGS_SUCCESS = b"engine_args_preflight=passed\n"
 MAX_RUNTIME_ARGUMENTS = 256
 MAX_RUNTIME_ARGUMENT_BYTES = 4096
 MAX_RUNTIME_ARGUMENT_TOTAL_BYTES = 64 << 10
@@ -75,21 +72,30 @@ LAUNCH_ENVIRONMENT_KEYS = {
     "CUDA_DEVICE_ORDER",
     "CUDA_VISIBLE_DEVICES",
     "DCP_SIZE",
+    "DRAFT_SAMPLE_METHOD",
     "DSPARK_CAPACITY_LOG_INTERVAL",
     "DSPARK_DEPTH_MODE",
     "DSPARK_STS_LOG_INTERVAL",
     "DSPARK_TOKENS",
     "EXTRA_VLLM_ARGS",
     "GPU_MEMORY_UTILIZATION",
+    "GRAPH",
+    "INSTANTTENSOR_BACKEND",
     "KV_OFFLOADING_SIZE",
+    "LMCACHE_MODE",
+    "LOAD_FORMAT",
     "MAX_MODEL_LEN",
     "MAX_NUM_BATCHED_TOKENS",
     "MAX_NUM_SEQS",
     "MODE",
+    "MODEL_PATH",
+    "MODEL_REVISION",
     "MODEL_ROOT",
     "NCCL_P2P_DISABLE",
     "PORT",
+    "REJECTION_SAMPLE_METHOD",
     "SERVED_MODEL_NAME",
+    "TOKENIZER_REVISION",
     "TP_SIZE",
 }
 
@@ -128,11 +134,12 @@ def digest_file(path):
 
 with open("/probe/runtime.json", "rb") as source:
     process = json.load(source)["process"]
+environment = {
+    key: os.environ.get(key) for key in sorted(process["environment"])
+}
 evidence = {
     "argv": sys.argv[1:],
-    "environment": {
-        key: os.environ.get(key) for key in sorted(process["environment"])
-    },
+    "environment": environment,
     "packages": {
         name: metadata.version(name) for name in sorted(process["packages"])
     },
@@ -142,6 +149,29 @@ evidence = {
     ],
 }
 print(json.dumps(evidence, sort_keys=True, separators=(",", ":")))
+'''
+
+ENGINE_ARGS_PROBE = r'''import json
+import vllm.platforms
+from vllm.platforms.cpu import CpuPlatform
+
+# Parser construction asks vLLM for a default device even though this probe
+# never constructs an engine. Use the CPU platform only for those defaults;
+# the exact serving argv and image-native EngineArgs class are still parsed.
+vllm.platforms.current_platform = CpuPlatform()
+
+from vllm import AsyncEngineArgs
+from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+with open("/probe/runtime.json", "rb") as source:
+    argv = json.load(source)["process"]["argv"]
+if not argv or argv[0] != "serve":
+    raise RuntimeError("invalid serving argv")
+parsed = make_arg_parser(FlexibleArgumentParser()).parse_args(argv[1:])
+engine = AsyncEngineArgs.from_cli_args(parsed)
+engine._check_feature_supported()
+print("engine_args_preflight=passed")
 '''
 
 
@@ -294,7 +324,7 @@ def generated_manifest(template: dict[str, Any], captured: Any) -> dict[str, Any
     if any(
         not isinstance(key, str)
         or not generated_string(key, 256)
-        or not generated_string(value)
+        or not generated_environment_string(value)
         for key, value in environment.items()
     ):
         raise ProbeError("captured serving environment is invalid")
@@ -352,6 +382,17 @@ def generated_string(value: Any, limit: int = MAX_RUNTIME_ARGUMENT_BYTES) -> boo
     return (
         isinstance(value, str)
         and bool(value)
+        and value.isascii()
+        and "\0" not in value
+        and len(value.encode()) <= limit
+    )
+
+
+def generated_environment_string(
+    value: Any, limit: int = MAX_RUNTIME_ARGUMENT_BYTES
+) -> bool:
+    return (
+        isinstance(value, str)
         and value.isascii()
         and "\0" not in value
         and len(value.encode()) <= limit
@@ -423,7 +464,6 @@ def safe_environment(environment: Any) -> dict[str, str]:
         ):
             raise ProbeError("rendered engine arguments contain a sensitive option")
         result[key] = str(value)
-    result["PATH"] = CONTAINER_PATH
     return result
 
 
@@ -441,31 +481,53 @@ def sensitive_environment_name(value: str) -> bool:
     )
 
 
-def render() -> dict[str, Any]:
-    completed = subprocess.run(
-        [
-            "docker",
-            "compose",
-            "-f",
-            str(BASE),
-            "-f",
-            str(OVERLAY),
-            "config",
-            "--format",
-            "json",
-        ],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        timeout=15,
-    )
+def render(overlays: list[pathlib.Path] | None = None) -> dict[str, Any]:
+    selected = [OVERLAY] if overlays is None else overlays
+    command = ["docker", "compose", "-f", str(BASE)]
+    for overlay in selected:
+        command.extend(("-f", str(overlay)))
+    command.extend(("config", "--format", "json"))
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ProbeError("serving Compose render failed") from error
     if completed.returncode != 0:
         raise ProbeError("serving Compose render failed")
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         raise ProbeError("serving Compose render is invalid") from error
+
+
+def container_process(service: Any) -> tuple[str, list[str]]:
+    if not isinstance(service, dict):
+        raise ProbeError("rendered engine service is invalid")
+    entrypoint = service.get("entrypoint")
+    if (
+        not isinstance(entrypoint, list)
+        or not entrypoint
+        or len(entrypoint) > 8
+        or not all(generated_string(value) for value in entrypoint)
+    ):
+        raise ProbeError("rendered engine entrypoint is invalid")
+    arguments = list(entrypoint[1:])
+    command = service.get("command")
+    if command is not None:
+        if (
+            not isinstance(command, list)
+            or len(command) > MAX_RUNTIME_ARGUMENTS
+            or not all(generated_string(value) for value in command)
+        ):
+            raise ProbeError("rendered engine command is invalid")
+        arguments.extend(command)
+    return entrypoint[0], arguments
 
 
 def run_probe(
@@ -486,6 +548,7 @@ def run_probe(
     ):
         raise ProbeError("rendered engine image is not immutable")
     environment = safe_environment(service.get("environment"))
+    entrypoint, process_arguments = container_process(service)
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="mini-dynamo-runtime-probe-") as directory:
         wrapper = pathlib.Path(directory) / "vllm"
@@ -495,6 +558,10 @@ def run_probe(
             "docker",
             "run",
             "--rm",
+            "--pull",
+            "never",
+            "--runtime",
+            "runc",
             "--network",
             "none",
             "--read-only",
@@ -503,7 +570,7 @@ def run_probe(
             "--tmpfs",
             "/tmp:rw,nosuid,nodev,noexec,size=16m",
             "--entrypoint",
-            "/usr/local/bin/serve-ds4-flash.sh",
+            entrypoint,
             "--volume",
             f"{wrapper}:{PROBE_PATH}:ro",
             "--volume",
@@ -512,13 +579,17 @@ def run_probe(
         for key, value in sorted(environment.items()):
             command.extend(("--env", f"{key}={value}"))
         command.append(image)
-        completed = subprocess.run(
-            command,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=timeout_seconds,
-        )
+        command.extend(process_arguments)
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout_seconds,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ProbeError("serving runtime image probe failed") from error
     elapsed_ms = round((time.monotonic() - started) * 1000)
     if completed.returncode != 0 or len(completed.stdout) > MAX_CAPTURE_BYTES:
         raise ProbeError("serving runtime image probe failed")
@@ -529,10 +600,82 @@ def run_probe(
     return captured, image, elapsed_ms
 
 
+def engine_args_command(
+    document: dict[str, Any], manifest_path: pathlib.Path, service_name: str
+) -> list[str]:
+    try:
+        service = document["services"][service_name]
+        image = service["image"]
+    except (KeyError, TypeError) as error:
+        raise ProbeError("rendered engine service is unavailable") from error
+    if (
+        not isinstance(image, str)
+        or "@sha256:" not in image
+        or len(image.rpartition("@sha256:")[2]) != 64
+    ):
+        raise ProbeError("rendered engine image is not immutable")
+    environment = safe_environment(service.get("environment"))
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--runtime",
+        "runc",
+        "--network",
+        "none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,noexec,size=16m",
+        "--entrypoint",
+        "/opt/venv/bin/python",
+        "--volume",
+        f"{manifest_path.resolve()}:{MANIFEST_TARGET}:ro",
+    ]
+    for key, value in sorted(environment.items()):
+        command.extend(("--env", f"{key}={value}"))
+    command.extend((image, "-c", ENGINE_ARGS_PROBE))
+    return command
+
+
+def run_engine_args_probe(
+    document: dict[str, Any],
+    manifest_path: pathlib.Path,
+    service_name: str,
+    timeout_seconds: float,
+) -> int:
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            engine_args_command(document, manifest_path, service_name),
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout_seconds,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ProbeError("serving EngineArgs probe failed") from error
+    if (
+        completed.returncode != 0
+        or len(completed.stdout) > MAX_CAPTURE_BYTES
+        or not completed.stdout.endswith(ENGINE_ARGS_SUCCESS)
+        or completed.stdout.count(ENGINE_ARGS_SUCCESS) != 1
+    ):
+        raise ProbeError("serving EngineArgs probe failed")
+    return round((time.monotonic() - started) * 1000)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=pathlib.Path, default=MANIFEST)
     parser.add_argument("--service", default=DEFAULT_SERVICE)
+    parser.add_argument(
+        "--compose-overlay",
+        action="append",
+        type=pathlib.Path,
+        help="Compose overlay to render; repeat for multiple overlays",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
     parser.add_argument(
         "--output",
@@ -544,18 +687,26 @@ def main() -> int:
         action="store_true",
         help="replace one existing regular output file (requires --output)",
     )
+    parser.add_argument(
+        "--validate-engine-args",
+        action="store_true",
+        help="parse the exact receipt argv through image-native EngineArgs",
+    )
     arguments = parser.parse_args()
     if not 1 <= arguments.timeout_seconds <= 120:
         raise SystemExit("timeout must be between 1 and 120 seconds")
     if arguments.replace and arguments.output is None:
         raise SystemExit("--replace requires --output")
+    if arguments.validate_engine_args and arguments.output is not None:
+        raise SystemExit("--validate-engine-args cannot be combined with --output")
     try:
         raw = arguments.manifest.read_bytes()
         manifest = json.loads(raw)
         validate_generation_template(manifest)
         errors = manifest_errors(manifest) if arguments.output is None else []
+        rendered = render(arguments.compose_overlay)
         captured, image, elapsed_ms = run_probe(
-            render(),
+            rendered,
             arguments.manifest,
             arguments.service,
             arguments.timeout_seconds,
@@ -587,6 +738,18 @@ def main() -> int:
             )
         )
         return 1
+    engine_args_elapsed_ms = None
+    if arguments.validate_engine_args:
+        try:
+            engine_args_elapsed_ms = run_engine_args_probe(
+                rendered,
+                arguments.manifest,
+                arguments.service,
+                arguments.timeout_seconds,
+            )
+        except ProbeError as error:
+            print(json.dumps({"status": "failed", "reason": str(error)}))
+            return 1
     if arguments.output is not None:
         print(
             json.dumps(
@@ -604,19 +767,22 @@ def main() -> int:
         )
         return 0
     process = manifest["process"]
+    report = {
+        "status": "match",
+        "service": arguments.service,
+        "image": image,
+        "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+        "argv_sha256": process["argv_sha256"],
+        "environment_sha256": process["environment_sha256"],
+        "packages_sha256": process["packages_sha256"],
+        "artifacts_sha256": process["artifacts_sha256"],
+        "elapsed_ms": elapsed_ms,
+    }
+    if engine_args_elapsed_ms is not None:
+        report["engine_args_elapsed_ms"] = engine_args_elapsed_ms
     print(
         json.dumps(
-            {
-                "status": "match",
-                "service": arguments.service,
-                "image": image,
-                "manifest_sha256": hashlib.sha256(raw).hexdigest(),
-                "argv_sha256": process["argv_sha256"],
-                "environment_sha256": process["environment_sha256"],
-                "packages_sha256": process["packages_sha256"],
-                "artifacts_sha256": process["artifacts_sha256"],
-                "elapsed_ms": elapsed_ms,
-            },
+            report,
             sort_keys=True,
             separators=(",", ":"),
         )
