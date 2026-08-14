@@ -5220,3 +5220,64 @@ a 12,446,264-byte binary. The removed Go oracle was not run because the Rust
 cutover no longer contains a Go module. The independent final audit found no
 remaining merge blocker. node06 was still unavailable, so no runtime mutation
 or inference claim was attempted.
+
+## 2026-08-14 — r109 local in-process vLLM identity endpoint candidate
+
+The first issue #15 engine publication design considered a separate identity
+sidecar. That would either put another proxy hop on every inference request or
+require a second LB endpoint/authority mapping. The retained candidate instead
+uses vLLM's supported `--middleware` import surface. A standard-library-only
+ASGI class intercepts exactly `GET /v1/mini-dynamo/identity` inside the same
+frontend process and passes every other scope directly to the existing app.
+
+Startup loads the committed compatibility manifest through a no-follow regular
+file descriptor, caps it at 1MiB, authenticates its SHA-256 in constant time,
+and validates the exact model/engine/tokenizer/renderer schema. It then compares
+the live vLLM distribution version, configured served-model name/context, and
+the no-follow tokenizer artifact digest. The response does not include goldens
+or request classes. Its opaque incarnation combines the kernel boot ID with
+`/proc/self/stat` process-start ticks and is rebuilt on the control request,
+binding the document to the current API frontend process. The
+endpoint performs its own constant-time, exactly-one bearer check rather than
+depending on vLLM middleware ordering. Initialization failures and HTTP errors
+are content-free.
+
+The production-shaped overlay is explicit and still leaves LB admission at
+`http`. Review found that the first draft incorrectly mounted on Infernal's
+Python path while targeting Gilded r34. The corrected overlay pins the immutable
+r34 digest and mounts inside its `/opt/vllm/vllm` package. Both engines retain
+the exact qualified KV-event publisher and top-p JSON; the middleware and
+manifest mounts are read-only binds with host-path creation disabled. A
+semantic validator rejects implicit base activation, an admission-mode change,
+mutable/wrong engine images, stale pins, wrong mounts, missing auth, duplicate
+options, or semantically changed qualified engine arguments. Six middleware
+and six Compose tests cover this local contract.
+
+A seven-round, 200,000-call-per-round synthetic ASGI fast-path microbenchmark
+measured a median 53.1ns direct no-op await and 169.7ns through the middleware,
+or 116.6ns added per ordinary request on this development host. This isolates
+the Python wrapper only; it is not a vLLM HTTP or inference latency claim. The
+candidate still re-publishes the manifest model-root and renderer claims without
+a live golden-render proof; the image binding is proved by Compose rather than
+inside the process; and its incarnation identifies the API frontend rather than
+the separate EngineCore/KV publisher. It is therefore diagnostic only and MUST
+NOT authorize LB compatibility mode. It still requires pinned-image import
+preflight and one-engine node06 correctness/performance qualification before
+any rollout, and node06 remained offline during this work.
+
+Public inspection of the exact OCI digest confirmed the image config digest
+`sha256:0ff4b1de4e950cf48dd0405562908a2f81597f4524698c0291ac2c40514ae17e`,
+`/opt/vllm` source copy, and pinned vLLM commit. That is sufficient to select
+the package mount path but is not a substitute for importing inside the full
+image. A full local pull was deliberately avoided because this is a large GPU
+runtime image and the same no-GPU import can run against node06's warm image
+cache when the host returns.
+
+Final local qualification passed 12 focused middleware/Compose tests (0.54s),
+244 complete Python tests plus agent corpus validation (2.40s), ordinary
+Compose rendering, all three semantic deployment validators, `git diff
+--check`, Rust formatting (0.31s), strict all-target/all-feature Clippy
+(0.26s), 371 Rust unit tests plus all integration/doc tests (5.22s), and the
+cached release build (0.16s). Both normal and tag Drone deployment lanes run
+the serving validator and Docker-capable Compose mutation tests; the generic
+Python lane may safely skip those tests when Docker is absent.

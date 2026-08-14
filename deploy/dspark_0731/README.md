@@ -46,6 +46,68 @@ starting that named service from the base file alone. The block candidate failed
 the agent-protocol gate recorded in `EXPERIMENTS.md` and must not be joined to
 the load balancer.
 
+## Opt-in in-process serving identity
+
+`docker-compose.compatibility-identity.yaml` is the engine half of the
+manifest-gated admission experiment. It mounts a standard-library-only ASGI
+middleware and the SHA-pinned compatibility manifest into each vLLM frontend.
+The exact authenticated `GET /v1/mini-dynamo/identity` path is answered in that
+same API process; every inference request still goes directly to vLLM, without
+a sidecar or another network hop. The middleware derives a fresh boot/process
+incarnation from `/proc`, emits only the model/engine/tokenizer/renderer subset,
+and refuses startup on a missing bearer, unsafe schema, non-regular manifest,
+or digest mismatch. It also compares the live vLLM distribution version,
+served model name, context limit, and tokenizer artifact hash with the
+manifest before it can answer the endpoint.
+
+Render and validate the candidate without starting an engine:
+
+```bash
+python3 deploy/dspark_0731/validate-serving-identity-compose.py
+docker compose -f deploy/dspark_0731/docker-compose.yaml \
+  -f deploy/dspark_0731/docker-compose.compatibility-identity.yaml \
+  config --quiet
+```
+
+The operational node06 directory is a mirror rather than a repository
+checkout. Before its eventual one-engine trial, copy the overlay, middleware,
+validator, and exact manifest beside the operational Compose and set these two
+uncommitted `.env` paths:
+
+```text
+MINI_DYNAMO_SERVING_IDENTITY_MIDDLEWARE_SOURCE=./engine_identity_middleware.py
+MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SOURCE=./deepseek-v4-r34.json
+```
+
+The validator hashes the rendered bind sources against the committed artifacts,
+so a stale operational copy fails before an engine is recreated.
+
+The validator proves that ordinary Compose has no middleware or identity
+mounts, both opt-in engines use the immutable Gilded r34 digest and the image's
+real `vllm` import path, the KV publisher and sampling floor exactly match their
+qualified JSON values, every bind is read-only and cannot create a host path,
+the manifest pin and both mounted artifacts match committed bytes, and the LB
+remains in `http` admission mode. It also
+validates any `EXTRA_VLLM_ARGS_A_IDENTITY` or
+`EXTRA_VLLM_ARGS_B_IDENTITY` override present in the environment; an override
+must retain the exact three required arguments.
+
+Do not apply this overlay to both engines together. First verify the pinned
+image still supports vLLM's `--middleware` import contract, single-home
+production on the peer, and recreate only the candidate engine. Test the direct
+endpoint with the existing engine bearer, then run the deterministic agent
+smoke and performance scout. Roll the second engine only after the candidate is
+clean. **Keep `DS4_UPSTREAM_ADMISSION_MODE=http`; this candidate MUST NOT be
+used to enable compatibility admission, even when both endpoint documents
+match.** The middleware verifies the live vLLM distribution, configured model
+name/context, and tokenizer bytes. It still re-publishes the manifest's model
+root and renderer profile without a live golden-render check, and Compose—not
+the process—provides the immutable image binding. It also does not attest the
+driver/CUDA/NCCL/kernel/cache/warmup bundle required to close issue #15. Its
+incarnation is the API frontend process rather than vLLM's separate EngineCore
+worker. A later qualified runtime-bundle publisher must close those bindings
+before compatibility admission can be enabled.
+
 ## Offline dual-companion security harness
 
 `docker-compose.snapshot-companion-offline.yaml` is a standalone,
