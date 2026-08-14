@@ -47,6 +47,33 @@ load units, and index size. It returns `200 ok` when every replica is healthy,
 serve. Successful proxied responses include `X-Mini-Dynamo-Upstream` with an
 opaque replica ordinal.
 
+### Opaque session affinity (experimental)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DS4_SESSION_AFFINITY_MODE` | `off` | `off` or observation-only `shadow`; shadow never changes the served replica. |
+| `DS4_SESSION_AFFINITY_KEY` | unset | Independent 32–256-byte HMAC key required in shadow mode. |
+| `DS4_SESSION_AFFINITY_BONUS_BLOCKS` | `4` | Counterfactual cache-equivalent bonus, at most `DS4_ROUTE_MAX_OVERLAP_BLOCKS`. |
+| `DS4_SESSION_AFFINITY_MAX_LOAD_DELTA` | `0` | Maximum load above the least-loaded healthy replica admitted for a counterfactual affinity target. |
+
+For one bounded `X-Session-ID`, shadow mode uses keyed rendezvous hashing to
+derive a stable primary and secondary from the configured upstream ordinals.
+It then records whether the bounded bonus would retain that pair without
+crossing the load guardrail. Missing, duplicate, empty, or larger-than-256-byte
+session headers fail closed. The header is stripped before upstream dispatch;
+the raw ID, HMAC scores, and key never enter logs, metrics, or the route
+journal. Journal v5 stores only a policy version, bounded policy parameters,
+outcomes, and opaque ordinals. `bench/route_replay.py` independently reproduces
+the decision, reports record mismatches, filters with `--session-affinity`, and
+sweeps `--session-bonus-blocks` / `--session-max-load-delta` without live
+traffic.
+
+This first slice is stateless prospective assignment, not learned
+"previous-replica" state, and it has no placement mode. Upstream list order and
+cardinality are part of assignment identity; reordering the list or rotating
+the key deliberately remaps sessions. Keep the affinity key separate from the
+exact-canary and snapshot secrets.
+
 ### Tokenization (experimental)
 
 | Variable | Default | Description |
@@ -212,6 +239,8 @@ families are:
 - `ds4proxy_cache_requests_total` and prompt/cached token counters for observed
   cache outcomes.
 - `ds4proxy_cache_ttft_seconds` for streaming time to first generated content.
+- `ds4proxy_session_affinity_total` for bounded prospective pair, health, load,
+  and score outcomes when session shadow mode is enabled.
 
 With `DS4_ROUTE_JOURNAL=true`, replay bounded decision snapshots without
 changing live traffic:

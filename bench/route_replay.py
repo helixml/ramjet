@@ -40,8 +40,134 @@ def records(lines):
             record = json.loads(line)
         except json.JSONDecodeError as error:
             raise ValueError(f"line {line_number}: invalid journal JSON: {error}") from error
-        if record.get("v") in (1, 2, 3, 4) and record.get("event") in ("start", "finish"):
+        if record.get("v") in (1, 2, 3, 4, 5) and record.get("event") in ("start", "finish"):
             yield record
+
+
+def session_affinity_outcome(record):
+    value = record.get("session_affinity")
+    if value is None:
+        return "legacy"
+    if isinstance(value, dict) and isinstance(value.get("outcome"), str):
+        return value["outcome"]
+    return "invalid"
+
+
+def _session_affinity_decision(record, alpha=None, bonus_blocks=None, max_load_delta=None):
+    """Independently reproduce a journal-v5 session-affinity observation."""
+    observation = record.get("session_affinity")
+    if observation is None:
+        return "legacy", None
+    if not isinstance(observation, dict) or observation.get("policy_version") != 1:
+        return "invalid_decision", None
+    observed = observation.get("outcome")
+    if observed in ("missing_session", "invalid_session"):
+        if any(observation.get(field) is not None for field in ("primary", "secondary", "target")):
+            return "invalid_decision", None
+        return observed, None
+
+    def nonnegative_int(value):
+        return type(value) is int and value >= 0
+
+    candidates = record.get("candidates")
+    primary = observation.get("primary")
+    secondary = observation.get("secondary")
+    chosen = record.get("chosen")
+    if (
+        not isinstance(candidates, list)
+        or len(candidates) < 2
+        or not all(isinstance(candidate, dict) for candidate in candidates)
+        or not all(nonnegative_int(value) for value in (primary, secondary, chosen))
+        or primary == secondary
+    ):
+        return "invalid_decision", None
+    states = {}
+    for candidate in candidates:
+        index = candidate.get("upstream")
+        if (
+            not nonnegative_int(index)
+            or index in states
+            or type(candidate.get("healthy")) is not bool
+            or not all(
+                nonnegative_int(candidate.get(field))
+                for field in ("overlap_blocks", "affinity_blocks", "load_units")
+            )
+        ):
+            return "invalid_decision", None
+        states[index] = candidate
+    if (
+        set(states) != set(range(len(states)))
+        or primary not in states
+        or secondary not in states
+        or chosen not in states
+    ):
+        return "invalid_decision", None
+
+    alpha = record.get("alpha") if alpha is None else alpha
+    bonus_blocks = observation.get("bonus_blocks") if bonus_blocks is None else bonus_blocks
+    max_load_delta = (
+        observation.get("max_load_delta") if max_load_delta is None else max_load_delta
+    )
+    if (
+        not isinstance(alpha, (int, float))
+        or not math.isfinite(float(alpha))
+        or alpha < 0
+        or not nonnegative_int(bonus_blocks)
+        or not nonnegative_int(max_load_delta)
+    ):
+        return "invalid_decision", None
+
+    healthy_loads = [state["load_units"] for state in states.values() if state["healthy"]]
+    if not healthy_loads:
+        return "no_healthy_upstream", None
+    admitted_load = min(healthy_loads) + max_load_delta
+    if states[primary]["healthy"] and states[primary]["load_units"] <= admitted_load:
+        target = primary
+        target_kind = "primary"
+    elif states[secondary]["healthy"] and states[secondary]["load_units"] <= admitted_load:
+        target = secondary
+        target_kind = "secondary_load" if states[primary]["healthy"] else "secondary_health"
+    elif not states[primary]["healthy"] and not states[secondary]["healthy"]:
+        return "no_healthy_assigned_pair", None
+    else:
+        return "kept_assigned_pair_load_gated", None
+
+    already = {
+        "primary": "approximate_already_primary",
+        "secondary_health": "approximate_already_secondary_primary_unhealthy",
+        "secondary_load": "approximate_already_secondary_primary_load_gated",
+    }
+    preferred = {
+        "primary": "would_prefer_primary",
+        "secondary_health": "would_prefer_secondary_primary_unhealthy",
+        "secondary_load": "would_prefer_secondary_primary_load_gated",
+    }
+    if chosen == target:
+        return already[target_kind], target
+
+    target_state = states[target]
+    chosen_state = states[chosen]
+    target_score = (
+        target_state["affinity_blocks"] - float(alpha) * target_state["load_units"] + bonus_blocks
+    )
+    chosen_score = chosen_state["affinity_blocks"] - float(alpha) * chosen_state["load_units"]
+    if target_state["healthy"] != chosen_state["healthy"]:
+        target_wins = target_state["healthy"]
+    elif target_score != chosen_score:
+        target_wins = target_score > chosen_score
+    elif target_state["overlap_blocks"] != chosen_state["overlap_blocks"]:
+        target_wins = target_state["overlap_blocks"] > chosen_state["overlap_blocks"]
+    else:
+        rotation = record.get("rotation")
+        if not nonnegative_int(rotation):
+            return "invalid_decision", None
+        count = len(states)
+        target_wins = (target + rotation) % count < (chosen + rotation) % count
+    return (preferred[target_kind] if target_wins else "kept_score"), target
+
+
+def session_affinity_choice(record, alpha=None, bonus_blocks=None, max_load_delta=None):
+    return _session_affinity_decision(record, alpha, bonus_blocks, max_load_delta)[0]
 
 
 def choose(record, alpha, cap, tie_break=None):
@@ -75,7 +201,15 @@ def choose(record, alpha, cap, tie_break=None):
     return sorted(candidates, key=functools.cmp_to_key(compare))[0]["upstream"]
 
 
-def replay(starts, finishes, alphas, caps, tie_break=None):
+def replay(
+    starts,
+    finishes,
+    alphas,
+    caps,
+    tie_break=None,
+    session_bonus_blocks=None,
+    session_max_load_delta=None,
+):
     paired_records = [
         (record, finishes[record["seq"]])
         for record in starts
@@ -138,6 +272,16 @@ def replay(starts, finishes, alphas, caps, tie_break=None):
                 overlaps.append(candidate["overlap_blocks"])
                 loads.append(candidate["load_units"])
             route_counts = {str(route): choices.count(route) for route in sorted(set(choices))}
+            session_replayed = [
+                session_affinity_choice(
+                    record,
+                    alpha=alpha,
+                    bonus_blocks=session_bonus_blocks,
+                    max_load_delta=session_max_load_delta,
+                )
+                for record in starts
+            ]
+            session_record_replayed = [_session_affinity_decision(record) for record in starts]
             paired = [finish for _, finish in paired_records]
             complete = [finish for _, finish in complete_records]
             durations = [record["duration_ms"] for record in complete if record.get("duration_ms") is not None]
@@ -160,6 +304,28 @@ def replay(starts, finishes, alphas, caps, tie_break=None):
                             {record.get("exact_canary", "legacy") for record in starts}
                         )
                     },
+                    "session_affinity_counts": {
+                        str(outcome): sum(
+                            1
+                            for record in starts
+                            if session_affinity_outcome(record) == outcome
+                        )
+                        for outcome in sorted(
+                            {session_affinity_outcome(record) for record in starts}
+                        )
+                    },
+                    "session_affinity_replay_counts": {
+                        str(outcome): session_replayed.count(outcome)
+                        for outcome in sorted(set(session_replayed))
+                    },
+                    "session_affinity_record_mismatches": sum(
+                        (
+                            session_affinity_outcome(record),
+                            (record.get("session_affinity") or {}).get("target"),
+                        )
+                        != reproduced
+                        for record, reproduced in zip(starts, session_record_replayed, strict=True)
+                    ),
                     "mean_overlap_blocks": round(sum(overlaps) / len(overlaps), 2) if overlaps else None,
                     "mean_observed_load_units": round(sum(loads) / len(loads), 2) if loads else None,
                     "paired_finishes": len(paired),
@@ -200,6 +366,37 @@ def main(argv=None):
         help="only replay one bounded exact-canary cohort; legacy selects records without one",
     )
     parser.add_argument(
+        "--session-affinity",
+        choices=(
+            "missing_session",
+            "invalid_session",
+            "approximate_already_primary",
+            "approximate_already_secondary_primary_unhealthy",
+            "approximate_already_secondary_primary_load_gated",
+            "would_prefer_primary",
+            "would_prefer_secondary_primary_unhealthy",
+            "would_prefer_secondary_primary_load_gated",
+            "kept_assigned_pair_load_gated",
+            "kept_score",
+            "no_healthy_assigned_pair",
+            "no_healthy_upstream",
+            "invalid_decision",
+            "legacy",
+            "invalid",
+        ),
+        help="only replay one bounded session-affinity outcome; legacy selects pre-v5 records",
+    )
+    parser.add_argument(
+        "--session-bonus-blocks",
+        type=int,
+        help="override the recorded session bonus for static counterfactual replay",
+    )
+    parser.add_argument(
+        "--session-max-load-delta",
+        type=int,
+        help="override the recorded session load delta for static counterfactual replay",
+    )
+    parser.add_argument(
         "--tie-break",
         choices=("observed", "overlap", "load-neutral"),
         default="observed",
@@ -207,6 +404,10 @@ def main(argv=None):
     )
     parser.add_argument("--json", action="store_true", help="emit one JSON object per policy")
     args = parser.parse_args(argv)
+    if args.session_bonus_blocks is not None and args.session_bonus_blocks < 0:
+        parser.error("--session-bonus-blocks must be non-negative")
+    if args.session_max_load_delta is not None and args.session_max_load_delta < 0:
+        parser.error("--session-max-load-delta must be non-negative")
     alphas = parse_numbers(args.alphas, float)
     caps = parse_numbers(args.caps, int)
     source = sys.stdin if args.trace == "-" else open(args.trace, encoding="utf-8", errors="replace")
@@ -227,13 +428,25 @@ def main(argv=None):
             args.exact_canary is None
             or record.get("exact_canary", "legacy") == args.exact_canary
         )
+        and (
+            args.session_affinity is None
+            or session_affinity_outcome(record) == args.session_affinity
+        )
     ]
     sequences = {record["seq"] for record in starts}
     finishes = {sequence: record for sequence, record in finishes.items() if sequence in sequences}
     if not starts:
         raise SystemExit("no v1 route-journal start records found")
     tie_break = None if args.tie_break == "observed" else args.tie_break
-    rows = replay(starts, finishes, alphas, caps, tie_break)
+    rows = replay(
+        starts,
+        finishes,
+        alphas,
+        caps,
+        tie_break,
+        args.session_bonus_blocks,
+        args.session_max_load_delta,
+    )
     if args.json:
         for row in rows:
             print(json.dumps(row, sort_keys=True))

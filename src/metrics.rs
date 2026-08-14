@@ -4,9 +4,12 @@ use prometheus::{
     CounterVec, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, Opts, Registry,
 };
 
-use crate::snapshot_reconnect::{
-    SnapshotReconnectAttemptKind, SnapshotReconnectAttemptResult, SnapshotReconnectEvent,
-    SnapshotReconnectObserver,
+use crate::{
+    session_affinity::SessionAffinityOutcome,
+    snapshot_reconnect::{
+        SnapshotReconnectAttemptKind, SnapshotReconnectAttemptResult, SnapshotReconnectEvent,
+        SnapshotReconnectObserver,
+    },
 };
 
 pub struct Metrics {
@@ -37,6 +40,7 @@ pub struct Metrics {
     pub route_decisions: CounterVec,
     pub route_overlap: Histogram,
     pub route_affinity: Histogram,
+    pub session_affinity: CounterVec,
     pub upstream_inflight: GaugeVec,
     pub upstream_load_units: GaugeVec,
     pub tokenizer_shadow: CounterVec,
@@ -286,6 +290,11 @@ impl Metrics {
                     "Bounded prefix overlap contribution used in the route score",
                 )
                 .buckets(vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]),
+            )?,
+            session_affinity: counter(
+                "ds4proxy_session_affinity_total",
+                "Opaque-session primary/secondary shadow decisions by endpoint and bounded outcome",
+                &["endpoint", "outcome"],
             )?,
             upstream_inflight: gauge(
                 "ds4proxy_upstream_inflight",
@@ -646,6 +655,11 @@ impl Metrics {
                     .exact_route_projected_balance
                     .with_label_values(&[endpoint, outcome]);
             }
+            for outcome in SessionAffinityOutcome::ALL.map(SessionAffinityOutcome::label) {
+                metrics
+                    .session_affinity
+                    .with_label_values(&[endpoint, outcome]);
+            }
         }
         for phase in [
             "off",
@@ -793,6 +807,7 @@ impl Metrics {
             Box::new(self.route_decisions.clone()),
             Box::new(self.route_overlap.clone()),
             Box::new(self.route_affinity.clone()),
+            Box::new(self.session_affinity.clone()),
             Box::new(self.upstream_inflight.clone()),
             Box::new(self.upstream_load_units.clone()),
             Box::new(self.tokenizer_shadow.clone()),
@@ -962,6 +977,10 @@ mod tests {
             .with_label_values(&["chat", "treatment"])
             .inc();
         metrics
+            .session_affinity
+            .with_label_values(&["chat", "approximate_already_primary"])
+            .inc();
+        metrics
             .compat_attested
             .with_label_values(&["upstream-0"])
             .set(1.0);
@@ -995,6 +1014,7 @@ mod tests {
             "ds4proxy_exact_route_placement_total",
             "ds4proxy_exact_route_projected_balance_total",
             "ds4proxy_exact_route_canary_total",
+            "ds4proxy_session_affinity_total",
             "ds4proxy_shadow_soak_source_attempts_total",
             "ds4proxy_compat_attested",
             "ds4proxy_kv_event_trusted",
@@ -1039,6 +1059,15 @@ mod tests {
                 "ds4proxy_exact_route_projected_balance_total{{endpoint=\"chat\",outcome=\"{outcome}\"}} 0"
             )));
         }
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("ds4proxy_session_affinity_total{"))
+                .count(),
+            5 * SessionAffinityOutcome::ALL.len()
+        );
+        assert!(text.contains(
+            "ds4proxy_session_affinity_total{endpoint=\"chat\",outcome=\"would_prefer_primary\"} 0"
+        ));
     }
 
     #[test]

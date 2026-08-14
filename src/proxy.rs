@@ -19,13 +19,15 @@ use crate::{
     config::Config,
     exact_route_inventory::ExactRouteInventory,
     exact_shadow::ExactRouteSnapshot,
-    journal::RouteJournal,
+    journal::{RouteAnnotations, RouteJournal},
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
     prepare::PreparedRequest,
     router::{Decision, LoadGuard, Router},
+    session::OpaqueSession,
+    session_affinity::SessionAffinity,
     shims::{self, Endpoint},
-    tokenizer::{CanarySession, ExactTokens, TokenizerObserver},
+    tokenizer::{ExactTokens, TokenizerObserver},
     usage::{Accumulator, feed_sse_chunk},
 };
 
@@ -45,6 +47,7 @@ struct Inner {
     router: Arc<Router>,
     exact_inventories: Arc<[ExactRouteInventory]>,
     journal: RouteJournal,
+    session_affinity: SessionAffinity,
     tokenizer: TokenizerObserver,
 }
 
@@ -150,6 +153,7 @@ impl Proxy {
         exact_inventories: Arc<[ExactRouteInventory]>,
     ) -> anyhow::Result<Self> {
         let journal = RouteJournal::new(config.route_journal);
+        let session_affinity = SessionAffinity::new(&config, Arc::clone(&metrics));
         let tokenizer = TokenizerObserver::with_exact_inventories(
             &config,
             client.clone(),
@@ -164,6 +168,7 @@ impl Proxy {
                 router,
                 exact_inventories,
                 journal,
+                session_affinity,
                 tokenizer,
             }),
         })
@@ -270,7 +275,7 @@ impl Proxy {
         if capture_shadow_soak && !self.inner.tokenizer.shadow_soak_status().enabled {
             return text_error(StatusCode::NOT_FOUND, "not found");
         }
-        let canary_session_id = exact_canary_session(&parts.headers);
+        let opaque_session = opaque_session_id(&parts.headers);
         let endpoint = shims::endpoint(parts.uri.path());
         let endpoint_label = endpoint.label();
         let Ok(raw_body) = to_bytes(inbound_body, MAX_REQUEST_BODY).await else {
@@ -289,7 +294,7 @@ impl Proxy {
         let canary_assignment =
             self.inner
                 .tokenizer
-                .assign_canary(endpoint, prepare_tokenizer_body, canary_session_id);
+                .assign_canary(endpoint, prepare_tokenizer_body, opaque_session);
         let prepared = PreparedRequest::with_tokenizer(
             endpoint,
             &raw_body,
@@ -307,6 +312,10 @@ impl Proxy {
             None
         };
         let approximate_decision = prepared.route(&self.inner.router);
+        let session_affinity =
+            self.inner
+                .session_affinity
+                .observe(endpoint, opaque_session, &approximate_decision);
         let pending_shadow_source = if capture_shadow_soak {
             let Some(tokens) = &pre_route_tokens else {
                 self.inner
@@ -360,9 +369,12 @@ impl Proxy {
             endpoint_label,
             body.len(),
             &approximate_decision,
-            decision.candidate_state.first().map(|state| state.index),
             &self.inner.config,
-            canary_assignment,
+            RouteAnnotations {
+                served_chosen: decision.candidate_state.first().map(|state| state.index),
+                exact_canary: canary_assignment,
+                session_affinity,
+            },
         );
 
         let serving_candidates = decision
@@ -1029,15 +1041,15 @@ fn filtered_headers(source: &HeaderMap) -> HeaderMap {
     destination
 }
 
-fn exact_canary_session(headers: &HeaderMap) -> CanarySession<'_> {
+fn opaque_session_id(headers: &HeaderMap) -> OpaqueSession<'_> {
     let mut values = headers.get_all("x-session-id").iter();
     let Some(session_id) = values.next().map(axum::http::HeaderValue::as_bytes) else {
-        return CanarySession::Missing;
+        return OpaqueSession::Missing;
     };
     if values.next().is_some() || !(1..=256).contains(&session_id.len()) {
-        return CanarySession::Invalid;
+        return OpaqueSession::Invalid;
     }
-    CanarySession::Valid(session_id)
+    OpaqueSession::Valid(session_id)
 }
 
 fn copy_response_headers(destination: &mut HeaderMap, source: &HeaderMap) {
@@ -1380,22 +1392,22 @@ mod tests {
     }
 
     #[test]
-    fn exact_canary_session_requires_one_bounded_nonempty_header() {
+    fn opaque_session_id_requires_one_bounded_nonempty_header() {
         let mut headers = HeaderMap::new();
-        assert_eq!(exact_canary_session(&headers), CanarySession::Missing);
+        assert_eq!(opaque_session_id(&headers), OpaqueSession::Missing);
         headers.insert("x-session-id", "session-a".parse().unwrap());
         assert_eq!(
-            exact_canary_session(&headers),
-            CanarySession::Valid(b"session-a")
+            opaque_session_id(&headers),
+            OpaqueSession::Valid(b"session-a")
         );
         headers.append("x-session-id", "session-b".parse().unwrap());
-        assert_eq!(exact_canary_session(&headers), CanarySession::Invalid);
+        assert_eq!(opaque_session_id(&headers), OpaqueSession::Invalid);
 
         let mut headers = HeaderMap::new();
         headers.insert("x-session-id", "".parse().unwrap());
-        assert_eq!(exact_canary_session(&headers), CanarySession::Invalid);
+        assert_eq!(opaque_session_id(&headers), OpaqueSession::Invalid);
         headers.insert("x-session-id", "x".repeat(257).parse().unwrap());
-        assert_eq!(exact_canary_session(&headers), CanarySession::Invalid);
+        assert_eq!(opaque_session_id(&headers), OpaqueSession::Invalid);
     }
 
     #[test]
@@ -1478,6 +1490,69 @@ mod tests {
         let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("prompt_tokens"));
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn session_affinity_shadow_is_header_private_and_does_not_change_dispatch() {
+        let requests_a = Arc::new(AtomicUsize::new(0));
+        let requests_b = Arc::new(AtomicUsize::new(0));
+        let leaked_session = Arc::new(AtomicBool::new(false));
+        let upstream = |requests: Arc<AtomicUsize>| {
+            let leaked_session = Arc::clone(&leaked_session);
+            AxumRouter::new().fallback(any(move |headers: HeaderMap| {
+                let requests = Arc::clone(&requests);
+                let leaked_session = Arc::clone(&leaked_session);
+                async move {
+                    requests.fetch_add(1, Ordering::Relaxed);
+                    leaked_session
+                        .fetch_or(headers.contains_key("x-session-id"), Ordering::Relaxed);
+                    (StatusCode::OK, r#"{"ok":true}"#)
+                }
+            }))
+        };
+        let (url_a, task_a) = start_upstream(upstream(Arc::clone(&requests_a))).await;
+        let (url_b, task_b) = start_upstream(upstream(Arc::clone(&requests_b))).await;
+        let joined = format!("{url_a},{url_b}");
+        let values = HashMap::from([
+            ("DS4_UPSTREAM", joined),
+            ("DS4_SESSION_AFFINITY_MODE", "shadow".to_owned()),
+            (
+                "DS4_SESSION_AFFINITY_KEY",
+                "0123456789abcdef0123456789abcdef".to_owned(),
+            ),
+        ]);
+        let config = Config::from_lookup(|key| values.get(key).cloned()).unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            // This golden maps to primary 0, while the first cold approximate
+            // rotation selects 1. Shadow must observe but still dispatch to 1.
+            .header("x-session-id", "session-c")
+            .body(Body::from(
+                r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+            ))
+            .unwrap();
+        let response = proxy.serve(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-mini-dynamo-upstream"], "1");
+        let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(requests_a.load(Ordering::Relaxed), 0);
+        assert_eq!(requests_b.load(Ordering::Relaxed), 1);
+        assert!(!leaked_session.load(Ordering::Relaxed));
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .session_affinity
+                .with_label_values(&["chat", "would_prefer_primary"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+        task_a.abort();
+        task_b.abort();
     }
 
     #[tokio::test]

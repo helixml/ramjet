@@ -31,6 +31,10 @@ pub struct Config {
     pub route_load_unit_bytes: usize,
     pub route_max_load_units: usize,
     pub affinity: Affinity,
+    pub session_affinity_mode: SessionAffinityMode,
+    pub session_affinity_key: Option<SecretString>,
+    pub session_affinity_bonus_blocks: usize,
+    pub session_affinity_max_load_delta: usize,
     pub route_journal: bool,
     pub tokenizer_mode: TokenizerMode,
     pub tokenizer_path: Option<String>,
@@ -76,6 +80,12 @@ pub struct Config {
 pub enum Affinity {
     Prefix,
     Load,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionAffinityMode {
+    Off,
+    Shadow,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,6 +187,13 @@ struct ExactRouteSettings {
     max_load_delta: usize,
     canary_bps: usize,
     canary_key: Option<SecretString>,
+}
+
+struct SessionAffinitySettings {
+    mode: SessionAffinityMode,
+    key: Option<SecretString>,
+    bonus_blocks: usize,
+    max_load_delta: usize,
 }
 
 struct SnapshotRouteSettings {
@@ -293,6 +310,12 @@ impl Config {
             "load" => Affinity::Load,
             value => return Err(invalid("DS4_AFFINITY", value.to_owned(), "prefix or load")),
         };
+        let session_affinity = session_affinity_settings(
+            &mut get,
+            upstreams.len(),
+            route_max_overlap_blocks,
+            route_max_load_units,
+        )?;
         let tokenizer = tokenizer_settings(&mut get)?;
         let kv_events = kv_event_settings(&mut get, upstreams.len())?;
         let snapshot_route = snapshot_route_settings(&mut get, upstreams.len())?;
@@ -333,6 +356,10 @@ impl Config {
             route_load_unit_bytes,
             route_max_load_units,
             affinity,
+            session_affinity_mode: session_affinity.mode,
+            session_affinity_key: session_affinity.key,
+            session_affinity_bonus_blocks: session_affinity.bonus_blocks,
+            session_affinity_max_load_delta: session_affinity.max_load_delta,
             route_journal: parse(&mut get, "DS4_ROUTE_JOURNAL", false, "a boolean")?,
             tokenizer_mode: tokenizer.mode,
             tokenizer_path: tokenizer.path,
@@ -374,6 +401,80 @@ impl Config {
             snapshot_route_reconnect_max_ms: snapshot_route.reconnect_max_ms,
         })
     }
+}
+
+fn session_affinity_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    upstream_count: usize,
+    max_overlap_blocks: usize,
+    max_load_units: usize,
+) -> Result<SessionAffinitySettings, ConfigError> {
+    let mode = match get("DS4_SESSION_AFFINITY_MODE").as_deref().unwrap_or("off") {
+        "off" => SessionAffinityMode::Off,
+        "shadow" => SessionAffinityMode::Shadow,
+        value => {
+            return Err(invalid(
+                "DS4_SESSION_AFFINITY_MODE",
+                value.to_owned(),
+                "off or shadow",
+            ));
+        }
+    };
+    if mode == SessionAffinityMode::Shadow && upstream_count < 2 {
+        return Err(invalid(
+            "DS4_SESSION_AFFINITY_MODE",
+            "shadow".to_owned(),
+            "shadow requires at least two upstreams",
+        ));
+    }
+    let key = get("DS4_SESSION_AFFINITY_KEY")
+        .filter(|value| !value.is_empty())
+        .map(SecretString);
+    if mode == SessionAffinityMode::Shadow
+        && key
+            .as_ref()
+            .is_none_or(|key| !(32..=256).contains(&key.as_bytes().len()))
+    {
+        return Err(invalid(
+            "DS4_SESSION_AFFINITY_KEY",
+            "<redacted>".to_owned(),
+            "a secret from 32 through 256 bytes in shadow mode",
+        ));
+    }
+    if mode == SessionAffinityMode::Off && key.is_some() {
+        return Err(invalid(
+            "DS4_SESSION_AFFINITY_KEY",
+            "<redacted>".to_owned(),
+            "unset unless DS4_SESSION_AFFINITY_MODE=shadow",
+        ));
+    }
+    let bonus_blocks = positive(get, "DS4_SESSION_AFFINITY_BONUS_BLOCKS", 4)?;
+    if bonus_blocks > max_overlap_blocks {
+        return Err(invalid(
+            "DS4_SESSION_AFFINITY_BONUS_BLOCKS",
+            bonus_blocks.to_string(),
+            "no greater than DS4_ROUTE_MAX_OVERLAP_BLOCKS",
+        ));
+    }
+    let max_load_delta = parse(
+        get,
+        "DS4_SESSION_AFFINITY_MAX_LOAD_DELTA",
+        0_usize,
+        "a non-negative integer",
+    )?;
+    if max_load_delta > max_load_units {
+        return Err(invalid(
+            "DS4_SESSION_AFFINITY_MAX_LOAD_DELTA",
+            max_load_delta.to_string(),
+            "no greater than DS4_ROUTE_MAX_LOAD_UNITS",
+        ));
+    }
+    Ok(SessionAffinitySettings {
+        mode,
+        key,
+        bonus_blocks,
+        max_load_delta,
+    })
 }
 
 fn exact_route_settings(
@@ -1127,6 +1228,10 @@ mod tests {
         assert_eq!(config.route_load_unit_bytes, 32 << 10);
         assert_eq!(config.route_max_load_units, 8);
         assert_eq!(config.affinity, Affinity::Prefix);
+        assert_eq!(config.session_affinity_mode, SessionAffinityMode::Off);
+        assert!(config.session_affinity_key.is_none());
+        assert_eq!(config.session_affinity_bonus_blocks, 4);
+        assert_eq!(config.session_affinity_max_load_delta, 0);
         assert!(!config.route_journal);
         assert_eq!(config.tokenizer_mode, TokenizerMode::Off);
         assert!(config.tokenizer_path.is_none());
@@ -1166,6 +1271,140 @@ mod tests {
         assert_eq!(config.snapshot_route_attempt_timeout_ms, 30_000);
         assert_eq!(config.snapshot_route_reconnect_min_ms, 250);
         assert_eq!(config.snapshot_route_reconnect_max_ms, 5_000);
+    }
+
+    #[test]
+    fn session_affinity_is_separate_redacted_and_shadow_only() {
+        let values = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1,http://b:1"),
+            ("DS4_SESSION_AFFINITY_MODE", "shadow"),
+            (
+                "DS4_SESSION_AFFINITY_KEY",
+                "0123456789abcdef0123456789abcdef",
+            ),
+            ("DS4_SESSION_AFFINITY_BONUS_BLOCKS", "8"),
+            ("DS4_SESSION_AFFINITY_MAX_LOAD_DELTA", "2"),
+        ]);
+        let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(config.session_affinity_mode, SessionAffinityMode::Shadow);
+        assert_eq!(config.session_affinity_bonus_blocks, 8);
+        assert_eq!(config.session_affinity_max_load_delta, 2);
+        assert!(!format!("{config:?}").contains("0123456789abcdef"));
+    }
+
+    #[test]
+    fn session_affinity_rejects_unsafe_or_inapplicable_settings() {
+        let mut values = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1,http://b:1"),
+            ("DS4_SESSION_AFFINITY_MODE", "shadow"),
+            (
+                "DS4_SESSION_AFFINITY_KEY",
+                "0123456789abcdef0123456789abcdef",
+            ),
+            ("DS4_SESSION_AFFINITY_BONUS_BLOCKS", "8"),
+            ("DS4_SESSION_AFFINITY_MAX_LOAD_DELTA", "2"),
+        ]);
+        values.insert("DS4_SESSION_AFFINITY_MODE", "off");
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_SESSION_AFFINITY_KEY",
+                value,
+                ..
+            }) if value == "<redacted>"
+        ));
+        values.insert("DS4_SESSION_AFFINITY_MODE", "shadow");
+        values.insert("DS4_SESSION_AFFINITY_KEY", "short");
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_SESSION_AFFINITY_KEY",
+                value,
+                ..
+            }) if value == "<redacted>"
+        ));
+        values.insert(
+            "DS4_SESSION_AFFINITY_KEY",
+            "0123456789abcdef0123456789abcdef",
+        );
+        values.insert("DS4_SESSION_AFFINITY_BONUS_BLOCKS", "33");
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_SESSION_AFFINITY_BONUS_BLOCKS",
+                ..
+            })
+        ));
+        values.insert("DS4_SESSION_AFFINITY_BONUS_BLOCKS", "8");
+        values.insert("DS4_SESSION_AFFINITY_MAX_LOAD_DELTA", "9");
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_SESSION_AFFINITY_MAX_LOAD_DELTA",
+                ..
+            })
+        ));
+
+        let single = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1"),
+            ("DS4_SESSION_AFFINITY_MODE", "shadow"),
+            (
+                "DS4_SESSION_AFFINITY_KEY",
+                "0123456789abcdef0123456789abcdef",
+            ),
+        ]);
+        assert!(matches!(
+            Config::from_lookup(|key| single.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_SESSION_AFFINITY_MODE",
+                ..
+            })
+        ));
+
+        let wrong_mode = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1,http://b:1"),
+            ("DS4_SESSION_AFFINITY_MODE", "placement"),
+        ]);
+        assert!(matches!(
+            Config::from_lookup(|key| wrong_mode.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_SESSION_AFFINITY_MODE",
+                ..
+            })
+        ));
+
+        let borrowed_canary_key = HashMap::from([
+            ("DS4_UPSTREAM", "http://a:1,http://b:1"),
+            ("DS4_SESSION_AFFINITY_MODE", "shadow"),
+            ("DS4_EXACT_ROUTE_CANARY_KEY", "not-a-session-affinity-key"),
+        ]);
+        assert!(matches!(
+            Config::from_lookup(|key| borrowed_canary_key.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "DS4_SESSION_AFFINITY_KEY",
+                value,
+                ..
+            }) if value == "<redacted>"
+        ));
+    }
+
+    #[test]
+    fn session_affinity_key_boundaries_are_exact() {
+        for (length, valid) in [(31, false), (32, true), (256, true), (257, false)] {
+            let boundary = HashMap::from([
+                (
+                    "DS4_UPSTREAM".to_owned(),
+                    "http://a:1,http://b:1".to_owned(),
+                ),
+                ("DS4_SESSION_AFFINITY_MODE".to_owned(), "shadow".to_owned()),
+                ("DS4_SESSION_AFFINITY_KEY".to_owned(), "x".repeat(length)),
+            ]);
+            assert_eq!(
+                Config::from_lookup(|key| boundary.get(key).cloned()).is_ok(),
+                valid,
+                "unexpected result for {length}-byte key"
+            );
+        }
     }
 
     #[test]
@@ -1442,7 +1681,7 @@ mod tests {
     #[test]
     fn exact_route_placement_is_explicit_and_parses_conservative_gates() {
         let values = HashMap::from([
-            ("DS4_UPSTREAM", "http://a:1"),
+            ("DS4_UPSTREAM", "http://a:1,http://b:1"),
             ("DS4_TOKENIZER_MODE", "local-shadow"),
             ("DS4_TOKENIZER_PATH", "/models/tokenizer.json"),
             (
@@ -1450,8 +1689,8 @@ mod tests {
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
             ("DS4_KV_EVENT_MODE", "shadow"),
-            ("DS4_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557"),
-            ("DS4_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558"),
+            ("DS4_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557,tcp://b:5557"),
+            ("DS4_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558,tcp://b:5558"),
             ("DS4_EXACT_ROUTE_MODE", "placement"),
             ("DS4_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
             (
@@ -1465,12 +1704,18 @@ mod tests {
                 "DS4_EXACT_ROUTE_CANARY_KEY",
                 "0123456789abcdef0123456789abcdef",
             ),
+            ("DS4_SESSION_AFFINITY_MODE", "shadow"),
+            (
+                "DS4_SESSION_AFFINITY_KEY",
+                "fedcba9876543210fedcba9876543210",
+            ),
         ]);
         let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
         assert_eq!(config.exact_route_mode, ExactRouteMode::Placement);
         assert_eq!(config.exact_route_min_gain_tokens, 16_384);
         assert_eq!(config.exact_route_max_load_delta, 1);
         assert_eq!(config.exact_route_canary_bps, 250);
+        assert_eq!(config.session_affinity_mode, SessionAffinityMode::Shadow);
         assert_eq!(
             config
                 .exact_route_canary_key
@@ -1478,8 +1723,16 @@ mod tests {
                 .map(SecretString::expose),
             Some("0123456789abcdef0123456789abcdef")
         );
+        assert_eq!(
+            config
+                .session_affinity_key
+                .as_ref()
+                .map(SecretString::expose),
+            Some("fedcba9876543210fedcba9876543210")
+        );
         let debug = format!("{config:?}");
         assert!(!debug.contains("0123456789abcdef"));
+        assert!(!debug.contains("fedcba9876543210"));
         assert!(debug.contains("<redacted>"));
     }
 

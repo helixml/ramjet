@@ -1,7 +1,7 @@
 import unittest
 from unittest import mock
 
-from route_replay import choose, records, replay
+from route_replay import choose, records, replay, session_affinity_choice
 
 
 def start(chosen=0, rotation=0, left=(40, 0), right=(0, 0)):
@@ -46,13 +46,97 @@ class RouteReplayTest(unittest.TestCase):
         self.assertEqual(rows[0]["agreement_pct"], 100.0)
         self.assertEqual(rows[0]["counterfactual_migrations"], 0)
 
-    def test_v3_and_v4_journal_records_are_accepted(self):
+    def test_v3_through_v5_journal_records_are_accepted(self):
         record = start()
         record["v"] = 3
         record["score_tie_break"] = "overlap"
         canary = {**record, "v": 4, "exact_canary": "treatment"}
-        parsed = list(records([__import__("json").dumps(record), __import__("json").dumps(canary)]))
-        self.assertEqual(parsed, [record, canary])
+        session = {
+            **start(left=(0, 0), right=(0, 0)),
+            "v": 5,
+            "alpha": 4,
+            "session_affinity": {
+                "policy_version": 1,
+                "bonus_blocks": 4,
+                "max_load_delta": 0,
+                "outcome": "would_prefer_primary",
+                "primary": 1,
+                "secondary": 0,
+                "target": 1,
+            },
+        }
+        parsed = list(
+            records(
+                [
+                    __import__("json").dumps(record),
+                    __import__("json").dumps(canary),
+                    __import__("json").dumps(session),
+                ]
+            )
+        )
+        self.assertEqual(parsed, [record, canary, session])
+        row = replay([session], {}, [4], [32])[0]
+        self.assertEqual(
+            row["session_affinity_counts"], {"would_prefer_primary": 1}
+        )
+        self.assertEqual(
+            row["session_affinity_replay_counts"], {"would_prefer_primary": 1}
+        )
+        self.assertEqual(row["session_affinity_record_mismatches"], 0)
+
+    def test_session_affinity_replay_matches_weight_overlap_and_rotation(self):
+        record = start(chosen=0, rotation=0, left=(5, 0), right=(0, 0))
+        record.update(v=5, alpha=4)
+        record["candidates"][0]["affinity_blocks"] = 4
+        record["session_affinity"] = {
+            "policy_version": 1,
+            "bonus_blocks": 4,
+            "max_load_delta": 0,
+            "outcome": "kept_score",
+            "primary": 1,
+            "secondary": 0,
+            "target": 1,
+        }
+        self.assertEqual(session_affinity_choice(record), "kept_score")
+
+        record["candidates"][0].update(overlap_blocks=4, affinity_blocks=4)
+        record["candidates"][1].update(overlap_blocks=4, affinity_blocks=4, load_units=1)
+        record["session_affinity"]["max_load_delta"] = 1
+        record["rotation"] = 1
+        self.assertEqual(session_affinity_choice(record), "would_prefer_primary")
+        record["rotation"] = 0
+        self.assertEqual(session_affinity_choice(record), "kept_score")
+
+    def test_session_affinity_replay_exposes_policy_mismatch_and_sweep(self):
+        record = start(chosen=0, left=(0, 0), right=(0, 0))
+        record.update(v=5, alpha=4)
+        record["session_affinity"] = {
+            "policy_version": 1,
+            "bonus_blocks": 4,
+            "max_load_delta": 0,
+            "outcome": "kept_score",
+            "primary": 1,
+            "secondary": 0,
+            "target": 1,
+        }
+        row = replay([record], {}, [4], [32])[0]
+        self.assertEqual(row["session_affinity_record_mismatches"], 1)
+        self.assertEqual(
+            row["session_affinity_replay_counts"], {"would_prefer_primary": 1}
+        )
+        record["session_affinity"].update(
+            outcome="would_prefer_primary", target=0
+        )
+        self.assertEqual(
+            replay([record], {}, [4], [32])[0][
+                "session_affinity_record_mismatches"
+            ],
+            1,
+        )
+        swept = replay(
+            [record], {}, [4], [32], session_bonus_blocks=0
+        )[0]
+        self.assertEqual(swept["session_affinity_replay_counts"], {"kept_score": 1})
 
     def test_v4_replays_approximate_choice_but_attributes_actual_warmth(self):
         record = start(chosen=1, left=(40, 0), right=(0, 0))
@@ -152,13 +236,35 @@ class RouteReplayTest(unittest.TestCase):
         second = start(chosen=1, rotation=1)
         second["seq"] = 2
         second["request_bytes"] = 200
+        second["v"] = 5
+        second["session_affinity"] = {
+            "policy_version": 1,
+            "bonus_blocks": 4,
+            "max_load_delta": 0,
+            "outcome": "would_prefer_secondary_primary_unhealthy",
+        }
         lines = "\n".join(__import__("json").dumps(item) for item in (first, second))
         with mock.patch("sys.stdin", __import__("io").StringIO(lines)), mock.patch(
             "sys.stdout", new_callable=__import__("io").StringIO
         ) as output:
             from route_replay import main
 
-            self.assertEqual(main(["-", "--alphas", "4", "--caps", "32", "--min-request-bytes", "150"]), 0)
+            self.assertEqual(
+                main(
+                    [
+                        "-",
+                        "--alphas",
+                        "4",
+                        "--caps",
+                        "32",
+                        "--min-request-bytes",
+                        "150",
+                        "--session-affinity",
+                        "would_prefer_secondary_primary_unhealthy",
+                    ]
+                ),
+                0,
+            )
         self.assertIn("       1", output.getvalue())
 
 
