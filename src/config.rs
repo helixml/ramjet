@@ -48,6 +48,7 @@ pub struct Config {
     pub route_index_capacity: usize,
     pub route_load_unit_bytes: usize,
     pub route_max_load_units: usize,
+    pub route_phase_aware_load: bool,
     pub affinity: Affinity,
     pub session_affinity_mode: SessionAffinityMode,
     pub session_affinity_key: Option<SecretString>,
@@ -503,6 +504,12 @@ impl Config {
             route_index_capacity,
             route_load_unit_bytes,
             route_max_load_units,
+            route_phase_aware_load: parse(
+                &mut get,
+                "DS4_ROUTE_PHASE_AWARE_LOAD",
+                false,
+                "a boolean",
+            )?,
             affinity,
             session_affinity_mode: session_affinity.mode,
             session_affinity_key: session_affinity.key,
@@ -1502,6 +1509,7 @@ mod tests {
         assert_eq!(config.route_max_overlap_blocks, 32);
         assert_eq!(config.route_load_unit_bytes, 32 << 10);
         assert_eq!(config.route_max_load_units, 8);
+        assert!(!config.route_phase_aware_load);
         assert_eq!(config.affinity, Affinity::Prefix);
         assert_eq!(config.session_affinity_mode, SessionAffinityMode::Off);
         assert!(config.session_affinity_key.is_none());

@@ -354,6 +354,30 @@ impl LoadGuard {
         self.do_release();
     }
 
+    /// Reduce this request's reservation without releasing its inflight slot.
+    ///
+    /// The proxy uses this at the observed prefill/decode boundary. `DistServe`
+    /// motivates accounting for TTFT/prefill and TPOT/decode independently:
+    /// <https://www.usenix.org/conference/osdi24/presentation/zhong-yinmin>.
+    /// Growing a reservation after dispatch is intentionally unsupported.
+    pub fn reduce_to(&mut self, units: usize) -> bool {
+        if self.released {
+            return false;
+        }
+        let units = units.max(1);
+        if units >= self.units {
+            return false;
+        }
+        let released = self.units - units;
+        let mut inner = self.router.inner.lock();
+        let Some(state) = inner.states.get_mut(self.upstream) else {
+            return false;
+        };
+        state.load = state.load.saturating_sub(released);
+        self.units = units;
+        true
+    }
+
     fn do_release(&mut self) {
         if self.released {
             return;
@@ -621,6 +645,31 @@ mod tests {
             Some((1, 4))
         );
         drop(guard);
+    }
+
+    #[test]
+    fn reservation_can_shrink_without_releasing_inflight() {
+        let router = Arc::new(Router::new(config()));
+        let mut guard = router.acquire(0, 4);
+        assert_eq!(
+            router.state(0).map(|state| (state.0, state.1)),
+            Some((1, 4))
+        );
+        assert!(guard.reduce_to(1));
+        assert_eq!(
+            router.state(0).map(|state| (state.0, state.1)),
+            Some((1, 1))
+        );
+        assert!(!guard.reduce_to(2));
+        assert_eq!(
+            router.state(0).map(|state| (state.0, state.1)),
+            Some((1, 1))
+        );
+        drop(guard);
+        assert_eq!(
+            router.state(0).map(|state| (state.0, state.1)),
+            Some((0, 0))
+        );
     }
 
     #[test]

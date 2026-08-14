@@ -36,6 +36,7 @@ secret manager.
 | `DS4_ROUTE_INDEX_CAPACITY` | `100000` | Maximum entries in the approximate locality index. |
 | `DS4_ROUTE_LOAD_UNIT_BYTES` | `32768` | Request bytes represented by one reserved load unit. |
 | `DS4_ROUTE_MAX_LOAD_UNITS` | `8` | Maximum size-weighted load reservation per request. |
+| `DS4_ROUTE_PHASE_AWARE_LOAD` | `false` | Experimental: after the first generated token on a streaming response, reduce the request's size-weighted prefill reservation to one decode unit. |
 | `DS4_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
 | `DS4_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary. |
 | `DS4_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
@@ -414,6 +415,21 @@ changing live traffic:
 docker logs ds4-loadbalancer 2>&1 | \
   python3 bench/route_replay.py - --alphas 1,2,4,8 --caps 8,16,32,64
 ```
+
+Audit the cost actually delivered by the observed routes, optionally against
+separate TTFT and TPOT SLOs:
+
+```bash
+docker logs ds4-loadbalancer 2>&1 | \
+  python3 bench/serving_cost_audit.py - \
+    --ttft-slo-ms 2000 --tpot-slo-ms 50 --gpu-count 8
+```
+
+The audit follows the measured-delivery principle in
+[MOSAIC](https://arxiv.org/abs/2608.10605) and the separate TTFT/TPOT goodput
+constraints in [DistServe](https://www.usenix.org/conference/osdi24/presentation/zhong-yinmin).
+Its TTFT-per-uncached-token statistic includes queueing and transport, so it is
+a serving-cost signal rather than isolated engine throughput.
 
 Journals contain sizes, opaque ordinals, route state, status, latency, and
 aggregate usage—not prompts, generated text, request IDs, cache keys, tokens,
