@@ -5413,3 +5413,66 @@ node06 offline (`LastSeen=2026-08-14T00:40:00.1Z`), and a three-second
 batch-mode SSH probe timed out with status 255. No node06 mutation occurred;
 live endpoint behavior, event/replay readiness, serving performance, and
 rolling availability remain unmeasured for r111.
+
+## 2026-08-14 — r112 exact launch/package/artifact authority and sub-second preflight
+
+Post-merge Drone build 349 completed successfully in 194 seconds after every
+quality lane passed. It published the LB as
+`rust-02eb19d@sha256:2a6ffc70865604e5cfa2be4233cd71c9e4a93ce9d742f1ac7b875950d258c3d5`
+and the companion as
+`companion-rust-02eb19d@sha256:ea656e949b039ebe99542912bc45bc4ee4c3220d19a0d8454b86bb2efb8ea4d5`.
+
+r112 expanded the separately pinned serving-runtime document to schema v2 at
+SHA-256
+`294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4`.
+It now carries the complete normalized vLLM argv, 68 allow-listed non-secret
+environment values, eight package versions, the launcher hash, and the active
+224,798,672-byte NCCL 2.30.4 library hash. The in-process middleware compares
+all of those facts before it can publish schema-v3 identity. Only four
+SHA-256 values cross the authenticated endpoint; raw argv/environment never
+enter LB logs, metrics, or journals. Rust admission compares each evidence
+domain independently and emits only bounded mismatch labels.
+
+The new GPU-free `bench/serving_runtime_image_probe.py` renders the actual
+base plus identity overlay, runs the immutable r34 entrypoint with networking
+disabled and a read-only root, and replaces only the terminal vLLM executable
+with a bounded evidence collector. Both service shapes matched the committed
+argv, environment, packages, and artifacts. A took 0.88s wall / 28,360 KiB
+host-observed maximum RSS; B took 0.60s / 28,768 KiB. This turns process
+contract drift into a sub-second stop before a nine-minute model load.
+
+The final local release gate passed warning-denied all-target/all-feature
+Clippy, 374 Rust unit tests plus 38 integration tests (412 total), and the
+locked release build in 54.79s wall. The five-case agent corpus and all 269
+Python tests passed in 3.90s, all three deployment validators passed in 0.67s,
+and the repeated two-service image probe passed in 2.61s total (A 1.871s, B
+0.589s). The final middleware SHA-256 was
+`52970a1ee285a9d61f609db3884677568b8d6b07c3a7bf603e41d76061cb02e3`.
+
+The first exact probe disproved three assumptions before any GPU allocation:
+
+- Production does not launch `/workspace/model`; the real command uses
+  `deepseek-ai/DeepSeek-V4-Flash-0731` plus immutable revision
+  `9e165c30e2704aec5d9d593cce3eebd58bbef1cb`.
+- Compose's `GPU_MEM_UTIL=0.90` was never consumed by the launcher; the
+  effective value was its 0.975 default. Canonical Compose now sets the real
+  `GPU_MEMORY_UTILIZATION=0.975`, preserving current behavior while making
+  overrides effective.
+- The b12x-a16 launcher overwrites a Compose
+  `VLLM_USE_B12X_FP8_GEMM=0` with one. Canonical Compose no longer makes the
+  ineffective zero claim, and the runtime manifest records the actual value.
+  The historical A8/A16 comparison remains an A8-versus-A16 comparison, but
+  its statement that both cells retained effective FP8-GEMM zero was wrong.
+
+The image already namespaces JIT/autotune paths by
+`vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8` under `/cache/jit`.
+Base Compose still mounts the historical host cache at `/root/.cache`, so it
+does not persist those runtime writes across a container recreate. Do not
+blindly move the mount: a first bind would hide image-baked cache contents and
+could create an avoidable cold compile. The next cache slice should inventory
+and preseed the fingerprinted tree, use one engine only, compare first and
+second restart readiness/JIT markers, and retain the peer throughout.
+
+Node06 remained unreachable and no deployment state changed. Live driver,
+kernel/topology, persistent-cache mount, representative warmup, event/replay,
+and compatibility-admission qualification remain open.

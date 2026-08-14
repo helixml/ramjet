@@ -4,7 +4,10 @@
 //! engines and to synthetic token-vector goldens. Exact token IDs may be used
 //! for shadow scoring only while every layer matches.
 
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -16,6 +19,12 @@ const MAX_GOLDENS: usize = 64;
 const MAX_ADMITTED_CLASSES: usize = 32;
 const MAX_INCARNATION_BYTES: usize = 256;
 const MAX_KV_EVENT_CAPACITY: usize = 1_000_000_000;
+const MAX_RUNTIME_ARGUMENTS: usize = 256;
+const MAX_RUNTIME_ARGUMENT_BYTES: usize = 4096;
+const MAX_RUNTIME_ARGUMENT_TOTAL_BYTES: usize = 64 << 10;
+const MAX_RUNTIME_ENVIRONMENT: usize = 128;
+const MAX_RUNTIME_PACKAGES: usize = 64;
+const MAX_RUNTIME_ARTIFACTS: usize = 16;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +72,7 @@ pub struct ServingRuntimeManifest {
     pub schema_version: u32,
     pub compatibility_manifest_sha256: String,
     pub engine: ServingRuntimeEngine,
+    pub process: ServingRuntimeProcess,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +80,26 @@ pub struct ServingRuntimeManifest {
 pub struct ServingRuntimeEngine {
     pub core_process_count: usize,
     pub kv_events: KvEventsIdentity,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServingRuntimeProcess {
+    pub argv: Vec<String>,
+    pub argv_sha256: String,
+    pub environment: BTreeMap<String, String>,
+    pub environment_sha256: String,
+    pub packages: BTreeMap<String, String>,
+    pub packages_sha256: String,
+    pub artifacts: Vec<ServingRuntimeArtifact>,
+    pub artifacts_sha256: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServingRuntimeArtifact {
+    pub path: String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,6 +147,10 @@ pub enum ServingIdentityOutcome {
     ModelMismatch,
     EngineMismatch,
     KvEventsMismatch,
+    LaunchMismatch,
+    EnvironmentMismatch,
+    PackageMismatch,
+    ArtifactMismatch,
     TokenizerMismatch,
     RendererMismatch,
 }
@@ -134,6 +168,10 @@ impl ServingIdentityOutcome {
             Self::ModelMismatch => "model_mismatch",
             Self::EngineMismatch => "engine_mismatch",
             Self::KvEventsMismatch => "kv_events_mismatch",
+            Self::LaunchMismatch => "launch_mismatch",
+            Self::EnvironmentMismatch => "environment_mismatch",
+            Self::PackageMismatch => "package_mismatch",
+            Self::ArtifactMismatch => "artifact_mismatch",
             Self::TokenizerMismatch => "tokenizer_mismatch",
             Self::RendererMismatch => "renderer_mismatch",
         }
@@ -182,6 +220,7 @@ struct ServingIdentityResponse {
     engine: ServingEngineIdentity,
     tokenizer: TokenizerIdentity,
     renderer: RendererIdentity,
+    runtime: ServingRuntimeEvidence,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +237,19 @@ struct ServingEngineIdentity {
 struct ServingIncarnation {
     frontend: String,
     engine_core: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServingRuntimeEvidence {
+    #[serde(rename = "argv_sha256")]
+    argv: String,
+    #[serde(rename = "environment_sha256")]
+    environment: String,
+    #[serde(rename = "packages_sha256")]
+    packages: String,
+    #[serde(rename = "artifacts_sha256")]
+    artifacts: String,
 }
 
 impl CompatibilityManifest {
@@ -350,7 +402,7 @@ impl CompatibilityManifest {
         let Ok(identity) = serde_json::from_slice::<ServingIdentityResponse>(body) else {
             return ServingIdentityOutcome::Decode;
         };
-        if identity.schema_version != 2 {
+        if identity.schema_version != 3 {
             return ServingIdentityOutcome::SchemaMismatch;
         }
         if !valid_incarnation(&identity.incarnation.frontend) {
@@ -383,6 +435,18 @@ impl CompatibilityManifest {
         }
         if identity.engine.kv_events != runtime.engine.kv_events {
             return ServingIdentityOutcome::KvEventsMismatch;
+        }
+        if identity.runtime.argv != runtime.process.argv_sha256 {
+            return ServingIdentityOutcome::LaunchMismatch;
+        }
+        if identity.runtime.environment != runtime.process.environment_sha256 {
+            return ServingIdentityOutcome::EnvironmentMismatch;
+        }
+        if identity.runtime.packages != runtime.process.packages_sha256 {
+            return ServingIdentityOutcome::PackageMismatch;
+        }
+        if identity.runtime.artifacts != runtime.process.artifacts_sha256 {
+            return ServingIdentityOutcome::ArtifactMismatch;
         }
         if identity.tokenizer.sha256 != self.tokenizer.sha256 {
             return ServingIdentityOutcome::TokenizerMismatch;
@@ -426,7 +490,7 @@ impl ServingRuntimeManifest {
 
     fn validate(&self, compatibility_manifest_sha256: &str) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.schema_version == 1,
+            self.schema_version == 2,
             "unsupported serving runtime schema"
         );
         anyhow::ensure!(
@@ -438,8 +502,158 @@ impl ServingRuntimeManifest {
             (1..=64).contains(&self.engine.core_process_count),
             "serving runtime engine core process count is invalid"
         );
-        self.engine.kv_events.validate()
+        self.engine.kv_events.validate()?;
+        self.process.validate()
     }
+}
+
+impl ServingRuntimeProcess {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=MAX_RUNTIME_ARGUMENTS).contains(&self.argv.len())
+                && self.argv.first().is_some_and(|value| value == "serve"),
+            "serving runtime argv is invalid"
+        );
+        let mut argument_bytes = 0usize;
+        for value in &self.argv {
+            let bytes = value.as_bytes();
+            argument_bytes = argument_bytes
+                .checked_add(bytes.len())
+                .context("serving runtime argv is oversized")?;
+            anyhow::ensure!(
+                !bytes.is_empty()
+                    && bytes.len() <= MAX_RUNTIME_ARGUMENT_BYTES
+                    && value.is_ascii()
+                    && !bytes.contains(&0),
+                "serving runtime argument is invalid"
+            );
+        }
+        anyhow::ensure!(
+            argument_bytes <= MAX_RUNTIME_ARGUMENT_TOTAL_BYTES
+                && !self
+                    .argv
+                    .iter()
+                    .any(|value| sensitive_runtime_argument(value)),
+            "serving runtime argv is invalid"
+        );
+        anyhow::ensure!(
+            valid_sha256(&self.argv_sha256) && self.argv_sha256 == nul_joined_sha256(&self.argv),
+            "serving runtime argv digest mismatch"
+        );
+
+        validate_runtime_map(
+            &self.environment,
+            MAX_RUNTIME_ENVIRONMENT,
+            true,
+            "environment",
+        )?;
+        anyhow::ensure!(
+            valid_sha256(&self.environment_sha256)
+                && self.environment_sha256 == json_sha256(&self.environment)?,
+            "serving runtime environment digest mismatch"
+        );
+
+        validate_runtime_map(&self.packages, MAX_RUNTIME_PACKAGES, false, "packages")?;
+        anyhow::ensure!(
+            valid_sha256(&self.packages_sha256)
+                && self.packages_sha256 == json_sha256(&self.packages)?,
+            "serving runtime package digest mismatch"
+        );
+
+        anyhow::ensure!(
+            (1..=MAX_RUNTIME_ARTIFACTS).contains(&self.artifacts.len()),
+            "serving runtime artifact set is invalid"
+        );
+        let mut paths = HashSet::with_capacity(self.artifacts.len());
+        for artifact in &self.artifacts {
+            anyhow::ensure!(
+                artifact.path.starts_with('/')
+                    && artifact.path.len() <= MAX_RUNTIME_ARGUMENT_BYTES
+                    && artifact.path.is_ascii()
+                    && !artifact.path.as_bytes().contains(&0)
+                    && !artifact.path.split('/').any(|part| part == "..")
+                    && paths.insert(&artifact.path)
+                    && valid_sha256(&artifact.sha256),
+                "serving runtime artifact is invalid"
+            );
+        }
+        anyhow::ensure!(
+            valid_sha256(&self.artifacts_sha256)
+                && self.artifacts_sha256 == json_sha256(&self.artifacts)?,
+            "serving runtime artifact digest mismatch"
+        );
+        Ok(())
+    }
+}
+
+fn validate_runtime_map(
+    values: &BTreeMap<String, String>,
+    limit: usize,
+    environment: bool,
+    description: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (1..=limit).contains(&values.len()),
+        "serving runtime {description} set is invalid"
+    );
+    for (key, value) in values {
+        let key_bytes = key.as_bytes();
+        let key_valid = if environment {
+            key_bytes.len() <= 128
+                && key_bytes
+                    .iter()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+        } else {
+            key_bytes.len() <= 256
+                && key_bytes.iter().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b'+' | b'-')
+                })
+        };
+        anyhow::ensure!(
+            !key_bytes.is_empty()
+                && key_valid
+                && (!environment || !sensitive_runtime_environment_key(key))
+                && !value.is_empty()
+                && value.len() <= MAX_RUNTIME_ARGUMENT_BYTES
+                && value.is_ascii()
+                && !value.as_bytes().contains(&0),
+            "serving runtime {description} entry is invalid"
+        );
+    }
+    Ok(())
+}
+
+fn sensitive_runtime_argument(value: &str) -> bool {
+    let name = value.split_once('=').map_or(value, |(name, _)| name);
+    matches!(
+        name,
+        "--api-key" | "--token" | "--hf-token" | "--authorization"
+    )
+}
+
+fn sensitive_runtime_environment_key(value: &str) -> bool {
+    value.contains("SECRET")
+        || value.contains("PASSWORD")
+        || value.contains("CREDENTIAL")
+        || value.ends_with("_TOKEN")
+        || value.ends_with("_API_KEY")
+        || value.ends_with("_AUTHORIZATION")
+}
+
+fn nul_joined_sha256(values: &[String]) -> String {
+    let capacity = values.iter().map(String::len).sum::<usize>() + values.len();
+    let mut bytes = Vec::with_capacity(capacity);
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(value.as_bytes());
+    }
+    sha256_hex(&bytes)
+}
+
+fn json_sha256(value: &impl Serialize) -> anyhow::Result<String> {
+    Ok(sha256_hex(&serde_json::to_vec(value)?))
 }
 
 impl KvEventsIdentity {
@@ -511,24 +725,18 @@ fn hex_digest(bytes: &[u8]) -> String {
 }
 
 fn valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn token_vector_digest_is_unambiguous_big_endian_u32() {
-        assert_eq!(
-            token_ids_sha256(&[1, 256]),
-            sha256_hex(&[0, 0, 0, 1, 0, 0, 1, 0])
-        );
-    }
-
-    #[test]
-    fn runtime_identity_requires_exact_model_and_version() {
-        let manifest = CompatibilityManifest {
+    fn test_compatibility_manifest() -> CompatibilityManifest {
+        CompatibilityManifest {
             schema_version: 1,
             model: ModelIdentity {
                 id: "model".to_owned(),
@@ -547,7 +755,40 @@ mod tests {
             },
             admitted_request_classes: vec!["plain".to_owned()],
             goldens: Vec::new(),
-        };
+        }
+    }
+
+    fn test_process() -> ServingRuntimeProcess {
+        let argv = vec!["serve".to_owned(), "model".to_owned()];
+        let environment = BTreeMap::from([("MODE".to_owned(), "test".to_owned())]);
+        let packages = BTreeMap::from([("vllm".to_owned(), "v1".to_owned())]);
+        let artifacts = vec![ServingRuntimeArtifact {
+            path: "/runtime".to_owned(),
+            sha256: "d".repeat(64),
+        }];
+        ServingRuntimeProcess {
+            argv_sha256: nul_joined_sha256(&argv),
+            environment_sha256: json_sha256(&environment).unwrap(),
+            packages_sha256: json_sha256(&packages).unwrap(),
+            artifacts_sha256: json_sha256(&artifacts).unwrap(),
+            argv,
+            environment,
+            packages,
+            artifacts,
+        }
+    }
+
+    #[test]
+    fn token_vector_digest_is_unambiguous_big_endian_u32() {
+        assert_eq!(
+            token_ids_sha256(&[1, 256]),
+            sha256_hex(&[0, 0, 0, 1, 0, 0, 1, 0])
+        );
+    }
+
+    #[test]
+    fn runtime_identity_requires_exact_model_and_version() {
+        let manifest = test_compatibility_manifest();
         let models = br#"{"data":[{"id":"model","root":"root","max_model_len":4096}]}"#;
         assert_eq!(
             manifest.runtime_outcome(models, br#"{"version":"v1"}"#),
@@ -561,28 +802,9 @@ mod tests {
 
     #[test]
     fn atomic_serving_identity_binds_every_compatibility_layer_and_incarnation() {
-        let manifest = CompatibilityManifest {
-            schema_version: 1,
-            model: ModelIdentity {
-                id: "model".to_owned(),
-                root: "root".to_owned(),
-                max_model_len: 4096,
-            },
-            engine: EngineIdentity {
-                version: "v1".to_owned(),
-                image_digest: format!("sha256:{}", "a".repeat(64)),
-            },
-            tokenizer: TokenizerIdentity {
-                sha256: "b".repeat(64),
-            },
-            renderer: RendererIdentity {
-                profile: "profile".to_owned(),
-            },
-            admitted_request_classes: vec!["plain".to_owned()],
-            goldens: Vec::new(),
-        };
+        let manifest = test_compatibility_manifest();
         let runtime = ServingRuntimeManifest {
-            schema_version: 1,
+            schema_version: 2,
             compatibility_manifest_sha256: "c".repeat(64),
             engine: ServingRuntimeEngine {
                 core_process_count: 1,
@@ -597,9 +819,10 @@ mod tests {
                     topic: String::new(),
                 },
             },
+            process: test_process(),
         };
         let identity = serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "incarnation": {
                 "frontend": "boot-1234:9:100",
                 "engine_core": ["boot-1234:10:101"],
@@ -622,6 +845,12 @@ mod tests {
             },
             "tokenizer": {"sha256": "b".repeat(64)},
             "renderer": {"profile": "profile"},
+            "runtime": {
+                "argv_sha256": runtime.process.argv_sha256,
+                "environment_sha256": runtime.process.environment_sha256,
+                "packages_sha256": runtime.process.packages_sha256,
+                "artifacts_sha256": runtime.process.artifacts_sha256,
+            },
         });
         let body = serde_json::to_vec(&identity).unwrap();
         assert_eq!(
@@ -651,6 +880,25 @@ mod tests {
             manifest.serving_identity_outcome(&runtime, &serde_json::to_vec(&mismatched).unwrap()),
             ServingIdentityOutcome::KvEventsMismatch
         );
+        mismatched["engine"]["kv_events"]["hwm"] = serde_json::json!(100_000);
+        for (field, expected) in [
+            ("argv_sha256", ServingIdentityOutcome::LaunchMismatch),
+            (
+                "environment_sha256",
+                ServingIdentityOutcome::EnvironmentMismatch,
+            ),
+            ("packages_sha256", ServingIdentityOutcome::PackageMismatch),
+            ("artifacts_sha256", ServingIdentityOutcome::ArtifactMismatch),
+        ] {
+            let original = mismatched["runtime"][field].clone();
+            mismatched["runtime"][field] = serde_json::Value::String("f".repeat(64));
+            assert_eq!(
+                manifest
+                    .serving_identity_outcome(&runtime, &serde_json::to_vec(&mismatched).unwrap()),
+                expected
+            );
+            mismatched["runtime"][field] = original;
+        }
     }
 
     #[test]
@@ -667,7 +915,7 @@ mod tests {
         );
 
         let mut identity = serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "incarnation": {
                 "frontend": "boot:1:10",
                 "engine_core": ["boot:2:20", "boot:2:20"],
@@ -685,14 +933,21 @@ mod tests {
             },
             "tokenizer": {"sha256": manifest.tokenizer.sha256},
             "renderer": {"profile": manifest.renderer.profile},
+            "runtime": {
+                "argv_sha256": runtime.process.argv_sha256,
+                "environment_sha256": runtime.process.environment_sha256,
+                "packages_sha256": runtime.process.packages_sha256,
+                "artifacts_sha256": runtime.process.artifacts_sha256,
+            },
         });
         let two_core_runtime = ServingRuntimeManifest {
-            schema_version: 1,
+            schema_version: 2,
             compatibility_manifest_sha256: runtime.compatibility_manifest_sha256,
             engine: ServingRuntimeEngine {
                 core_process_count: 2,
                 kv_events: runtime.engine.kv_events,
             },
+            process: test_process(),
         };
         assert_eq!(
             manifest.serving_identity_outcome(
@@ -701,7 +956,7 @@ mod tests {
             ),
             ServingIdentityOutcome::CoreIncarnationInvalid
         );
-        identity["schema_version"] = serde_json::json!(1);
+        identity["schema_version"] = serde_json::json!(2);
         assert_eq!(
             manifest.serving_identity_outcome(
                 &two_core_runtime,
@@ -720,7 +975,7 @@ mod tests {
         let compatibility_sha = "4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa";
         let mut cases = Vec::new();
         for (pointer, value) in [
-            ("/schema_version", serde_json::json!(2)),
+            ("/schema_version", serde_json::json!(1)),
             ("/engine/core_process_count", serde_json::json!(0)),
             ("/engine/kv_events/publisher", serde_json::json!("null")),
             (
@@ -736,6 +991,20 @@ mod tests {
                 "/engine/kv_events/hwm",
                 serde_json::json!(MAX_KV_EVENT_CAPACITY + 1),
             ),
+            ("/process/argv/0", serde_json::json!("vllm")),
+            ("/process/argv_sha256", serde_json::json!("0".repeat(64))),
+            (
+                "/process/environment_sha256",
+                serde_json::json!("0".repeat(64)),
+            ),
+            (
+                "/process/packages_sha256",
+                serde_json::json!("0".repeat(64)),
+            ),
+            (
+                "/process/artifacts/0/path",
+                serde_json::json!("relative/runtime"),
+            ),
         ] {
             let mut candidate = baseline.clone();
             *candidate.pointer_mut(pointer).unwrap() = value;
@@ -744,6 +1013,12 @@ mod tests {
         let mut unknown = baseline;
         unknown["engine"]["kv_events"]["unknown"] = serde_json::json!(true);
         cases.push(unknown);
+        let mut secret = serde_json::from_slice::<Value>(include_bytes!(
+            "../compat/deepseek-v4-r34-serving-runtime.json"
+        ))
+        .unwrap();
+        secret["process"]["environment"]["PRIVATE_API_KEY"] = serde_json::json!("private");
+        cases.push(secret);
 
         for candidate in cases {
             let rejected = serde_json::from_value::<ServingRuntimeManifest>(candidate)
@@ -770,7 +1045,7 @@ mod tests {
         let runtime_path = Path::new("compat/deepseek-v4-r34-serving-runtime.json");
         let runtime = ServingRuntimeManifest::load(
             runtime_path,
-            "a8937e6a5801fef6df3df58d341950d65b515896212c30ce6695c90df17f65a4",
+            "294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4",
             "4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa",
         )
         .unwrap();
@@ -786,7 +1061,7 @@ mod tests {
         assert!(
             ServingRuntimeManifest::load(
                 runtime_path,
-                "a8937e6a5801fef6df3df58d341950d65b515896212c30ce6695c90df17f65a4",
+                "294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4",
                 &"f".repeat(64),
             )
             .is_err()

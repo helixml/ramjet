@@ -42,6 +42,22 @@ KV_EVENTS_KEYS = {
     "max_queue_size",
     "topic",
 }
+PROCESS_KEYS = {
+    "argv",
+    "argv_sha256",
+    "environment",
+    "environment_sha256",
+    "packages",
+    "packages_sha256",
+    "artifacts",
+    "artifacts_sha256",
+}
+MAX_RUNTIME_ARGUMENTS = 256
+MAX_RUNTIME_ARGUMENT_BYTES = 4096
+MAX_RUNTIME_ARGUMENT_TOTAL_BYTES = 64 << 10
+MAX_RUNTIME_ENVIRONMENT = 128
+MAX_RUNTIME_PACKAGES = 64
+MAX_RUNTIME_ARTIFACTS = 16
 GENERATION_CONFIG = {"top_p": 0.95}
 MANIFEST_SHA256 = hashlib.sha256(MANIFEST.read_bytes()).hexdigest()
 RUNTIME_MANIFEST_SHA256 = hashlib.sha256(RUNTIME_MANIFEST.read_bytes()).hexdigest()
@@ -131,9 +147,10 @@ def validate_runtime_manifest(document: Any | None = None) -> dict[str, Any]:
         "schema_version",
         "compatibility_manifest_sha256",
         "engine",
+        "process",
     }:
         fail("serving runtime manifest schema changed")
-    if document.get("schema_version") != 1:
+    if document.get("schema_version") != 2:
         fail("serving runtime manifest schema is unsupported")
     if document.get("compatibility_manifest_sha256") != MANIFEST_SHA256:
         fail("serving runtime compatibility link changed")
@@ -167,7 +184,147 @@ def validate_runtime_manifest(document: Any | None = None) -> dict[str, Any]:
     topic = kv_events.get("topic")
     if not isinstance(topic, str) or len(topic.encode()) > 4096:
         fail("serving runtime KV topic is invalid")
+    validate_process_contract(document.get("process"))
     return document
+
+
+def validate_process_contract(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != PROCESS_KEYS:
+        fail("serving runtime process schema changed")
+    argv = value.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not 0 < len(argv) <= MAX_RUNTIME_ARGUMENTS
+        or argv[0] != "serve"
+    ):
+        fail("serving runtime argv is invalid")
+    total = 0
+    for argument in argv:
+        runtime_string(argument)
+        total += len(argument.encode())
+        if sensitive_argument(argument):
+            fail("serving runtime argv contains a sensitive option")
+    if total > MAX_RUNTIME_ARGUMENT_TOTAL_BYTES:
+        fail("serving runtime argv is oversized")
+    runtime_digest(value.get("argv_sha256"), nul_joined_sha256(argv), "argv")
+
+    environment = runtime_mapping(
+        value.get("environment"), MAX_RUNTIME_ENVIRONMENT, environment=True
+    )
+    runtime_digest(
+        value.get("environment_sha256"),
+        canonical_json_sha256(environment),
+        "environment",
+    )
+    packages = runtime_mapping(
+        value.get("packages"), MAX_RUNTIME_PACKAGES, environment=False
+    )
+    runtime_digest(
+        value.get("packages_sha256"),
+        canonical_json_sha256(packages),
+        "packages",
+    )
+    artifacts = value.get("artifacts")
+    if (
+        not isinstance(artifacts, list)
+        or not 0 < len(artifacts) <= MAX_RUNTIME_ARTIFACTS
+    ):
+        fail("serving runtime artifacts are invalid")
+    paths: set[str] = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or set(artifact) != {"path", "sha256"}:
+            fail("serving runtime artifact is invalid")
+        path = artifact.get("path")
+        digest = artifact.get("sha256")
+        runtime_string(path)
+        if (
+            not path.startswith("/")
+            or ".." in path.split("/")
+            or path in paths
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            fail("serving runtime artifact is invalid")
+        paths.add(path)
+    runtime_digest(
+        value.get("artifacts_sha256"),
+        canonical_json_sha256(artifacts),
+        "artifacts",
+    )
+
+
+def runtime_mapping(
+    value: Any, limit: int, *, environment: bool
+) -> dict[str, str]:
+    if not isinstance(value, dict) or not 0 < len(value) <= limit:
+        fail("serving runtime mapping is invalid")
+    for key, item in value.items():
+        if not isinstance(key, str) or not key or not key.isascii():
+            fail("serving runtime mapping key is invalid")
+        if environment:
+            valid_key = len(key.encode()) <= 128 and all(
+                character.isupper() or character.isdigit() or character == "_"
+                for character in key
+            )
+            if sensitive_environment_key(key):
+                valid_key = False
+        else:
+            valid_key = len(key.encode()) <= 256 and all(
+                character.isalnum() or character in "._+-" for character in key
+            )
+        runtime_string(item)
+        if not valid_key:
+            fail("serving runtime mapping key is invalid")
+    return value
+
+
+def runtime_string(value: Any) -> None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or not value.isascii()
+        or len(value.encode()) > MAX_RUNTIME_ARGUMENT_BYTES
+        or "\0" in value
+    ):
+        fail("serving runtime string is invalid")
+
+
+def sensitive_argument(value: str) -> bool:
+    return value.split("=", 1)[0] in {
+        "--api-key",
+        "--token",
+        "--hf-token",
+        "--authorization",
+    }
+
+
+def sensitive_environment_key(value: str) -> bool:
+    return (
+        "SECRET" in value
+        or "PASSWORD" in value
+        or "CREDENTIAL" in value
+        or value.endswith("_TOKEN")
+        or value.endswith("_API_KEY")
+        or value.endswith("_AUTHORIZATION")
+    )
+
+
+def nul_joined_sha256(values: list[str]) -> str:
+    return hashlib.sha256(b"\0".join(value.encode() for value in values)).hexdigest()
+
+
+def canonical_json_sha256(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def runtime_digest(value: Any, expected: str, name: str) -> None:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        or value != expected
+    ):
+        fail(f"serving runtime {name} digest is invalid")
 
 
 def validate_disabled(document: dict[str, Any]) -> None:
@@ -232,6 +389,7 @@ def validate_enabled(
 ) -> None:
     runtime = validate_runtime_manifest(runtime_document)
     expected_kv_events = runtime["engine"]["kv_events"]
+    expected_environment = runtime["process"]["environment"]
     load_balancer = document["services"]["ds4-loadbalancer"]
     lb_environment = load_balancer.get("environment", {})
     if lb_environment.get("DS4_UPSTREAM_ADMISSION_MODE") != "http":
@@ -287,6 +445,29 @@ def validate_enabled(
             fail(f"{name} live verification timeout changed")
         if not environment.get("VLLM_API_KEY"):
             fail(f"{name} has no endpoint bearer authority")
+        if "GPU_MEM_UTIL" in environment:
+            fail(f"{name} retains the ignored GPU memory variable")
+        if "VLLM_USE_B12X_FP8_GEMM" in environment:
+            fail(f"{name} asserts a launcher-overwritten FP8 GEMM value")
+        for key in (
+            "ALLREDUCE_MODE",
+            "BACKEND",
+            "BLOCK_SIZE",
+            "CUDA_DEVICE_ORDER",
+            "CUDA_VISIBLE_DEVICES",
+            "DCP_SIZE",
+            "DSPARK_DEPTH_MODE",
+            "DSPARK_TOKENS",
+            "GPU_MEMORY_UTILIZATION",
+            "MAX_MODEL_LEN",
+            "MAX_NUM_BATCHED_TOKENS",
+            "MAX_NUM_SEQS",
+            "MODE",
+            "NCCL_P2P_DISABLE",
+            "TP_SIZE",
+        ):
+            if str(environment.get(key)) != expected_environment[key]:
+                fail(f"{name} diverges from the serving process environment")
         arguments = environment.get("EXTRA_VLLM_ARGS", "")
         if option_value(arguments, "--middleware", f"{name} middleware") != MIDDLEWARE_IMPORT:
             fail(f"{name} middleware import changed")

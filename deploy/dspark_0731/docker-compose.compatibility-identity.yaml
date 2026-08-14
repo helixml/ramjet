@@ -17,7 +17,7 @@ services:
           create_host_path: false
     environment:
       DS4_SERVING_RUNTIME_MANIFEST_PATH: /compat/serving-runtime.json
-      DS4_SERVING_RUNTIME_MANIFEST_SHA256: a8937e6a5801fef6df3df58d341950d65b515896212c30ce6695c90df17f65a4
+      DS4_SERVING_RUNTIME_MANIFEST_SHA256: 294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4
 
   dspark-0731:
     # This endpoint describes only this immutable image. A candidate image
@@ -47,7 +47,7 @@ services:
       MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_PATH: /opt/mini-dynamo/compatibility.json
       MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SHA256: 4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa
       MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_PATH: /opt/mini-dynamo/serving-runtime.json
-      MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SHA256: a8937e6a5801fef6df3df58d341950d65b515896212c30ce6695c90df17f65a4
+      MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SHA256: 294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4
       MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH: /workspace/model/tokenizer.json
       MINI_DYNAMO_SERVING_IDENTITY_VERIFY_TIMEOUT_MS: "4000"
       EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_A_IDENTITY---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""} --override-generation-config {"top_p":0.95} --middleware mini_dynamo_engine_identity.ServingIdentityMiddleware}'
@@ -77,7 +77,7 @@ services:
       MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_PATH: /opt/mini-dynamo/compatibility.json
       MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SHA256: 4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa
       MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_PATH: /opt/mini-dynamo/serving-runtime.json
-      MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SHA256: a8937e6a5801fef6df3df58d341950d65b515896212c30ce6695c90df17f65a4
+      MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SHA256: 294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4
       MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH: /workspace/model/tokenizer.json
       MINI_DYNAMO_SERVING_IDENTITY_VERIFY_TIMEOUT_MS: "4000"
       EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_B_IDENTITY---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""} --override-generation-config {"top_p":0.95} --middleware mini_dynamo_engine_identity.ServingIdentityMiddleware}'

@@ -100,19 +100,31 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   r111 keeps that renderer/tokenizer authority at schema v1 and its unchanged
   SHA-256 `4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa`.
   A separate default-off serving-runtime manifest is independently pinned and
-  linked back to that exact digest. Its schema-v2 endpoint reports the
+  linked back to that exact digest. Its then-schema-v2 endpoint reports the
   frontend and EngineCore boot/PID/start-time incarnations, proves the exact
   live typed `KVEventsConfig`, and brackets a stable direct child that owns
   exactly one wildcard listening socket for each configured event/replay port
   in the frontend's network namespace. This is process and socket ownership
   evidence, not proof that the KV publisher thread is alive, events are
   advancing, sequence zero is retained, or replay is complete and timely.
+  r112 upgrades the independently pinned runtime manifest to schema v2 and the
+  authenticated response to schema v3. It now binds the complete normalized
+  vLLM argv, 68 selected non-secret environment values including the
+  revision-specific cache namespace, eight runtime package versions, the exact
+  launcher bytes, and the active 224.8MB NCCL 2.30.4 library. Only four
+  SHA-256 evidence values cross the endpoint. A network-disabled, GPU-free
+  probe drives the real entrypoint from rendered Compose and checks both TP4
+  service shapes in 0.6–0.9s when the image is warm. That probe exposed two
+  previously invisible Compose assertions: GPU_MEM_UTIL was ignored while
+  r34 actually used 0.975, and the b12x-a16 launcher overwrote the claimed
+  FP8-GEMM zero with one. Canonical Compose now names the effective
+  GPU_MEMORY_UTILIZATION=0.975 and removes the ineffective FP8 assertion,
+  without changing the running engine contract.
   Live event/replay qualification is therefore still mandatory, the Compose
   default remains `http`, and no enablement is admissible. The larger issue
-  #15 bundle still needs driver/CUDA/NCCL,
-  kernel/patch, topology,
-  normalized argv/environment, compile-cache identity, representative warmups,
-  complete runtime-manifest generation, and immutable engine-image
+  #15 bundle still needs live driver/kernel/topology evidence, a safely
+  persisted and preseeded cache mount, representative warmups, complete
+  build-produced runtime-manifest generation, and immutable engine-image
   qualification.
 - 🔨 **Exact KV-event shadow index.** The transport-independent sequence fence
   now starts untrusted, requests bounded contiguous replay on gaps, increments

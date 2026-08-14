@@ -151,7 +151,8 @@ focused loop:
 ```bash
 cargo test --locked compat::tests
 python3 -m unittest bench.test_engine_identity_middleware \
-  bench.test_serving_identity_compose
+  bench.test_serving_identity_compose \
+  bench.test_serving_runtime_image_probe
 python3 deploy/dspark_0731/validate-serving-identity-compose.py
 ```
 
@@ -162,6 +163,18 @@ engines or enable LB compatibility admission. First preflight the pinned
 image's `--middleware` import contract without GPUs, single-home production on
 the peer, then recreate and qualify only one engine. Record the render,
 preflight, restart, and first endpoint/request wall times separately.
+
+When the immutable r34 image is already cached, run the full launcher probe
+before paying for a model load:
+
+    python3 bench/serving_runtime_image_probe.py
+    python3 bench/serving_runtime_image_probe.py --service dspark-0731-b
+
+This network-disabled, GPU-free check uses the real entrypoint and rendered
+Compose, but replaces the terminal vllm executable with a read-only evidence
+collector. It compares the complete normalized argv, selected non-secret
+environment, package versions, launcher hash, and NCCL library hash. It took
+0.6–0.9s warm in r112. Do not add the 12.5GB image pull to Drone.
 
 The identity middleware's nested probes must clone the original request scope
 so vLLM routes retain the real FastAPI `app.state`. `/tokenize` owns child tasks
@@ -176,10 +189,15 @@ Keep renderer/tokenizer and serving-runtime authority separate. The
 compatibility manifest remains schema v1 with SHA-256
 `4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa`;
 the default-off serving-runtime manifest must be independently pinned and
-must link back to that digest. Runtime proof must use the exact pinned vLLM
-types, stable direct-child EngineCore incarnation, live typed KV-event config,
-shared network namespace, and exact child-owned wildcard listener for every
-configured event/replay port, with process state checked before and after.
+must link back to that digest. Runtime-manifest schema v2 additionally carries
+the complete normalized serving argv, an allow-listed non-secret environment,
+runtime package versions, and exact launcher/NCCL artifact hashes. The
+authenticated response is schema v3 and publishes only their four SHA-256
+digests after matching live process state. Runtime proof must use the exact
+pinned vLLM types, stable direct-child EngineCore incarnation, live typed
+KV-event config, shared network namespace, and exact child-owned wildcard
+listener for every configured event/replay port, with process state checked
+before and after.
 Never describe this binding as publisher-thread liveness, event progress,
 retained sequence-zero, or replay readiness. Those remain node06 live
 event/replay qualification gates, and LB admission remains `http` until they

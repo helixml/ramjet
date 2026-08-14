@@ -1613,10 +1613,7 @@ mod tests {
     use prometheus::Registry;
 
     use super::*;
-    use crate::compat::{
-        EngineIdentity, KvEventsIdentity, ModelIdentity, RendererIdentity, ServingRuntimeEngine,
-        TokenizerIdentity,
-    };
+    use crate::compat::{EngineIdentity, ModelIdentity, RendererIdentity, TokenizerIdentity};
 
     fn route_decision() -> crate::router::Decision {
         crate::router::Decision {
@@ -1669,23 +1666,12 @@ mod tests {
     }
 
     fn test_serving_runtime() -> ServingRuntimeManifest {
-        ServingRuntimeManifest {
-            schema_version: 1,
-            compatibility_manifest_sha256: "c".repeat(64),
-            engine: ServingRuntimeEngine {
-                core_process_count: 1,
-                kv_events: KvEventsIdentity {
-                    enable_kv_cache_events: true,
-                    publisher: "zmq".to_owned(),
-                    endpoint: "tcp://*:5557".to_owned(),
-                    replay_endpoint: "tcp://*:5558".to_owned(),
-                    buffer_steps: 10_000,
-                    hwm: 100_000,
-                    max_queue_size: 100_000,
-                    topic: String::new(),
-                },
-            },
-        }
+        let mut runtime: ServingRuntimeManifest = serde_json::from_slice(include_bytes!(
+            "../compat/deepseek-v4-r34-serving-runtime.json"
+        ))
+        .unwrap();
+        runtime.compatibility_manifest_sha256 = "c".repeat(64);
+        runtime
     }
 
     #[tokio::test]

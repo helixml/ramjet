@@ -16,7 +16,10 @@
 #     peer access (`NCCL_P2P_DISABLE=0`) on this specific topology.
 #
 # Known-good/known-bad (from the recipe): kv fp8_ds_mla ONLY; DCP must be 1;
-# num_speculative_tokens >= 5; VLLM_USE_B12X_FP8_GEMM must be 0; block 256.
+# num_speculative_tokens >= 5; block 256. The pinned r34 launcher selects
+# VLLM_USE_B12X_FP8_GEMM=1 for b12x-a16 after reading Compose; do not claim an
+# ineffective Compose override. The opt-in runtime manifest attests the final
+# exec environment.
 # The WHOLE serving stack lives in this one compose project: both engines and
 # the load balancer shares the project network, so it reaches engines by
 # service name — no manual `docker network connect`/aliases. Put the Caddy
@@ -145,15 +148,16 @@ services:
       # volume. Per-engine controls keep rolling dynamic-depth trials isolated.
       DSPARK_CAPACITY_LOG_INTERVAL: ${DSPARK_CAPACITY_LOG_INTERVAL_A:-0}
       DSPARK_STS_LOG_INTERVAL: ${DSPARK_STS_LOG_INTERVAL_A:-0}
-      # A16 MoE kernels win 5-16% on code and 7-10% on prose decode; keep
-      # VLLM_USE_B12X_FP8_GEMM=0 because the drafter cannot use that path.
+      # A16 MoE kernels win 5-16% on code and 7-10% on prose decode.
       BACKEND: ${BACKEND:-b12x-a16}
       TP_SIZE: "4"
       DCP_SIZE: "1"
       ALLREDUCE_MODE: ${ALLREDUCE_MODE:-nccl}
       # node06's PCIe P2P path passed direct decode/mixed/200K-context A/B.
       NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-0}
-      GPU_MEM_UTIL: "0.90"
+      # This is the launcher input. 0.975 was already r34's effective default;
+      # spelling it explicitly does not change the live allocation.
+      GPU_MEMORY_UTILIZATION: "0.975"
       MAX_MODEL_LEN: "393216"
       # Parameterized for rolling concurrency/graph-memory qualification.
       MAX_NUM_SEQS: ${MAX_NUM_SEQS:-16}
@@ -176,7 +180,6 @@ services:
       # Overriding EXTRA_VLLM_ARGS_A drops both this and the KV publisher --
       # copy them into any experiment value.
       EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_A---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""} --override-generation-config {"top_p":0.95}}'
-      VLLM_USE_B12X_FP8_GEMM: "0"
       VLLM_API_KEY: ${VLLM_API_KEY:-dspark-local}
 
   # Second instance, GPUs 4-7. Both are joined to ds4_flash_default with
@@ -226,7 +229,7 @@ services:
       DCP_SIZE: "1"
       ALLREDUCE_MODE: ${ALLREDUCE_MODE:-nccl}
       NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-0}
-      GPU_MEM_UTIL: "0.90"
+      GPU_MEMORY_UTILIZATION: "0.975"
       MAX_MODEL_LEN: "393216"
       MAX_NUM_SEQS: ${MAX_NUM_SEQS:-16}
       MAX_NUM_BATCHED_TOKENS: ${MAX_NUM_BATCHED_TOKENS:-4096}
@@ -236,5 +239,4 @@ services:
       # omit it. Overriding EXTRA_VLLM_ARGS_B drops both this and the KV
       # publisher -- copy them into any experiment value.
       EXTRA_VLLM_ARGS: '${EXTRA_VLLM_ARGS_B---kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""} --override-generation-config {"top_p":0.95}}'
-      VLLM_USE_B12X_FP8_GEMM: "0"
       VLLM_API_KEY: ${VLLM_API_KEY:-dspark-local}

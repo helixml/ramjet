@@ -104,10 +104,23 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    @staticmethod
-    def runtime_manifest(compatibility_digest):
+    def runtime_manifest(self, compatibility_digest):
+        argv = ["serve", "model"]
+        environment = {
+            "MAX_MODEL_LEN": "4096",
+            "SERVED_MODEL_NAME": "model",
+        }
+        packages = {"vllm": "v1"}
+        artifacts = [
+            {
+                "path": str(self.tokenizer_path),
+                "sha256": hashlib.sha256(
+                    self.tokenizer_path.read_bytes()
+                ).hexdigest(),
+            }
+        ]
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "compatibility_manifest_sha256": compatibility_digest,
             "engine": {
                 "core_process_count": 1,
@@ -122,7 +135,45 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
                     "topic": "",
                 },
             },
+            "process": {
+                "argv": argv,
+                "argv_sha256": hashlib.sha256(
+                    b"\0".join(value.encode() for value in argv)
+                ).hexdigest(),
+                "environment": environment,
+                "environment_sha256": hashlib.sha256(
+                    json.dumps(
+                        environment, sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).hexdigest(),
+                "packages": packages,
+                "packages_sha256": hashlib.sha256(
+                    json.dumps(
+                        packages, sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).hexdigest(),
+                "artifacts": artifacts,
+                "artifacts_sha256": hashlib.sha256(
+                    json.dumps(
+                        artifacts, sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).hexdigest(),
+            },
         }
+
+    @staticmethod
+    def refresh_process_digests(runtime):
+        process = runtime["process"]
+        process["argv_sha256"] = hashlib.sha256(
+            b"\0".join(value.encode() for value in process["argv"])
+        ).hexdigest()
+        for name in ("environment", "packages", "artifacts"):
+            process[f"{name}_sha256"] = hashlib.sha256(
+                json.dumps(
+                    process[name], sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+        return runtime
 
     def live_scope(self, processes=None, kv_events=None):
         if processes is None:
@@ -256,6 +307,10 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
 
         with patch.dict(os.environ, environment, clear=True), patch.object(
             middleware_module.importlib_metadata, "version", return_value="v1"
+        ), patch.object(
+            middleware_module,
+            "_normalized_process_argv",
+            return_value=["serve", "model"],
         ):
             return middleware_module.ServingIdentityMiddleware(downstream)
 
@@ -302,7 +357,7 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
         self.assertEqual(messages[0]["status"], 200)
         self.assertIn((b"cache-control", b"no-store"), messages[0]["headers"])
         identity = json.loads(messages[1]["body"])
-        self.assertEqual(identity["schema_version"], 2)
+        self.assertEqual(identity["schema_version"], 3)
         self.assertEqual(identity["model"], self.manifest["model"])
         self.assertNotIn("goldens", identity)
         self.assertRegex(
@@ -317,6 +372,16 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
         self.assertEqual(
             identity["engine"]["kv_events"],
             self.runtime_manifest("0" * 64)["engine"]["kv_events"],
+        )
+        self.assertEqual(
+            identity["runtime"],
+            {
+                key: value
+                for key, value in self.runtime_manifest("0" * 64)[
+                    "process"
+                ].items()
+                if key.endswith("_sha256")
+            },
         )
         self.assertEqual(
             self.internal_paths,
@@ -419,7 +484,7 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
         wrong_link = runtime()
         wrong_link["compatibility_manifest_sha256"] = "c" * 64
         wrong_schema = runtime()
-        wrong_schema["schema_version"] = 2
+        wrong_schema["schema_version"] = 1
         extra_root = runtime()
         extra_root["private-content"] = "must-not-leak"
         boolean_count = runtime()
@@ -440,6 +505,18 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
         boolean_capacity["engine"]["kv_events"]["hwm"] = True
         oversized_topic = runtime()
         oversized_topic["engine"]["kv_events"]["topic"] = "x" * 4097
+        bad_argv_digest = runtime()
+        bad_argv_digest["process"]["argv_sha256"] = "0" * 64
+        sensitive_argv = runtime()
+        sensitive_argv["process"]["argv"].extend(["--api-key", "private"])
+        secret_environment = runtime()
+        secret_environment["process"]["environment"]["PRIVATE_API_KEY"] = (
+            "private"
+        )
+        duplicate_artifact = runtime()
+        duplicate_artifact["process"]["artifacts"].append(
+            dict(duplicate_artifact["process"]["artifacts"][0])
+        )
         cases = [
             {"runtime_digest": "0" * 64},
             {"runtime": wrong_link},
@@ -452,6 +529,10 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
             {"runtime": duplicate_endpoint},
             {"runtime": boolean_capacity},
             {"runtime": oversized_topic},
+            {"runtime": bad_argv_digest},
+            {"runtime": sensitive_argv},
+            {"runtime": secret_environment},
+            {"runtime": duplicate_artifact},
         ]
         for arguments in cases:
             with self.subTest(arguments=sorted(arguments)):
@@ -461,6 +542,68 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
                     self.middleware(**arguments)
                 self.assertNotIn("private-content", str(raised.exception))
                 self.assertNotIn(str(self.runtime_path), str(raised.exception))
+
+    def test_process_argv_environment_packages_and_artifacts_are_live(self):
+        raw = json.dumps(self.manifest).encode()
+        compatibility_digest = hashlib.sha256(raw).hexdigest()
+        cases = []
+
+        argv = self.runtime_manifest(compatibility_digest)
+        argv["process"]["argv"].append("--changed")
+        cases.append(self.refresh_process_digests(argv))
+
+        environment = self.runtime_manifest(compatibility_digest)
+        environment["process"]["environment"]["MAX_MODEL_LEN"] = "8192"
+        cases.append(self.refresh_process_digests(environment))
+
+        packages = self.runtime_manifest(compatibility_digest)
+        packages["process"]["packages"]["vllm"] = "v2"
+        cases.append(self.refresh_process_digests(packages))
+
+        artifacts = self.runtime_manifest(compatibility_digest)
+        artifacts["process"]["artifacts"][0]["sha256"] = "f" * 64
+        cases.append(self.refresh_process_digests(artifacts))
+
+        for runtime in cases:
+            with self.subTest(
+                process={
+                    key: runtime["process"][key]
+                    for key in (
+                        "argv_sha256",
+                        "environment_sha256",
+                        "packages_sha256",
+                        "artifacts_sha256",
+                    )
+                }
+            ), self.assertRaisesRegex(
+                RuntimeError, "^serving identity initialization failed$"
+            ):
+                self.middleware(runtime=runtime)
+
+    def test_process_argv_normalization_is_exact_and_bounded(self):
+        with patch.object(
+            middleware_module,
+            "_read_bounded",
+            return_value=(
+                b"/opt/venv/bin/python\0/opt/venv/bin/vllm\0"
+                b"serve\0model\0"
+            ),
+        ):
+            self.assertEqual(
+                middleware_module._normalized_process_argv(),
+                ["serve", "model"],
+            )
+
+        for raw in (
+            b"/opt/venv/bin/python\0/opt/venv/bin/vllm\0model\0",
+            b"python\0vllm\0serve\0serve\0",
+            b"python\0vllm\0serve\0model",
+            b"python\0vllm\0serve\0\xff\0",
+        ):
+            with self.subTest(raw=raw), patch.object(
+                middleware_module, "_read_bounded", return_value=raw
+            ), self.assertRaises(ValueError):
+                middleware_module._normalized_process_argv()
 
     def test_duplicate_authorization_is_rejected(self):
         middleware = self.middleware()
@@ -525,6 +668,10 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
                 middleware_module.importlib_metadata,
                 "version",
                 return_value=version,
+            ), patch.object(
+                middleware_module,
+                "_normalized_process_argv",
+                return_value=["serve", "model"],
             ), self.assertRaisesRegex(
                 RuntimeError, "^serving identity initialization failed$"
             ):
@@ -533,6 +680,10 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
         self.tokenizer_path.write_bytes(b"changed")
         with patch.dict(os.environ, base, clear=True), patch.object(
             middleware_module.importlib_metadata, "version", return_value="v1"
+        ), patch.object(
+            middleware_module,
+            "_normalized_process_argv",
+            return_value=["serve", "model"],
         ), self.assertRaisesRegex(
             RuntimeError, "^serving identity initialization failed$"
         ):

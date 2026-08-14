@@ -1335,8 +1335,8 @@ mod tests {
     use super::*;
     use crate::{
         compat::{
-            CompatibilityManifest, EngineIdentity, KvEventsIdentity, ModelIdentity,
-            RendererIdentity, ServingRuntimeEngine, ServingRuntimeManifest, TokenizerIdentity,
+            CompatibilityManifest, EngineIdentity, ModelIdentity, RendererIdentity,
+            ServingRuntimeManifest, TokenizerIdentity,
         },
         exact_index::{ExactIndexLimits, FencedExactKvInventory},
         kv_wire::{BlockStored, ExternalBlockHash, KvEvent, KvEventBatch},
@@ -1473,28 +1473,18 @@ mod tests {
     }
 
     fn test_serving_runtime_manifest() -> ServingRuntimeManifest {
-        ServingRuntimeManifest {
-            schema_version: 1,
-            compatibility_manifest_sha256: "c".repeat(64),
-            engine: ServingRuntimeEngine {
-                core_process_count: 1,
-                kv_events: KvEventsIdentity {
-                    enable_kv_cache_events: true,
-                    publisher: "zmq".to_owned(),
-                    endpoint: "tcp://*:5557".to_owned(),
-                    replay_endpoint: "tcp://*:5558".to_owned(),
-                    buffer_steps: 10_000,
-                    hwm: 100_000,
-                    max_queue_size: 100_000,
-                    topic: String::new(),
-                },
-            },
-        }
+        let mut runtime: ServingRuntimeManifest = serde_json::from_slice(include_bytes!(
+            "../compat/deepseek-v4-r34-serving-runtime.json"
+        ))
+        .unwrap();
+        runtime.compatibility_manifest_sha256 = "c".repeat(64);
+        runtime
     }
 
     fn test_serving_identity(digest: &str) -> serde_json::Value {
+        let runtime = test_serving_runtime_manifest();
         serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "incarnation": {
                 "frontend": "boot-1:1:10",
                 "engine_core": ["boot-1:2:20"],
@@ -1517,6 +1507,12 @@ mod tests {
             },
             "tokenizer": {"sha256": "b".repeat(64)},
             "renderer": {"profile": "profile"},
+            "runtime": {
+                "argv_sha256": runtime.process.argv_sha256,
+                "environment_sha256": runtime.process.environment_sha256,
+                "packages_sha256": runtime.process.packages_sha256,
+                "artifacts_sha256": runtime.process.artifacts_sha256,
+            },
         })
     }
 

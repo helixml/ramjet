@@ -120,8 +120,10 @@ missing `X-Session-ID` preserves the approximate route.
 Compatibility admission is an independent serving gate. It requires
 `DS4_TOKENIZER_MODE=local-shadow` plus the SHA-pinned manifest so local golden
 validation exists, the separately SHA-pinned serving-runtime manifest, and at
-least two upstreams. It does not enable exact routing. The runtime manifest
-binds the expected EngineCore cardinality and KV-event publisher configuration;
+least two upstreams. It does not enable exact routing. The schema-v2 runtime
+manifest binds the expected EngineCore cardinality, KV-event publisher
+configuration, complete normalized serving argv, selected non-secret
+environment, runtime package versions, and exact launcher/NCCL artifact hashes;
 its `compatibility_manifest_sha256` must equal the renderer/tokenizer manifest
 pin exactly.
 A mismatching replica is removed from ordinary serving until a later probe
@@ -132,13 +134,13 @@ mode unless every upstream implements the identity contract below. Inspect
 `ds4proxy_upstream_admission_checks_total` before opting in.
 
 The identity endpoint must capture the frontend and every expected EngineCore
-atomically and return a bounded schema-v2 document. Each incarnation is an
+atomically and return a bounded schema-v3 document. Each incarnation is an
 opaque value of 1–256 ASCII alphanumeric/`.`/`_`/`:`/`-` bytes. mini-dynamo
 validates these values but never logs, labels, journals, or retains them.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "incarnation": {
     "frontend": "boot-id:frontend-pid:process-start",
     "engine_core": ["boot-id:core-pid:process-start"]
@@ -160,7 +162,13 @@ validates these values but never logs, labels, journals, or retains them.
     }
   },
   "tokenizer": {"sha256": "..."},
-  "renderer": {"profile": "..."}
+  "renderer": {"profile": "..."},
+  "runtime": {
+    "argv_sha256": "...",
+    "environment_sha256": "...",
+    "packages_sha256": "...",
+    "artifacts_sha256": "..."
+  }
 }
 ```
 
@@ -183,17 +191,21 @@ separate from the base Compose, pins the immutable r34 image, and does not
 enable LB admission. The first authenticated identity call exercises the real
 initialized `/v1/models` and all committed `/tokenize` goldens through the
 inner ASGI app, brackets them with vLLM health, and caches a complete match for
-that frontend process. The same proof requires the exact pinned vLLM client and
-process-manager types, a stable direct-child EngineCore incarnation, the live
-typed KV-event configuration, and exact child-owned wildcard listeners for the
-event and replay ports. Later calls still check health, process identity,
+that frontend process. The same proof requires runtime-manifest schema v2's
+complete normalized argv, allow-listed non-secret environment, runtime package
+versions, and exact launcher/NCCL artifact hashes, plus the exact pinned vLLM
+client and process-manager types, a stable direct-child EngineCore incarnation,
+the live typed KV-event configuration, and exact child-owned wildcard listeners
+for the event and replay ports. The endpoint returns only the four runtime
+evidence digests. Later calls still check health, process identity,
 configuration, and socket ownership. The 4s inner deadline is
 below the LB's 5s control deadline; cancellation sends an internal disconnect
 and waits for vLLM's child tasks so a timeout cannot orphan tokenization work.
 The one-time proof intentionally appears in vLLM's HTTP metrics as one models
 request and ten tokenize requests; it never reaches inference scheduling.
-This verifies the live renderer/model-root claims and binds the EngineCore
-process/configuration/listening sockets. It does not prove publisher-thread
+This verifies the live renderer/model-root claims and binds the serving launch,
+packages/artifacts, and EngineCore process/configuration/listening sockets. It
+does not prove publisher-thread
 liveness, event advancement, replay completeness, or the complete runtime
 bundle. Validate it with `validate-serving-identity-compose.py` and roll one
 engine at a time. The candidate remains diagnostic: keep the LB in `http` mode

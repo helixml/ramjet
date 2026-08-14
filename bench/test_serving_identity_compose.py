@@ -118,6 +118,32 @@ class ServingIdentityComposeTest(unittest.TestCase):
         with self.assertRaisesRegex(validator.ValidationError, "port is invalid"):
             validator.validate_enabled(validator.render(enabled=True), unicode_port)
 
+    def test_runtime_manifest_binds_launch_environment_packages_and_artifacts(self):
+        runtime = validator.validate_runtime_manifest()
+        self.assertEqual(runtime["schema_version"], 2)
+        self.assertEqual(runtime["process"]["argv"][0], "serve")
+        self.assertEqual(
+            runtime["process"]["environment"]["VLLM_USE_B12X_FP8_GEMM"],
+            "1",
+        )
+        for name in (
+            "argv_sha256",
+            "environment_sha256",
+            "packages_sha256",
+            "artifacts_sha256",
+        ):
+            malformed = copy.deepcopy(runtime)
+            malformed["process"][name] = "0" * 64
+            with self.subTest(name=name), self.assertRaisesRegex(
+                validator.ValidationError, "digest"
+            ):
+                validator.validate_runtime_manifest(malformed)
+
+        secret = copy.deepcopy(runtime)
+        secret["process"]["environment"]["PRIVATE_API_KEY"] = "private"
+        with self.assertRaisesRegex(validator.ValidationError, "mapping key"):
+            validator.validate_runtime_manifest(secret)
+
     def test_lb_and_engine_runtime_authorities_cannot_be_cross_wired(self):
         document = validator.render(enabled=True)
         document["services"]["ds4-loadbalancer"]["environment"][
@@ -204,6 +230,31 @@ class ServingIdentityComposeTest(unittest.TestCase):
         service = document["services"][validator.ENGINES[0]]
         service["environment"]["EXTRA_VLLM_ARGS"] += " --kv-events-config={}"
         with self.assertRaisesRegex(validator.ValidationError, "cardinality"):
+            validator.validate_enabled(document)
+
+    def test_compose_cannot_assert_ignored_or_launcher_overwritten_settings(self):
+        for key, value, message in [
+            ("GPU_MEM_UTIL", "0.90", "ignored GPU memory"),
+            (
+                "VLLM_USE_B12X_FP8_GEMM",
+                "0",
+                "launcher-overwritten FP8 GEMM",
+            ),
+        ]:
+            document = validator.render(enabled=True)
+            service = document["services"][validator.ENGINES[0]]
+            service["environment"][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(
+                validator.ValidationError, message
+            ):
+                validator.validate_enabled(document)
+
+        document = validator.render(enabled=True)
+        service = document["services"][validator.ENGINES[0]]
+        service["environment"]["GPU_MEMORY_UTILIZATION"] = "0.90"
+        with self.assertRaisesRegex(
+            validator.ValidationError, "serving process environment"
+        ):
             validator.validate_enabled(document)
 
 
