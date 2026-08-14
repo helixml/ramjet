@@ -58,9 +58,9 @@ class FakeRunner:
         self.log_bodies = logs or {}
         self.inspect_sequence = list(inspect_sequence or [])
         self.live_environment = environment or {
-            "DS4_UPSTREAM": "http://engine-a:8000",
-            "DS4_KV_EVENT_LIVE_ENDPOINTS": "tcp://engine-a:5557",
-            "DS4_KV_EVENT_REPLAY_ENDPOINTS": "tcp://engine-a:5558",
+            "MD_UPSTREAM": "http://engine-a:8000",
+            "MD_KV_EVENT_LIVE_ENDPOINTS": "tcp://engine-a:5557",
+            "MD_KV_EVENT_REPLAY_ENDPOINTS": "tcp://engine-a:5558",
         }
         self.live_device_ids = device_ids
         self.unhealthy = set(unhealthy or ())
@@ -507,9 +507,9 @@ class CandidateGateTest(unittest.TestCase):
             FakeRunner(
                 self.identity,
                 environment={
-                    "DS4_UPSTREAM": "http://engine-a:8000,http://candidate:8000",
-                    "DS4_KV_EVENT_LIVE_ENDPOINTS": "tcp://engine-a:5557",
-                    "DS4_KV_EVENT_REPLAY_ENDPOINTS": "tcp://engine-a:5558",
+                    "MD_UPSTREAM": "http://engine-a:8000,http://candidate:8000",
+                    "MD_KV_EVENT_LIVE_ENDPOINTS": "tcp://engine-a:5557",
+                    "MD_KV_EVENT_REPLAY_ENDPOINTS": "tcp://engine-a:5558",
                 },
             ),
             FakeRunner(self.identity, device_ids=("0", "1", "2", "3")),

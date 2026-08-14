@@ -1,5 +1,158 @@
 # node06 experiment journal
 
+## 2026-08-14 — Qwen3.8-27B-FP8 replaces DeepSeek-V4-Flash on node06
+
+Brought the whole serving stack over to `Qwen/Qwen3.8-27B-FP8` (vision-language)
+at the user's explicit direction, after they authorised engine runs on an
+otherwise-idle node06. No production traffic was being served. The AC repair
+was **not** confirmed, so the 65C start gate and 78C abort ceiling were left
+untouched and sustained load was kept to short cells; peak observed was 70C.
+
+**No new engine image was needed.** Qwen3.8-27B declares
+`architectures: ["Qwen3_5ForConditionalGeneration"]` (`model_type` `qwen3_5`),
+and the pinned r34 image already registers that architecture among 362. This
+was checked from registry/config metadata before anything was pulled or
+stopped. Weights are ~31GB and `/prod` had 1.9T free, so the DeepSeek weights
+stayed exactly where they were; nothing was moved or deleted.
+
+The engines deliberately do **not** use `serve-ds4-flash.sh`. That launcher is
+DeepSeek/DSpark-specific (`MODE=dspark`, `BACKEND=b12x-a16`, speculative
+depth). Qwen runs plain `vllm serve` with an explicit argv in
+`deploy/qwen38_27b/docker-compose.yaml`, so every setting is visible in one
+place.
+
+**Topology and cost.** Two TP4 engines mirroring the DeepSeek layout: A on
+GPUs 0-3 (:8012), B on GPUs 4-7 (:8013), both behind the load balancer on
+:8006. Each engine reports a **4,901,554-token GPU KV cache** at the model's
+native 262144 window, using 87.8GB/GPU at `gpu-memory-utilization=0.90`. Engine
+init took 310-334s, of which 152-169s was compilation.
+
+**Block size is 784 tokens, not 256.** The engine logs
+`Setting attention block size to 784 tokens to ensure that attention page size
+is >= mamba page size` — the Gated DeltaNet state forces the attention page
+up. This is the single most consequential difference for this load balancer:
+AGENTS.md's rule that a request needs more than 256 prompt tokens to emit a KV
+event becomes **more than 784 tokens** for Qwen, and prefix sharing is
+correspondingly coarser.
+
+**KV cache events do work on this hybrid model**, which closes the open
+question in issue #167. A 6,321-token prompt sent directly to engine B moved
+`ds4proxy_kv_event_blocks_total{action="stored"}` from 0 to 8, and
+6321/784 = 8.06 matches exactly. Low counters during the concurrency sweep were
+not a defect: those prompts were 60-100 tokens, far below one 784-token block,
+so no full block ever formed. Prefix caching itself is plainly effective — a
+repeated 12,025-token prefix went from 1.31s cold to 0.14s warm, a 9.4x
+improvement.
+
+Two caveats that stop this being a clean win. `usage.prompt_tokens_details` is
+`null` on every response, so `cached_tokens` is unavailable and `cachebench.py`
+reconciliation cannot work as written against this engine. The
+`vllm:gpu_prefix_cache_queries_total` counters are absent as well; only
+`external_prefix_cache_*` exist and they stay at zero. Cache accounting for
+Qwen therefore has no engine-native source yet.
+
+**A reasoning parser is mandatory.** Without `--reasoning-parser=qwen3` the
+model's entire `<think>` block is emitted inside `content`, so every client
+sees raw chain-of-thought with a stray `</think>` in the middle of the answer.
+The parser registers lazily in this image under the name `qwen3`; with it,
+`content` is clean and Helix receives `reasoning_content` separately.
+`--tool-call-parser=qwen3_xml` and `--enable-auto-tool-choice` are set on the
+same grounds but are not yet exercised by a test.
+
+**Concurrency (warm, through the LB, 256 output tokens/request).** The first
+sweep was discarded: its c8 cell read 41.9 tok/s with a 26.5s TTFT while c16
+did 3.3s, and reruns gave 318-384 tok/s. That was first-traffic autotuning, not
+load. Clean warm sweep, zero errors, upstream split exactly balanced at every
+level:
+
+| concurrency | output tok/s | wall | split |
+|---|---|---|---|
+| 1 | 75.5 | 3.39s | 1/0 |
+| 4 | 262.1 | 3.91s | 2/2 |
+| 8 | 384.8 | 5.32s | 4/4 |
+| 16 | 1247.8 | 3.28s | 8/8 |
+| 32 | 2180.0 | 3.74s | 8/8 |
+| 64 | 3692.8 | 4.43s | 32/32 |
+
+The c8 cell remains slower than c16 across repeats, which is not explained by
+load and is not claimed to be. The TTFT column is omitted deliberately: with
+thinking on by default, the measured "first token" is the first *post-thinking*
+content token, so it tracks how long the model reasoned rather than queueing
+delay. It is not comparable to the DeepSeek TTFT figures elsewhere in this
+journal.
+
+### Throughput tuning (same day)
+
+Aggregate throughput went from **~5950 to ~7800 tok/s at c256, +32%**, from a
+single change: `max_num_seqs` 64 -> 256. Two engines at 64 capped the stack at
+128 concurrent sequences, so at c256 half the load queued instead of batching.
+
+A `--max-num-batched-tokens` override was changed in the same restart and then
+isolated afterwards: 8192 measured 7789 and 7812 tok/s, 16384 measured 7845.
+That is noise, so the knob does not appear in the committed compose. The whole
+gain is attributable to the sequence cap.
+
+**The benchmark needed fixing before any of this was measurable.** With
+thinking on, requests stop early after a variable amount of reasoning, so cell
+wall-time tracked prompt luck rather than engine speed -- the same
+configuration and concurrency read 3693 tok/s and 1496 tok/s on consecutive
+sweeps. `bench/qwen_concurrency.py` now defaults to `ignore_eos` plus
+`min_tokens` with thinking off, which makes every request emit exactly
+`max_tokens`; token counts land on the nose (65,536 at c256) and repeats agree
+to within 1%. `--thinking` restores the realistic-but-noisy behaviour.
+
+**The first cell after an engine restart is not usable.** It ran 997 tok/s /
+65.7s where the following identical cells ran 7789 and 7812. An earlier sweep
+showed the same shape from the other direction: c256 read 5950 measured last
+and 2830 measured first. This is presumably graph capture or kernel selection
+for large-batch shapes. Operationally it means the first burst after a rolling
+restart is roughly 8x slower, and any benchmark must discard its first cell.
+
+**c512 is not a valid operating point.** It reaches ~9100 tok/s but the load
+balancer returns 8-9 `503 Service Unavailable` out of 512, about 1.6%, with no
+corresponding preemption or OOM in the engine logs. The shedding is on the
+proxy side under load and is not understood yet; it should be diagnosed before
+anyone treats 9100 as the headline number.
+
+**Stopped here on thermals, not on ideas.** GPU temperatures reached 77C during
+the c512 runs against a 78C abort ceiling, with AC repair still unconfirmed.
+They recovered to 67-73C once load stopped and no throttle reason was ever
+asserted. Two larger levers are consequently untested:
+
+- **Data parallelism instead of tensor parallelism.** 27B FP8 is ~28GB and each
+  GPU has 96GB, so the model fits on one card with room for KV. Eight
+  independent TP1 engines behind this load balancer would remove every NCCL
+  allreduce from the decode path, which for a model this size is usually worth
+  more than anything tuned above. mini-dynamo already fronts N upstreams.
+- **MTP speculative decoding.** The checkpoint ships `mtp.safetensors` and the
+  image registers `Qwen3_5MTP`. Expect this to help single-stream latency and
+  possibly to hurt saturated throughput, so it should be measured at both ends.
+
+**Vision works end to end.** A 128x128 solid-red PNG sent as a base64
+`image_url` part returns "Red" with 132 prompt tokens against 60 for the same
+text alone, so roughly 72 tokens of image. Verified identically against the
+engine directly, through the load balancer, and through Caddy. This is the
+path that the `flatten_content_parts` fix protects: before it, the sanitizer
+rewrote the forwarded body and the image was silently deleted.
+
+**Helix integration.** Caddy gained a `/qwen3.8-27b/*` route to the same
+balancer, validated and reloaded with the previous config backed up. Helix
+provider `qwen38-node06` (`pe_01m012yhxyrax456npd50esf5k`) points at
+`http://100.89.187.17/qwen3.8-27b/v1`, and app
+`app_01m01302yyvrqawv7vwk715atw` binds it in `org_01kx8crck2r9j31kts1gbew9an`.
+A real `POST /api/v1/sessions/chat` returned "Tokyo" with `reasoning_content`
+correctly separated. Note that `POST /v1/chat/completions` without an org
+fails with `failed to check balance: org_id not specified`; the session path
+is the one that works.
+
+**Not done.** Local attested tokenization stays off (`MD_TOKENIZER_MODE=off`,
+`MD_EXACT_ROUTE_MODE=off`): a Qwen compatibility manifest and a pinned chat
+template digest do not exist yet, and the model ships its template as a
+standalone `chat_template.jinja` rather than inside `tokenizer_config.json`,
+which `load_chat_template` does not yet read. Tool calling is configured but
+untested. The DeepSeek stack is stopped, not deleted, and its weights and
+compose file are intact for rollback.
+
 ## 2026-08-14 — Infernal r12 registry admission (GPU-free)
 
 Staged r12 admission artifacts entirely from registry metadata while the
@@ -852,7 +1005,7 @@ other engine. Replay predicted alpha 4/cap 32 would retain all probes while
 alpha 16/cap 32 would migrate all three.
 
 The LB-only live A/B confirmed that prediction. Both variants ran on the same
-unchanged engines and rc5 image; only `DS4_ROUTE_ALPHA` changed. Each sample
+unchanged engines and rc5 image; only `MD_ROUTE_ALPHA` changed. Each sample
 used three fresh trunks with four blockers and 1,024-token blocker budgets.
 
 | Policy | Probe routes | Probe cached tokens | Median probe TTFT |
@@ -1805,7 +1958,7 @@ logged no error, panic, or fatal. A real internal-account Helix
 `POST /api/v1/sessions/chat` through provider `ds4-flash-node06` also returned
 HTTP 200 with the requested exact sentinel. The exact placement mode remains
 absent; rollback is the stateless r19 LB image or
-`DS4_EXACT_ROUTE_MODE=off`.
+`MD_EXACT_ROUTE_MODE=off`.
 
 Verdict: r20 proves exact IDs and exact KV overlap can be joined before cache
 mutation with bounded single-digit-millisecond frontend cost and independent
@@ -1817,7 +1970,7 @@ transitions, and event recovery long enough to set a conservative route gate.
 ## 2026-08-12 — r21 health contract, Drone gate, and exact-placement canary
 
 r21 makes replica health part of the serving contract and introduces an
-explicit `DS4_EXACT_ROUTE_MODE=placement` canary without changing the
+explicit `MD_EXACT_ROUTE_MODE=placement` canary without changing the
 production default. `/health` returns opaque replica ordinals and aggregate
 `ok`, `degraded`, or `unhealthy` readiness; zero healthy replicas returns 503.
 The serving loop filters every known-unhealthy candidate before opening a
@@ -1894,7 +2047,7 @@ Unit tests compare the complete route before/after shadow `would_move` and
 strict Clippy, release build, the Go oracle, and **97 Rust tests**.
 
 The node06-local `rust-r21-shadow-policy-718012c` image replaced only the
-isolated canary and ran with `DS4_EXACT_ROUTE_MODE=shadow`. A fresh A/B event
+isolated canary and ran with `MD_EXACT_ROUTE_MODE=shadow`. A fresh A/B event
 pair replayed 930/947 retained batches and made both inventories authoritative.
 The controlled two-request proof then behaved as follows:
 
@@ -1932,7 +2085,7 @@ access and rerun; no source/build repair is indicated by that failure.
 The public multi-architecture image
 `ghcr.io/helixml/ds4-loadbalancer:rust-r21-shadow-policy-718012c` (digest
 `sha256:12bb463ad554099e856b3b5a8beb6a23002cdf2d3da96efea57b59f2834d49f3`)
-replaced r20 in production with `DS4_EXACT_ROUTE_MODE=shadow`. This was an
+replaced r20 in production with `MD_EXACT_ROUTE_MODE=shadow`. This was an
 LB-only swap: A and B retained their 12:11Z/12:21Z start times and zero restart
 counts, so neither engine nor its KV cache was disturbed. `/health` returned
 `ok` with 2/2 replicas, both runtime compatibility gauges attested, and the LB
@@ -3980,8 +4133,8 @@ current engine metadata before either per-engine service can be enabled.
 
 The standalone companion metrics server now has an explicit endpoint type:
 loopback TCP remains available for local use, while
-`DS4_SNAPSHOT_METRICS_SOCKET_PATH` selects a Unix listener only when a dedicated
-non-root `DS4_SNAPSHOT_METRICS_GROUP_GID` is also supplied. TCP and UDS settings
+`MD_SNAPSHOT_METRICS_SOCKET_PATH` selects a Unix listener only when a dedicated
+non-root `MD_SNAPSHOT_METRICS_GROUP_GID` is also supplied. TCP and UDS settings
 are mutually exclusive. UDS configuration rejects non-normalized/oversized
 paths and any parent shared with the snapshot socket before filesystem work.
 
@@ -4136,7 +4289,7 @@ secret, authenticated incarnation, and selected KV group per upstream. Every
 protected authority and socket parent is validated before reconnect owners are
 spawned, and direct raw-event and snapshot authority cannot be enabled together.
 
-Snapshot mode is deliberately limited to `DS4_EXACT_ROUTE_MODE=shadow`.
+Snapshot mode is deliberately limited to `MD_EXACT_ROUTE_MODE=shadow`.
 Configuration rejects placement and the scorer independently forces compact
 inventories back to shadow, so they feed only the exact
 counterfactual scorer, and approximate routing plus `/health` remain backed by
@@ -4215,7 +4368,7 @@ incarnation for the lifetime of the stateless LB. Startup still preflights all
 session secrets, digest secrets, attestation envelopes, socket parents, and
 upstream cardinality before spawning anything. Each per-engine watcher then
 reloads the attestation at the bounded
-`DS4_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS` interval using the same symlink,
+`MD_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS` interval using the same symlink,
 owner, permission, link-count, inode-stability, size, schema, field, and HMAC
 checks as startup.
 
@@ -4339,8 +4492,8 @@ still off.
 Independent pre-merge review caught two production-contract gaps. First, the
 base Compose exact-shadow default survived the intended off-mode overlay and
 would have made the LB reject startup when both exact authorities were off.
-The overlay now derives both `DS4_EXACT_ROUTE_MODE` and snapshot authority from
-the same bounded `DS4_SNAPSHOT_ROUTE_MODE=off|shadow` control, with positive
+The overlay now derives both `MD_EXACT_ROUTE_MODE` and snapshot authority from
+the same bounded `MD_SNAPSHOT_ROUTE_MODE=off|shadow` control, with positive
 renders and a divergence rejection test. Second, the initial Caddy validator
 required both metrics sockets but did not reject an additional session-socket
 proxy. It now accepts exactly the two ordered metrics UDS upstreams and rejects
@@ -5699,7 +5852,7 @@ This evidence binds a process and its listening sockets. It does not show that
 the publisher thread is live, that events advance, that sequence zero remains
 available, or that replay is complete within its deadline. Those remain live
 node06 event/replay qualification gates, so compatibility admission remains
-default-off and `DS4_UPSTREAM_ADMISSION_MODE=http` remains required.
+default-off and `MD_UPSTREAM_ADMISSION_MODE=http` remains required.
 
 The exact cached r34 image remains
 `voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b`

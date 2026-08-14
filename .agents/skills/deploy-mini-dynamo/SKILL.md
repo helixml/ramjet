@@ -52,8 +52,8 @@ GPU-enumeration container before starting a model server.
 - Pin production images by immutable digest. Do not introduce `latest`.
 - Keep credentials in an uncommitted `.env` or secret store and set its mode to
   `0600`. Never print token values or persist them in command history.
-- For existing engines, mini-dynamo normally needs only `DS4_UPSTREAM`; add
-  `DS4_UPSTREAM_TOKEN` only when the engines require it. Leave tokenizer, KV
+- For existing engines, mini-dynamo normally needs only `MD_UPSTREAM`; add
+  `MD_UPSTREAM_TOKEN` only when the engines require it. Leave tokenizer, KV
   event, exact route, and snapshot route modes off unless the requested stack
   includes every documented authority and validator.
 - Bind public access through the node's authenticated reverse proxy. Bind

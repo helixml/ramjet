@@ -1,5 +1,7 @@
 use serde_json::{Map, Number, Value};
 
+use crate::model::{ContentShape, content_shape};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Endpoint {
     Chat,
@@ -96,6 +98,12 @@ pub(crate) fn sanitize_object(
     changed
 }
 
+/// Collapses array-valued `content` into a plain string.
+///
+/// Only messages whose every part is text are flattened. A message carrying an
+/// `image_url`, `video_url`, or any other non-text part is left byte-for-byte
+/// alone: this body is forwarded to the engine, so dropping a part here would
+/// silently delete the image from a vision request rather than fail it.
 fn flatten_content_parts(object: &mut Map<String, Value>) -> bool {
     let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) else {
         return false;
@@ -105,6 +113,9 @@ fn flatten_content_parts(object: &mut Map<String, Value>) -> bool {
         let Some(message) = message.as_object_mut() else {
             continue;
         };
+        if content_shape(message) != ContentShape::TextParts {
+            continue;
+        }
         let Some(parts) = message.get("content").and_then(Value::as_array) else {
             continue;
         };

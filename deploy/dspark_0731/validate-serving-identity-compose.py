@@ -333,7 +333,7 @@ def runtime_digest(value: Any, expected: str, name: str) -> None:
 def validate_disabled(document: dict[str, Any]) -> None:
     load_balancer = document["services"]["ds4-loadbalancer"]
     lb_environment = load_balancer.get("environment", {})
-    if any(key.startswith("DS4_SERVING_RUNTIME_") for key in lb_environment):
+    if any(key.startswith("MD_SERVING_RUNTIME_") for key in lb_environment):
         fail("serving runtime is active in the base load balancer")
     if any(
         volume.get("target") == LB_RUNTIME_MANIFEST_TARGET
@@ -341,9 +341,9 @@ def validate_disabled(document: dict[str, Any]) -> None:
     ):
         fail("serving runtime mount is active in the base load balancer")
     if (
-        lb_environment.get("DS4_EXACT_ROUTE_MANIFEST_PATH")
+        lb_environment.get("MD_EXACT_ROUTE_MANIFEST_PATH")
         != LB_RENDERER_MANIFEST_TARGET
-        or lb_environment.get("DS4_EXACT_ROUTE_MANIFEST_SHA256")
+        or lb_environment.get("MD_EXACT_ROUTE_MANIFEST_SHA256")
         != MANIFEST_SHA256
     ):
         fail("base renderer manifest pin changed")
@@ -395,24 +395,24 @@ def validate_enabled(
     expected_environment = runtime["process"]["environment"]
     load_balancer = document["services"]["ds4-loadbalancer"]
     lb_environment = load_balancer.get("environment", {})
-    if lb_environment.get("DS4_UPSTREAM_ADMISSION_MODE") != "http":
+    if lb_environment.get("MD_UPSTREAM_ADMISSION_MODE") != "http":
         fail("identity overlay may not opt the load balancer into admission")
-    if lb_environment.get("DS4_DSPARK_GUARD_MODE") != "off":
+    if lb_environment.get("MD_DSPARK_GUARD_MODE") != "off":
         fail("identity overlay may not opt the load balancer into DSpark enforcement")
     if (
-        lb_environment.get("DS4_EXACT_ROUTE_MANIFEST_PATH")
+        lb_environment.get("MD_EXACT_ROUTE_MANIFEST_PATH")
         != LB_RENDERER_MANIFEST_TARGET
-        or lb_environment.get("DS4_EXACT_ROUTE_MANIFEST_SHA256")
+        or lb_environment.get("MD_EXACT_ROUTE_MANIFEST_SHA256")
         != MANIFEST_SHA256
     ):
         fail("identity overlay changed the renderer manifest pin")
     if (
-        lb_environment.get("DS4_SERVING_RUNTIME_MANIFEST_PATH")
+        lb_environment.get("MD_SERVING_RUNTIME_MANIFEST_PATH")
         != LB_RUNTIME_MANIFEST_TARGET
     ):
         fail("load balancer serving runtime target changed")
     if (
-        lb_environment.get("DS4_SERVING_RUNTIME_MANIFEST_SHA256")
+        lb_environment.get("MD_SERVING_RUNTIME_MANIFEST_SHA256")
         != RUNTIME_MANIFEST_SHA256
     ):
         fail("load balancer serving runtime pin changed")
@@ -442,7 +442,7 @@ def validate_enabled(
             != RUNTIME_MANIFEST_SHA256
         ):
             fail(f"{name} serving runtime pin changed")
-        if any(key.startswith("DS4_SERVING_RUNTIME_") for key in environment):
+        if any(key.startswith("MD_SERVING_RUNTIME_") for key in environment):
             fail(f"{name} uses load balancer serving runtime authority")
         if environment.get("MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH") != "/workspace/model/tokenizer.json":
             fail(f"{name} tokenizer verification path changed")

@@ -321,51 +321,51 @@ mod tests {
 
         fn config(&self) -> Config {
             let values = HashMap::from([
-                ("DS4_UPSTREAM".to_owned(), "http://a:1".to_owned()),
-                ("DS4_TOKENIZER_MODE".to_owned(), "local-shadow".to_owned()),
+                ("MD_UPSTREAM".to_owned(), "http://a:1".to_owned()),
+                ("MD_TOKENIZER_MODE".to_owned(), "local-shadow".to_owned()),
                 (
-                    "DS4_TOKENIZER_PATH".to_owned(),
+                    "MD_TOKENIZER_PATH".to_owned(),
                     "/models/tokenizer.json".to_owned(),
                 ),
-                ("DS4_TOKENIZER_SHA256".to_owned(), "a".repeat(64)),
-                ("DS4_EXACT_ROUTE_MODE".to_owned(), "shadow".to_owned()),
+                ("MD_TOKENIZER_SHA256".to_owned(), "a".repeat(64)),
+                ("MD_EXACT_ROUTE_MODE".to_owned(), "shadow".to_owned()),
                 (
-                    "DS4_EXACT_ROUTE_MANIFEST_PATH".to_owned(),
+                    "MD_EXACT_ROUTE_MANIFEST_PATH".to_owned(),
                     "/compat/manifest.json".to_owned(),
                 ),
-                ("DS4_EXACT_ROUTE_MANIFEST_SHA256".to_owned(), "b".repeat(64)),
-                ("DS4_SNAPSHOT_ROUTE_MODE".to_owned(), "shadow".to_owned()),
+                ("MD_EXACT_ROUTE_MANIFEST_SHA256".to_owned(), "b".repeat(64)),
+                ("MD_SNAPSHOT_ROUTE_MODE".to_owned(), "shadow".to_owned()),
                 (
-                    "DS4_SNAPSHOT_ROUTE_SOCKET_PATHS".to_owned(),
+                    "MD_SNAPSHOT_ROUTE_SOCKET_PATHS".to_owned(),
                     self.socket.display().to_string(),
                 ),
                 (
-                    "DS4_SNAPSHOT_ROUTE_COMPANION_UIDS".to_owned(),
+                    "MD_SNAPSHOT_ROUTE_COMPANION_UIDS".to_owned(),
                     self.owner.to_string(),
                 ),
                 (
-                    "DS4_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS".to_owned(),
+                    "MD_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS".to_owned(),
                     self.session.display().to_string(),
                 ),
                 (
-                    "DS4_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS".to_owned(),
+                    "MD_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS".to_owned(),
                     self.digest.display().to_string(),
                 ),
                 (
-                    "DS4_SNAPSHOT_ROUTE_ATTESTATION_PATHS".to_owned(),
+                    "MD_SNAPSHOT_ROUTE_ATTESTATION_PATHS".to_owned(),
                     self.attestation.display().to_string(),
                 ),
-                ("DS4_SNAPSHOT_ROUTE_GROUPS".to_owned(), "0:0".to_owned()),
+                ("MD_SNAPSHOT_ROUTE_GROUPS".to_owned(), "0:0".to_owned()),
                 (
-                    "DS4_SNAPSHOT_ROUTE_SECRET_OWNER_UID".to_owned(),
+                    "MD_SNAPSHOT_ROUTE_SECRET_OWNER_UID".to_owned(),
                     self.owner.to_string(),
                 ),
                 (
-                    "DS4_SNAPSHOT_ROUTE_RECONNECT_MIN_MS".to_owned(),
+                    "MD_SNAPSHOT_ROUTE_RECONNECT_MIN_MS".to_owned(),
                     "1".to_owned(),
                 ),
                 (
-                    "DS4_SNAPSHOT_ROUTE_RECONNECT_MAX_MS".to_owned(),
+                    "MD_SNAPSHOT_ROUTE_RECONNECT_MAX_MS".to_owned(),
                     "2".to_owned(),
                 ),
             ]);

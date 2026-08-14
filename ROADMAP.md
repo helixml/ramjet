@@ -386,7 +386,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
 - ✅ Size-weighted cold-prefill reservation: 32KB/request load units keep
   short decoders off the prefill engine; measured +23% aggregate decode and
   -39% median decoder TTFT in the 33.6k-prefill + 8-decoder workload.
-- ✅ Explicit affinity toggle (`DS4_AFFINITY=prefix|load`) for policy A/B tests
+- ✅ Explicit affinity toggle (`MD_AFFINITY=prefix|load`) for policy A/B tests
   and engines without reusable prefix state.
 - ✅ Health-aware failover, authenticated probes, `/v1/models` context-margin
   rewrite, request shims (max_tokens / content-parts / reasoning_effort).
@@ -997,7 +997,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   opt-in. Twelve mock/in-memory policy tests cover first-run/idempotent behavior,
   collisions, unsafe paths and outputs, secret reuse, and Caddy isolation.
   The LB can now select one snapshot consumer per upstream behind the typed
-  `DS4_SNAPSHOT_ROUTE_MODE=shadow` gate. Startup validates every protected
+  `MD_SNAPSHOT_ROUTE_MODE=shadow` gate. Startup validates every protected
   authority and exact upstream cardinality before spawning reconnect owners;
   direct raw-event and compact snapshot authority are mutually exclusive.
   Snapshot inventory is injected only into the exact counterfactual scorer,

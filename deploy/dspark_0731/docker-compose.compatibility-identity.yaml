@@ -16,8 +16,8 @@ services:
         bind:
           create_host_path: false
     environment:
-      DS4_SERVING_RUNTIME_MANIFEST_PATH: /compat/serving-runtime.json
-      DS4_SERVING_RUNTIME_MANIFEST_SHA256: 294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4
+      MD_SERVING_RUNTIME_MANIFEST_PATH: /compat/serving-runtime.json
+      MD_SERVING_RUNTIME_MANIFEST_SHA256: 294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4
 
   dspark-0731:
     # This endpoint describes only this immutable image. A candidate image

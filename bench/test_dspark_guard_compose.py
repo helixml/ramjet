@@ -47,9 +47,9 @@ class DsparkGuardComposeTest(unittest.TestCase):
 
     def test_threshold_or_admission_drift_is_rejected(self) -> None:
         for key in [
-            "DS4_UPSTREAM_ADMISSION_MODE",
-            "DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS",
-            "DS4_DSPARK_GUARD_MIN_PROPOSED_TOKENS",
+            "MD_UPSTREAM_ADMISSION_MODE",
+            "MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS",
+            "MD_DSPARK_GUARD_MIN_PROPOSED_TOKENS",
         ]:
             document = copy.deepcopy(self.enabled)
             document["services"]["ds4-loadbalancer"]["environment"][key] = "unsafe"

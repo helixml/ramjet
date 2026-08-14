@@ -103,8 +103,8 @@ def render(
                 f"SNAPSHOT_ENGINE_METADATA_FILE_{suffix}": domain["metadata_source"],
             }
         )
-    environment["DS4_SNAPSHOT_ROUTE_MODE"] = route_mode
-    environment["DS4_SHADOW_SOAK_MODE"] = soak_mode
+    environment["MD_SNAPSHOT_ROUTE_MODE"] = route_mode
+    environment["MD_SHADOW_SOAK_MODE"] = soak_mode
     if lb_image is not None:
         environment["SNAPSHOT_LB_IMAGE"] = lb_image
     command = ["docker", "compose", "-f", str(BASE), "-f", str(OVERLAY)]
@@ -316,18 +316,18 @@ def validate_lb(
         fail("LB image is not the qualified immutable release build")
     environment = service.get("environment", {})
     expected = {
-        "DS4_KV_EVENT_MODE": "off",
-        "DS4_EXACT_ROUTE_MODE": route_mode,
-        "DS4_SNAPSHOT_ROUTE_MODE": route_mode,
-        "DS4_SNAPSHOT_ROUTE_COMPANION_UIDS": "12001,12003",
-        "DS4_SNAPSHOT_ROUTE_GROUPS": "0:0,0:0",
-        "DS4_SNAPSHOT_ROUTE_SECRET_OWNER_UID": "0",
-        "DS4_SHADOW_SOAK_MODE": soak_mode,
-        "DS4_SHADOW_SOAK_SOURCE_TARGET": "104",
-        "DS4_SHADOW_SOAK_COMPARISON_TARGET": "100000",
-        "DS4_SHADOW_SOAK_ATTEMPT_LIMIT": "110000",
-        "DS4_SHADOW_SOAK_MAX_TOKEN_BYTES": "100663296",
-        "DS4_SHADOW_SOAK_TIMEOUT_MS": "300000",
+        "MD_KV_EVENT_MODE": "off",
+        "MD_EXACT_ROUTE_MODE": route_mode,
+        "MD_SNAPSHOT_ROUTE_MODE": route_mode,
+        "MD_SNAPSHOT_ROUTE_COMPANION_UIDS": "12001,12003",
+        "MD_SNAPSHOT_ROUTE_GROUPS": "0:0,0:0",
+        "MD_SNAPSHOT_ROUTE_SECRET_OWNER_UID": "0",
+        "MD_SHADOW_SOAK_MODE": soak_mode,
+        "MD_SHADOW_SOAK_SOURCE_TARGET": "104",
+        "MD_SHADOW_SOAK_COMPARISON_TARGET": "100000",
+        "MD_SHADOW_SOAK_ATTEMPT_LIMIT": "110000",
+        "MD_SHADOW_SOAK_MAX_TOKEN_BYTES": "100663296",
+        "MD_SHADOW_SOAK_TIMEOUT_MS": "300000",
     }
     for key, value in expected.items():
         if str(environment.get(key)) != value:
@@ -367,23 +367,23 @@ def validate_companion(engine: str, domain: dict[str, str], service: dict[str, A
         fail(f"{name} image is not immutable")
     environment = service.get("environment", {})
     exact = {
-        "DS4_SNAPSHOT_COMPANION_MODE": "serve",
-        "DS4_SNAPSHOT_COMPANION_UID": domain["companion_uid"],
-        "DS4_SNAPSHOT_CLIENT_UID": LB_UID,
-        "DS4_SNAPSHOT_SECRET_OWNER_UID": "0",
-        "DS4_SNAPSHOT_MAX_CLIENTS": "2",
-        "DS4_SNAPSHOT_BLOCK_SIZE": "256",
-        "DS4_SNAPSHOT_ATTENTION_KIND": "mla",
-        "DS4_SNAPSHOT_LIVE_ENDPOINTS": f"tcp://{domain['engine']}:5557",
-        "DS4_SNAPSHOT_REPLAY_ENDPOINTS": f"tcp://{domain['engine']}:5558",
-        "DS4_SNAPSHOT_METRICS_GROUP_GID": domain["metrics_gid"],
+        "MD_SNAPSHOT_COMPANION_MODE": "serve",
+        "MD_SNAPSHOT_COMPANION_UID": domain["companion_uid"],
+        "MD_SNAPSHOT_CLIENT_UID": LB_UID,
+        "MD_SNAPSHOT_SECRET_OWNER_UID": "0",
+        "MD_SNAPSHOT_MAX_CLIENTS": "2",
+        "MD_SNAPSHOT_BLOCK_SIZE": "256",
+        "MD_SNAPSHOT_ATTENTION_KIND": "mla",
+        "MD_SNAPSHOT_LIVE_ENDPOINTS": f"tcp://{domain['engine']}:5557",
+        "MD_SNAPSHOT_REPLAY_ENDPOINTS": f"tcp://{domain['engine']}:5558",
+        "MD_SNAPSHOT_METRICS_GROUP_GID": domain["metrics_gid"],
     }
     for key, value in exact.items():
         if str(environment.get(key)) != value:
             fail(f"{name} setting {key} changed")
-    if environment.get("DS4_SNAPSHOT_METRICS_BIND") is not None:
+    if environment.get("MD_SNAPSHOT_METRICS_BIND") is not None:
         fail(f"{name} enables TCP metrics")
-    if environment.get("DS4_SNAPSHOT_METRICS_SOCKET_PATH") != "/run/mini-dynamo-metrics/metrics.sock":
+    if environment.get("MD_SNAPSHOT_METRICS_SOCKET_PATH") != "/run/mini-dynamo-metrics/metrics.sock":
         fail(f"{name} metrics UDS changed")
     require_bind(service, "/run/mini-dynamo-snapshot", domain["runtime_source"], read_only=False)
     require_bind(service, "/run/mini-dynamo-metrics", domain["metrics_source"], read_only=False)
@@ -418,8 +418,8 @@ def validate_provisioner(engine: str, domain: dict[str, str], service: dict[str,
     if image != EXPECTED_COMPANION_IMAGE:
         fail(f"{name} image is not immutable")
     environment = service.get("environment", {})
-    if str(environment.get("DS4_SNAPSHOT_SECRET_OWNER_UID")) != "0" or str(
-        environment.get("DS4_SNAPSHOT_SECRET_GROUP_GID")
+    if str(environment.get("MD_SNAPSHOT_SECRET_OWNER_UID")) != "0" or str(
+        environment.get("MD_SNAPSHOT_SECRET_GROUP_GID")
     ) != SESSION_GID:
         fail(f"{name} output ownership changed")
     require_bind(service, "/run/metadata/engine.json", domain["metadata_source"], read_only=True)

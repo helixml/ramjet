@@ -31,7 +31,7 @@ class InfernalR11ComposeTest(unittest.TestCase):
     def test_candidate_cannot_reenter_load_balancer(self) -> None:
         document = copy.deepcopy(self.candidate)
         document["services"]["ds4-loadbalancer"]["environment"][
-            "DS4_UPSTREAM"
+            "MD_UPSTREAM"
         ] += ",http://dspark-0731-b:8000"
         with self.assertRaisesRegex(validator.ValidationError, "single-home"):
             validator.validate(self.base, document)

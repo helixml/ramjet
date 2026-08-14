@@ -11,7 +11,7 @@ use std::{
 use anyhow::Context;
 use axum::body::Bytes;
 use dynamo_protocols::types::CreateChatCompletionRequest;
-use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, TextInput, deepseek_formatter_for};
+use dynamo_renderer::{OAIChatLikeRequest, TextInput};
 use futures_util::StreamExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -27,16 +27,14 @@ use crate::{
         CompatibilityManifest, RuntimeOutcome, ServingIdentityOutcome, ServingRuntimeManifest,
         sha256_hex, token_ids_sha256,
     },
-    config::{
-        Config, ExactRouteMode, ShadowSoakMode, TokenizerMode, TokenizerProfile,
-        UpstreamAdmissionMode,
-    },
+    config::{Config, ExactRouteMode, ShadowSoakMode, TokenizerMode, UpstreamAdmissionMode},
     exact_route_inventory::ExactRouteInventory,
     exact_shadow::{
         ExactPlacementMode, ExactPlacementPolicy, ExactRouteShadow, ExactRouteSnapshot,
     },
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
+    model::{self, ModelProfile, has_tool_history, request_class},
     router::{Decision, RequestLoadEstimator},
     session::{OpaqueSession, hmac_sha256},
     shadow_soak::{
@@ -104,6 +102,7 @@ struct RemoteTokenizer {
 struct LocalTokenizer {
     tokenizer: fastokens::Tokenizer,
     formatter: Arc<dyn dynamo_renderer::OAIPromptFormatter>,
+    profile: &'static dyn ModelProfile,
 }
 
 #[derive(Clone)]
@@ -183,7 +182,7 @@ enum Failure {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum LocalFailure {
+pub enum LocalFailure {
     Unsupported,
     Decode,
     Render,
@@ -320,21 +319,24 @@ impl TokenizerObserver {
                 let path = config
                     .tokenizer_path
                     .as_deref()
-                    .context("DS4_TOKENIZER_PATH is required in local-shadow mode")?;
+                    .context("MD_TOKENIZER_PATH is required in local-shadow mode")?;
                 let expected_sha256 = config
                     .tokenizer_sha256
                     .as_deref()
-                    .context("DS4_TOKENIZER_SHA256 is required in local-shadow mode")?;
+                    .context("MD_TOKENIZER_SHA256 is required in local-shadow mode")?;
                 validate_tokenizer_sha256(path, expected_sha256)?;
                 let tokenizer = fastokens::Tokenizer::from_file(Path::new(path))
                     .map_err(|error| anyhow::anyhow!(error.to_string()))
                     .with_context(|| format!("load fastokens tokenizer from {path}"))?;
-                let PromptFormatter::OAI(formatter) =
-                    deepseek_formatter_for(&Some("deepseek_v4".to_owned()), "deepseek-v4-flash")
-                        .context("DeepSeek-V4 formatter unavailable")?;
+                let profile = model::profile_for(config.tokenizer_profile).with_context(|| {
+                    format!("unknown tokenizer profile {}", config.tokenizer_profile)
+                })?;
+                let chat_template = load_chat_template(config, profile)?;
+                let formatter = model::build_formatter(profile, chat_template.as_deref())?;
                 let local = Arc::new(LocalTokenizer {
                     tokenizer,
                     formatter,
+                    profile,
                 });
                 if config.exact_route_mode != ExactRouteMode::Off
                     || config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility
@@ -342,20 +344,20 @@ impl TokenizerObserver {
                     let manifest_path = config
                         .exact_route_manifest_path
                         .as_deref()
-                        .context("DS4_EXACT_ROUTE_MANIFEST_PATH is required")?;
+                        .context("MD_EXACT_ROUTE_MANIFEST_PATH is required")?;
                     let manifest_sha256 = config
                         .exact_route_manifest_sha256
                         .as_deref()
-                        .context("DS4_EXACT_ROUTE_MANIFEST_SHA256 is required")?;
+                        .context("MD_EXACT_ROUTE_MANIFEST_SHA256 is required")?;
                     let tokenizer_sha256 = config
                         .tokenizer_sha256
                         .as_deref()
-                        .context("DS4_TOKENIZER_SHA256 is required")?;
+                        .context("MD_TOKENIZER_SHA256 is required")?;
                     let manifest = Arc::new(CompatibilityManifest::load(
                         Path::new(manifest_path),
                         manifest_sha256,
                         tokenizer_sha256,
-                        tokenizer_profile_label(config.tokenizer_profile),
+                        profile.label(),
                     )?);
                     validate_golden_tokens(&local, &manifest)?;
                     let serving_runtime =
@@ -363,11 +365,11 @@ impl TokenizerObserver {
                             let path = config
                                 .serving_runtime_manifest_path
                                 .as_deref()
-                                .context("DS4_SERVING_RUNTIME_MANIFEST_PATH is required")?;
+                                .context("MD_SERVING_RUNTIME_MANIFEST_PATH is required")?;
                             let expected_sha256 = config
                                 .serving_runtime_manifest_sha256
                                 .as_deref()
-                                .context("DS4_SERVING_RUNTIME_MANIFEST_SHA256 is required")?;
+                                .context("MD_SERVING_RUNTIME_MANIFEST_SHA256 is required")?;
                             Some(Arc::new(ServingRuntimeManifest::load(
                                 Path::new(path),
                                 expected_sha256,
@@ -830,9 +832,49 @@ fn validate_tokenizer_sha256(path: &str, expected: &str) -> anyhow::Result<()> {
     let actual = sha256_hex(&bytes);
     anyhow::ensure!(
         actual == expected,
-        "tokenizer artifact SHA-256 does not match DS4_TOKENIZER_SHA256"
+        "tokenizer artifact SHA-256 does not match MD_TOKENIZER_SHA256"
     );
     Ok(())
+}
+
+/// Reads and verifies the chat template for a template-driven profile.
+///
+/// The template is as load-bearing as the tokenizer: an edit changes rendered
+/// token IDs, so it is digest-pinned the same way. Profiles that use the
+/// renderer's compiled-in formatter need no file and must not be given one,
+/// which would imply an authority the formatter does not consult.
+fn load_chat_template(
+    config: &Config,
+    profile: &'static dyn ModelProfile,
+) -> anyhow::Result<Option<String>> {
+    if profile.formatter_source() != model::FormatterSource::HfChatTemplate {
+        anyhow::ensure!(
+            config.chat_template_path.is_none(),
+            "profile {} renders with a native formatter and must not set MD_CHAT_TEMPLATE_PATH",
+            profile.label()
+        );
+        return Ok(None);
+    }
+    let path = config.chat_template_path.as_deref().with_context(|| {
+        format!(
+            "MD_CHAT_TEMPLATE_PATH is required by profile {}",
+            profile.label()
+        )
+    })?;
+    let expected = config.chat_template_sha256.as_deref().with_context(|| {
+        format!(
+            "MD_CHAT_TEMPLATE_SHA256 is required by profile {}",
+            profile.label()
+        )
+    })?;
+    let bytes = std::fs::read(path).with_context(|| format!("read chat template {path}"))?;
+    anyhow::ensure!(
+        sha256_hex(&bytes) == expected,
+        "chat template SHA-256 does not match MD_CHAT_TEMPLATE_SHA256"
+    );
+    String::from_utf8(bytes)
+        .context("chat template is not valid UTF-8")
+        .map(Some)
 }
 
 fn remote_tokenizer(config: &Config, client: reqwest::Client) -> RemoteTokenizer {
@@ -1025,12 +1067,6 @@ impl RuntimeAttestation {
             .upstream_admission_checks
             .with_label_values(&[url.as_str().trim_end_matches('/'), outcome])
             .inc();
-    }
-}
-
-fn tokenizer_profile_label(profile: TokenizerProfile) -> &'static str {
-    match profile {
-        TokenizerProfile::DeepSeekV4R34 => "deepseek-v4-r34",
     }
 }
 
@@ -1297,7 +1333,7 @@ impl LocalTokenizer {
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default();
-        apply_node06_vllm_profile(&mut args)?;
+        self.profile.apply_reasoning(&mut args)?;
         let inner = serde_json::from_value::<CreateChatCompletionRequest>(request)
             .map_err(|_| LocalFailure::Decode)?;
         let request = RenderRequest {
@@ -1326,7 +1362,7 @@ impl LocalTokenizer {
         if object.get("model").and_then(Value::as_str) != Some(manifest.model.id.as_str()) {
             return Err(LocalFailure::Unsupported);
         }
-        let class = attested_request_class(object)?;
+        let class = request_class(self.profile, object)?;
         if !manifest.admitted(class) {
             return Err(LocalFailure::Unsupported);
         }
@@ -1340,151 +1376,6 @@ impl LocalTokenizer {
             .map_err(|_| LocalFailure::Encode)?;
         Ok(ExactTokens { token_ids })
     }
-}
-
-fn attested_request_class(
-    object: &serde_json::Map<String, Value>,
-) -> Result<&'static str, LocalFailure> {
-    let messages = object
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or(LocalFailure::Unsupported)?;
-    if messages.is_empty()
-        || object
-            .get("documents")
-            .is_some_and(|value| !value.is_null())
-        || has_tool_history(object)
-        || !object
-            .get("add_generation_prompt")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-        || [
-            "response_format",
-            "tool_choice",
-            "function_call",
-            "parallel_tool_calls",
-            "chat_template",
-            "add_special_tokens",
-            "truncate_prompt_tokens",
-            "think",
-            "thinking",
-        ]
-        .iter()
-        .any(|key| object.get(*key).is_some_and(|value| !value.is_null()))
-    {
-        return Err(LocalFailure::Unsupported);
-    }
-    let args = object
-        .get("chat_template_kwargs")
-        .and_then(Value::as_object);
-    if args.is_some_and(|args| {
-        args.keys().any(|key| {
-            !matches!(
-                key.as_str(),
-                "enable_thinking" | "thinking" | "reasoning_effort"
-            )
-        })
-    }) {
-        return Err(LocalFailure::Unsupported);
-    }
-    let top_effort = object.get("reasoning_effort").and_then(Value::as_str);
-    let arg_effort = args
-        .and_then(|args| args.get("reasoning_effort"))
-        .and_then(Value::as_str);
-    if top_effort.is_some() && arg_effort.is_some() && top_effort != arg_effort {
-        return Err(LocalFailure::Unsupported);
-    }
-    let effort = top_effort.or(arg_effort);
-    let thinking = args
-        .and_then(|args| args.get("enable_thinking").or_else(|| args.get("thinking")))
-        .and_then(Value::as_bool);
-    let tools = object
-        .get("tools")
-        .and_then(Value::as_array)
-        .is_some_and(|tools| !tools.is_empty());
-    if tools {
-        let one_user_message =
-            messages.len() == 1 && messages[0].get("role").and_then(Value::as_str) == Some("user");
-        if !one_user_message || effort.is_some() || thinking.is_some() {
-            return Err(LocalFailure::Unsupported);
-        }
-        return Ok("tools_declared");
-    }
-    if let Some(effort) = effort {
-        return match effort {
-            "high" => Ok("reasoning_high"),
-            "none" => Ok("reasoning_none"),
-            "minimal" => Ok("reasoning_minimal"),
-            "low" => Ok("reasoning_low"),
-            "medium" => Ok("reasoning_medium"),
-            _ => Err(LocalFailure::Unsupported),
-        };
-    }
-    if thinking == Some(false) {
-        return Ok("thinking_disabled");
-    }
-    if messages.len() > 1
-        || messages.iter().any(|message| {
-            matches!(
-                message.get("role").and_then(Value::as_str),
-                Some("system" | "developer")
-            )
-        })
-    {
-        return Ok("system_multiturn");
-    }
-    Ok("plain")
-}
-
-fn has_tool_history(object: &serde_json::Map<String, Value>) -> bool {
-    object
-        .get("messages")
-        .and_then(Value::as_array)
-        .is_some_and(|messages| {
-            messages.iter().any(|message| {
-                message.get("role").and_then(Value::as_str) == Some("tool")
-                    || message
-                        .get("tool_calls")
-                        .is_some_and(|value| !value.is_null())
-                    || message
-                        .get("function_call")
-                        .is_some_and(|value| !value.is_null())
-            })
-        })
-}
-
-/// Translate the active node06 vLLM r34 DeepSeek-V4 template profile into
-/// Dynamo renderer semantics. `max`/`xhigh` deliberately fall back to the
-/// remote authority because this renderer release lacks vLLM's newer
-/// "Beyond maximum" preamble.
-fn apply_node06_vllm_profile(args: &mut HashMap<String, Value>) -> Result<(), LocalFailure> {
-    let thinking = args
-        .get("enable_thinking")
-        .or_else(|| args.get("thinking"))
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    if !thinking {
-        args.insert("thinking".to_owned(), Value::Bool(false));
-        args.insert(
-            "reasoning_effort".to_owned(),
-            Value::String("none".to_owned()),
-        );
-        return Ok(());
-    }
-    let effort = args
-        .get("reasoning_effort")
-        .and_then(Value::as_str)
-        .unwrap_or("high");
-    let mapped = match effort {
-        "none" | "low" => "none",
-        "minimal" | "medium" | "high" | "auto" => "max",
-        _ => return Err(LocalFailure::Unsupported),
-    };
-    args.insert(
-        "reasoning_effort".to_owned(),
-        Value::String(mapped.to_owned()),
-    );
-    Ok(())
 }
 
 impl OAIChatLikeRequest for RenderRequest {
@@ -1849,9 +1740,9 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let values = HashMap::from([
-            ("DS4_UPSTREAM", url),
-            ("DS4_TOKENIZER_MODE", "remote-shadow".to_owned()),
-            ("DS4_TOKENIZER_MIN_BYTES", "0".to_owned()),
+            ("MD_UPSTREAM", url),
+            ("MD_TOKENIZER_MODE", "remote-shadow".to_owned()),
+            ("MD_TOKENIZER_MIN_BYTES", "0".to_owned()),
         ]);
         let config = Config::from_lookup(|key| values.get(key).cloned()).unwrap();
         let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
@@ -1889,6 +1780,11 @@ mod tests {
         server.abort();
     }
 
+    /// The profile the frozen node06 goldens were captured against.
+    fn deepseek_profile() -> &'static dyn ModelProfile {
+        model::profile_for("deepseek-v4-r34").expect("the r34 profile stays registered")
+    }
+
     #[test]
     fn node06_profile_matches_observed_vllm_effort_classes() {
         for (effort, expected) in [
@@ -1902,7 +1798,7 @@ mod tests {
                 "reasoning_effort".to_owned(),
                 Value::String(effort.to_owned()),
             )]);
-            apply_node06_vllm_profile(&mut args).unwrap();
+            deepseek_profile().apply_reasoning(&mut args).unwrap();
             assert_eq!(args["reasoning_effort"], expected);
         }
         for effort in ["xhigh", "max"] {
@@ -1910,7 +1806,7 @@ mod tests {
                 "reasoning_effort".to_owned(),
                 Value::String(effort.to_owned()),
             )]);
-            assert!(apply_node06_vllm_profile(&mut args).is_err());
+            assert!(deepseek_profile().apply_reasoning(&mut args).is_err());
         }
     }
 
@@ -1939,30 +1835,32 @@ mod tests {
             "add_generation_prompt": true
         });
         assert_eq!(
-            attested_request_class(plain.as_object().unwrap()).unwrap(),
+            request_class(deepseek_profile(), plain.as_object().unwrap()).unwrap(),
             "plain"
         );
         let custom_template = serde_json::json!({
             "messages": [{"role": "user", "content": "hello"}],
             "chat_template_kwargs": {"custom": true}
         });
-        assert!(attested_request_class(custom_template.as_object().unwrap()).is_err());
+        assert!(request_class(deepseek_profile(), custom_template.as_object().unwrap()).is_err());
         let tools_and_reasoning = serde_json::json!({
             "messages": [{"role": "user", "content": "hello"}],
             "tools": [{"type": "function", "function": {"name": "lookup"}}],
             "reasoning_effort": "high"
         });
-        assert!(attested_request_class(tools_and_reasoning.as_object().unwrap()).is_err());
+        assert!(
+            request_class(deepseek_profile(), tools_and_reasoning.as_object().unwrap()).is_err()
+        );
         let custom_template = serde_json::json!({
             "messages": [{"role": "user", "content": "hello"}],
             "chat_template": "{{ messages }}"
         });
-        assert!(attested_request_class(custom_template.as_object().unwrap()).is_err());
+        assert!(request_class(deepseek_profile(), custom_template.as_object().unwrap()).is_err());
         let truncated = serde_json::json!({
             "messages": [{"role": "user", "content": "hello"}],
             "truncate_prompt_tokens": 1024
         });
-        assert!(attested_request_class(truncated.as_object().unwrap()).is_err());
+        assert!(request_class(deepseek_profile(), truncated.as_object().unwrap()).is_err());
     }
 
     #[test]
