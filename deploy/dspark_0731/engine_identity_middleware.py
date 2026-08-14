@@ -31,6 +31,14 @@ MAX_ADMITTED_CLASSES = 32
 MAX_CORE_PROCESSES = 64
 MAX_CORE_FDS = 16_384
 MAX_PROC_NET_BYTES = 4 << 20
+MAX_RUNTIME_ARGUMENTS = 256
+MAX_RUNTIME_ARGUMENT_BYTES = 4096
+MAX_RUNTIME_ARGUMENT_TOTAL_BYTES = 64 << 10
+MAX_RUNTIME_ENVIRONMENT = 128
+MAX_RUNTIME_PACKAGES = 64
+MAX_RUNTIME_ARTIFACTS = 16
+MAX_RUNTIME_ARTIFACT_BYTES = 1 << 30
+MAX_RUNTIME_CMDLINE_BYTES = 128 << 10
 DEFAULT_VERIFY_TIMEOUT_MS = 4000
 INTERNAL_CANCELLATION_GRACE_SECONDS = 0.25
 _HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -63,6 +71,7 @@ class ServingIdentityMiddleware:
         "_identity",
         "_live_verified",
         "_runtime",
+        "_runtime_evidence",
         "_token",
         "_verification_lock",
         "_verified_core_incarnations",
@@ -74,6 +83,9 @@ class ServingIdentityMiddleware:
         try:
             self._identity, self._goldens, self._runtime = _load_identity()
             _verify_runtime(self._identity)
+            self._runtime_evidence = _verify_process_contract(
+                self._runtime["process"]
+            )
             self._token = _load_token()
             self._verify_timeout_seconds = _load_verify_timeout()
             self._live_verified = False
@@ -118,6 +130,7 @@ class ServingIdentityMiddleware:
             "frontend": frontend_incarnation,
             "engine_core": list(core_incarnations),
         }
+        identity["runtime"] = self._runtime_evidence
         body = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
         await _json_response(send, 200, body)
 
@@ -222,7 +235,7 @@ def _load_identity() -> tuple[
     if not admitted.issubset({golden["name"] for golden in goldens}):
         raise ValueError("missing admitted golden")
     identity = {
-        "schema_version": 2,
+        "schema_version": 3,
         "model": model,
         "engine": engine,
         "tokenizer": tokenizer,
@@ -264,10 +277,11 @@ def _load_runtime_contract(compatibility_sha256: str) -> dict[str, Any]:
         "schema_version",
         "compatibility_manifest_sha256",
         "engine",
+        "process",
     }:
         raise ValueError("invalid runtime manifest schema")
     if (
-        runtime.get("schema_version") != 1
+        runtime.get("schema_version") != 2
         or runtime.get("compatibility_manifest_sha256") != compatibility_sha256
     ):
         raise ValueError("runtime manifest compatibility mismatch")
@@ -276,11 +290,173 @@ def _load_runtime_contract(compatibility_sha256: str) -> dict[str, Any]:
     if type(count) is not int or not 0 < count <= MAX_CORE_PROCESSES:
         raise ValueError("invalid engine core process count")
     engine["kv_events"] = _kv_events_contract(engine.get("kv_events"))
+    process = _process_contract(runtime.get("process"))
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "compatibility_manifest_sha256": compatibility_sha256,
         "engine": engine,
+        "process": process,
     }
+
+
+def _process_contract(value: Any) -> dict[str, Any]:
+    keys = {
+        "argv",
+        "argv_sha256",
+        "environment",
+        "environment_sha256",
+        "packages",
+        "packages_sha256",
+        "artifacts",
+        "artifacts_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != keys:
+        raise ValueError("invalid serving process schema")
+
+    argv = value.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not 0 < len(argv) <= MAX_RUNTIME_ARGUMENTS
+        or argv[0] != "serve"
+    ):
+        raise ValueError("invalid serving process argv")
+    total = 0
+    for argument in argv:
+        _runtime_string(argument, MAX_RUNTIME_ARGUMENT_BYTES)
+        total += len(argument.encode())
+        if _sensitive_runtime_argument(argument):
+            raise ValueError("sensitive serving process argv")
+    if total > MAX_RUNTIME_ARGUMENT_TOTAL_BYTES:
+        raise ValueError("oversized serving process argv")
+    _runtime_digest(value.get("argv_sha256"), _nul_joined_sha256(argv))
+
+    environment = _runtime_mapping(
+        value.get("environment"), MAX_RUNTIME_ENVIRONMENT, environment=True
+    )
+    _runtime_digest(
+        value.get("environment_sha256"), _canonical_json_sha256(environment)
+    )
+    packages = _runtime_mapping(
+        value.get("packages"), MAX_RUNTIME_PACKAGES, environment=False
+    )
+    _runtime_digest(
+        value.get("packages_sha256"), _canonical_json_sha256(packages)
+    )
+
+    artifacts = value.get("artifacts")
+    if (
+        not isinstance(artifacts, list)
+        or not 0 < len(artifacts) <= MAX_RUNTIME_ARTIFACTS
+    ):
+        raise ValueError("invalid serving process artifacts")
+    normalized_artifacts: list[dict[str, str]] = []
+    paths: set[str] = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or set(artifact) != {"path", "sha256"}:
+            raise ValueError("invalid serving process artifact")
+        path = artifact.get("path")
+        digest = artifact.get("sha256")
+        _runtime_string(path, MAX_RUNTIME_ARGUMENT_BYTES)
+        if (
+            not path.startswith("/")
+            or ".." in path.split("/")
+            or path in paths
+            or not isinstance(digest, str)
+            or _HEX_SHA256.fullmatch(digest) is None
+        ):
+            raise ValueError("invalid serving process artifact")
+        paths.add(path)
+        normalized_artifacts.append({"path": path, "sha256": digest})
+    _runtime_digest(
+        value.get("artifacts_sha256"),
+        _canonical_json_sha256(normalized_artifacts),
+    )
+    return {
+        "argv": list(argv),
+        "argv_sha256": value["argv_sha256"],
+        "environment": environment,
+        "environment_sha256": value["environment_sha256"],
+        "packages": packages,
+        "packages_sha256": value["packages_sha256"],
+        "artifacts": normalized_artifacts,
+        "artifacts_sha256": value["artifacts_sha256"],
+    }
+
+
+def _runtime_mapping(
+    value: Any, limit: int, *, environment: bool
+) -> dict[str, str]:
+    if not isinstance(value, dict) or not 0 < len(value) <= limit:
+        raise ValueError("invalid serving process mapping")
+    normalized: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key or not key.isascii():
+            raise ValueError("invalid serving process mapping key")
+        if environment:
+            valid_key = len(key.encode()) <= 128 and all(
+                character.isupper() or character.isdigit() or character == "_"
+                for character in key
+            )
+            if _sensitive_runtime_environment_key(key):
+                valid_key = False
+        else:
+            valid_key = len(key.encode()) <= 256 and all(
+                character.isalnum() or character in "._+-" for character in key
+            )
+        _runtime_string(item, MAX_RUNTIME_ARGUMENT_BYTES)
+        if not valid_key:
+            raise ValueError("invalid serving process mapping key")
+        normalized[key] = item
+    return normalized
+
+
+def _runtime_string(value: Any, limit: int) -> None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or not value.isascii()
+        or len(value.encode()) > limit
+        or "\0" in value
+    ):
+        raise ValueError("invalid serving process string")
+
+
+def _sensitive_runtime_argument(value: str) -> bool:
+    return value.split("=", 1)[0] in {
+        "--api-key",
+        "--token",
+        "--hf-token",
+        "--authorization",
+    }
+
+
+def _sensitive_runtime_environment_key(value: str) -> bool:
+    return (
+        "SECRET" in value
+        or "PASSWORD" in value
+        or "CREDENTIAL" in value
+        or value.endswith("_TOKEN")
+        or value.endswith("_API_KEY")
+        or value.endswith("_AUTHORIZATION")
+    )
+
+
+def _runtime_digest(value: Any, expected: str) -> None:
+    if (
+        not isinstance(value, str)
+        or _HEX_SHA256.fullmatch(value) is None
+        or not hmac.compare_digest(value, expected)
+    ):
+        raise ValueError("serving process digest mismatch")
+
+
+def _nul_joined_sha256(values: list[str]) -> str:
+    return hashlib.sha256(b"\0".join(value.encode() for value in values)).hexdigest()
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _kv_events_contract(value: Any) -> dict[str, Any]:
@@ -423,6 +599,50 @@ def _verify_runtime(identity: dict[str, Any]) -> None:
     tokenizer_path = os.environ["MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH"]
     if _regular_file_sha256(tokenizer_path, MAX_TOKENIZER_BYTES) != tokenizer["sha256"]:
         raise ValueError("tokenizer digest mismatch")
+
+
+def _verify_process_contract(expected: dict[str, Any]) -> dict[str, str]:
+    if _normalized_process_argv() != expected["argv"]:
+        raise ValueError("serving process argv mismatch")
+    if any(os.environ.get(key) != value for key, value in expected["environment"].items()):
+        raise ValueError("serving process environment mismatch")
+    for package, version in expected["packages"].items():
+        if importlib_metadata.version(package) != version:
+            raise ValueError("serving process package mismatch")
+    for artifact in expected["artifacts"]:
+        if (
+            _regular_file_sha256(
+                artifact["path"], MAX_RUNTIME_ARTIFACT_BYTES
+            )
+            != artifact["sha256"]
+        ):
+            raise ValueError("serving process artifact mismatch")
+    return {
+        "argv_sha256": expected["argv_sha256"],
+        "environment_sha256": expected["environment_sha256"],
+        "packages_sha256": expected["packages_sha256"],
+        "artifacts_sha256": expected["artifacts_sha256"],
+    }
+
+
+def _normalized_process_argv() -> list[str]:
+    raw = _read_bounded("/proc/self/cmdline", MAX_RUNTIME_CMDLINE_BYTES)
+    if not raw.endswith(b"\0"):
+        raise ValueError("serving process argv unavailable")
+    encoded = raw[:-1].split(b"\0")
+    if not encoded or any(not value for value in encoded):
+        raise ValueError("serving process argv unavailable")
+    try:
+        values = [value.decode("ascii") for value in encoded]
+    except UnicodeDecodeError as error:
+        raise ValueError("serving process argv unavailable") from error
+    positions = [index for index, value in enumerate(values) if value == "serve"]
+    if len(positions) != 1 or positions[0] not in {1, 2}:
+        raise ValueError("serving process argv unavailable")
+    normalized = values[positions[0] :]
+    if len(normalized) > MAX_RUNTIME_ARGUMENTS:
+        raise ValueError("serving process argv unavailable")
+    return normalized
 
 
 def _regular_file_sha256(path: str, limit: int) -> str:

@@ -54,8 +54,10 @@ middleware, the SHA-pinned compatibility manifest, and a separately pinned
 serving-runtime manifest into each vLLM frontend. The compatibility manifest
 remains schema v1 at SHA-256
 `4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa`;
-the default-off runtime manifest links to that digest and pins one EngineCore
-plus the exact event/replay KV configuration.
+the default-off schema-v2 runtime manifest links to that digest and pins one
+EngineCore, the exact event/replay KV configuration, complete normalized vLLM
+argv, selected non-secret environment, package versions, and launcher/NCCL
+artifact hashes.
 The exact authenticated `GET /v1/mini-dynamo/identity` path is answered in that
 same API process; every inference request still goes directly to vLLM, without
 a sidecar or another network hop. The middleware derives a fresh boot/process
@@ -98,6 +100,19 @@ docker run --rm --network none \
   voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b \
   -c 'from mini_dynamo_engine_identity import ServingIdentityMiddleware; print("identity middleware import passed")'
 ```
+
+The stronger sub-second preflight runs the real launcher from rendered Compose
+and compares all process evidence without starting vLLM or allocating a GPU:
+
+    python3 bench/serving_runtime_image_probe.py
+    python3 bench/serving_runtime_image_probe.py --service dspark-0731-b
+
+It also prevents misleading Compose inputs from surviving to an engine roll.
+r112 proved that GPU_MEM_UTIL was ignored in favor of the launcher's effective
+0.975 default and that the b12x-a16 launcher overwrites a Compose
+VLLM_USE_B12X_FP8_GEMM=0 assertion with 1. Canonical Compose now names
+GPU_MEMORY_UTILIZATION=0.975 and no longer claims the ineffective FP8 override;
+these corrections preserve the already-running effective configuration.
 
 Do not make this 12.5GB image pull part of the ordinary local or Drone loop.
 Use node06's or the development host's warm cache. The source tree at
@@ -154,13 +169,20 @@ match.** The middleware verifies the live vLLM distribution, configured model
 name/context, and tokenizer bytes. It still re-publishes the manifest's model
 root and renderer profile only after the real initialized `/v1/models` and all
 ten renderer/token-ID goldens match. Compose—not the process—still provides the
-immutable image binding. The health bracket and schema-v2 response bind the
+immutable image binding. The health bracket and schema-v3 response bind the
 frontend to the exact stable EngineCore child, live typed KV configuration, and
-owned event/replay listening sockets. This does not prove publisher-thread
+owned event/replay listening sockets. Before publishing that response, it also
+matches the full normalized argv, allow-listed environment, package versions,
+and exact launcher/NCCL artifacts from runtime-manifest schema v2. The response
+contains only their four digests, not raw argv or environment. This does not
+prove publisher-thread
 liveness, event advancement, retained sequence zero, or complete and timely
 replay; those require live node06 qualification. It also does not attest the
-complete driver/CUDA/NCCL/kernel/cache/warmup bundle required to close issue
-#15. A later qualified runtime-bundle publisher must close those bindings
+complete live driver/kernel/topology, persistent-cache mount, or warmup bundle
+required to close issue #15. The image's cache namespace points under
+/cache/jit, while base Compose still mounts its historical host cache at
+/root/.cache; persistence must be preseeded and qualified on one engine before
+changing that mount. A later qualified runtime-bundle publisher must close those bindings
 before compatibility admission can be enabled.
 
 ## Offline dual-companion security harness
