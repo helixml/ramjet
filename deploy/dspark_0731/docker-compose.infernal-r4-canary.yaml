@@ -11,8 +11,8 @@ services:
   dspark-0731-b:
     image: voipmonitor/vllm:infernal-invocation-vllm3226eb7-b12x1584743-fi1ac6942-cu133-torch213-20260812-r4@sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6
     volumes:
-      - /prod/sglang-cache/infernal-invocation-cu133-r4:/cache
-      - /prod/sglang-cache/infernal-invocation-cu133-r4/tmp:/container-tmp
+      - /prod/engine-cache/infernal-invocation-cu133-r4:/cache
+      - /prod/engine-cache/infernal-invocation-cu133-r4/tmp:/container-tmp
     environment:
       MODEL_PATH: /workspace/model
       MODEL_REVISION: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb

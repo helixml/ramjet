@@ -1,0 +1,99 @@
+# Snapshot authority wiring for the SERVING load balancer.
+#
+# This file is deliberately separate from docker-compose.snapshot-companion.yaml.
+# Applying it is the reviewable event that couples the production serving path
+# to /run tmpfs state: it gives ds4-loadbalancer eight hard bind mounts whose
+# sources vanish on every reboot. In the 2026-08-14 outage (#156) that coupling
+# left runc unable to create the container at all, and because container-create
+# failure is not a process exit, `restart: unless-stopped` never retried it --
+# production served nothing for ~50 minutes.
+#
+# Preconditions for using this file at all:
+#   1. systemd/mini-dynamo-snapshot-authority.service and
+#      systemd/tmpfiles.d/mini-dynamo-snapshot.conf are installed and enabled,
+#      so every source below exists before Docker restores containers.
+#   2. validate-snapshot-production-compose.py passes, including its
+#      serving-path isolation and boot-authority checks.
+#
+# Render and validate before use:
+#   docker compose -f docker-compose.yaml \
+#     -f docker-compose.snapshot-companion.yaml \
+#     -f docker-compose.snapshot-lb.yaml \
+#     --profile snapshot-companion config --quiet
+#
+# The companion overlay on its own runs companions without touching the LB.
+# Snapshot routing stays off unless DS4_SNAPSHOT_ROUTE_MODE=shadow is explicit.
+
+services:
+  ds4-loadbalancer:
+    # SO_PEERCRED is part of the session authority. Numeric identity avoids a
+    # mutable passwd database and is required only when this overlay is used.
+    image: ${SNAPSHOT_LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-81f648c@sha256:531f341b86506427e6fc2bd28fd1e689cb4f38767a15661e919ec726ab4526be}
+    user: "12002:12000"
+    environment:
+      # Raw vLLM event consumers and companion snapshots are mutually exclusive.
+      DS4_KV_EVENT_MODE: "off"
+      # One operator control keeps the router gate and its sole exact authority
+      # in lockstep: off-mode startup is valid, and shadow can never be enabled
+      # without the companion inventory that supplies it.
+      DS4_EXACT_ROUTE_MODE: ${DS4_SNAPSHOT_ROUTE_MODE:-off}
+      DS4_SNAPSHOT_ROUTE_MODE: ${DS4_SNAPSHOT_ROUTE_MODE:-off}
+      DS4_SNAPSHOT_ROUTE_SOCKET_PATHS: /run/mini-dynamo-snapshot-a/companion.sock,/run/mini-dynamo-snapshot-b/companion.sock
+      DS4_SNAPSHOT_ROUTE_COMPANION_UIDS: "12001,12003"
+      DS4_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS: /run/secrets/snapshot-session-a,/run/secrets/snapshot-session-b
+      DS4_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS: /run/secrets/snapshot-digest-a,/run/secrets/snapshot-digest-b
+      DS4_SNAPSHOT_ROUTE_ATTESTATION_PATHS: /run/attestation-a/engine.json,/run/attestation-b/engine.json
+      DS4_SNAPSHOT_ROUTE_GROUPS: "0:0,0:0"
+      DS4_SNAPSHOT_ROUTE_SECRET_OWNER_UID: "0"
+      DS4_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS: "30000"
+      DS4_SNAPSHOT_ROUTE_RECONNECT_MIN_MS: "250"
+      DS4_SNAPSHOT_ROUTE_RECONNECT_MAX_MS: "5000"
+    volumes:
+      - type: bind
+        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/mini-dynamo-snapshot-a.invalid}
+        target: /run/mini-dynamo-snapshot-a
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/mini-dynamo-snapshot-b.invalid}
+        target: /run/mini-dynamo-snapshot-b
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-session-a.invalid}
+        target: /run/secrets/snapshot-session-a
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-session-b.invalid}
+        target: /run/secrets/snapshot-session-b
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-digest-a.invalid}
+        target: /run/secrets/snapshot-digest-a
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-digest-b.invalid}
+        target: /run/secrets/snapshot-digest-b
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_ATTESTATION_DIR_A:-/run/mini-dynamo-snapshot-attestation-a.invalid}
+        target: /run/attestation-a
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SNAPSHOT_ATTESTATION_DIR_B:-/run/mini-dynamo-snapshot-attestation-b.invalid}
+        target: /run/attestation-b
+        read_only: true
+        bind:
+          create_host_path: false

@@ -10,7 +10,7 @@ if (($# == 0)); then
 fi
 gpu_count=${BENCH_GPU_COUNT:-$((4 * $#))}
 
-model_root=${BENCH_MODEL_ROOT:-/prod/models/sglang/DeepSeek-V4-Flash-0731}
+model_root=${BENCH_MODEL_ROOT:-/prod/models/DeepSeek-V4-Flash-0731}
 for path in "$model_root/tokenizer.json" "$model_root/config.json"; do
   [[ -r $path ]] || { echo "missing model artifact: $path" >&2; exit 1; }
 done

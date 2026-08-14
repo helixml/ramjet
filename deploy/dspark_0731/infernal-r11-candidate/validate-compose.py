@@ -41,13 +41,13 @@ MATCHED_ENGINE_ENVIRONMENT = {
 EXTRA_VOLUMES = [
     {
         "type": "bind",
-        "source": "/prod/sglang-cache/infernal-invocation-cu133-r11",
+        "source": "/prod/engine-cache/infernal-invocation-cu133-r11",
         "target": "/cache",
         "bind": {},
     },
     {
         "type": "bind",
-        "source": "/prod/sglang-cache/infernal-invocation-cu133-r11/tmp",
+        "source": "/prod/engine-cache/infernal-invocation-cu133-r11/tmp",
         "target": "/container-tmp",
         "bind": {},
     },

@@ -7,7 +7,7 @@ output=${1:?usage: node06_engine_metadata.sh OUTPUT_JSON ENGINE_CONTAINER [RECEI
 container=${2:?usage: node06_engine_metadata.sh OUTPUT_JSON ENGINE_CONTAINER [RECEIPT_JSON]}
 receipt=${3:-}
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-model_root=${BENCH_MODEL_ROOT:-/prod/models/sglang/DeepSeek-V4-Flash-0731}
+model_root=${BENCH_MODEL_ROOT:-/prod/models/DeepSeek-V4-Flash-0731}
 
 for command in docker jq sha256sum nvidia-smi python3 timeout; do
   command -v "$command" >/dev/null || { echo "missing command: $command" >&2; exit 1; }

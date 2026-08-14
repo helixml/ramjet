@@ -1,0 +1,57 @@
+[Unit]
+# Rebuild the snapshot companion's /run authority before Docker restores any
+# container (issue #158). /run is tmpfs; everything the companion needs there
+# is gone after a reboot, and Docker starts `unless-stopped` containers as soon
+# as docker.service starts.
+Description=mini-dynamo snapshot companion host authority
+Documentation=https://github.com/helixml/mini-dynamo/issues/158
+
+# The directory parents come from tmpfiles.d; this unit only adds identities
+# and secret material on top of them.
+After=systemd-tmpfiles-setup.service
+Requires=systemd-tmpfiles-setup.service
+
+# Ordering only. docker.service pulls this unit in via a Wants= symlink (see
+# [Install]), NOT Requires=, which is the whole point: if provisioning fails,
+# Docker must still start and ds4-loadbalancer must still serve. A failed
+# provisioner leaves the companions down -- never the serving path. This is a
+# deliberate deviation from the "RequiredBy=docker.service" wording in #158,
+# which contradicts that issue's own third acceptance bullet.
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# The helper takes no path or identity arguments: its production paths, UIDs,
+# and GIDs are fixed in the source. It creates secrets only with exclusive
+# creation and refuses to repair unsafe pre-existing state, so re-running it on
+# an already-provisioned host is idempotent rather than destructive.
+#
+# The default mode deliberately does NOT touch Caddy group membership.
+# --configure-caddy is an explicit operator action and must never be added here.
+ExecStart=/usr/local/lib/mini-dynamo/setup_snapshot_production_host.py
+
+# Verify the result rather than trusting the exit code alone. --check is
+# read-only and re-asserts ownership, modes, setgid bits, and group separation.
+ExecStartPost=/usr/local/lib/mini-dynamo/setup_snapshot_production_host.py --check
+
+# Secrets are derived and written by the helper; keep them out of the journal.
+# Failures are reported as closed, non-secret-bearing reasons by design.
+StandardOutput=journal
+StandardError=journal
+
+# The unit writes under /run and manages service identities. It needs no
+# network, no devices, and no access to the rest of the filesystem.
+PrivateNetwork=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+
+[Install]
+# Wants=, not Requires=: docker.service starts this unit and waits for it, but
+# is not held back by its failure.
+WantedBy=docker.service

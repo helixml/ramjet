@@ -25,5 +25,5 @@ services:
       INSTANTTENSOR_BACKEND: BUFFERED
       LMCACHE_MODE: "off"
     volumes:
-      - /prod/sglang-cache/infernal-invocation-cu133-r11:/cache
-      - /prod/sglang-cache/infernal-invocation-cu133-r11/tmp:/container-tmp
+      - /prod/engine-cache/infernal-invocation-cu133-r11:/cache
+      - /prod/engine-cache/infernal-invocation-cu133-r11/tmp:/container-tmp

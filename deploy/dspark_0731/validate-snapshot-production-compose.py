@@ -15,7 +15,12 @@ from typing import Any
 HERE = pathlib.Path(__file__).resolve().parent
 BASE = HERE / "docker-compose.yaml"
 OVERLAY = HERE / "docker-compose.snapshot-companion.yaml"
+LB_OVERLAY = HERE / "docker-compose.snapshot-lb.yaml"
 CADDY = HERE / "Caddyfile.snapshot-companion"
+SYSTEMD = HERE / "systemd"
+TMPFILES = SYSTEMD / "tmpfiles.d" / "mini-dynamo-snapshot.conf"
+AUTHORITY_UNIT = SYSTEMD / "mini-dynamo-snapshot-authority.service"
+SERVING_SERVICE = "ds4-loadbalancer"
 COMPANION_PROFILE = "snapshot-companion"
 ATTESTATION_PROFILE = "snapshot-attestation"
 SESSION_GID = "12000"
@@ -84,6 +89,7 @@ def render(
     route_mode: str = "off",
     soak_mode: str = "off",
     lb_image: str | None = None,
+    lb_overlay: bool = True,
 ) -> dict[str, Any]:
     environment = os.environ.copy()
     for suffix, domain in zip(("A", "B"), DOMAINS.values(), strict=True):
@@ -102,6 +108,8 @@ def render(
     if lb_image is not None:
         environment["SNAPSHOT_LB_IMAGE"] = lb_image
     command = ["docker", "compose", "-f", str(BASE), "-f", str(OVERLAY)]
+    if lb_overlay:
+        command.extend(["-f", str(LB_OVERLAY)])
     if companion:
         command.extend(["--profile", COMPANION_PROFILE])
     if attestation:
@@ -163,6 +171,118 @@ def validate_source_bind_policy(path: pathlib.Path = OVERLAY) -> int:
     if bind_items == 0:
         fail("production overlay contains no bind mounts")
     return bind_items
+
+
+def tmpfs_bind_sources(service: dict[str, Any]) -> list[str]:
+    """Bind-mount sources that live on a filesystem wiped by reboot.
+
+    /run is the one that bit us in #156, and it is the only tmpfs the snapshot
+    authority uses. Treat the classic volatile roots the same way so a future
+    overlay cannot reintroduce the trap under a different name.
+    """
+    volatile = ("/run/", "/var/run/", "/dev/shm/", "/tmp/")
+    sources: list[str] = []
+    for volume in service.get("volumes", []):
+        if volume.get("type") != "bind":
+            continue
+        source = str(volume.get("source", ""))
+        if source.startswith(volatile) or source in {"/run", "/var/run", "/tmp"}:
+            sources.append(source)
+    return sources
+
+
+def boot_provisioned_paths(path: pathlib.Path = TMPFILES) -> set[str]:
+    """Directory paths the tmpfiles.d fragment guarantees to exist at boot."""
+    if not path.is_file():
+        fail("no boot-time tmpfiles fragment provisions the /run authority")
+    provisioned: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        # Only directory-creating types establish a mountable parent at boot.
+        if len(fields) < 2 or fields[0] not in {"d", "D", "v", "q", "Q"}:
+            continue
+        provisioned.add(fields[1].rstrip("/"))
+    if not provisioned:
+        fail("the tmpfiles fragment provisions no directories")
+    return provisioned
+
+
+def unit_directives(path: pathlib.Path = AUTHORITY_UNIT) -> dict[str, set[str]]:
+    """Active `Key=value` directives in a systemd unit, ignoring comments.
+
+    Comments matter here: this unit documents why it deliberately avoids
+    RequiredBy=, and a raw substring search would read that prose as the
+    directive it warns against.
+    """
+    if not path.is_file():
+        fail("no boot-time unit rebuilds the /run authority")
+    directives: dict[str, set[str]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", ";", "[")) or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        directives.setdefault(key.strip(), set()).update(value.split())
+    return directives
+
+
+def validate_serving_path_isolation() -> None:
+    """The serving LB must start with no /run state present at all (#157).
+
+    This is the recurrence guard for #156. Rendering the base stack, and the
+    base stack plus the companion overlay, must both produce a load balancer
+    with zero volatile bind mounts -- so a reboot that wipes /run can never
+    stop the container from being created.
+    """
+    for description, document in (
+        ("the base stack", render(companion=False, attestation=False, lb_overlay=False)),
+        (
+            "the companion overlay",
+            render(companion=True, attestation=True, lb_overlay=False),
+        ),
+    ):
+        service = document.get("services", {}).get(SERVING_SERVICE)
+        if service is None:
+            fail(f"{description} does not define {SERVING_SERVICE}")
+        sources = tmpfs_bind_sources(service)
+        if sources:
+            fail(
+                f"{description} gives {SERVING_SERVICE} a tmpfs bind mount "
+                f"({sources[0]}); the serving path must survive a reboot"
+            )
+        if service.get("user"):
+            fail(f"{description} changes the {SERVING_SERVICE} runtime identity")
+
+
+def validate_boot_authority(document: dict[str, Any]) -> None:
+    """Every LB /run mount needs a boot-time provisioner behind it (#157).
+
+    Once docker-compose.snapshot-lb.yaml is applied the serving container does
+    depend on tmpfs state, so that state has to be recreated before Docker
+    restores containers. An unguarded mount -- one whose parent no boot unit
+    creates -- is rejected here rather than discovered at the next reboot.
+    """
+    service = document.get("services", {}).get(SERVING_SERVICE, {})
+    sources = tmpfs_bind_sources(service)
+    if not sources:
+        fail("the LB overlay render carries no snapshot authority mounts")
+    provisioned = boot_provisioned_paths()
+    for source in sources:
+        parent = str(pathlib.PurePosixPath(source).parent)
+        if source.rstrip("/") not in provisioned and parent not in provisioned:
+            fail(f"no boot-time unit provisions the LB authority mount {source}")
+    directives = unit_directives()
+    if "Before" not in directives or "docker.service" not in directives["Before"]:
+        fail("the authority unit is not ordered before docker.service")
+    if "WantedBy" not in directives or "docker.service" not in directives["WantedBy"]:
+        fail("docker.service does not pull in the authority unit")
+    # A hard requirement would make provisioner failure block serving, which is
+    # the exact coupling #157 exists to prevent.
+    if "docker.service" in directives.get("RequiredBy", set()):
+        fail("the authority unit blocks docker.service on its own failure")
 
 
 def validate_sandbox(name: str, service: dict[str, Any], *, networked: bool) -> None:
@@ -360,11 +480,12 @@ def validate_documents(
     if soak_mode == "capture" and route_mode != "shadow":
         fail("shadow soak capture is not paired with snapshot shadow")
     validate_lb(
-        companion_services.get("ds4-loadbalancer", {}),
+        companion_services.get(SERVING_SERVICE, {}),
         route_mode,
         soak_mode,
         expected_lb_image,
     )
+    validate_boot_authority(companion_document)
     for engine, domain in DOMAINS.items():
         validate_companion(engine, domain, companion_services[domain["companion"]])
         validate_provisioner(engine, domain, full_services[domain["provisioner"]])
@@ -416,6 +537,8 @@ def main() -> int:
         parser.error("--candidate-lb-image must be an immutable sha256 image ID")
     try:
         validate_source_bind_policy()
+        validate_source_bind_policy(LB_OVERLAY)
+        validate_serving_path_isolation()
         if args.shadow_soak_capture:
             capture_companion = render(
                 companion=True,
@@ -471,7 +594,10 @@ def main() -> int:
     except ValidationError as exc:
         print(f"snapshot production compose validation failed: {exc}", file=sys.stderr)
         return 1
-    print("snapshot production compose validation passed: two isolated shadow domains")
+    print(
+        "snapshot production compose validation passed: two isolated shadow "
+        "domains, serving path free of tmpfs mounts"
+    )
     return 0
 
 

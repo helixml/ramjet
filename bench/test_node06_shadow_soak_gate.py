@@ -377,6 +377,7 @@ class Node06ShadowSoakGateTests(unittest.TestCase):
                     "engine_metrics.py",
                     "compose.yaml",
                     "overlay.yaml",
+                    "lb-overlay.yaml",
                     "setup.py",
                     "host_validator.py",
                     "compose_validator.py",
@@ -389,6 +390,7 @@ class Node06ShadowSoakGateTests(unittest.TestCase):
             runtime.original_workload = paths["shadow_soak.py"]
             runtime.original_base = paths["compose.yaml"]
             runtime.original_overlay = paths["overlay.yaml"]
+            runtime.original_lb_overlay = paths["lb-overlay.yaml"]
             runtime.setup = paths["setup.py"]
             runtime.host_validator = paths["host_validator.py"]
             runtime.compose_validator = paths["compose_validator.py"]
@@ -414,6 +416,7 @@ class Node06ShadowSoakGateTests(unittest.TestCase):
             for name in (
                 "compose.yaml",
                 "overlay.yaml",
+                "lb-overlay.yaml",
                 "shadow_soak.py",
                 "cachebench.py",
                 "engine_metrics.py",
@@ -426,9 +429,11 @@ class Node06ShadowSoakGateTests(unittest.TestCase):
             runtime.directory = root
             runtime.original_base = root / "compose.yaml"
             runtime.original_overlay = root / "overlay.yaml"
+            runtime.original_lb_overlay = root / "lb-overlay.yaml"
             runtime.original_workload = root / "shadow_soak.py"
             runtime.base = runtime.original_base
             runtime.overlay = runtime.original_overlay
+            runtime.lb_overlay = runtime.original_lb_overlay
             runtime.workload = runtime.original_workload
             runtime.args = argparse.Namespace(
                 env_file=".env", candidate_image="sha256:" + "a" * 64
@@ -460,8 +465,10 @@ class Node06ShadowSoakGateTests(unittest.TestCase):
         runtime.args = argparse.Namespace(profile_timeout_seconds=1)
         runtime.original_base = pathlib.Path("/missing/base.yaml")
         runtime.original_overlay = pathlib.Path("/missing/overlay.yaml")
+        runtime.original_lb_overlay = pathlib.Path("/missing/lb-overlay.yaml")
         runtime.base = pathlib.Path("/frozen/base.yaml")
         runtime.overlay = pathlib.Path("/frozen/overlay.yaml")
+        runtime.lb_overlay = pathlib.Path("/frozen/lb-overlay.yaml")
         runtime._assert_original_artifacts = mock.Mock(side_effect=FileNotFoundError())
         runtime._terminate_child = mock.Mock()
         runtime._profile_env = mock.Mock(return_value={})
@@ -473,7 +480,8 @@ class Node06ShadowSoakGateTests(unittest.TestCase):
             runtime.rollback(baseline(), "candidate-id")
         self.assertEqual(caught.exception.reason, "rollback_artifact_changed")
         self.assertEqual(
-            runtime._compose.call_args.args[0], (runtime.base, runtime.overlay)
+            runtime._compose.call_args.args[0],
+            (runtime.base, runtime.overlay, runtime.lb_overlay),
         )
 
     def test_rollback_switches_to_frozen_files_after_canonical_attempt_fails(self):
@@ -481,8 +489,10 @@ class Node06ShadowSoakGateTests(unittest.TestCase):
         runtime.args = argparse.Namespace(profile_timeout_seconds=1)
         runtime.original_base = pathlib.Path("/canonical/base.yaml")
         runtime.original_overlay = pathlib.Path("/canonical/overlay.yaml")
+        runtime.original_lb_overlay = pathlib.Path("/canonical/lb-overlay.yaml")
         runtime.base = pathlib.Path("/frozen/base.yaml")
         runtime.overlay = pathlib.Path("/frozen/overlay.yaml")
+        runtime.lb_overlay = pathlib.Path("/frozen/lb-overlay.yaml")
         runtime._assert_original_artifacts = mock.Mock()
         runtime._terminate_child = mock.Mock()
         runtime._profile_env = mock.Mock(return_value={})
@@ -498,8 +508,12 @@ class Node06ShadowSoakGateTests(unittest.TestCase):
         self.assertEqual(
             [call.args[0] for call in runtime._compose.call_args_list],
             [
-                (runtime.original_base, runtime.original_overlay),
-                (runtime.base, runtime.overlay),
+                (
+                    runtime.original_base,
+                    runtime.original_overlay,
+                    runtime.original_lb_overlay,
+                ),
+                (runtime.base, runtime.overlay, runtime.lb_overlay),
             ],
         )
 

@@ -405,15 +405,26 @@ available.
 
 ## Production-shaped snapshot overlay
 
-`docker-compose.snapshot-companion.yaml` now joins the two standalone
-companions, one-shot attestation provisioners, and LB snapshot clients to the
-canonical stack without granting Docker, GPU, host IPC, privileged, or host
-network access. It is not part of an ordinary `docker-compose.yaml` deploy.
-The two companions require the explicit `snapshot-companion` profile, and the
-short-lived root provisioners require the separate `snapshot-attestation`
-profile. Snapshot routing defaults to `off` even with the overlay; only an
-explicit `DS4_SNAPSHOT_ROUTE_MODE=shadow` enables both the exact-router gate
-and snapshot authority in lockstep so the inventories can be consumed, and the
+`docker-compose.snapshot-companion.yaml` joins the two standalone companions
+and the one-shot attestation provisioners to the canonical stack without
+granting Docker, GPU, host IPC, privileged, or host network access. It is not
+part of an ordinary `docker-compose.yaml` deploy. The two companions require
+the explicit `snapshot-companion` profile, and the short-lived root
+provisioners require the separate `snapshot-attestation` profile.
+
+The LB-side snapshot clients live in a **separate**
+`docker-compose.snapshot-lb.yaml`. That split is the #157 boundary: the
+companion overlay alone never modifies `ds4-loadbalancer`, so it cannot couple
+the production serving path to `/run` tmpfs state. Applying the LB overlay is
+the reviewable event that does create that coupling, and it requires the
+boot-time authority units under `systemd/` (#158) — without them a reboot
+wipes `/run`, runc cannot create the container, and because that is a
+create-time failure rather than a process exit, `restart: unless-stopped`
+never retries it. That is exactly the ~50-minute #156 outage.
+
+Snapshot routing defaults to `off` even with both overlays; only an explicit
+`DS4_SNAPSHOT_ROUTE_MODE=shadow` enables both the exact-router gate and
+snapshot authority in lockstep so the inventories can be consumed, and the
 pinned LB also enforces that compact inventories cannot select placement.
 
 Render the complete contract without starting it:
@@ -422,6 +433,7 @@ Render the complete contract without starting it:
 python3 deploy/dspark_0731/validate-snapshot-production-compose.py
 docker compose -f deploy/dspark_0731/docker-compose.yaml \
   -f deploy/dspark_0731/docker-compose.snapshot-companion.yaml \
+  -f deploy/dspark_0731/docker-compose.snapshot-lb.yaml \
   --profile snapshot-companion --profile snapshot-attestation config --quiet
 ```
 
@@ -432,6 +444,19 @@ ports, isolated session/digest/attestation domains, and dedicated metrics-only
 groups. It also validates `Caddyfile.snapshot-companion`: Caddy can reach only
 `/metrics/snapshot/0|1` over the two metrics UDS paths and must never join
 session GID `12000`.
+
+Two of its checks exist specifically to prevent a #156 recurrence:
+
+- **Serving-path isolation** — the base stack, and the base stack plus the
+  companion overlay, must both render an `ds4-loadbalancer` with zero bind
+  mounts on a volatile filesystem and no changed runtime identity. A reboot
+  that wipes `/run` therefore cannot stop the LB from being created.
+- **Boot authority** — once the LB overlay *is* applied, every `/run` mount it
+  adds must have a parent in `systemd/tmpfiles.d/mini-dynamo-snapshot.conf`,
+  and `mini-dynamo-snapshot-authority.service` must be ordered
+  `Before=docker.service` while being pulled in by `WantedBy=`, never
+  `RequiredBy=`. Ordering is guaranteed; a provisioner failure must leave the
+  companions down without ever blocking the serving path.
 
 Before provisioning, create every host authority on `/run`, capture both engine
 metadata files, and run the same command below with a trailing

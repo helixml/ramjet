@@ -157,6 +157,7 @@ class NodeShadowRuntime(recovery.NodeRuntime):
         self.workload = self.directory / args.workload_script
         self.original_base = self.base
         self.original_overlay = self.overlay
+        self.original_lb_overlay = self.lb_overlay
         self.original_workload = self.workload
         self._child = None
         self._rollback_active = False
@@ -209,7 +210,7 @@ class NodeShadowRuntime(recovery.NodeRuntime):
 
     def _profile_hash(self, image, soak_mode):
         return self.compose_hash(
-            (self.base, self.overlay), self._profile_env(image, soak_mode)
+            (self.base, self.overlay, self.lb_overlay), self._profile_env(image, soak_mode)
         )
 
     def _service_hash(self, files, service, env, profiles=()):
@@ -394,6 +395,7 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
         required = (
             self.base,
             self.overlay,
+            self.lb_overlay,
             self.setup,
             self.host_validator,
             self.compose_validator,
@@ -444,7 +446,11 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
                 "expected baseline is not the committed admitted profile",
             )
         expected_base_files = (str(self.base.resolve()),)
-        expected_overlay_files = (str(self.base.resolve()), str(self.overlay.resolve()))
+        expected_overlay_files = (
+            str(self.base.resolve()),
+            str(self.overlay.resolve()),
+            str(self.lb_overlay.resolve()),
+        )
         config_files = self._config_files(
             (LB_CONTAINER, *ENGINE_CONTAINERS, *COMPANION_CONTAINERS)
         )
@@ -469,7 +475,7 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
                 )
         for name, identity in zip(COMPANION_CONTAINERS, companions, strict=True):
             expected_hash = self._service_hash(
-                (self.base, self.overlay),
+                (self.base, self.overlay, self.lb_overlay),
                 name,
                 admitted_env,
                 profiles=("snapshot-companion",),
@@ -542,7 +548,7 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
     def deploy_candidate(self, baseline):
         self._raise_if_interrupted()
         self._compose(
-            (self.base, self.overlay),
+            (self.base, self.overlay, self.lb_overlay),
             (
                 "--profile",
                 "snapshot-companion",
@@ -574,6 +580,7 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
             ),
             "base_compose": recovery.file_digest(self.original_base),
             "snapshot_compose": recovery.file_digest(self.original_overlay),
+            "snapshot_lb_compose": recovery.file_digest(self.original_lb_overlay),
             "setup_helper": recovery.file_digest(self.setup),
             "host_validator": recovery.file_digest(self.host_validator),
             "compose_validator": recovery.file_digest(self.compose_validator),
@@ -608,6 +615,7 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
         sources = (
             self.original_base,
             self.original_overlay,
+            self.original_lb_overlay,
             self.original_workload,
             self.directory / "cachebench.py",
             self.directory / "engine_metrics.py",
@@ -649,6 +657,7 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
         self._frozen_env = directory / ".env"
         self.base = directory / self.original_base.name
         self.overlay = directory / self.original_overlay.name
+        self.lb_overlay = directory / self.original_lb_overlay.name
         self.workload = directory / self.original_workload.name
         try:
             if (
@@ -666,6 +675,7 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
         except Exception:
             self.base = self.original_base
             self.overlay = self.original_overlay
+            self.lb_overlay = self.original_lb_overlay
             self.workload = self.original_workload
             self.cleanup_frozen_artifacts()
             raise
@@ -883,10 +893,10 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
         artifacts_changed = False
         try:
             self._assert_original_artifacts()
-            rollback_files = (self.original_base, self.original_overlay)
+            rollback_files = (self.original_base, self.original_overlay, self.original_lb_overlay)
         except Exception:  # noqa: BLE001 - rollback must survive any artifact I/O fault
             artifacts_changed = True
-            rollback_files = (self.base, self.overlay)
+            rollback_files = (self.base, self.overlay, self.lb_overlay)
         last_error = None
         restored = None
         for attempt in range(2):
@@ -920,7 +930,7 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
                 last_error = error
                 if attempt == 0:
                     artifacts_changed = True
-                    rollback_files = (self.base, self.overlay)
+                    rollback_files = (self.base, self.overlay, self.lb_overlay)
                     time.sleep(1)
         if restored is None:
             raise recovery.GateError(
@@ -934,6 +944,7 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
         expected_files = (
             str(self.original_base.resolve()),
             str(self.original_overlay.resolve()),
+            str(self.original_lb_overlay.resolve()),
         )
         if self._config_files((LB_CONTAINER,))[0] != expected_files:
             raise recovery.GateError(

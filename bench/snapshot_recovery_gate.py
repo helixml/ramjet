@@ -351,6 +351,10 @@ class NodeRuntime:
         self.directory = args.deployment_dir.resolve()
         self.base = self.directory / args.base_compose
         self.overlay = self.directory / args.snapshot_compose
+        # The LB's own snapshot authority mounts live in a separate file
+        # so the serving path cannot gain /run dependencies by accident
+        # (#157). Every render that exercises the LB needs both overlays.
+        self.lb_overlay = self.directory / args.snapshot_lb_compose
         self.setup = self.directory / args.setup_helper
         self.host_validator = self.directory / args.host_validator
         self.compose_validator = self.directory / args.compose_validator
@@ -454,7 +458,7 @@ class NodeRuntime:
 
     def rendered_services(self, env):
         raw = self._compose(
-            (self.base, self.overlay),
+            (self.base, self.overlay, self.lb_overlay),
             (
                 "--profile",
                 "snapshot-companion",
@@ -478,6 +482,7 @@ class NodeRuntime:
         required = (
             self.base,
             self.overlay,
+            self.lb_overlay,
             self.setup,
             self.host_validator,
             self.compose_validator,
@@ -488,7 +493,7 @@ class NodeRuntime:
         self._run("host_validator", (self.host_validator,), env=AUTHORITY_ENV)
         self._run("compose_validator", (sys.executable, self.compose_validator))
         self._compose(
-            (self.base, self.overlay),
+            (self.base, self.overlay, self.lb_overlay),
             (
                 "--profile",
                 "snapshot-companion",
@@ -536,7 +541,9 @@ class NodeRuntime:
                 "companion_image_mismatch",
                 "running companions do not match the overlay",
             )
-        shadow_hash = self.compose_hash((self.base, self.overlay), shadow_env)
+        shadow_hash = self.compose_hash(
+            (self.base, self.overlay, self.lb_overlay), shadow_env
+        )
         self._last_lb_id = lb.container_id
         return Baseline(
             lb=lb,
@@ -614,7 +621,7 @@ class NodeRuntime:
             )
         started_monotonic = time.monotonic()
         self._compose(
-            (self.base, self.overlay),
+            (self.base, self.overlay, self.lb_overlay),
             (
                 "--profile",
                 "snapshot-companion",
@@ -729,6 +736,7 @@ class NodeRuntime:
                 "gate": file_digest(pathlib.Path(__file__)),
                 "base_compose": file_digest(self.base),
                 "snapshot_compose": file_digest(self.overlay),
+                "snapshot_lb_compose": file_digest(self.lb_overlay),
                 "setup_helper": file_digest(self.setup),
                 "host_validator": file_digest(self.host_validator),
                 "compose_validator": file_digest(self.compose_validator),
@@ -887,6 +895,9 @@ def parser():
     root.add_argument("--deployment-dir", type=pathlib.Path, default=pathlib.Path.cwd())
     root.add_argument("--base-compose", default="docker-compose.yaml")
     root.add_argument("--snapshot-compose", default="docker-compose.snapshot-companion.yaml")
+    root.add_argument(
+        "--snapshot-lb-compose", default="docker-compose.snapshot-lb.yaml"
+    )
     root.add_argument("--setup-helper", default="setup_snapshot_production_host.py")
     root.add_argument("--host-validator", default="validate-snapshot-production-host.sh")
     root.add_argument("--compose-validator", default="validate-snapshot-production-compose.py")
