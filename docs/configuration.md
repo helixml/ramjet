@@ -133,7 +133,9 @@ exact-canary and snapshot secrets.
 | `MD_TOKENIZER_MODE` | `off` | `off`, `remote-shadow`, or `local-shadow`; shadow modes never change the approximate decision alone. |
 | `MD_TOKENIZER_PATH` | unset | `tokenizer.json` path; required by `local-shadow`. |
 | `MD_TOKENIZER_SHA256` | unset | Expected 64-character artifact SHA-256; required by `local-shadow`. |
-| `MD_TOKENIZER_PROFILE` | `deepseek-v4-r34` | Pinned prompt-renderer compatibility profile. |
+| `MD_TOKENIZER_PROFILE` | `deepseek-v4-r34` | Prompt-renderer profile; one of the labels registered in `src/model/`. Unknown values are rejected at startup. See [models.md](models.md). |
+| `MD_CHAT_TEMPLATE_PATH` | unset | `tokenizer_config.json` supplying the Jinja chat template; required by template-driven profiles. |
+| `MD_CHAT_TEMPLATE_SHA256` | unset | Expected chat-template SHA-256. Required with, and only with, `MD_CHAT_TEMPLATE_PATH`. |
 | `MD_TOKENIZER_MIN_BYTES` | `32768` | Minimum request bytes admitted to shadow tokenization. |
 | `MD_TOKENIZER_MAX_BYTES` | `2097152` | Maximum request bytes admitted to shadow tokenization. |
 | `MD_TOKENIZER_WORKERS` | `1` | Bounded blocking workers for local tokenization. |

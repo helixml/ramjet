@@ -95,7 +95,13 @@ services:
       # model's native 262144 window costs roughly 17 full-length sequences
       # worth of residency and is affordable here.
       - --max-model-len=${MAX_MODEL_LEN:-262144}
-      - --max-num-seqs=${MAX_NUM_SEQS:-64}
+      # 64 was the throughput limiter: two engines capped the stack at 128
+      # concurrent sequences, and c256 saturated at ~5950 tok/s with the
+      # surplus queued rather than batched. Raising it to 256 measured
+      # ~7800 tok/s at c256, +32%, with no errors. A --max-num-batched-tokens
+      # override was tested alongside it at 8192 and 16384 and made no
+      # difference beyond noise, so it is deliberately not set here.
+      - --max-num-seqs=${MAX_NUM_SEQS:-256}
       - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
       - --enable-prefix-caching
       # Without a reasoning parser the model's <think> block is emitted inside

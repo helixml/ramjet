@@ -27,7 +27,7 @@ PROMPT = (
 )
 
 
-def one_request(base, model, token, index, salt, max_tokens, timeout):
+def one_request(base, model, token, index, salt, max_tokens, timeout, deterministic):
     """Issues one streaming request and returns (ttft, wall, output_tokens)."""
     body = {
         "model": model,
@@ -36,9 +36,17 @@ def one_request(base, model, token, index, salt, max_tokens, timeout):
         "temperature": 0.0,
         "stream": True,
         "stream_options": {"include_usage": True},
-        # Thinking is left on: it is the model's default and therefore the
-        # shape production traffic actually takes.
     }
+    if deterministic:
+        # Throughput A/B needs every request to emit exactly max_tokens.
+        # Left to itself the model thinks for a variable number of tokens and
+        # may stop early, so cell wall-time reflects prompt luck rather than
+        # engine speed -- an early sweep read 3693 tok/s and 1496 tok/s at the
+        # same concurrency for that reason. ignore_eos plus thinking off makes
+        # the output length fixed and the comparison meaningful.
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+        body["ignore_eos"] = True
+        body["min_tokens"] = max_tokens
     request = urllib.request.Request(
         f"{base}/v1/chat/completions",
         data=json.dumps(body).encode(),
@@ -67,14 +75,14 @@ def one_request(base, model, token, index, salt, max_tokens, timeout):
     return ttft, time.time() - started, completion_tokens, upstream
 
 
-def run_cell(base, model, token, concurrency, salt, max_tokens, timeout):
+def run_cell(base, model, token, concurrency, salt, max_tokens, timeout, deterministic):
     results = []
     errors = []
     lock = threading.Lock()
 
     def worker(index):
         try:
-            result = one_request(base, model, token, index, salt, max_tokens, timeout)
+            result = one_request(base, model, token, index, salt, max_tokens, timeout, deterministic)
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as error:
             with lock:
                 errors.append(repr(error)[:120])
@@ -118,6 +126,10 @@ def main():
     parser.add_argument("--tokens", type=int, default=256)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--salt", default=None)
+    parser.add_argument(
+        "--thinking", action="store_true",
+        help="leave thinking on and let requests stop early; realistic but high variance",
+    )
     args = parser.parse_args()
 
     token = os.environ.get("BENCH_TOKEN")
@@ -132,6 +144,7 @@ def main():
         cell = run_cell(
             base, args.model, token, concurrency,
             f"{salt_base}-c{concurrency}", args.tokens, args.timeout,
+            not args.thinking,
         )
         print(json.dumps(cell), flush=True)
 

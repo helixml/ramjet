@@ -81,6 +81,53 @@ content token, so it tracks how long the model reasoned rather than queueing
 delay. It is not comparable to the DeepSeek TTFT figures elsewhere in this
 journal.
 
+### Throughput tuning (same day)
+
+Aggregate throughput went from **~5950 to ~7800 tok/s at c256, +32%**, from a
+single change: `max_num_seqs` 64 -> 256. Two engines at 64 capped the stack at
+128 concurrent sequences, so at c256 half the load queued instead of batching.
+
+A `--max-num-batched-tokens` override was changed in the same restart and then
+isolated afterwards: 8192 measured 7789 and 7812 tok/s, 16384 measured 7845.
+That is noise, so the knob does not appear in the committed compose. The whole
+gain is attributable to the sequence cap.
+
+**The benchmark needed fixing before any of this was measurable.** With
+thinking on, requests stop early after a variable amount of reasoning, so cell
+wall-time tracked prompt luck rather than engine speed -- the same
+configuration and concurrency read 3693 tok/s and 1496 tok/s on consecutive
+sweeps. `bench/qwen_concurrency.py` now defaults to `ignore_eos` plus
+`min_tokens` with thinking off, which makes every request emit exactly
+`max_tokens`; token counts land on the nose (65,536 at c256) and repeats agree
+to within 1%. `--thinking` restores the realistic-but-noisy behaviour.
+
+**The first cell after an engine restart is not usable.** It ran 997 tok/s /
+65.7s where the following identical cells ran 7789 and 7812. An earlier sweep
+showed the same shape from the other direction: c256 read 5950 measured last
+and 2830 measured first. This is presumably graph capture or kernel selection
+for large-batch shapes. Operationally it means the first burst after a rolling
+restart is roughly 8x slower, and any benchmark must discard its first cell.
+
+**c512 is not a valid operating point.** It reaches ~9100 tok/s but the load
+balancer returns 8-9 `503 Service Unavailable` out of 512, about 1.6%, with no
+corresponding preemption or OOM in the engine logs. The shedding is on the
+proxy side under load and is not understood yet; it should be diagnosed before
+anyone treats 9100 as the headline number.
+
+**Stopped here on thermals, not on ideas.** GPU temperatures reached 77C during
+the c512 runs against a 78C abort ceiling, with AC repair still unconfirmed.
+They recovered to 67-73C once load stopped and no throttle reason was ever
+asserted. Two larger levers are consequently untested:
+
+- **Data parallelism instead of tensor parallelism.** 27B FP8 is ~28GB and each
+  GPU has 96GB, so the model fits on one card with room for KV. Eight
+  independent TP1 engines behind this load balancer would remove every NCCL
+  allreduce from the decode path, which for a model this size is usually worth
+  more than anything tuned above. mini-dynamo already fronts N upstreams.
+- **MTP speculative decoding.** The checkpoint ships `mtp.safetensors` and the
+  image registers `Qwen3_5MTP`. Expect this to help single-stream latency and
+  possibly to hurt saturated throughput, so it should be measured at both ends.
+
 **Vision works end to end.** A 128x128 solid-red PNG sent as a base64
 `image_url` part returns "Red" with 132 prompt tokens against 60 for the same
 text alone, so roughly 72 tokens of image. Verified identically against the

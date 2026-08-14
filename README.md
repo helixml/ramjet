@@ -120,6 +120,7 @@ closed and are not dependencies of ordinary serving.
 | --- | --- |
 | Deploy or roll back | [Docker Compose operator guide](deploy/dspark_0731/README.md) |
 | Configure the router | [Environment reference](docs/configuration.md) |
+| Serve a different model | [Model profiles](docs/models.md) |
 | Understand the design | [Architecture and routing model](DESIGN.md) |
 | Inspect current work | [Roadmap](ROADMAP.md) |
 
