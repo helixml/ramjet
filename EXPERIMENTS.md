@@ -1,5 +1,52 @@
 # node06 experiment journal
 
+## 2026-08-14 — Infernal r12 registry admission (GPU-free)
+
+Staged r12 admission artifacts entirely from registry metadata while the
+cooling moratorium is active. No image layers were pulled and node06 was not
+touched.
+
+**r12 is r11 plus exactly one vLLM PR.** Verified from the images' own
+`local-inference.*.integration.prs` labels rather than from the release notes:
+the vLLM set gains `308@053e6351d0b3b3e35c969c9e3933db64d30a7164` and loses
+nothing, while the b12x set is byte-identical (`145,146,148,149,150`) even
+though its tree/commit was rebuilt. LMCache is unchanged in both cache
+fingerprints. PR #308 records and zeroes recycled KV blocks for heterogeneous
+attention-cache specifications, which is a correctness fix for long-context
+token contamination, not a throughput change; upstream states performance was
+not swept.
+
+The rest of the delta is inert. Environment is 0 added, 0 removed, 22 changed,
+and all 22 are the versioned cache-path fingerprint moving from
+`vllm908522a320-b12x5d648d944a` to `vllmdc2934ef69-b12xd48c62bbbd` — no
+functional setting differs. CUDA 13.3, Torch 2.13.0, NCCL 2.31.2, FlashInfer
+0.6.18, InstantTensor 0.1.9, LMCache 0.5.2 and the base image are unchanged.
+`CUTLASS_DSL_VERSION` is 4.6.2 on both sides, so the r4→r11 effective-
+environment inconsistency recorded in AGENTS.md does not recur. Transfer cost
+is 18 candidate-only blobs at 2.47GiB against 61 shared blobs at 11.27GiB, so
+r11 must stay resident for Docker to reuse them.
+
+**r12 does not qualify our topology.** Upstream qualifies TP2/DCP1 on two GPUs
+and says so explicitly: r12 "does not qualify GLM-5.2, TP4, or alternate
+DeepSeek checkpoints". Its reference compose defaults `TP_SIZE=2`, `GPUS=0,1`,
+`BACKEND=b12x-a8`, `ALLREDUCE_MODE=auto`, `MAX_MODEL_LEN=131072`,
+`MAX_NUM_BATCHED_TOKENS=8192`, `GRAPH=auto`, plus host networking and IPC.
+node06 runs two TP4 pairs with `b12x-a16`, `nccl`, 393216 context, 4096 batched
+tokens, graph 96, bridge networking and explicit device IDs. So the whole
+serving stack sits outside r12's qualified envelope, and the trade is one
+correctness PR against exercising an unqualified tensor-parallel width on the
+production box. That is a decision to take before pulling, not after.
+
+`bench/infernal_registry_candidate.py` had the candidate name hard-coded to
+`infernal-r11-direct`; it now accepts a bounded `infernal-r<N>-direct` so each
+release can ship its own manifest. Both manifests validate against the live
+registry (r12 in 2.6s, r11 in 3.1s) and both compose validators pass; the r12
+validator is wired into both Drone pipelines. 399 Python tests pass.
+
+Not done, and each needs a supervised window: the pull, the
+`--validate-engine-args` runtime probe that would first surface the TP4 gap, a
+launcher-derived `serving-runtime.json`, and an `infernal-r12-b` gate profile.
+
 ## 2026-08-14 — rc6 gate reproduced, and the sustained-load thermal ceiling
 
 Second supervised window, authorized with an explicit instruction to abort on

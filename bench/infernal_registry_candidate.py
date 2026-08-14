@@ -16,6 +16,7 @@ DEFAULT_MANIFEST = (
     REPO_ROOT / "deploy/dspark_0731/infernal-r11-candidate/manifest.json"
 )
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+CANDIDATE_NAME = re.compile(r"infernal-r[1-9][0-9]{0,2}-direct")
 
 
 class CandidateError(RuntimeError):
@@ -154,7 +155,11 @@ def _validate_comparison(value):
 def validate_manifest(manifest):
     if manifest.get("schema_version") != 2:
         raise CandidateError("invalid_manifest", "schema_version")
-    if manifest.get("candidate") != "infernal-r11-direct":
+    # Bounded rather than a single hard-coded release: each Infernal candidate
+    # ships its own manifest, and r12 was the first to need a second name.
+    if not isinstance(manifest.get("candidate"), str) or CANDIDATE_NAME.fullmatch(
+        manifest["candidate"]
+    ) is None:
         raise CandidateError("invalid_manifest", "candidate")
     _image_contract(manifest.get("candidate_image"), "candidate_image")
     _image_contract(manifest.get("baseline_image"), "baseline_image")
