@@ -27,6 +27,31 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   silent. A loopback test proves upstream-body destruction plus inflight/load
   release; the production gate drained LB load and vLLM running state by the
   first 2.019s sample after a forced 2.000s timeout.
+- 🔨 **Fail-closed GPU experiment thermal admission.** r115 adds a generic
+  descendant-tree watchdog for sustained request-generating node06 benchmarks.
+  It requires exact stable GPU UUID/name identity and a cool start, samples
+  bounded temperature, utilization, memory, and power telemetry on a nominal
+  one-second poll with a two-second query bound, and cancels the benchmark tree
+  on a completed 78C reading or lost telemetry. Request workers get a separate
+  at-most-five-second cancellation grace, with earlier escalation on another
+  hot or lost sample;
+  the deployment owner may continue rollback for 780 seconds only through the
+  shadow gate's explicit rollback-owner mode. Telemetry continues while
+  available; loss kills request work without preempting bounded rollback;
+  direct/candidate roots remain request workers. Its owner-only append-only
+  JSONL journal fsyncs start, periodic
+  checkpoint, and final records with hashed UUIDs and bounded aggregates, never
+  the child command/environment. It is deliberately not treated as evidence
+  that chassis/passive cooling is healthy or that thermal slowdown did not
+  occur; facility/BMC airflow, coolant, and driver slowdown telemetry remain
+  separate.
+  The 104-source/100K gate now refuses to run outside the eight-GPU guard and
+  binds its ceiling into the qualified plan. Live completion remains open:
+  after cooling repair, capture idle evidence, qualify one TP4 pair, then a
+  bounded dual-pair cell before resuming long-context all-eight-GPU work. Before
+  admitting arbitrary third-party commands, replace the shim's reserved 77/78
+  status sentinels with a private status pipe; current candidate/shadow owners
+  use only 0/1/2 and are unaffected.
 - ✅ **Health-gated serving contract.** `/health` reports opaque per-replica
   health plus aggregate `ok|degraded|unhealthy` readiness, returning 503 only
   when no replica can serve. Known-unhealthy replicas are removed from every
@@ -384,7 +409,13 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   five-request deterministic agent smoke, then an optional code/prose c8 scout
   and only then the full matrix. Every boundary rejects restart drift and late
   JIT/CUDA/NCCL/OOM/Xid/runtime markers; successful stages resume only under
-  the identical hashed plan. A live r34 direct-engine smoke passed 5/5 in
+  the identical hashed plan. r115 additionally refuses every request-generating
+  stage outside the eight-GPU 78C-or-lower watchdog. Stable safety policy is
+  plan-bound while every result record links the fresh guard run ID, preserving
+  safe resume across watchdog invocations. Engine startup/model load remains
+  outside this wrapper and requires one-TP4 isolation plus manual BMC/driver
+  observation until a container-aware owner exists. A live r34 direct-engine
+  smoke passed 5/5 in
   2.99s and resumed without GPU traffic in 0.09s. This would have rejected r4
   before its 204-request performance matrix.
 - ✅ **node06 DSpark depth sweep (K5 vs K7).** K5 passed 10/10 gates and beat

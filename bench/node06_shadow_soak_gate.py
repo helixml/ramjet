@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 
+import node06_gpu_guard as gpu_guard
 import snapshot_recovery_gate as recovery
 
 
@@ -578,6 +579,7 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
             "compose_validator": recovery.file_digest(self.compose_validator),
             "candidate_image": self.args.candidate_image,
             "expected_baseline_image": self.args.expected_baseline_image,
+            "thermal_guard": dict(self.args.thermal_guard),
         }
         if self._bound_plan is not None and current != self._bound_plan:
             raise recovery.GateError(
@@ -1086,6 +1088,21 @@ def parser():
 
 
 def validate_args(args):
+    try:
+        guard = gpu_guard.validate_inherited_guard(
+            expected_gpus=8, maximum_abort_c=78
+        )
+    except gpu_guard.GuardError as error:
+        raise recovery.GateError(
+            "thermal_guard_required",
+            "shadow soak requires an inherited eight-GPU thermal guard "
+            "capability at 78C or lower",
+        ) from error
+    args.thermal_guard = {
+        "expected_gpus": guard["expected_gpus"],
+        "abort_c": guard["abort_c"],
+        "run_id": guard["run_id"],
+    }
     if args.engine_metrics is None:
         args.engine_metrics = [
             "http://127.0.0.1:8012/metrics",

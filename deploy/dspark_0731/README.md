@@ -515,13 +515,30 @@ output path for every run; the gate never overwrites evidence.
 ### Detached exact-route shadow-soak gate
 
 The 104-source/100K compact-index qualification has a separate deployment
-owner, `bench/node06_shadow_soak_gate.py`. Launch it as a detached transient
+owner, `bench/node06_shadow_soak_gate.py`, and now refuses to start unless it is
+inside `bench/node06_gpu_guard.py`. Launch the pair as a detached transient
 systemd service using the command in `AGENTS.md`; do not attach the workload and
-rollback lifetime to SSH. It admits only an explicitly named immutable current
-baseline and local `sha256:` candidate, recreates only `ds4-loadbalancer`, and
-holds the common deployment lock until the exact snapshot-shadow/soak-off
-baseline has been restored and verified. Both engine and companion identities
-must remain unchanged.
+rollback lifetime to SSH. The outer guard observes all eight GPUs, admits a
+65C-or-cooler start, aborts at 78C or on lost telemetry, and owns a separate
+mode-0600 append-only JSONL journal. It fsyncs a start record, periodic
+checkpoints, and the final result; records contain stable GPU names and hashed
+UUID identities plus bounded aggregates, but never the child command or
+environment. Stdout/journald receives only run ID, status, reason, and exit
+code. A launch-gated exec shim arms parent-death cancellation before
+releasing the command and supervises escaped sessions, so loss of the outer
+sampler cannot leave a direct benchmark running. On abort it gives
+request-generating descendants at most five seconds to cancel, escalating on
+another hot or lost sample, before KILL while the inner deployment owner
+retains a separate 780-second rollback grace. Telemetry continues while
+available; loss kills request work without preempting bounded rollback. This is a last-resort
+request-generator stop, not proof of healthy passive cooling or absence of
+thermal slowdown; chassis airflow/coolant/inlet and BMC/driver slowdown
+monitoring remain independent. The rollback-owner exception is explicit and
+must not be used for direct or candidate request roots. The inner gate admits
+only an explicitly named immutable current baseline and local `sha256:` candidate, recreates only
+`ds4-loadbalancer`, and holds the common deployment lock until the exact
+snapshot-shadow/soak-off baseline has been restored and verified. Both engine
+and companion identities must remain unchanged.
 
 The child retries only the two proxy-signed pre-dispatch outcomes
 `tokenizer_unavailable` and `attestation_changed`. Generic 503s, upstream 503s,
@@ -530,3 +547,16 @@ requires the bounded client retry reasons and LB source-attempt counters to
 match exactly, so retry cannot conceal a serving failure. The gate reads the
 mode-0600 `.env` itself and never places the bearer in argv, systemd properties,
 or its content-free journal.
+
+The 2026-08-14 host loss occurred during the third consecutive long-context
+capacity/soak campaign after completed 711.81s and 1,801.80s all-eight-GPU
+cells. No thermal telemetry was captured, so causation is unknown. After the
+cooling repair, first run `bench/capture_node06.sh` to record idle per-GPU
+temperature/power plus the device-reported target, maximum-operating, slowdown,
+and shutdown thresholds, then run only one isolated TP4 pair under the guard.
+A dual-pair cell is admissible only after that controlled soak stays below the
+operational ceiling and independent BMC/driver evidence shows no slowdown; the
+core-temperature guard alone cannot establish that. Candidate container
+startup, model load, and JIT occur before the request gate and require one-TP4
+isolation plus a manual BMC/facility and driver watch until a container-aware
+rollout owner exists. The 52/64-app boundary remains last, not first.

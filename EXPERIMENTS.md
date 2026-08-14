@@ -5546,3 +5546,89 @@ and the locked release build in 6.11s wall with 251MiB peak compiler RSS. The
 five-case agent corpus plus all 280 Python tests passed in 4.06s, all four
 deployment validators plus host-script syntax passed in 0.82s, and the exact
 image/cache probes plus canonical generation comparison passed in 3.91s.
+
+## 2026-08-14 — r115 fail-closed GPU thermal experiment guard
+
+node06's cooling failed after the r105 workload and the host remained offline.
+The closest admitted history was thermally substantial: the completed 52-app
+cell ran 104 long-context requests for 711.81s and processed 15.15M prompt
+tokens; the completed 64-app cell ran 128 requests for 1,801.80s and processed
+18.64M. Both repeatedly prefetched roughly 145.6K-token prefixes across the two
+TP4 replicas. r105 then began another matched 104-request source workload and
+lost host connectivity around request 96. No temperature/power/fan telemetry
+was captured, and the completed cells had no Xid, CUDA, NCCL, OOM, restart, or
+fatal-runtime markers. The evidence therefore says the tests imposed sustained
+all-eight-GPU load, but cannot attribute the cooling failure to software.
+NVIDIA specifies the RTX PRO 6000 Blackwell Server Edition as passively cooled
+and configurable from 400W to 600W per board, so eight cards represent a
+3.2-4.8kW GPU power envelope before the rest of the server. Actual draw during
+these cells was not captured. The product and `nvidia-smi` documentation are:
+<https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-6000-family/>
+and <https://docs.nvidia.com/deploy/nvidia-smi/index.html>.
+
+r115 adds `bench/node06_gpu_guard.py` as the required outer owner for sustained
+request-generating GPU benchmarks. It validates an exact default-eight GPU
+inventory with stable UUID/name identity, waits up to five minutes for every
+GPU to reach a conservative 65C cool-start ceiling, and then samples per-GPU
+temperature, power, power fraction, GPU utilization, and memory occupancy plus
+box aggregates on a nominal one-second poll. Each query has a separate
+two-second bound, so worst-case loss detection is approximately three seconds,
+not an instantaneous one-second guarantee. Any completed 78C reading or
+malformed, missing, or timed-out `nvidia-smi` sample cancels the complete
+benchmark descendant tree.
+On an abort request-generating descendants get a separate at-most-five-second
+cancellation grace before KILL; a subsequent hot or lost sample escalates
+sooner, while the deployment owner may retain a 780-second
+rollback grace. Telemetry continues while available; loss immediately kills
+request work but leaves the owner its bounded baseline-restoration grace. This stays below systemd's
+900-second `TimeoutStopSec`, avoiding a race with baseline restoration. The
+rollback-owner exception is explicit and reserved for the shadow gate; direct
+and candidate roots remain request work and receive only that bounded grace.
+The
+mode-0600, create-once journal is append-only JSONL in an owner-only directory:
+it fsyncs a start record, periodic checkpoints, and the final result. Records
+contain stable GPU names and hashed UUID identities plus bounded aggregates,
+thresholds, reason, label, timing, and child exit status; they never record argv
+or the environment. A crash can truncate only the last line rather than erase
+all prior telemetry. Stdout emits only run ID, status, reason, and exit code,
+so journald does not duplicate the hardware fingerprint or telemetry.
+
+This wrapper is only a last-resort request-generator stop. The server edition
+is passively cooled, and `nvidia-smi` core sensors do not prove chassis airflow,
+inlet/exhaust temperature, coolant state, unsupported board/memory sensors, or
+the absence of thermal slowdown. Cooling repair, BMC/facility validation, and
+independent inspection of driver slowdown reasons remain external
+prerequisites.
+
+The wrapper releases a command only after the outer process has installed its
+descendant-tree owner. A universal exec shim arms parent-death handling before
+launch, latches termination without interrupting child registration, supervises new
+sessions as a subreaper, and forwards a sealed fresh capability to guard-aware
+candidate/shadow owners. A regression SIGKILLs the outer guard and proves the
+active candidate-owned request process stops; an injected tree-construction
+failure proves the launch gate never releases the command.
+
+The especially heavy 104-source/100K shadow gate and every fail-fast engine
+candidate request stage now refuse to start unless they inherit the live guard
+capability for all eight GPUs and an abort ceiling at or below 78C. Stable
+policy is plan-bound; every candidate record separately links its fresh guard
+run ID so a safe resume can use a new thermal journal. Candidate container startup, model
+load, and JIT happen before `candidate_gate.py`, so this wrapper cannot protect
+that phase. Until a container-aware rollout owner exists, candidate startup
+requires one-TP4 isolation plus a manual BMC/facility and driver-telemetry
+watch. Twenty-one focused guard tests plus the
+existing shadow-gate suite cover exact telemetry parsing, internally
+inconsistent data, cool-start rejection before child launch, successful child
+exit with a final sample, thermal and telemetry-loss descendant-tree
+cancellation, journal non-overwrite/permissions, and threshold policy. This is
+local safety qualification only. Once cooling is repaired, the restart sequence
+is idle read-only evidence including device-reported thermal thresholds, one
+isolated TP4 soak, then a bounded dual-pair cell; no
+52/64-app repeat is admissible before those gates pass.
+
+The final local gate passed formatting, warning-denied Clippy, all 412 Rust
+tests, and the warm locked release build in 8.07s wall; all 306 Python tests in
+6.95s; and the five-case agent corpus, four production Compose validators,
+capture-script syntax, and diff checks in 0.78s. The focused 51-test
+guard/candidate/shadow loop took 3.43s, dominated by real parent-death and
+process-tree regressions. No GPU or remote host was touched.

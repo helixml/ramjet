@@ -13,6 +13,14 @@ printf 'compose_sha256='; sha256sum docker-compose.yaml | awk '{print $1}'
 printf 'driver='; nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1
 printf 'host_memory='; free -h | awk 'NR==2{print $2}'
 printf 'numa_nodes='; lscpu | awk -F: '/NUMA node\(s\)/{gsub(/ /,"",$2); print $2}'
+printf '%s\n' 'gpu_telemetry_begin'
+nvidia-smi \
+  --query-gpu=index,uuid,name,temperature.gpu,power.draw,power.limit,utilization.gpu,utilization.memory,memory.used,memory.total \
+  --format=csv,noheader,nounits
+printf '%s\n' 'gpu_telemetry_end'
+printf '%s\n' 'gpu_thermal_power_limits_begin'
+nvidia-smi -q -d TEMPERATURE,POWER
+printf '%s\n' 'gpu_thermal_power_limits_end'
 
 for container in dspark-0731 dspark-0731-b; do
   image=$(docker inspect -f '{{.Config.Image}}' "$container")
