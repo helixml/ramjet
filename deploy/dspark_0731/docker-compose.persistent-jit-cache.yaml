@@ -1,0 +1,26 @@
+# Optional, image-specific persistent JIT/autotune cache overlay.
+#
+# This overlay is deliberately separate from the serving stack. It may be used
+# only with the exact r34 image and only after both host directories pass
+# validate-persistent-jit-cache-host.sh. Distinct engine directories prevent
+# concurrent compiler writers from corrupting a shared cache.
+services:
+  dspark-0731:
+    image: voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b
+    volumes:
+      - type: bind
+        source: /prod/mini-dynamo/jit-cache/vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8/engine-a
+        target: /cache/jit
+        read_only: false
+        bind:
+          create_host_path: false
+
+  dspark-0731-b:
+    image: voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b
+    volumes:
+      - type: bind
+        source: /prod/mini-dynamo/jit-cache/vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8/engine-b
+        target: /cache/jit
+        read_only: false
+        bind:
+          create_host_path: false
