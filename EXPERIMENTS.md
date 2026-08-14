@@ -1,5 +1,111 @@
 # node06 experiment journal
 
+## 2026-08-14 — Qwen3.8-27B-FP8 replaces DeepSeek-V4-Flash on node06
+
+Brought the whole serving stack over to `Qwen/Qwen3.8-27B-FP8` (vision-language)
+at the user's explicit direction, after they authorised engine runs on an
+otherwise-idle node06. No production traffic was being served. The AC repair
+was **not** confirmed, so the 65C start gate and 78C abort ceiling were left
+untouched and sustained load was kept to short cells; peak observed was 70C.
+
+**No new engine image was needed.** Qwen3.8-27B declares
+`architectures: ["Qwen3_5ForConditionalGeneration"]` (`model_type` `qwen3_5`),
+and the pinned r34 image already registers that architecture among 362. This
+was checked from registry/config metadata before anything was pulled or
+stopped. Weights are ~31GB and `/prod` had 1.9T free, so the DeepSeek weights
+stayed exactly where they were; nothing was moved or deleted.
+
+The engines deliberately do **not** use `serve-ds4-flash.sh`. That launcher is
+DeepSeek/DSpark-specific (`MODE=dspark`, `BACKEND=b12x-a16`, speculative
+depth). Qwen runs plain `vllm serve` with an explicit argv in
+`deploy/qwen38_27b/docker-compose.yaml`, so every setting is visible in one
+place.
+
+**Topology and cost.** Two TP4 engines mirroring the DeepSeek layout: A on
+GPUs 0-3 (:8012), B on GPUs 4-7 (:8013), both behind the load balancer on
+:8006. Each engine reports a **4,901,554-token GPU KV cache** at the model's
+native 262144 window, using 87.8GB/GPU at `gpu-memory-utilization=0.90`. Engine
+init took 310-334s, of which 152-169s was compilation.
+
+**Block size is 784 tokens, not 256.** The engine logs
+`Setting attention block size to 784 tokens to ensure that attention page size
+is >= mamba page size` — the Gated DeltaNet state forces the attention page
+up. This is the single most consequential difference for this load balancer:
+AGENTS.md's rule that a request needs more than 256 prompt tokens to emit a KV
+event becomes **more than 784 tokens** for Qwen, and prefix sharing is
+correspondingly coarser.
+
+**KV cache events do work on this hybrid model**, which closes the open
+question in issue #167. A 6,321-token prompt sent directly to engine B moved
+`ds4proxy_kv_event_blocks_total{action="stored"}` from 0 to 8, and
+6321/784 = 8.06 matches exactly. Low counters during the concurrency sweep were
+not a defect: those prompts were 60-100 tokens, far below one 784-token block,
+so no full block ever formed. Prefix caching itself is plainly effective — a
+repeated 12,025-token prefix went from 1.31s cold to 0.14s warm, a 9.4x
+improvement.
+
+Two caveats that stop this being a clean win. `usage.prompt_tokens_details` is
+`null` on every response, so `cached_tokens` is unavailable and `cachebench.py`
+reconciliation cannot work as written against this engine. The
+`vllm:gpu_prefix_cache_queries_total` counters are absent as well; only
+`external_prefix_cache_*` exist and they stay at zero. Cache accounting for
+Qwen therefore has no engine-native source yet.
+
+**A reasoning parser is mandatory.** Without `--reasoning-parser=qwen3` the
+model's entire `<think>` block is emitted inside `content`, so every client
+sees raw chain-of-thought with a stray `</think>` in the middle of the answer.
+The parser registers lazily in this image under the name `qwen3`; with it,
+`content` is clean and Helix receives `reasoning_content` separately.
+`--tool-call-parser=qwen3_xml` and `--enable-auto-tool-choice` are set on the
+same grounds but are not yet exercised by a test.
+
+**Concurrency (warm, through the LB, 256 output tokens/request).** The first
+sweep was discarded: its c8 cell read 41.9 tok/s with a 26.5s TTFT while c16
+did 3.3s, and reruns gave 318-384 tok/s. That was first-traffic autotuning, not
+load. Clean warm sweep, zero errors, upstream split exactly balanced at every
+level:
+
+| concurrency | output tok/s | wall | split |
+|---|---|---|---|
+| 1 | 75.5 | 3.39s | 1/0 |
+| 4 | 262.1 | 3.91s | 2/2 |
+| 8 | 384.8 | 5.32s | 4/4 |
+| 16 | 1247.8 | 3.28s | 8/8 |
+| 32 | 2180.0 | 3.74s | 8/8 |
+| 64 | 3692.8 | 4.43s | 32/32 |
+
+The c8 cell remains slower than c16 across repeats, which is not explained by
+load and is not claimed to be. The TTFT column is omitted deliberately: with
+thinking on by default, the measured "first token" is the first *post-thinking*
+content token, so it tracks how long the model reasoned rather than queueing
+delay. It is not comparable to the DeepSeek TTFT figures elsewhere in this
+journal.
+
+**Vision works end to end.** A 128x128 solid-red PNG sent as a base64
+`image_url` part returns "Red" with 132 prompt tokens against 60 for the same
+text alone, so roughly 72 tokens of image. Verified identically against the
+engine directly, through the load balancer, and through Caddy. This is the
+path that the `flatten_content_parts` fix protects: before it, the sanitizer
+rewrote the forwarded body and the image was silently deleted.
+
+**Helix integration.** Caddy gained a `/qwen3.8-27b/*` route to the same
+balancer, validated and reloaded with the previous config backed up. Helix
+provider `qwen38-node06` (`pe_01m012yhxyrax456npd50esf5k`) points at
+`http://100.89.187.17/qwen3.8-27b/v1`, and app
+`app_01m01302yyvrqawv7vwk715atw` binds it in `org_01kx8crck2r9j31kts1gbew9an`.
+A real `POST /api/v1/sessions/chat` returned "Tokyo" with `reasoning_content`
+correctly separated. Note that `POST /v1/chat/completions` without an org
+fails with `failed to check balance: org_id not specified`; the session path
+is the one that works.
+
+**Not done.** Local attested tokenization stays off (`MD_TOKENIZER_MODE=off`,
+`MD_EXACT_ROUTE_MODE=off`): a Qwen compatibility manifest and a pinned chat
+template digest do not exist yet, and the model ships its template as a
+standalone `chat_template.jinja` rather than inside `tokenizer_config.json`,
+which `load_chat_template` does not yet read. Tool calling is configured but
+untested. The DeepSeek stack is stopped, not deleted, and its weights and
+compose file are intact for rollback.
+
 ## 2026-08-14 — Infernal r12 registry admission (GPU-free)
 
 Staged r12 admission artifacts entirely from registry metadata while the
