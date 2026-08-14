@@ -95,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
 
     let probe = tokio::spawn(proxy.clone().probe_loop());
     let dspark_guard = tokio::spawn(proxy.clone().dspark_guard_loop());
+    let idle_drain = tokio::spawn(proxy.clone().idle_drain_loop());
     let mut api_shutdown = shutdown_tx.subscribe();
     let mut metrics_shutdown = shutdown_tx.subscribe();
     let api_server = axum::serve(api_listener, api).with_graceful_shutdown(async move {
@@ -131,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
     }
     probe.abort();
     dspark_guard.abort();
+    idle_drain.abort();
     kv_consumers.shutdown().await;
     snapshot_consumers.shutdown().await;
     Ok(())
@@ -184,6 +186,12 @@ fn log_startup(config: &Config) {
         snapshot_route_mode = ?config.snapshot_route_mode,
         snapshot_route_sources = config.snapshot_route_sources.len(),
         snapshot_route_attestation_refresh_ms = config.snapshot_route_attestation_refresh_ms,
+        idle_drain_mode = config.idle_drain.mode.label(),
+        idle_drain_idle_after_ms = config.idle_drain.idle_after.as_millis(),
+        idle_drain_min_warm = config.idle_drain.min_warm,
+        idle_drain_cooldown_ms = config.idle_drain.cooldown.as_millis(),
+        idle_drain_grace_ms = config.idle_drain.drain_grace.as_millis(),
+        idle_drain_interval_ms = config.idle_drain_interval_ms,
         "mini-dynamo up: API :8000, metrics :9090"
     );
 }

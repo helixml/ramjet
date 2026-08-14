@@ -2,10 +2,13 @@ use std::{
     collections::HashSet,
     env, fmt,
     path::{Component, Path, PathBuf},
+    time::Duration,
 };
 
 use thiserror::Error;
 use url::Url;
+
+use crate::idle_drain::{IdleDrainConfig, IdleDrainMode};
 
 const MAX_SNAPSHOT_ROUTE_SOCKET_PATH_BYTES: usize = 64;
 const MAX_SNAPSHOT_ROUTE_PATH_BYTES: usize = 4_096;
@@ -18,6 +21,12 @@ const MAX_SHADOW_SOAK_TOKEN_BYTES: usize = 256 << 20;
 const MAX_SHADOW_SOAK_TIMEOUT_MS: usize = 15 * 60 * 1_000;
 const MAX_UPSTREAM_ADMISSION_TIMEOUT_MS: usize = 30_000;
 const MAX_DSPARK_GUARD_INTERVAL_MS: usize = 60_000;
+/// A day of quiet is far beyond any useful setting and keeps the millisecond
+/// arithmetic well clear of overflow.
+const MAX_IDLE_DRAIN_MS: usize = 24 * 60 * 60 * 1_000;
+const MIN_IDLE_DRAIN_IDLE_AFTER_MS: usize = 60_000;
+const MAX_IDLE_DRAIN_INTERVAL_MS: usize = 300_000;
+const MIN_IDLE_DRAIN_INTERVAL_MS: usize = 1_000;
 const MIN_DSPARK_GUARD_INTERVAL_MS: usize = 1_000;
 const MAX_DSPARK_GUARD_CONSECUTIVE_WINDOWS: usize = 12;
 const MAX_DSPARK_GUARD_MIN_PROPOSED_TOKENS: usize = 10_000_000;
@@ -39,6 +48,8 @@ pub struct Config {
     pub dspark_guard_state_path: Option<PathBuf>,
     pub dspark_guard_state_owner_uid: u32,
     pub dspark_guard_state_group_gid: u32,
+    pub idle_drain: IdleDrainConfig,
+    pub idle_drain_interval_ms: usize,
     pub max_tokens_strip: i64,
     pub advertise_ctx_margin: i64,
     pub route_alpha: f64,
@@ -471,6 +482,7 @@ impl Config {
             &snapshot_route,
             upstream_token.is_some(),
         )?;
+        let idle_drain = idle_drain_settings(&mut get, upstreams.len())?;
 
         Ok(Self {
             upstreams,
@@ -490,6 +502,23 @@ impl Config {
             dspark_guard_state_path,
             dspark_guard_state_owner_uid,
             dspark_guard_state_group_gid,
+            idle_drain,
+            idle_drain_interval_ms: {
+                let interval = bounded_positive(
+                    &mut get,
+                    "DS4_IDLE_DRAIN_INTERVAL_MS",
+                    15_000,
+                    MAX_IDLE_DRAIN_INTERVAL_MS,
+                )?;
+                if interval < MIN_IDLE_DRAIN_INTERVAL_MS {
+                    return Err(invalid(
+                        "DS4_IDLE_DRAIN_INTERVAL_MS",
+                        interval.to_string(),
+                        "an integer from 1000 through 300000",
+                    ));
+                }
+                interval
+            },
             max_tokens_strip: parse(&mut get, "DS4_MAX_TOKENS_STRIP", 100_000, "an integer")?,
             advertise_ctx_margin: parse(
                 &mut get,
@@ -1483,11 +1512,228 @@ fn invalid(key: &'static str, value: String, reason: &'static str) -> ConfigErro
     ConfigError::InvalidValue { key, value, reason }
 }
 
+/// Widens a bounds-checked millisecond setting. Every caller has already been
+/// clamped to [`MAX_IDLE_DRAIN_MS`], so saturation is unreachable.
+fn ms_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+/// Parses the idle-drain policy.
+///
+/// Draining is rejected outright on a single-upstream deployment: there is no
+/// replica to fall back to, so the only reachable outcome would be parking the
+/// engine that serves every request.
+fn idle_drain_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    upstreams: usize,
+) -> Result<IdleDrainConfig, ConfigError> {
+    let mode = match get("DS4_IDLE_DRAIN_MODE").as_deref().unwrap_or("off") {
+        "off" => IdleDrainMode::Off,
+        "observe" => IdleDrainMode::Observe,
+        "drain" => IdleDrainMode::Drain,
+        value => {
+            return Err(invalid(
+                "DS4_IDLE_DRAIN_MODE",
+                value.to_owned(),
+                "off, observe, or drain",
+            ));
+        }
+    };
+    if mode == IdleDrainMode::Drain && upstreams < 2 {
+        return Err(invalid(
+            "DS4_IDLE_DRAIN_MODE",
+            "drain".to_owned(),
+            "drain requires at least two DS4_UPSTREAM replicas",
+        ));
+    }
+
+    let idle_after_ms = bounded_positive(
+        get,
+        "DS4_IDLE_DRAIN_IDLE_AFTER_MS",
+        900_000,
+        MAX_IDLE_DRAIN_MS,
+    )?;
+    if idle_after_ms < MIN_IDLE_DRAIN_IDLE_AFTER_MS {
+        return Err(invalid(
+            "DS4_IDLE_DRAIN_IDLE_AFTER_MS",
+            idle_after_ms.to_string(),
+            "at least 60000; a shorter window parks engines between ordinary requests",
+        ));
+    }
+    let cooldown_ms = bounded_positive(
+        get,
+        "DS4_IDLE_DRAIN_COOLDOWN_MS",
+        300_000,
+        MAX_IDLE_DRAIN_MS,
+    )?;
+    let drain_grace_ms =
+        bounded_positive(get, "DS4_IDLE_DRAIN_GRACE_MS", 30_000, MAX_IDLE_DRAIN_MS)?;
+
+    // The warm floor may equal the fleet size, which simply disables parking.
+    // It may never be zero: something must stay warm to answer the next
+    // request, and that invariant is the whole reason this policy is safe.
+    let min_warm = positive(get, "DS4_IDLE_DRAIN_MIN_WARM", 1)?;
+    if min_warm > upstreams {
+        return Err(invalid(
+            "DS4_IDLE_DRAIN_MIN_WARM",
+            min_warm.to_string(),
+            "at most the number of DS4_UPSTREAM replicas",
+        ));
+    }
+
+    Ok(IdleDrainConfig {
+        mode,
+        idle_after: Duration::from_millis(ms_to_u64(idle_after_ms)),
+        min_warm,
+        cooldown: Duration::from_millis(ms_to_u64(cooldown_ms)),
+        drain_grace: Duration::from_millis(ms_to_u64(drain_grace_ms)),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    fn two_upstreams(extra: &[(&'static str, &'static str)]) -> Result<Config, ConfigError> {
+        let overrides: HashMap<&str, &str> = extra.iter().copied().collect();
+        Config::from_lookup(|key| match key {
+            "DS4_UPSTREAM" => Some("http://a:8000,http://b:8000".to_owned()),
+            other => overrides.get(other).map(|value| (*value).to_owned()),
+        })
+    }
+
+    #[test]
+    fn idle_drain_defaults_to_off() {
+        let config = Config::from_lookup(|_| None).unwrap();
+        assert_eq!(config.idle_drain.mode, IdleDrainMode::Off);
+        assert!(!config.idle_drain.mode.enabled());
+        assert_eq!(config.idle_drain.min_warm, 1);
+        assert_eq!(config.idle_drain.idle_after, Duration::from_mins(15));
+        assert_eq!(config.idle_drain_interval_ms, 15_000);
+    }
+
+    #[test]
+    fn idle_drain_rejects_draining_a_single_upstream_deployment() {
+        let error = Config::from_lookup(|key| match key {
+            "DS4_UPSTREAM" => Some("http://only:8000".to_owned()),
+            "DS4_IDLE_DRAIN_MODE" => Some("drain".to_owned()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "DS4_IDLE_DRAIN_MODE",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn idle_drain_observe_is_allowed_on_a_single_upstream() {
+        // Observing cannot fence anything, so it is safe to qualify anywhere.
+        let config = Config::from_lookup(|key| match key {
+            "DS4_UPSTREAM" => Some("http://only:8000".to_owned()),
+            "DS4_IDLE_DRAIN_MODE" => Some("observe".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(config.idle_drain.mode, IdleDrainMode::Observe);
+    }
+
+    #[test]
+    fn idle_drain_rejects_an_unknown_mode() {
+        let error = two_upstreams(&[("DS4_IDLE_DRAIN_MODE", "stop")]).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "DS4_IDLE_DRAIN_MODE",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn idle_drain_rejects_a_window_short_enough_to_park_between_requests() {
+        let error = two_upstreams(&[
+            ("DS4_IDLE_DRAIN_MODE", "drain"),
+            ("DS4_IDLE_DRAIN_IDLE_AFTER_MS", "5000"),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "DS4_IDLE_DRAIN_IDLE_AFTER_MS",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn idle_drain_rejects_a_zero_or_oversized_warm_floor() {
+        let zero = two_upstreams(&[
+            ("DS4_IDLE_DRAIN_MODE", "drain"),
+            ("DS4_IDLE_DRAIN_MIN_WARM", "0"),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            zero,
+            ConfigError::InvalidValue {
+                key: "DS4_IDLE_DRAIN_MIN_WARM",
+                ..
+            }
+        ));
+        let oversized = two_upstreams(&[
+            ("DS4_IDLE_DRAIN_MODE", "drain"),
+            ("DS4_IDLE_DRAIN_MIN_WARM", "3"),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            oversized,
+            ConfigError::InvalidValue {
+                key: "DS4_IDLE_DRAIN_MIN_WARM",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn idle_drain_accepts_a_tuned_two_engine_policy() {
+        let config = two_upstreams(&[
+            ("DS4_IDLE_DRAIN_MODE", "drain"),
+            ("DS4_IDLE_DRAIN_IDLE_AFTER_MS", "600000"),
+            ("DS4_IDLE_DRAIN_COOLDOWN_MS", "120000"),
+            ("DS4_IDLE_DRAIN_GRACE_MS", "45000"),
+            ("DS4_IDLE_DRAIN_MIN_WARM", "1"),
+            ("DS4_IDLE_DRAIN_INTERVAL_MS", "30000"),
+        ])
+        .unwrap();
+        assert_eq!(config.idle_drain.mode, IdleDrainMode::Drain);
+        assert_eq!(config.idle_drain.idle_after, Duration::from_mins(10));
+        assert_eq!(config.idle_drain.cooldown, Duration::from_mins(2));
+        assert_eq!(config.idle_drain.drain_grace, Duration::from_secs(45));
+        assert_eq!(config.idle_drain_interval_ms, 30_000);
+    }
+
+    #[test]
+    fn idle_drain_rejects_an_evaluation_interval_outside_its_bounds() {
+        for value in ["500", "600000"] {
+            let error = two_upstreams(&[
+                ("DS4_IDLE_DRAIN_MODE", "drain"),
+                ("DS4_IDLE_DRAIN_INTERVAL_MS", value),
+            ])
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                ConfigError::InvalidValue {
+                    key: "DS4_IDLE_DRAIN_INTERVAL_MS",
+                    ..
+                }
+            ));
+        }
+    }
 
     #[test]
     fn defaults_match_go_contract() {

@@ -403,6 +403,25 @@ lock. A corrupt existing output, older process start, or changed evidence for
 the same process must fail closed without replacement. Do not turn transient
 capture metadata such as capture time into incarnation identity.
 
+`idle_drain` decides when one engine may be parked during a quiet window; it
+never stops anything. The LB sits in the production request path and must not
+hold a Docker socket, which is root-equivalent on the host: the policy publishes
+`desired_running` and `safe_to_stop` per upstream and a separately privileged
+actor converges the containers. Keep the asymmetry — draining is gated by a
+cooldown and the warm floor, resuming is immediate and bypasses every rate
+limit, because being short of capacity costs a five-minute cold start while
+parking late costs watt-minutes. An unhealthy replica never counts toward the
+warm floor, the floor is clamped to at least one, and `drain` mode is rejected
+outright below two upstreams. Keep the drain flag separate from health in the
+router: `upstream_up` must keep reporting reachability so a parked replica is
+never confused with a failing one. Qualify with `DS4_IDLE_DRAIN_MODE=observe`
+against real traffic before enforcing; observe advances the state machine and
+publishes intent but fences nothing and never reports `safe_to_stop`.
+
+```bash
+cargo test --locked idle_drain
+```
+
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
 Validate the trusted socket parent on every connect, use a fresh OS-random

@@ -16,6 +16,7 @@ pub mod dspark_guard_store;
 pub mod exact_index;
 pub mod exact_route_inventory;
 pub mod exact_shadow;
+pub mod idle_drain;
 pub mod journal;
 pub mod kv_consumer;
 pub mod kv_fence;

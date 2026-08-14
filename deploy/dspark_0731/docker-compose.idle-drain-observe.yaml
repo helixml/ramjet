@@ -1,0 +1,36 @@
+# Observation overlay for the idle-driven single-engine drain policy.
+#
+# Two resident TP4 engines draw about 800W on node06 regardless of load, and an
+# idle engine still holds its weights and KV arena. Parking one during a
+# genuinely quiet window recovers roughly half of that with no first-token
+# penalty, because the surviving replica stays warm.
+#
+# This overlay is deliberately observe-only. It evaluates the policy and
+# publishes what it *would* park, but never withholds a replica from routing,
+# so it can be qualified against real traffic with no serving consequence.
+# Promote to enforcement only after a soak shows the exported drain state
+# matches the traffic pattern you expect. See
+# docker-compose.idle-drain-enforce.yaml.
+#
+# Nothing here stops a container. The load balancer publishes intent; a
+# separately privileged actor converges the engines onto it. Do not give the
+# load balancer a Docker socket: it sits in the production request path and a
+# socket there is root-equivalent on the host.
+services:
+  ds4-loadbalancer:
+    environment:
+      DS4_IDLE_DRAIN_MODE: observe
+      # Quiet period before the fleet counts as idle. Deliberately long: the
+      # cost of parking too eagerly is a five-minute cold start, and the cost
+      # of parking too late is a few hundred watt-minutes.
+      DS4_IDLE_DRAIN_IDLE_AFTER_MS: "900000"
+      # Replicas that must always stay warm. Never set this to zero; the
+      # binary clamps it to one regardless.
+      DS4_IDLE_DRAIN_MIN_WARM: "1"
+      # Minimum spacing between drain transitions, so the policy cannot flap
+      # across the idle threshold. Resuming always ignores this.
+      DS4_IDLE_DRAIN_COOLDOWN_MS: "300000"
+      # Quiet time a fenced replica must accumulate before it is reported safe
+      # to stop, covering requests already dispatched when the fence landed.
+      DS4_IDLE_DRAIN_GRACE_MS: "30000"
+      DS4_IDLE_DRAIN_INTERVAL_MS: "15000"

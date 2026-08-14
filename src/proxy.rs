@@ -30,6 +30,7 @@ use crate::{
     dspark_guard_store::{DsparkGuardStore, DsparkGuardStorePolicy},
     exact_route_inventory::ExactRouteInventory,
     exact_shadow::ExactRouteSnapshot,
+    idle_drain::{IdleDrainDecision, IdleDrainPolicy, UpstreamDrainState, UpstreamObservation},
     journal::{RouteAnnotations, RouteJournal},
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
@@ -111,6 +112,21 @@ struct Inner {
     tokenizer: TokenizerObserver,
     dspark_guards: Arc<[DsparkGuardReplica]>,
     dspark_guard_store: Option<Arc<DsparkGuardStore>>,
+    /// Idle-drain policy and the monotonic origin its millisecond clock is
+    /// measured from. Absent unless the policy is enabled, so the default build
+    /// carries no extra per-request work.
+    idle_drain: Option<IdleDrainState>,
+}
+
+struct IdleDrainState {
+    policy: Mutex<IdleDrainPolicy>,
+    origin: Instant,
+}
+
+impl IdleDrainState {
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
 }
 
 #[derive(Serialize)]
@@ -133,6 +149,11 @@ struct ReplicaHealth {
     inflight: usize,
     load_units: usize,
     approximate_index_entries: usize,
+    /// Idle-drain state. Reported alongside, never folded into, `healthy`: a
+    /// parked replica is reachable and healthy, it is simply not being routed
+    /// to, and an operator has to be able to tell those apart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idle_drain: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     exact_inventory: Option<ExactInventoryHealth>,
 }
@@ -773,6 +794,17 @@ impl Proxy {
                     .set(0.0);
             }
         }
+        let idle_drain = config.idle_drain.mode.enabled().then(|| {
+            let origin = Instant::now();
+            IdleDrainState {
+                policy: Mutex::new(IdleDrainPolicy::new(
+                    config.idle_drain,
+                    config.upstreams.len(),
+                    0,
+                )),
+                origin,
+            }
+        });
         Ok(Self {
             inner: Arc::new(Inner {
                 config,
@@ -785,6 +817,7 @@ impl Proxy {
                 tokenizer,
                 dspark_guards,
                 dspark_guard_store,
+                idle_drain,
             }),
         })
     }
@@ -855,6 +888,13 @@ impl Proxy {
                         );
                         let healthy =
                             reliability.effective_healthy && compatibility_attested.unwrap_or(true);
+                        let idle_drain = proxy.inner.idle_drain.as_ref().and_then(|state| {
+                            state
+                                .policy
+                                .lock()
+                                .state(index)
+                                .map(UpstreamDrainState::label)
+                        });
                         ReplicaHealth {
                             index,
                             healthy,
@@ -864,6 +904,7 @@ impl Proxy {
                             inflight,
                             load_units,
                             approximate_index_entries,
+                            idle_drain,
                             exact_inventory,
                         }
                     },
@@ -1007,6 +1048,9 @@ impl Proxy {
             .observe(usize_to_f64(body.len()));
         self.inner.metrics.inflight.inc();
         let inflight_guard = InflightGuard(GaugeHandle(self.inner.metrics.inflight.clone()));
+        // Recorded before dispatch so a parked replica resumes on the request
+        // that arrives during an idle window, not one round trip later.
+        self.observe_idle_drain_activity();
 
         self.record_decision(&decision);
         let journal_sequence = self.inner.journal.start(
@@ -1568,6 +1612,89 @@ impl Proxy {
         loop {
             interval.tick().await;
             self.probe_round().await;
+        }
+    }
+
+    /// Periodically re-evaluates the idle-drain policy and publishes its
+    /// conclusions. Returns immediately when the policy is disabled.
+    pub async fn idle_drain_loop(self) {
+        if self.inner.idle_drain.is_none() {
+            return;
+        }
+        let mut interval = dspark_poll_interval(Duration::from_millis(
+            u64::try_from(self.inner.config.idle_drain_interval_ms).unwrap_or(u64::MAX),
+        ));
+        loop {
+            interval.tick().await;
+            self.idle_drain_round();
+        }
+    }
+
+    /// Records that the fleet served a request, resuming any parked replica on
+    /// the next evaluation.
+    fn observe_idle_drain_activity(&self) {
+        if let Some(state) = self.inner.idle_drain.as_ref() {
+            let now_ms = state.now_ms();
+            state.policy.lock().observe_activity(now_ms);
+        }
+    }
+
+    /// One evaluation: sample every upstream, tick the policy, then apply the
+    /// result to routing and telemetry.
+    fn idle_drain_round(&self) {
+        let Some(state) = self.inner.idle_drain.as_ref() else {
+            return;
+        };
+        let observations = (0..self.inner.config.upstreams.len())
+            .map(|upstream| {
+                let (inflight, _, _, healthy) = self
+                    .inner
+                    .router
+                    .state(upstream)
+                    .unwrap_or((0, 0, 0, false));
+                UpstreamObservation { healthy, inflight }
+            })
+            .collect::<Vec<_>>();
+        let now_ms = state.now_ms();
+        let decision = state.policy.lock().tick(now_ms, &observations);
+        self.publish_idle_drain(&decision);
+    }
+
+    fn publish_idle_drain(&self, decision: &IdleDrainDecision) {
+        let metrics = &self.inner.metrics;
+        metrics.idle_drain_fleet_idle.set(f64::from(decision.idle));
+        for (upstream, intent) in decision.upstreams.iter().enumerate() {
+            let label = self.upstream_label(upstream);
+            // Routing authority is applied before telemetry so a scrape can
+            // never advertise a replica as parked while it is still routable.
+            if self.inner.config.idle_drain.mode.fences_routing() {
+                self.inner.router.set_drained(upstream, intent.fenced);
+            }
+            metrics
+                .idle_drain_state
+                .with_label_values(&[&label])
+                .set(intent.state.code());
+            metrics
+                .idle_drain_desired_running
+                .with_label_values(&[&label])
+                .set(f64::from(intent.desired_running));
+            metrics
+                .idle_drain_safe_to_stop
+                .with_label_values(&[&label])
+                .set(f64::from(intent.safe_to_stop));
+        }
+        for (upstream, state) in &decision.transitions {
+            let label = self.upstream_label(*upstream);
+            metrics
+                .idle_drain_transitions
+                .with_label_values(&[&label, state.label()])
+                .inc();
+            tracing::info!(
+                upstream = *upstream,
+                state = state.label(),
+                mode = self.inner.config.idle_drain.mode.label(),
+                "idle drain transition"
+            );
         }
     }
 
@@ -2243,6 +2370,212 @@ mod tests {
             affinity: config.affinity,
         }));
         Proxy::new(config, reqwest::Client::new(), metrics, router, inventories).unwrap()
+    }
+
+    /// Builds a proxy with the idle-drain policy configured, using the
+    /// shortest windows the config validator permits so tests stay fast.
+    fn idle_drain_proxy(upstreams: &[Url], mode: &str) -> Proxy {
+        let joined = upstreams
+            .iter()
+            .map(Url::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        let config = Config::from_lookup(|key| match key {
+            "DS4_UPSTREAM" => Some(joined.clone()),
+            "DS4_IDLE_DRAIN_MODE" => Some(mode.to_owned()),
+            // Shortest window the validator permits, so the injected clock
+            // only has to step a little past it.
+            "DS4_IDLE_DRAIN_IDLE_AFTER_MS" | "DS4_IDLE_DRAIN_COOLDOWN_MS" => {
+                Some("60000".to_owned())
+            }
+            "DS4_IDLE_DRAIN_GRACE_MS" => Some("1000".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        proxy_for_config(config, Arc::from([]))
+    }
+
+    fn upstreams_pair() -> Vec<Url> {
+        vec![
+            Url::parse("http://a:8000").unwrap(),
+            Url::parse("http://b:8000").unwrap(),
+        ]
+    }
+
+    /// Advances the policy's own clock without waiting in real time.
+    fn advance_idle_drain(proxy: &Proxy, ms: u64) {
+        let state = proxy.inner.idle_drain.as_ref().expect("policy enabled");
+        let observations = (0..proxy.inner.config.upstreams.len())
+            .map(|upstream| {
+                let (inflight, _, _, healthy) = proxy
+                    .inner
+                    .router
+                    .state(upstream)
+                    .unwrap_or((0, 0, 0, false));
+                UpstreamObservation { healthy, inflight }
+            })
+            .collect::<Vec<_>>();
+        let decision = state.policy.lock().tick(ms, &observations);
+        proxy.publish_idle_drain(&decision);
+    }
+
+    #[tokio::test]
+    async fn idle_drain_disabled_by_default_and_carries_no_state() {
+        let proxy = proxy_for(&upstreams_pair());
+        assert!(proxy.inner.idle_drain.is_none());
+        // The loop must return immediately rather than spin when disabled.
+        tokio::time::timeout(Duration::from_secs(1), proxy.clone().idle_drain_loop())
+            .await
+            .expect("disabled drain loop returns");
+    }
+
+    #[tokio::test]
+    async fn idle_drain_fences_one_replica_from_routing_after_the_idle_window() {
+        let proxy = idle_drain_proxy(&upstreams_pair(), "drain");
+        // Inside the window nothing is fenced.
+        advance_idle_drain(&proxy, 30_000);
+        assert!(!proxy.inner.router.drained(0));
+        assert!(!proxy.inner.router.drained(1));
+
+        advance_idle_drain(&proxy, 90_000);
+        assert!(!proxy.inner.router.drained(0), "one replica stays warm");
+        assert!(proxy.inner.router.drained(1));
+
+        // The fenced replica must not be selectable for dispatch.
+        assert!(proxy.inner.router.acquire_if_healthy(1, 1).is_none());
+        assert!(proxy.inner.router.acquire_if_healthy(0, 1).is_some());
+    }
+
+    #[tokio::test]
+    async fn idle_drain_observe_mode_never_fences_routing() {
+        let proxy = idle_drain_proxy(&upstreams_pair(), "observe");
+        advance_idle_drain(&proxy, 90_000);
+        advance_idle_drain(&proxy, 120_000);
+        // State advanced, but both replicas remain routable.
+        assert!(!proxy.inner.router.drained(0));
+        assert!(!proxy.inner.router.drained(1));
+        assert!(proxy.inner.router.acquire_if_healthy(1, 1).is_some());
+    }
+
+    /// Records activity on the policy's injected clock. Production calls
+    /// [`Proxy::observe_idle_drain_activity`], which reads the same monotonic
+    /// origin the loop ticks from; tests drive both explicitly so the two
+    /// cannot disagree.
+    fn observe_idle_drain_activity_at(proxy: &Proxy, ms: u64) {
+        proxy
+            .inner
+            .idle_drain
+            .as_ref()
+            .expect("policy enabled")
+            .policy
+            .lock()
+            .observe_activity(ms);
+    }
+
+    #[tokio::test]
+    async fn request_activity_resumes_a_fenced_replica() {
+        let proxy = idle_drain_proxy(&upstreams_pair(), "drain");
+        advance_idle_drain(&proxy, 90_000);
+        assert!(proxy.inner.router.drained(1));
+
+        observe_idle_drain_activity_at(&proxy, 90_050);
+        advance_idle_drain(&proxy, 90_100);
+        assert!(
+            !proxy.inner.router.drained(1),
+            "traffic must restore capacity immediately"
+        );
+        assert!(proxy.inner.router.acquire_if_healthy(1, 1).is_some());
+    }
+
+    #[tokio::test]
+    async fn serving_a_request_records_idle_drain_activity() {
+        let proxy = idle_drain_proxy(&upstreams_pair(), "drain");
+        let state = proxy.inner.idle_drain.as_ref().expect("policy enabled");
+        // The real request path stamps activity from the shared monotonic
+        // origin, which must be at or after the policy's construction point.
+        proxy.observe_idle_drain_activity();
+        let stamped = state.policy.lock().config().mode;
+        assert_eq!(stamped, crate::idle_drain::IdleDrainMode::Drain);
+        // A tick at that same origin sees a fleet that is not yet idle.
+        let observations = vec![
+            UpstreamObservation {
+                healthy: true,
+                inflight: 0,
+            };
+            2
+        ];
+        let decision = state.policy.lock().tick(state.now_ms(), &observations);
+        assert!(!decision.idle, "activity just recorded cannot be idle");
+        assert_eq!(decision.desired_running(), 2);
+    }
+
+    #[tokio::test]
+    async fn idle_drain_publishes_state_and_stop_intent_metrics() {
+        let proxy = idle_drain_proxy(&upstreams_pair(), "drain");
+        advance_idle_drain(&proxy, 90_000);
+        let metrics = &proxy.inner.metrics;
+        assert!((metrics.idle_drain_fleet_idle.get() - 1.0).abs() < f64::EPSILON);
+        let parked = metrics
+            .idle_drain_state
+            .with_label_values(&["http://b:8000"])
+            .get();
+        assert!((parked - 1.0).abs() < f64::EPSILON, "draining");
+        assert!(
+            (metrics
+                .idle_drain_desired_running
+                .with_label_values(&["http://b:8000"])
+                .get())
+            .abs()
+                < f64::EPSILON,
+            "policy no longer wants the parked engine running"
+        );
+        // Still draining, so stopping it is not yet safe.
+        assert!(
+            (metrics
+                .idle_drain_safe_to_stop
+                .with_label_values(&["http://b:8000"])
+                .get())
+            .abs()
+                < f64::EPSILON
+        );
+
+        // Past the grace period it becomes safe to stop.
+        advance_idle_drain(&proxy, 92_000);
+        assert!(
+            (metrics
+                .idle_drain_safe_to_stop
+                .with_label_values(&["http://b:8000"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+        // The warm replica is never reported stoppable.
+        assert!(
+            (metrics
+                .idle_drain_safe_to_stop
+                .with_label_values(&["http://a:8000"])
+                .get())
+            .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[tokio::test]
+    async fn health_reports_drain_state_without_marking_a_parked_replica_unhealthy() {
+        let proxy = idle_drain_proxy(&upstreams_pair(), "drain");
+        advance_idle_drain(&proxy, 90_000);
+        let response = Proxy::health(State(proxy.clone())).await;
+        let body = axum::body::to_bytes(response.into_body(), 64 << 10)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let replicas = value["replicas"].as_array().expect("replicas");
+        assert_eq!(replicas[0]["idle_drain"], "warm");
+        assert_eq!(replicas[1]["idle_drain"], "draining");
+        // A parked replica is still healthy; only its routing is withheld.
+        assert_eq!(replicas[1]["healthy"], true);
+        assert_eq!(value["status"], "ok");
     }
 
     fn guarded_proxy(upstreams: &[Url]) -> (Proxy, TestDsparkState) {
