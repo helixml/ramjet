@@ -17,14 +17,14 @@ class Node06OperationalMoratoriumTests(unittest.TestCase):
             "cooling_ac_failure_2026_08_14",
         )
 
-    def test_current_state_is_the_reviewed_supervised_lift(self):
-        # Guards the operational fact that the flag is global while lifted, so
-        # a stale False is standing permission for every caller. If this fails,
-        # the supervised window is over and the moratorium should be re-armed.
-        self.assertFalse(moratorium.MORATORIUM_ACTIVE)
-        self.assertIsNone(
+    def test_default_state_is_armed(self):
+        # The flag is global: a stale False is standing permission for every
+        # caller, not just the run it was lifted for. The supervised window of
+        # 2026-08-14 is closed, so the armed state is the committed default and
+        # any future run needs its own reviewed lift.
+        self.assertTrue(moratorium.MORATORIUM_ACTIVE)
+        with self.assertRaises(moratorium.MoratoriumError):
             moratorium.require_active_work_permitted("gpu-workload.ramped-load")
-        )
 
     def test_only_reviewed_inactive_state_permits_bounded_operation(self):
         with mock.patch.object(moratorium, "MORATORIUM_ACTIVE", False):
