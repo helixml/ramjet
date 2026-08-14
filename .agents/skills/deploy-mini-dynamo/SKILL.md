@@ -5,6 +5,13 @@ description: Deploy or upgrade mini-dynamo and OpenAI-compatible GPU engines on 
 
 # Deploy mini-dynamo
 
+For node06, the 2026-08-14 cooling/AC moratorium permits planning and GPU-free
+image/manifest/Compose validation only. Do not mutate its deployment, send a
+verification request, start/restart an engine, load a model, or run JIT/warmup
+even if the host returns. Resume only when the user authorizes a specific
+supervised window after the AC repair. Other explicitly authorized nodes retain
+the generic procedure below.
+
 Deploy a reproducible stack without assuming that an arbitrary node has the
 reference node06 topology.
 

@@ -119,8 +119,9 @@ PROCESS_PROBE = r'''import base64, hashlib, json, os, pathlib, stat, sys
 keys = json.loads(base64.b64decode(sys.argv[1]))
 artifacts = json.loads(base64.b64decode(sys.argv[2]))
 policy = json.loads(base64.b64decode(sys.argv[3]))
+proc_root = pathlib.Path(sys.argv[4] if len(sys.argv) > 4 else '/proc')
 matches = []
-for entry in pathlib.Path('/proc').iterdir():
+for entry in proc_root.iterdir():
     if not entry.name.isdigit():
         continue
     try:
@@ -139,7 +140,7 @@ if any(value.split('=', 1)[0] in {'--api-key', '--token', '--hf-token', '--autho
     raise SystemExit('sensitive serving option')
 stat_fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
 start_ticks = int(stat_fields[19])
-boot_seconds = next(int(line.split()[1]) for line in pathlib.Path('/proc/stat').read_text().splitlines() if line.startswith('btime '))
+boot_seconds = next(int(line.split()[1]) for line in (proc_root / 'stat').read_text().splitlines() if line.startswith('btime '))
 started_ns = boot_seconds * 1_000_000_000 + start_ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK')
 raw_environment = (entry / 'environ').read_bytes().rstrip(b'\0').split(b'\0')
 environment = {}
@@ -389,7 +390,7 @@ class SubprocessRunner:
         ).decode()
         result = self.run(
             ("docker", "exec", container, "python3", "-c", PROCESS_PROBE,
-             encoded_names, encoded_paths, encoded_policy)
+             encoded_names, encoded_paths, encoded_policy, "/proc")
         )
         if result.returncode != 0 or len(result.stdout) > 4096:
             raise GateError("live serving process inspection failed")

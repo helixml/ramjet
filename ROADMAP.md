@@ -4,6 +4,13 @@ Status legend: ✅ done · 🔨 in progress · ⬜ planned. Ordered by
 value-per-effort given the current deployment (2 vLLM+DSpark TP4 instances on
 node06). The design rationale for each lives in DESIGN.md.
 
+> **Active node06 moratorium (2026-08-14):** no request-generating workload,
+> vLLM start/restart, model load/JIT, or engine-candidate rollout may run even
+> if node06 returns. AC repair alone is insufficient. Live work resumes only
+> with explicit authorization for a specific supervised run after the repair.
+> Continue only GPU-free image/manifest, dry-run Compose, harness, CI, and
+> offline analysis work in the meantime.
+
 ## v0.1.0 — first public Rust release
 
 The release boundary is the production-qualified proxy: locality/load routing,
@@ -47,7 +54,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   separate.
   The 104-source/100K gate now refuses to run outside the eight-GPU guard and
   binds its ceiling into the qualified plan. Live completion remains open:
-  after cooling repair, capture idle evidence, qualify one TP4 pair, then a
+  after explicit supervised authorization following cooling repair, capture idle evidence, qualify one TP4 pair, then a
   bounded dual-pair cell before resuming long-context all-eight-GPU work. Before
   admitting arbitrary third-party commands, replace the shim's reserved 77/78
   status sentinels with a private status pipe; current candidate/shadow owners
@@ -112,8 +119,8 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   holds the common deployment lock; and rejects unreconciled native DSpark
   counters. Startup/model load and automatic rollback still require the future
   container-aware rollout owner.
-  This makes r11 a high-value candidate, not a performance claim. After cooling
-  repair: preflight engine arguments without GPUs, isolate one TP4 pair under
+  This makes r11 a high-value candidate, not a performance claim. After explicit
+  supervised authorization following cooling repair: preflight engine arguments without GPUs, isolate one TP4 pair under
   facility/BMC observation, then stop at the first failed five-request smoke,
   c8 code/prose scout, or full direct matrix gate. Pay for a two-round r34/r11
   crossover only if the scout is near the promotion threshold. Cache/locality

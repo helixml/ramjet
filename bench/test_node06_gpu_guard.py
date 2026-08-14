@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 
 import node06_gpu_guard as guard
+import node06_operational_moratorium as moratorium
 
 
 def records(path):
@@ -403,10 +404,19 @@ class Node06GpuGuardTests(unittest.TestCase):
             )
             request_pid_path = root / "request.pid"
             output = root / "guard.jsonl"
+            module_dir = str(pathlib.Path(guard.__file__).parent)
+            launcher = (
+                "import sys; sys.path.insert(0, sys.argv.pop(1)); "
+                "import node06_operational_moratorium as m; "
+                "m.MORATORIUM_ACTIVE=False; import node06_gpu_guard as g; "
+                "raise SystemExit(g.main(sys.argv[1:]))"
+            )
             process = subprocess.Popen(
                 [
                     sys.executable,
-                    guard.__file__,
+                    "-c",
+                    launcher,
+                    module_dir,
                     "--nvidia-smi",
                     str(nvidia_smi),
                     "--output",
@@ -555,7 +565,7 @@ class Node06GpuGuardTests(unittest.TestCase):
             output = root / "result.json"
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
                 io.StringIO()
-            ):
+            ), mock.patch.object(moratorium, "MORATORIUM_ACTIVE", False):
                 result = guard.main(
                     [
                         "--nvidia-smi",
@@ -572,6 +582,31 @@ class Node06GpuGuardTests(unittest.TestCase):
             record = final_record(output)
             self.assertEqual(record["status"], "passed")
             self.assertEqual(record["telemetry"]["samples"], 2)
+
+    def test_cli_moratorium_blocks_before_telemetry_or_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            output = root / "must-not-exist.jsonl"
+            telemetry = root / "must-not-run"
+            fake = root / "nvidia-smi"
+            fake.write_text(f"#!/bin/sh\ntouch {telemetry}\nexit 1\n")
+            fake.chmod(0o755)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                result = guard.main(
+                    [
+                        "--nvidia-smi",
+                        str(fake),
+                        "--output",
+                        str(output),
+                        "--",
+                        "true",
+                    ]
+                )
+            self.assertEqual(result, 2)
+            self.assertFalse(telemetry.exists())
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

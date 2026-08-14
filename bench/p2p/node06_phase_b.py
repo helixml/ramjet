@@ -27,6 +27,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from node06_operational_moratorium import (  # noqa: E402
+    MoratoriumError,
+    require_active_work_permitted,
+)
+
 
 R34_IMAGE_ID = "sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b"
 R34_REPO_DIGEST = "voipmonitor/vllm@" + R34_IMAGE_ID
@@ -1306,6 +1312,17 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if active:
+        operation = (
+            "p2p-full-prerequisite"
+            if args.run_full_prerequisite
+            else "p2p-gpu-scout"
+        )
+        try:
+            require_active_work_permitted(operation)
+        except MoratoriumError as exc:
+            print(f"active mode blocked by node06 moratorium: {exc}", file=sys.stderr)
+            return 2
     try:
         state = preflight(active=active)
         summary = {

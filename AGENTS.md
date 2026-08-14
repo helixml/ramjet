@@ -438,6 +438,23 @@ and must not become flaky CI thresholds.
 node06 is a Tailscale host running two vLLM+DSpark TP4 instances behind this
 LB. Connect with the SSH alias (config already set up):
 
+### Active cooling/AC moratorium (2026-08-14)
+
+Do not run request-generating traffic on node06, start or restart either vLLM
+engine, load a model, run JIT/warmup, or execute an engine-candidate rollout,
+even if the host and all GPUs become reachable. AC repair or healthy telemetry
+alone does not authorize a run. Resume only after the user explicitly
+authorizes a specific supervised startup/workload/rollback interval after the
+repair. Until then, do not connect merely to poll availability. GPU-free work
+is limited to development-host image/manifest inspection, registry pulls,
+runtime-receipt validation, Compose rendering without mutation, local tests,
+and documentation. Commands later in this section describe the future
+supervised procedure; they are not current authorization to execute it.
+The active GPU guard and P2P harness contain a static fail-closed moratorium.
+Do not bypass or monkeypatch it in an operational workflow. Lifting it requires
+the user's explicit supervised authorization after AC repair and a reviewed
+repository change; healthy telemetry alone cannot satisfy it.
+
 For DSpark reliability changes, keep the GPU-free loop focused and exercise
 the real routing boundary with loopback upstreams:
 
@@ -586,7 +603,8 @@ snapshot-shadow/soak-off baseline on success, failure, timeout, or handled
 signal. It reads the bearer from the protected deployment `.env` internally;
 never put that token in argv or a systemd property. Copy the gate together with
 `snapshot_recovery_gate.py`, `shadow_soak.py`, `cachebench.py`, and
-`engine_metrics.py`, and `node06_gpu_guard.py`, then detach it from
+`engine_metrics.py`, `node06_gpu_guard.py`, and
+`node06_operational_moratorium.py`, then detach it from
 Tailscale/SSH. Both journals live below a precreated owner-only directory; do
 not put the thermal journal or bearer in argv-visible systemd properties:
 
@@ -618,8 +636,8 @@ counters exactly. A host power loss cannot execute an in-memory rollback; after
 any connectivity loss, verify boot ID, detached-unit result, LB config/image,
 engine identities, and the journal before treating rollback as proved.
 
-After the 2026-08-14 cooling failure, no sustained request-generating benchmark
-may start on node06 until cooling is repaired and a read-only
+After the active moratorium is explicitly lifted for a specific supervised run,
+no sustained request-generating benchmark may start until a read-only
 inventory/temperature/power preflight is recorded with
 `bench/capture_node06.sh`. Inspect each device's reported target,
 maximum-operating, slowdown, and shutdown thresholds; never infer the hardware
@@ -719,7 +737,7 @@ pull r11 outside engine startup and benchmark timing. If r4 is absent, budget
 the full cold transfer. Do not pull both images merely to reproduce this
 metadata calculation; registry manifests are sufficient.
 
-After cooling repair, pull r11 once outside benchmark timing, validate the
+After explicit supervised authorization following cooling repair, pull r11 once outside benchmark timing, validate the
 pinned image's `EngineArgs` before GPU assignment. Under the common deployment
 lock, use the committed base+overlay render to recreate only the LB first,
 verify all engine/KV endpoint lists contain only A, and then recreate exactly

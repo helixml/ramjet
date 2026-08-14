@@ -31,6 +31,11 @@ import threading
 import time
 from typing import Callable
 
+from node06_operational_moratorium import (
+    MoratoriumError,
+    require_active_work_permitted,
+)
+
 
 SCHEMA_VERSION = 1
 DEFAULT_NVIDIA_SMI = "/usr/bin/nvidia-smi"
@@ -1167,8 +1172,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         validate_args(args)
+        require_active_work_permitted(f"gpu-workload.{args.label}")
         return run_guard(args)
-    except GuardError as error:
+    except (GuardError, MoratoriumError) as error:
         print(f"node06 GPU guard: {error}", file=sys.stderr)
         return 2
 

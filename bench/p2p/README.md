@@ -1,5 +1,11 @@
 # Node06 direct-P2P prerequisite gate
 
+> **Current node06 moratorium:** do not run either active mode after the
+> 2026-08-14 cooling/AC failure, even if the host returns. Read-only source and
+> plan validation may continue. AC repair alone is insufficient; active modes
+> remain statically blocked until explicit supervised authorization is followed
+> by a reviewed repository change.
+
 This tooling addresses issue #32 Phase B without changing driver settings. It
 separates CUDA-kernel peer access from copy-engine DMA and NCCL:
 

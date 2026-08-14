@@ -72,7 +72,15 @@ digest is still present, then pull r11 once outside startup/benchmark timing.
 If r4 was pruned, budget the full 12.79 GiB cold transfer instead of treating
 the incremental figure as guaranteed.
 
-## First run after the cooling repair
+## Future supervised re-entry (currently prohibited)
+
+The 2026-08-14 node06 cooling/AC moratorium remains active even if the host or
+GPUs return. Do not start/restart B, load the model, run JIT/warmup, apply this
+overlay, or send requests. AC repair alone is not authorization. The procedure
+below is a prepared future runbook and may be executed only after the user
+explicitly authorizes a specific supervised run with startup through rollback
+observed. Until then, use only development-host image/manifest inspection,
+receipt validation, and dry-run Compose rendering.
 
 Do not start with a full-box matrix. Capture idle GPU/BMC/airflow evidence,
 then keep the load balancer single-homed on A and qualify r11 only on B. Hold

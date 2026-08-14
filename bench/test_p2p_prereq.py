@@ -108,6 +108,24 @@ class P2PPrerequisiteTest(unittest.TestCase):
         self.assertEqual(short_fence.returncode, 2)
         self.assertIn("60-second quiet fence", short_fence.stderr)
 
+        blocked = subprocess.run(
+            [
+                "python3",
+                str(HARNESS),
+                "--run-gpu-scout",
+                "--acknowledge-production-risk",
+                phase_b.PROFILE_ACK,
+                "--expected-tools-manifest-sha256",
+                "a" * 64,
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn("blocked by node06 moratorium", blocked.stderr)
+
     def test_source_and_runtime_pins_are_consistent(self):
         expected = {
             phase_b.NVBANDWIDTH_SHA,
