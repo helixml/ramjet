@@ -944,6 +944,7 @@ impl Proxy {
             &self.inner.router,
             prepare_tokenizer_body,
         );
+        let output_limit = prepared.output_limit;
         let tokenizer_body = prepared.tokenizer_body.clone();
         let pre_route_tokens = if prepare_tokenizer_body {
             self.inner
@@ -1016,6 +1017,7 @@ impl Proxy {
                 served_chosen: decision.candidate_state.first().map(|state| state.index),
                 exact_canary: canary_assignment,
                 session_affinity,
+                output_limit,
             },
         );
 

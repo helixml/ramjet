@@ -606,6 +606,20 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   it never sees prompt text, request IDs, fingerprints, generated text, or
   hostnames. The first live capture paired 114/114 records and reproduced the
   current policy 100%.
+- 🔨 **Requested-output evidence before decode-weighted routing (#147).**
+  Journal v7 now records only fixed requested/effective output-limit buckets,
+  endpoint-specific field source, compatibility-strip action, and stream mode
+  from the existing single JSON parse. OpenAI chat prefers
+  `max_completion_tokens` over `max_tokens`; Completions/Anthropic use
+  `max_tokens`, and Responses uses `max_output_tokens`. Replay accepts v1-v7.
+  Serving-cost audit schema v2 joins the bounded observation to actual output,
+  total/decode duration, TTFT/TPOT, cancellation, endpoint, stream mode, and a
+  fixed initial-load bucket, with successful and failed outcome distributions
+  kept separate,
+  while preserving legacy/malformed missingness without unbounded labels. This
+  remains telemetry-only: no score, reservation, or route changes. The required
+  production-shaped observation/review remains prohibited by the node06 cooling
+  moratorium and must precede any decode-weight proposal.
 - ✅ **Conflict-trace benchmark + outcome scoring.** `bench/route_conflict.py`
   prewarms a shared trunk on one engine, applies controlled weighted load there,
   and sends returning work at a bounded setting. The completed 4K/20K/80K ×

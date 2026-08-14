@@ -7,13 +7,14 @@ use serde::Serialize;
 
 use crate::{
     config::Config,
+    prepare::OutputLimitObservation,
     router::{CandidateState, Decision},
     session_affinity::SessionAffinityObservation,
     tokenizer::CanaryAssignment,
     usage::Accumulator,
 };
 
-const VERSION: u8 = 6;
+const VERSION: u8 = 7;
 
 pub struct RouteJournal {
     enabled: bool,
@@ -25,6 +26,7 @@ pub(crate) struct RouteAnnotations {
     pub(crate) served_chosen: Option<usize>,
     pub(crate) exact_canary: CanaryAssignment,
     pub(crate) session_affinity: Option<SessionAffinityObservation>,
+    pub(crate) output_limit: OutputLimitObservation,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +53,7 @@ pub struct StartRecord<'a> {
     exact_canary: Option<CanaryAssignment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_affinity: Option<SessionAffinityObservation>,
+    output_limit: OutputLimitObservation,
     candidates: &'a [CandidateState],
 }
 
@@ -141,6 +144,7 @@ impl RouteJournal {
             exact_canary: (annotations.exact_canary != CanaryAssignment::NotApplicable)
                 .then_some(annotations.exact_canary),
             session_affinity: annotations.session_affinity,
+            output_limit: annotations.output_limit,
             candidates: &decision.candidate_state,
         }
     }
@@ -203,11 +207,15 @@ fn emit(record: &impl Serialize) {
 
 #[cfg(test)]
 mod tests {
+    use url::Url;
+
     use super::*;
     use crate::{
         config::Affinity,
-        router::Outcome,
+        prepare::PreparedRequest,
+        router::{Outcome, Router, RouterConfig},
         session_affinity::{SessionAffinityObservation, SessionAffinityOutcome},
+        shims::Endpoint,
     };
 
     #[test]
@@ -236,6 +244,23 @@ mod tests {
             rotation: 1,
             outcome: Outcome::Overlap,
         };
+        let router = Router::new(RouterConfig {
+            upstreams: vec![Url::parse("http://engine:8000").unwrap()],
+            alpha: 4.0,
+            chunk_bytes: 64,
+            max_prefix_bytes: 2 << 20,
+            max_overlap_blocks: 32,
+            index_capacity: 100_000,
+            load_unit_bytes: 32 << 10,
+            max_load_units: 8,
+            affinity: Affinity::Prefix,
+        });
+        let prepared = PreparedRequest::new(
+            Endpoint::Chat,
+            br#"{"messages":[],"max_completion_tokens":100000,"stream":true}"#,
+            100_000,
+            &router,
+        );
         let encoded = serde_json::to_string(&RouteJournal::start_record(
             42,
             "chat",
@@ -254,10 +279,17 @@ mod tests {
                     secondary: Some(1),
                     target: Some(0),
                 }),
+                output_limit: prepared.output_limit,
             },
         ))
         .unwrap();
-        for forbidden in ["secret-engine", "http://", "prompt", "fingerprint"] {
+        for forbidden in [
+            "secret-engine",
+            "http://",
+            "prompt",
+            "fingerprint",
+            "100000",
+        ] {
             assert!(
                 !encoded.contains(forbidden),
                 "leaked {forbidden}: {encoded}"
@@ -265,11 +297,14 @@ mod tests {
         }
         assert!(encoded.contains("\"chosen\":1"));
         assert!(encoded.contains("\"served_chosen\":1"));
-        assert!(encoded.contains("\"v\":6"));
+        assert!(encoded.contains("\"v\":7"));
         assert!(encoded.contains("\"phase_aware_load\":false"));
         assert!(encoded.contains("\"exact_canary\":\"treatment\""));
         assert!(encoded.contains(
             "\"session_affinity\":{\"policy_version\":1,\"bonus_blocks\":4,\"max_load_delta\":0,\"outcome\":\"would_prefer_primary\",\"primary\":0,\"secondary\":1,\"target\":0}"
+        ));
+        assert!(encoded.contains(
+            "\"output_limit\":{\"policy_version\":1,\"requested_bucket\":\"4097_plus\",\"requested_source\":\"max_completion_tokens\",\"effective_bucket\":\"unset\",\"effective_source\":\"none\",\"mutation\":\"max_completion_tokens_stripped\",\"stream_mode\":\"streaming\"}"
         ));
     }
 }

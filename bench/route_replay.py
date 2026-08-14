@@ -40,7 +40,14 @@ def records(lines):
             record = json.loads(line)
         except json.JSONDecodeError as error:
             raise ValueError(f"line {line_number}: invalid journal JSON: {error}") from error
-        if record.get("v") in (1, 2, 3, 4, 5, 6) and record.get("event") in ("start", "finish"):
+        if not isinstance(record, dict):
+            continue
+        version = record.get("v")
+        if (
+            type(version) is int
+            and version in (1, 2, 3, 4, 5, 6, 7)
+            and record.get("event") in ("start", "finish")
+        ):
             yield record
 
 

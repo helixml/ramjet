@@ -45,6 +45,7 @@ fn main() {
             let prepared = PreparedRequest::new(Endpoint::Chat, &body, 100_000, &router);
             black_box(prepared.route(&router));
             black_box(prepared.fingerprints);
+            black_box(prepared.output_limit);
         }
         let single_parse = started.elapsed().as_secs_f64();
 
