@@ -668,6 +668,14 @@ tag is unchanged but the recorded base content ID is different, so do not
 claim native binary equivalence, describe it as a vLLM-only delta, or infer a
 throughput result from metadata.
 
+Registry manifests report 12.79GiB compressed for r11. Immutable r4 and r11
+share 51 layers/9.85GiB; r11 has 28 unique layers totaling 2.94GiB. Before the
+first post-repair pull, inspect the exact r4 digest in node06's local image
+store. Preserve it until r11 is present so Docker can reuse those layers, and
+pull r11 outside engine startup and benchmark timing. If r4 is absent, budget
+the full cold transfer. Do not pull both images merely to reproduce this
+metadata calculation; registry manifests are sufficient.
+
 After cooling repair, pull r11 once outside benchmark timing, validate the
 pinned image's `EngineArgs` before GPU assignment. Under the common deployment
 lock, use the committed base+overlay render to recreate only the LB first,

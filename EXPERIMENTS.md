@@ -5761,3 +5761,23 @@ reserved for a candidate near the promotion boundary. Cache-locality,
 exact-placement, and box-capacity work remains serial and later. node06 stayed
 offline and untouched; no image layer was pulled locally or remotely and no
 GPU work ran.
+
+## 2026-08-14 — r118 Infernal r11 transfer-size preflight
+
+The immutable r4 and r11 registry manifests were compared without downloading
+layers. r4 contains 78 layers and 12.750GiB compressed; r11 contains 79 layers
+and 12.791GiB compressed. They share 51 layers totaling 9.849GiB. Relative to
+a retained exact r4 cache, r11 therefore needs 28 non-shared layers totaling
+2.942GiB; without r4, the cold transfer remains the full 12.791GiB. The read
+took 8.3s and did not touch node06, Docker's local layer store, or any GPU.
+
+This turns the first post-repair pull into a cheap precondition: inspect the
+exact r4 digest already used by the rejected canary, preserve it if present,
+then pull r11 once before engine-start timing. Do not prune r4 until r11 is
+resident. The incremental figure is not guaranteed if node06's old image was
+already removed.
+
+Config history also shows r11 declaring ExLlamaV3 paths and revision
+`704aefd743b390af4bd0fb429d1906f9b964c7d8`; r4 does not expose the same
+config labels. The planned DS4 trial selects B12X-A16, so this is recorded as
+another image/config delta, not assumed to be an active performance path.
