@@ -176,6 +176,26 @@ collector. It compares the complete normalized argv, selected non-secret
 environment, package versions, launcher hash, and NCCL library hash. It took
 0.6–0.9s warm in r112. Do not add the 12.5GB image pull to Drone.
 
+For the default-off persistent JIT-cache overlay, keep the no-GPU loop to:
+
+```bash
+python3 deploy/dspark_0731/validate-persistent-jit-cache-compose.py
+PYTHONPATH=bench python3 -m unittest \
+  bench.test_jit_cache_image_probe bench.test_persistent_jit_cache_compose
+bash -n deploy/dspark_0731/validate-persistent-jit-cache-host.sh
+python3 bench/jit_cache_image_probe.py  # only when exact r34 is cached
+```
+
+The r34 image has 26 directories and one zero-byte log below `/cache/jit`, but
+no non-empty payload. A future image must pass its own exact-image probe before
+an empty host bind is admissible. Keep A and B on distinct root-owned mode-0700
+disk-backed directories whose path contains the exact launcher fingerprint;
+the Compose overlay pins the corresponding immutable image and may not create
+host paths. Qualify persistence by rolling one engine while its peer serves,
+then compare first and second restart readiness/JIT markers. Never add the
+12.5GB pull to Drone or deploy this overlay merely because local validation
+passes.
+
 The identity middleware's nested probes must clone the original request scope
 so vLLM routes retain the real FastAPI `app.state`. `/tokenize` owns child tasks
 for work and disconnect detection. On an outer timeout, signal a synthetic

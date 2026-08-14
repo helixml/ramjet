@@ -5476,3 +5476,39 @@ second restart readiness/JIT markers, and retain the peer throughout.
 Node06 remained unreachable and no deployment state changed. Live driver,
 kernel/topology, persistent-cache mount, representative warmup, event/replay,
 and compatibility-admission qualification remain open.
+
+## 2026-08-14 — r113 persistent JIT-cache pre-admission scaffold
+
+r112 merged as PR 137 at `91fbf41`. Drone PR build 350 passed in 63 seconds;
+main build 351 passed in 190 seconds and published
+`rust-91fbf41@sha256:d7d0c1a146f95aaf79b34fdc55bcdec686b9941123f5c41abeee743a0608fbcb`
+and
+`companion-rust-91fbf41@sha256:ef343a53f0f0474bd4c23c42c10d784dee23ce91fd659d35e26396ff72841cd1`.
+
+The first shallow r34 cache inventory appeared empty at 118,784 allocated
+bytes. A new recursive, network-disabled exact-image probe correctly found the
+deeper exception: one zero-byte FlashInfer JIT log under 26 directories. Its
+SHA-256 is the empty-file digest and there are no non-empty files, links, or
+special nodes below `/cache/jit`. The bounded repeatable probe passed in 407ms
+without a GPU. For this immutable digest, mounting an empty host directory
+hides no reusable compiled payload; a future image must be re-probed rather
+than inheriting that conclusion.
+
+r113 stages but does not enable a persistent-cache overlay. It pins the exact
+r34 digest and fingerprint, gives engine A and B distinct writable host paths,
+and refuses Compose-created directories. Semantic validation proves the
+overlay changes only engine image identity plus `/cache/jit`, leaves the LB
+unchanged, and keeps every selected runtime cache path inside one fingerprint
+namespace. A read-only host gate requires canonical root-owned mode-0700,
+disk-backed, distinct directories and at least 16GiB free.
+
+The final local gate passed warning-denied Clippy, all 412 Rust tests, and the
+warm locked release build in 6.15s wall; the five-case agent corpus plus all
+276 Python tests in 3.69s; all four Compose validators and host-script syntax
+in 0.68s; and the cache plus both serving-runtime exact-image probes in 2.04s.
+
+Node06 remained offline at the same Tailscale last-seen timestamp, so no host
+directory or engine changed. The admissible live experiment is one engine at a
+time with production single-homed on its peer: compare first/second restart
+readiness, JIT markers, cache bytes/inodes, correctness, and steady serving,
+then retain the overlay only if the second start is clean and faster.

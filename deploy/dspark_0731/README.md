@@ -38,6 +38,44 @@ ssh node06 'cd /home/luke/inference/dspark_0731 && \
   docker compose up -d ds4-loadbalancer'
 ```
 
+## Optional persistent JIT/autotune cache
+
+`docker-compose.persistent-jit-cache.yaml` is a default-off, r34-specific
+overlay. It pins the immutable engine digest and mounts distinct writable host
+directories at `/cache/jit` for A and B. Never share the directories: compiler
+and autotune writers are not a cross-process coordination protocol.
+
+The exact image contains 26 cache directories and one zero-byte FlashInfer log
+placeholder, but no reusable cache payload. Therefore an empty host bind does
+not hide a compiled artifact for this digest. Prove that again for every new
+image; the probe is intentionally not in Drone because the image is 12.5GB:
+
+```bash
+python3 bench/jit_cache_image_probe.py
+python3 deploy/dspark_0731/validate-persistent-jit-cache-compose.py
+```
+
+Prepare the fixed node06 paths explicitly; Compose refuses to create them:
+
+```bash
+scp deploy/dspark_0731/docker-compose.persistent-jit-cache.yaml \
+  deploy/dspark_0731/validate-persistent-jit-cache-host.sh \
+  node06:/home/luke/inference/dspark_0731/
+ssh node06 'install -d -o root -g root -m 0700 \
+  /prod/mini-dynamo/jit-cache/vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8/engine-a \
+  /prod/mini-dynamo/jit-cache/vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8/engine-b \
+  && cd /home/luke/inference/dspark_0731 \
+  && ./validate-persistent-jit-cache-host.sh \
+  && docker compose -f docker-compose.yaml \
+       -f docker-compose.persistent-jit-cache.yaml config --quiet'
+```
+
+Roll only one named engine while production is single-homed on its peer. Record
+first-start readiness, every JIT/autotune marker, cache bytes/inodes, and the
+same measurements after a second restart. The second start must be clean and
+faster before retaining the overlay. Roll back by recreating that named engine
+from the base file alone; do not delete the host cache during rollback.
+
 `docker-compose.k5-block-canary.yaml` is a reproducible negative experiment,
 not a production recommendation. It changes only engine B from the r34
 K5/probabilistic/standard default to K5/probabilistic/block while production is

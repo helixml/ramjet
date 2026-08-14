@@ -120,10 +120,19 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   FP8-GEMM zero with one. Canonical Compose now names the effective
   GPU_MEMORY_UTILIZATION=0.975 and removes the ineffective FP8 assertion,
   without changing the running engine contract.
+  r113 adds a separate default-off persistent-JIT overlay bound to that exact
+  image/cache fingerprint. A no-GPU image walk found 26 baked directories and
+  one zero-byte FlashInfer log but no compiled payload, so an empty host bind
+  does not conceal reusable r34 state. Compose requires distinct precreated
+  A/B writer directories, immutable image identity, and exact fingerprinted
+  paths; host validation requires root-owned mode-0700 disk-backed directories
+  and 16GiB free. This is rollout scaffolding, not persistence evidence: one
+  engine must still prove clean/faster second-start readiness while its peer
+  serves.
   Live event/replay qualification is therefore still mandatory, the Compose
   default remains `http`, and no enablement is admissible. The larger issue
-  #15 bundle still needs live driver/kernel/topology evidence, a safely
-  persisted and preseeded cache mount, representative warmups, complete
+  #15 bundle still needs live driver/kernel/topology evidence, qualified
+  persistent-cache restart measurements, representative warmups, complete
   build-produced runtime-manifest generation, and immutable engine-image
   qualification.
 - 🔨 **Exact KV-event shadow index.** The transport-independent sequence fence
