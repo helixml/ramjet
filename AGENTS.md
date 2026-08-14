@@ -650,6 +650,40 @@ a different image, run the same import with `docker run --rm --entrypoint
 python <engine-image> -c ...` before assigning GPUs. Record preflight wall time
 and the result in `EXPERIMENTS.md`.
 
+For Infernal r11, keep the first decision loop GPU-free and layer-free:
+
+```bash
+python3 bench/infernal_registry_candidate.py
+python3 deploy/dspark_0731/infernal-r11-candidate/validate-compose.py
+```
+
+The registry check runs all r4/r11 manifest/config reads concurrently and took
+2.6-7.9s across observed warm runs on 2026-08-14. It pins the image and config
+digests, launcher entrypoints, platforms, and selected source/runtime labels. It
+downloads no image layers and must run before the first pull and again
+immediately before qualification. The direct image changes the vLLM, B12X,
+and LMCache integration trees while keeping their declared base commits and
+CUDA/Torch/FlashInfer/InstantTensor/NCCL versions fixed. Its named Kimi-K3 base
+tag is unchanged but the recorded base content ID is different, so do not
+claim native binary equivalence, describe it as a vLLM-only delta, or infer a
+throughput result from metadata.
+
+After cooling repair, pull r11 once outside benchmark timing, validate the
+pinned image's `EngineArgs` before GPU assignment. Under the common deployment
+lock, use the committed base+overlay render to recreate only the LB first,
+verify all engine/KV endpoint lists contain only A, and then recreate exactly
+`--no-deps dspark-0731-b` from the same render. The semantic validator proves
+the overlay leaves A unchanged, restores r11's vendor wrapper entrypoint, and
+keeps B on GPUs 4-7 and port 8013. Never start B before single-homing or use an
+unscoped Compose up. Model load/JIT is outside `candidate_gate.py`; isolate the TP4 pair and watch
+facility/BMC plus driver slowdown telemetry. Once healthy, capture immutable
+engine/agent metadata and run `candidate_gate.py` under a fresh eight-GPU
+thermal guard through `smoke`, then resume through `scout`, then `matrix` only
+when the previous stage is green. Do not start with an aggregate box or cache
+test. A two-round r34/r11 crossover is justified only after the c8 scout is
+close enough to promotion; use fresh inputs and per-engine metrics in every
+cell.
+
 ## Benchmarks (run on node06)
 
 All benches are in `bench/` and mirrored to

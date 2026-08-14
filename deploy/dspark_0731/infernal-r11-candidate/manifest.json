@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "candidate": "infernal-r11-direct",
+  "candidate_image": {
+    "image": "voipmonitor/vllm:infernal-invocation-vllm908522a-b12x5d648d9-fi1ac6942-cu133-torch213-20260813-r11@sha256:01b973d1ae132882bcc1bf62ea232f6aabe649dd4a89b961d81f3c41cc53f971",
+    "image_digest": "sha256:01b973d1ae132882bcc1bf62ea232f6aabe649dd4a89b961d81f3c41cc53f971",
+    "config_digest": "sha256:f226a6fd788bb4af345a17b768654f1e5a7487a812746ccb117aa9b040a82294",
+    "created": "2026-08-13T20:11:23.376831181Z",
+    "platform": "linux/amd64",
+    "entrypoint": [
+      "/usr/local/bin/lmcache-mp-wrapper.sh",
+      "/usr/local/bin/serve-ds4-flash.sh"
+    ],
+    "labels": {
+      "local-inference.b12x.commit": "954fd0174c49502b62547a01f09c404029e6035a",
+      "local-inference.b12x.integration.tree": "5d648d944a047d4fac5c2035309c207b3faebd9c",
+      "local-inference.cache.fingerprint": "cu133-torch213-vllm908522a320-b12x5d648d944a-lmcache5fdf59cfa1",
+      "local-inference.cuda.version": "13.3",
+      "local-inference.docker.commit": "ddac295bf4a4396b30966addae0fa54aba22ad74",
+      "local-inference.flashinfer.commit": "1ac6942776b383c6b03c7a5805a22e72a3e3349f",
+      "local-inference.flashinfer.version": "0.6.18+cu133",
+      "local-inference.instanttensor.commit": "49b4010afc1cae0441e71fe0b0bffc24fa05e932",
+      "local-inference.instanttensor.version": "0.1.9",
+      "local-inference.lmcache.commit": "9cebd405d0caf4bebe01d694b5a8bf4e3e354314",
+      "local-inference.lmcache.integration.tree": "5fdf59cfa184bc15dc5414df0bd633da9e49aaae",
+      "local-inference.lmcache.version": "0.5.2+glm52dcp.5",
+      "local-inference.nccl.commit": "fb6f40999a2a9e63104d4ae4a84118bce61528f8",
+      "local-inference.nccl.version": "2.31.2",
+      "local-inference.pytorch.commit": "cf30153c4c131c8164ee7798e5022d810682e2cb",
+      "local-inference.release.name": "infernal-invocation-cu133-torch213",
+      "local-inference.runtime.base-id": "sha256:55b42a47d239f7cdc3d5ccf97644d920c5b7ec11c47f8b830243215bba3439f7",
+      "local-inference.runtime.base-image": "voipmonitor/vllm:kimi-k3-cu133-torch213-nccl2312-20260811-r2",
+      "local-inference.runtime.nvidia-pytorch-image": "nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c",
+      "local-inference.torch.version": "2.13.0",
+      "local-inference.vllm.commit": "ce5f50f6d01b02336c4207f11277fd7bedacb4d6",
+      "local-inference.vllm.integration.tree": "908522a320ecc26582926228c9644af085f5a86c",
+      "local-inference.vllm.package-version": "0.26.1rc0+infernal.invocation.cu133.r11.vllm908522a.b12x5d648d9"
+    }
+  },
+  "baseline_image": {
+    "image": "voipmonitor/vllm:infernal-invocation-vllm3226eb7-b12x1584743-fi1ac6942-cu133-torch213-20260812-r4@sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6",
+    "image_digest": "sha256:21f048058375ccf00ea555f37addad326a7ee33bc2b4699ae53370f25af4ecb6",
+    "config_digest": "sha256:b0cac4ef4037ed8880809df87c14ddc592ef234d59499864e1468448eb928cbf",
+    "created": "2026-08-12T19:34:43.108779138Z",
+    "platform": "linux/amd64",
+    "entrypoint": [
+      "/usr/local/bin/lmcache-mp-wrapper.sh",
+      "/usr/local/bin/serve-ds4-flash.sh"
+    ],
+    "labels": {
+      "local-inference.b12x.commit": "184d7d52ad630841d0c6caf962f8b9d36f38992a",
+      "local-inference.b12x.integration.tree": "1584743fd972ead81619e8f8934cb7bca61571db",
+      "local-inference.cache.fingerprint": "cu133-torch213-vllm3226eb7ff6-b12x1584743fd9-lmcacheccccdfc37f",
+      "local-inference.cuda.version": "13.3",
+      "local-inference.docker.commit": "0040f0af0670d0e5bb0f6bea6ee7cd2de2990b01",
+      "local-inference.flashinfer.commit": "1ac6942776b383c6b03c7a5805a22e72a3e3349f",
+      "local-inference.flashinfer.version": "0.6.18+cu133",
+      "local-inference.instanttensor.commit": "49b4010afc1cae0441e71fe0b0bffc24fa05e932",
+      "local-inference.instanttensor.version": "0.1.9",
+      "local-inference.lmcache.commit": "9cebd405d0caf4bebe01d694b5a8bf4e3e354314",
+      "local-inference.lmcache.integration.tree": "ccccdfc37f108ab674ac0418b5ac5fc1c8b0857e",
+      "local-inference.lmcache.version": "0.5.2+glm52dcp.5",
+      "local-inference.nccl.commit": "fb6f40999a2a9e63104d4ae4a84118bce61528f8",
+      "local-inference.nccl.version": "2.31.2",
+      "local-inference.pytorch.commit": "cf30153c4c131c8164ee7798e5022d810682e2cb",
+      "local-inference.release.name": "deepseek-infernal-invocation-cu133-torch213",
+      "local-inference.runtime.base-id": "sha256:651f0d37bc3da8469a2b9257bcff060f5509cc0d97c18f2bf340a6e5ce68d532",
+      "local-inference.runtime.base-image": "voipmonitor/vllm:kimi-k3-cu133-torch213-nccl2312-20260811-r2",
+      "local-inference.runtime.nvidia-pytorch-image": "nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c",
+      "local-inference.torch.version": "2.13.0",
+      "local-inference.vllm.commit": "ce5f50f6d01b02336c4207f11277fd7bedacb4d6",
+      "local-inference.vllm.integration.tree": "3226eb7ff642702908f502a2402f9d083d16511c",
+      "local-inference.vllm.package-version": "0.26.1rc0+infernal.invocation.cu133.r4.vllm3226eb7.b12x1584743"
+    }
+  },
+  "unchanged_labels": [
+    "local-inference.cuda.version",
+    "local-inference.flashinfer.commit",
+    "local-inference.flashinfer.version",
+    "local-inference.instanttensor.commit",
+    "local-inference.instanttensor.version",
+    "local-inference.lmcache.commit",
+    "local-inference.lmcache.version",
+    "local-inference.nccl.commit",
+    "local-inference.nccl.version",
+    "local-inference.pytorch.commit",
+    "local-inference.runtime.base-image",
+    "local-inference.runtime.nvidia-pytorch-image",
+    "local-inference.torch.version",
+    "local-inference.vllm.commit"
+  ],
+  "changed_labels": [
+    "local-inference.b12x.commit",
+    "local-inference.b12x.integration.tree",
+    "local-inference.cache.fingerprint",
+    "local-inference.docker.commit",
+    "local-inference.lmcache.integration.tree",
+    "local-inference.release.name",
+    "local-inference.runtime.base-id",
+    "local-inference.vllm.integration.tree",
+    "local-inference.vllm.package-version"
+  ]
+}

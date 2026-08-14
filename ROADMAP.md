@@ -84,6 +84,24 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   before separately considering compatibility admission and enforcement. BOS
   repetition detection and a bounded per-request completion policy remain the
   next independent Phase-C containment slices.
+- 🔨 **Infernal Invocation r11 fail-fast qualification (#32).** The upstream
+  r11 image is pinned by both manifest and config digest with a direct
+  engine-B-only Compose overlay and an isolated compilation cache. A no-layer
+  registry gate validates both r4/r11 raw manifest digests, configs,
+  entrypoints, platforms, and selected source/runtime labels in 2.6-7.9s
+  observed warm.
+  Declared CUDA 13.3, Torch 2.13, FlashInfer 0.6.18, InstantTensor 0.1.9,
+  NCCL 2.31.2, and the base vLLM/LMCache commits remain constant; the vLLM,
+  B12X, and LMCache integration trees change. The named Kimi-K3 base tag is
+  unchanged but its recorded content ID differs, so native binary equivalence
+  is unproven. A semantic render gate restores the vendor wrapper, leaves A
+  byte-for-byte unchanged, single-homes the LB on A, and restricts B to GPUs
+  4-7. This makes r11 a high-value candidate, not a performance claim. After cooling
+  repair: preflight engine arguments without GPUs, isolate one TP4 pair under
+  facility/BMC observation, then stop at the first failed five-request smoke,
+  c8 code/prose scout, or full direct matrix gate. Pay for a two-round r34/r11
+  crossover only if the scout is near the promotion threshold. Cache/locality
+  and aggregate box tests remain later serial gates.
 - ✅ **Single-parse approximate preparation.** One JSON parse now feeds both
   compatibility mutations and canonical route fingerprints; cache observation
   reuses the prepared vector. Release-mode preparation is 0.49ms at 256KiB and

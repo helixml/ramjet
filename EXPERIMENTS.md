@@ -5706,3 +5706,58 @@ DSpark host/Compose tests, production validators, base render, and diff checks
 passed in 0.46s. The final widened Rust lane, including the edited thin-LTO
 release relink, passed in 48.21s (release build 39.96s). No GPU, remote host,
 image, or live deployment was touched.
+
+## 2026-08-14 — r117 Infernal Invocation r11 no-pull candidate admission
+
+The upstream Infernal Invocation r11 artifact appeared after the earlier r4/r5
+qualification. Its immutable image is
+`voipmonitor/vllm:infernal-invocation-vllm908522a-b12x5d648d9-fi1ac6942-cu133-torch213-20260813-r11@sha256:01b973d1ae132882bcc1bf62ea232f6aabe649dd4a89b961d81f3c41cc53f971`;
+the image-config digest is
+`sha256:f226a6fd788bb4af345a17b768654f1e5a7487a812746ccb117aa9b040a82294`.
+Registry reads report a 2026-08-13 amd64 image, vLLM package
+`0.26.1rc0+infernal.invocation.cu133.r11.vllm908522a.b12x5d648d9`, vLLM
+integration tree `908522a320ecc26582926228c9644af085f5a86c`, B12X tree
+`5d648d944a047d4fac5c2035309c207b3faebd9c`, and LMCache integration tree
+`5fdf59cfa184bc15dc5414df0bd633da9e49aaae`.
+
+The immutable r4 comparison keeps the declared CUDA 13.3, Torch 2.13, FlashInfer
+0.6.18+cu133, InstantTensor 0.1.9, NCCL 2.31.2, the vLLM base commit, and the
+LMCache base commit/version constant. It changes the vLLM, B12X, and LMCache
+integration trees. Deeper config-history inspection also found that the same
+named Kimi-K3 base tag records base content ID `sha256:651f0d...` in r4 and
+`sha256:55b42a...` in r11. Native binary equivalence is therefore unproven:
+this is not a vLLM-only experiment, and no performance or correctness
+conclusion follows from the labels.
+
+r117 adds a direct engine-B-only Compose overlay with a separate r11 cache and
+a machine-readable manifest containing both the candidate and baseline
+contracts. `bench/infernal_registry_candidate.py` concurrently reads both
+immutable r4/r11 registry manifests and configs, hashes the raw manifest bytes,
+and verifies both image/config digests, entrypoints, platforms, created times,
+and every selected contract label without downloading layers. Its first
+warm run passed in 2.70s. Eleven new focused registry/semantic-Compose tests
+pass; the complete 34-test Infernal suite took 0.12s. Drone now runs the semantic
+overlay validator as part of the deployment
+lane; it intentionally does not perform a network-dependent registry check.
+Immediate/reviewer repeats passed in 2.63-7.82s, recording registry variance
+rather than claiming a fixed three-second network budget.
+The final widened Python lane passed all 322 tests in 6.73s and the five-case
+agent corpus remained green; all five existing production Compose validators,
+the r11 semantic validator, and the base render passed in parallel with it. Independent review found
+that the first overlay bypassed the validated vendor wrapper and remained
+dual-homed. The corrected semantic gate now proves engine A is unchanged, the
+LB engine/KV endpoints contain only A, the vendor wrapper is effective, and B
+changes only by image, entrypoint, and isolated caches while retaining GPUs
+4-7 and port 8013.
+
+The post-repair decision order is fixed before spending GPU time: repeat the
+2.7s registry gate, pull once outside measurement, validate the exact image's
+`EngineArgs` without assigning GPUs, single-home production to A, and start
+only B while manually watching BMC/facility and driver slowdown evidence.
+After immutable metadata capture, the eight-GPU thermal guard owns a
+five-request deterministic smoke, then the resumable code/prose c8 scout, then
+the full six-cell direct matrix only if green. A two-round TP4 crossover is
+reserved for a candidate near the promotion boundary. Cache-locality,
+exact-placement, and box-capacity work remains serial and later. node06 stayed
+offline and untouched; no image layer was pulled locally or remotely and no
+GPU work ran.
