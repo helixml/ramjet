@@ -27,6 +27,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from node06_operational_moratorium import (  # noqa: E402
+    MoratoriumError,
+    require_supervised_authorization,
+)
+
 
 R34_IMAGE_ID = "sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b"
 R34_REPO_DIGEST = "voipmonitor/vllm@" + R34_IMAGE_ID
@@ -1262,6 +1268,11 @@ def parser() -> argparse.ArgumentParser:
     mode.add_argument("--run-full-prerequisite", action="store_true")
     result.add_argument("--acknowledge-production-risk")
     result.add_argument(
+        "--supervised-authorization-file",
+        type=pathlib.Path,
+        help="fresh owner-only authorization for this supervised node06 window",
+    )
+    result.add_argument(
         "--tools-dir", type=pathlib.Path, default=pathlib.Path("/tmp/mini-dynamo-p2p-tools")
     )
     result.add_argument("--expected-tools-manifest-sha256")
@@ -1306,6 +1317,20 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if active:
+        operation = (
+            "p2p-full-prerequisite"
+            if args.run_full_prerequisite
+            else "p2p-gpu-scout"
+        )
+        try:
+            require_supervised_authorization(
+                args.supervised_authorization_file,
+                operation,
+            )
+        except MoratoriumError as exc:
+            print(f"active mode blocked by node06 moratorium: {exc}", file=sys.stderr)
+            return 2
     try:
         state = preflight(active=active)
         summary = {

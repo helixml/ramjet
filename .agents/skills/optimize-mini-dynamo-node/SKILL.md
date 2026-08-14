@@ -5,6 +5,16 @@ description: Measure and tune a mini-dynamo GPU inference node using controlled,
 
 # Optimize a mini-dynamo node
 
+## Current node06 moratorium
+
+For node06, do not benchmark, send inference requests, start/restart an engine,
+load a model, run JIT/warmup, or apply a candidate deployment even if the host
+returns. AC repair alone is insufficient. Until the user authorizes a specific
+supervised window after the repair, work only from existing results and run
+GPU-free local/CI tests, image/manifest inspection, receipt validation, and
+dry-run Compose rendering. The experimental procedure below is future guidance,
+not current node06 execution authority.
+
 Optimize from evidence, with one attributable change at a time. Read
 `AGENTS.md` for the current benchmark contract and `RESULTS.md` for the metric
 definitions before running GPU work.

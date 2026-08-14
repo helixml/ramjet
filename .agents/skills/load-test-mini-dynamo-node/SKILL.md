@@ -5,6 +5,27 @@ description: Execute guarded, reproducible load tests against a mini-dynamo GPU 
 
 # Load-test a mini-dynamo node
 
+## Current node06 moratorium
+
+Do not run this skill's request-generating workflow on node06. The 2026-08-14
+cooling/AC failure is an active operational moratorium even if SSH, containers,
+or every GPU becomes reachable again. Do not start or restart either vLLM
+engine, load a model, run JIT/warmup, execute a candidate rollout, or send
+benchmark/correctness traffic. A cooling repair report by itself does not lift
+the moratorium. Resume only when the user gives explicit authorization for a
+specific supervised run after the AC repair, with a supervisor present for the
+complete startup, workload, and rollback interval.
+
+While the moratorium is active, this skill may be used only to prepare GPU-free
+work: inspect public/local image metadata, pull or build images on a non-GPU
+development host, validate manifests and runtime receipts, render Compose in
+dry-run mode, improve harnesses/tests, and review historical results. Do not
+connect to node06 merely to see whether it has returned. Stop after preparation
+and report the exact command plan that still requires supervised authorization.
+The GPU guard requires a fresh private authorization file for any future run.
+Do not generate it on the user's behalf: the supervisor creates it only while
+lifting the moratorium for that named window.
+
 Run the smallest load test that answers the question, preserve production, and
 leave an identity-bound experiment record. Treat node06 as a live serving box,
 not a disposable benchmark host.
@@ -30,8 +51,8 @@ development machine:
 bash bench/capture_node06.sh node06
 ```
 
-After the 2026-08-14 cooling failure, do not generate sustained load until the
-repair is confirmed in current evidence. Inspect all GPU temperatures, reported
+After the current moratorium is explicitly lifted for a supervised run, inspect
+all GPU temperatures, reported
 slowdown/shutdown thresholds, power, utilization, memory, topology, container
 identity/restarts, mini-dynamo upstream health, driver throttling, and available
 BMC/facility cooling evidence. The watchdog's 78C ceiling is an operational
@@ -98,6 +119,7 @@ python3 bench/node06_gpu_guard.py \
   --output .experiments/direct-b-code-c8-thermal.jsonl \
   -- env METRICS_URL=http://127.0.0.1:8013/metrics \
     BENCH_WORKLOAD=code \
+    BENCH_REQUIRE_RECONCILED_SPECULATION=1 \
     python3 bench/codebench.py http://127.0.0.1:8013 \
       deepseek-v4-flash 256 8 1
 ```
@@ -122,7 +144,7 @@ not reconcile, or the guard journal did not finish with `status=passed`.
   the common lock, and prove 2/2 health and original identities before leaving.
 
 Use both TP4 pairs concurrently only for independent direct-engine cells after
-the repaired box has passed a bounded single-pair re-entry. Use a two-round
+an explicitly authorized supervised single-pair re-entry has passed. Use a two-round
 crossover with fresh inputs to remove engine/time bias. Keep LB routing,
 cache-residency, exact-placement, aggregate-capacity, and eviction experiments
 serial because parallel work changes their measured state.

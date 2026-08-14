@@ -1,5 +1,21 @@
 # node06 experiment journal
 
+## 2026-08-14 — node06 cooling/AC operational moratorium
+
+The operator prohibited all node06 request-generating tests after the cooling
+failure, even if SSH and the GPUs become reachable. The moratorium also covers
+vLLM engine start/restart, model load, JIT/warmup, and candidate rollout because
+those phases can impose substantial GPU and chassis load before a benchmark
+client starts. AC repair or healthy point-in-time telemetry alone does not lift
+the restriction. A future live interval requires explicit authorization for a
+specific supervised startup, workload, and rollback after the repair.
+
+Permitted work while blocked is GPU-free and off-host: public/local image and
+manifest inspection, development-host pulls/builds, exact runtime-receipt and
+Compose dry-run validation, harness/unit/CI work, and offline analysis of
+already-captured results. No node06 experiment result was produced and no live
+performance claim should be inferred from this entry.
+
 Append-only record of controlled serving experiments. Configuration changes use
 rolling engine restarts; the other TP4 engine stays available. Every comparison
 must use the same workload, fresh cache-busting salts where applicable, and a

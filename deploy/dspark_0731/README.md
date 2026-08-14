@@ -6,6 +6,17 @@ The deploy checkout on node06 and the infra repository contain mirrors so
 operators can still use the established `/home/luke/inference/dspark_0731`
 working directory.
 
+## Active node06 cooling/AC moratorium
+
+The 2026-08-14 moratorium overrides every node06 mutation and workload command
+below, even if the host returns. Do not send inference requests, start/restart
+either vLLM engine, load a model, run JIT/warmup, or apply a candidate/LB
+deployment. AC repair alone is insufficient; resume only when the user
+authorizes a specific supervised startup/workload/rollback window after the
+repair. Until then, use this directory only for GPU-free development-host image
+and manifest inspection, exact receipt checks, tests, and `docker compose
+config` rendering that cannot contact or mutate node06.
+
 Edit `docker-compose.yaml` here first. Keep secrets in node06's uncommitted
 `.env`; never add them to either repository.
 

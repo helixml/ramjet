@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 
 import node06_gpu_guard as guard
+import node06_operational_moratorium as moratorium
 
 
 def records(path):
@@ -21,6 +22,31 @@ def records(path):
 
 def final_record(path):
     return records(path)[-1]
+
+
+def supervised_authorization(root, operation="gpu-workload.node06-experiment"):
+    root = pathlib.Path(root)
+    root.chmod(0o700)
+    now = int(time.time())
+    path = root / "supervised-authorization.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "node": "node06",
+                "operation": operation,
+                "issued_at_unix": now,
+                "expires_at_unix": now + 300,
+                "nonce": "b" * 32,
+                "acknowledgement": moratorium.ACKNOWLEDGEMENT,
+                "ac_repair_confirmed": True,
+                "supervisor_present": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    return path
 
 
 def pid_is_active(pid):
@@ -403,10 +429,13 @@ class Node06GpuGuardTests(unittest.TestCase):
             )
             request_pid_path = root / "request.pid"
             output = root / "guard.jsonl"
+            authorization = supervised_authorization(root)
             process = subprocess.Popen(
                 [
                     sys.executable,
                     guard.__file__,
+                    "--supervised-authorization-file",
+                    str(authorization),
                     "--nvidia-smi",
                     str(nvidia_smi),
                     "--output",
@@ -553,11 +582,14 @@ class Node06GpuGuardTests(unittest.TestCase):
             nvidia_smi.write_text(f"#!/bin/sh\nprintf '%b' '{rows}\\n'\n")
             nvidia_smi.chmod(0o755)
             output = root / "result.json"
+            authorization = supervised_authorization(root)
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
                 io.StringIO()
             ):
                 result = guard.main(
                     [
+                        "--supervised-authorization-file",
+                        str(authorization),
                         "--nvidia-smi",
                         str(nvidia_smi),
                         "--output",
@@ -572,6 +604,31 @@ class Node06GpuGuardTests(unittest.TestCase):
             record = final_record(output)
             self.assertEqual(record["status"], "passed")
             self.assertEqual(record["telemetry"]["samples"], 2)
+
+    def test_cli_moratorium_blocks_before_telemetry_or_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            output = root / "must-not-exist.jsonl"
+            telemetry = root / "must-not-run"
+            fake = root / "nvidia-smi"
+            fake.write_text(f"#!/bin/sh\ntouch {telemetry}\nexit 1\n")
+            fake.chmod(0o755)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                result = guard.main(
+                    [
+                        "--nvidia-smi",
+                        str(fake),
+                        "--output",
+                        str(output),
+                        "--",
+                        "true",
+                    ]
+                )
+            self.assertEqual(result, 2)
+            self.assertFalse(telemetry.exists())
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
