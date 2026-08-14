@@ -325,8 +325,10 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   reservation was still the approximate block estimate computed before the
   exact inventory was consulted, so a fully warm request reserved cold-prefill
   capacity. A shared `RequestLoadEstimator` now derives both the approximate
-  and exact-overlap reservations under one bounded quantum and cap, and the
-  recompute runs for both `shadow` and `placement` evaluation. It is atomic
+  and exact-overlap reservations under one bounded quantum and cap. The
+  recompute runs only in `placement` mode, whether or not the exact winner
+  moves the request; `shadow` remains strictly observation-only and never
+  alters admission accounting. It is atomic
   across healthy candidates and fails closed to the original reservations when
   any healthy candidate lacks a trusted overlap, so a partially trusted
   inventory can never produce a mixed accounting view. Placement selection is

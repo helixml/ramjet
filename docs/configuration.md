@@ -177,7 +177,10 @@ resident therefore reserves proportionally less capacity, bounded by the same
 recompute is atomic across healthy candidates and fails closed: if any healthy
 candidate lacks a trusted overlap, every original reservation is preserved. It
 never changes which replica is selected — placement is decided first, and the
-gain/load gates still run against the pre-route estimate.
+gain/load gates still run against the pre-route estimate. This applies only to
+`DS4_EXACT_ROUTE_MODE=placement`, and there whether or not the exact winner
+actually moves the request. `shadow` stays strictly observation-only: it never
+alters a reservation.
 
 Compatibility admission is an independent serving gate. It requires
 `DS4_TOKENIZER_MODE=local-shadow` plus the SHA-pinned manifest so local golden

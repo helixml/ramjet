@@ -1664,6 +1664,40 @@ mod tests {
     }
 
     #[test]
+    fn shadow_mode_never_recomputes_reservations() {
+        // Same warm-prefix shape that placement mode recomputes to [4, 6].
+        // Observation mode must leave admission accounting untouched.
+        let selected = trusted_inventory(vec![store_hash(7, &[1, 2])]);
+        let alternative = trusted_inventory(vec![store_hash(8, &[1, 2, 3, 4])]);
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative]),
+            Arc::new(Metrics::new(&Registry::new()).unwrap()),
+            1.0,
+            8,
+            estimator(),
+        );
+        let mut route = decision();
+        set_reservations(&mut route, [8, 8]);
+        let original = route.clone();
+
+        for mode in [ExactPlacementMode::Shadow, ExactPlacementMode::Control] {
+            let mut observed = original.clone();
+            shadow.route_pre_route(
+                Endpoint::Chat,
+                &[1, 2, 3, 4, 5, 6, 7, 8],
+                1_024,
+                &mut observed,
+                ExactPlacementPolicy {
+                    min_gain_tokens: 2,
+                    max_load_delta: 0,
+                },
+                mode,
+            );
+            assert_eq!(observed, original, "{mode:?} must not alter admission");
+        }
+    }
+
+    #[test]
     fn placement_preserves_an_unchanged_selected_reservation() {
         let selected = trusted_inventory(vec![store_hash(7, &[1, 2])]);
         let alternative = trusted_inventory(Vec::new());

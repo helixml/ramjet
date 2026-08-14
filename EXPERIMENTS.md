@@ -13,8 +13,9 @@ The recompute is atomic across healthy candidates and fails closed to the
 original reservations when any healthy candidate lacks a trusted overlap, so a
 partially trusted inventory cannot produce a mixed accounting view. Replica
 selection is unchanged: the gain/load gates still run against the pre-route
-estimate, and the shadow mode remains observation-only for placement while its
-reservation view is evaluated.
+estimate. The recompute is confined to `placement` mode and applies whether or
+not the exact winner moves the request; `shadow` mode remains strictly
+observation-only and never alters admission accounting.
 
 Journal v8 adds the reservation actually acquired to the finish record, which
 under failover is the reserving candidate's value rather than the initially
