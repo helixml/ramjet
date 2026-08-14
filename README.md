@@ -126,6 +126,7 @@ closed and are not dependencies of ordinary serving.
 Codex-compatible repo skills are included for repeatable node operations:
 [`$deploy-mini-dynamo`](.agents/skills/deploy-mini-dynamo/SKILL.md),
 [`$optimize-mini-dynamo-node`](.agents/skills/optimize-mini-dynamo-node/SKILL.md),
+[`$load-test-mini-dynamo-node`](.agents/skills/load-test-mini-dynamo-node/SKILL.md),
 and
 [`$troubleshoot-mini-dynamo-node`](.agents/skills/troubleshoot-mini-dynamo-node/SKILL.md).
 
