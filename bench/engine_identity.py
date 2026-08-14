@@ -55,6 +55,31 @@ def argv_contract(command):
     return result, hashlib.sha256(normalized).hexdigest()
 
 
+def serving_argv_sha256(command):
+    """Hash the exact privacy-safe argv beginning at ``vllm serve``.
+
+    ``pgrep -af`` prefixes the process ID and images may invoke the console
+    script through different Python paths. The committed serving-runtime
+    receipt begins at ``serve``; bind the live process to that same boundary.
+    The hash is retained, never the argv itself.
+    """
+    words = shlex.split(command)
+    for index in range(1, len(words)):
+        if words[index] != "serve":
+            continue
+        executable = pathlib.PurePosixPath(words[index - 1]).name
+        if executable == "vllm":
+            serving = words[index:]
+            if any(
+                argument.split("=", 1)[0] in SENSITIVE_FLAGS
+                for argument in serving
+            ):
+                raise ValueError("serving argv contains a sensitive option")
+            payload = "\0".join(serving).encode()
+            return hashlib.sha256(payload).hexdigest()
+    return None
+
+
 def compact_receipt(receipt, receipt_sha256):
     source = receipt.get("source_composition") or {}
     checkpoint = receipt.get("checkpoint") or {}
@@ -119,6 +144,7 @@ def verify(live_path, receipt_path=None):
     command = live.pop("command", "")
     contract, command_sha256 = argv_contract(command)
     live["argv_sha256"] = command_sha256
+    live["serving_argv_sha256"] = serving_argv_sha256(command)
     live["effective_contract"] = contract
     result = {"schema_version": 1, "live": live, "receipt": None, "verified": None}
     if receipt_path:

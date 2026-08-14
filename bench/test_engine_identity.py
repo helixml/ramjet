@@ -4,7 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from engine_identity import argv_contract, verify, verify_receipt
+from engine_identity import (
+    argv_contract,
+    serving_argv_sha256,
+    verify,
+    verify_receipt,
+)
 
 
 class EngineIdentityTest(unittest.TestCase):
@@ -37,18 +42,19 @@ class EngineIdentityTest(unittest.TestCase):
             "model_revision": "model-rev",
             "tokenizer_revision": "tokenizer-rev",
             "runtime_packages": {"vllm": "1.2.3", "torch": "4.5.6"},
-            "command": "vllm serve model --api-key secret --max-num-seqs 16 --revision model-rev",
+            "command": "vllm serve model --max-num-seqs 16 --revision model-rev",
         }
 
     def test_argv_contract_returns_only_allow_list_and_stable_hash(self):
-        contract, digest = argv_contract(self.live["command"])
+        sensitive = self.live["command"].replace("model --", "model --api-key secret --")
+        contract, digest = argv_contract(sensitive)
         self.assertEqual(
             contract, {"max_num_seqs": "16", "revision": "model-rev"}
         )
         self.assertEqual(len(digest), 64)
         self.assertNotIn("secret", json.dumps(contract))
         _, other_secret_digest = argv_contract(
-            self.live["command"].replace("secret", "another-secret")
+            sensitive.replace("secret", "another-secret")
         )
         self.assertEqual(digest, other_secret_digest)
 
@@ -60,6 +66,20 @@ class EngineIdentityTest(unittest.TestCase):
             verify_receipt(self.live, self.receipt),
             ["model_revision", "runtime_packages.torch"],
         )
+
+    def test_serving_argv_hash_matches_runtime_receipt_boundary(self):
+        expected = hashlib.sha256(
+            b"serve\0model\0--max-num-seqs\0"
+            b"16\0--revision\0model-rev"
+        ).hexdigest()
+        self.assertEqual(serving_argv_sha256(self.live["command"]), expected)
+        prefixed = "42 /opt/venv/bin/" + self.live["command"]
+        self.assertEqual(serving_argv_sha256(prefixed), expected)
+        self.assertIsNone(serving_argv_sha256("42 python -m other serve model"))
+
+    def test_serving_argv_hash_rejects_sensitive_options(self):
+        with self.assertRaisesRegex(ValueError, "sensitive option"):
+            serving_argv_sha256("vllm serve model --api-key secret")
 
     def test_old_docker_image_id_capture_remains_compatible(self):
         self.live.pop("image_config_digest")
@@ -86,6 +106,10 @@ class EngineIdentityTest(unittest.TestCase):
         self.assertTrue(result["verified"])
         self.assertNotIn("command", result["live"])
         self.assertNotIn("secret", json.dumps(result))
+        self.assertEqual(
+            result["live"]["serving_argv_sha256"],
+            serving_argv_sha256(self.live["command"]),
+        )
         self.assertEqual(
             result["receipt"]["receipt_sha256"], hashlib.sha256(raw).hexdigest()
         )

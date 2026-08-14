@@ -105,6 +105,13 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   allowlisted non-secret environment values, eight package versions, both launch scripts, and NCCL
   2.31.2 bytes. The warm exact receipt plus image-native CLI/EngineArgs parse
   passes in 9.53-13.70s, moving another failure class ahead of model load.
+  r124 closes the live false-green boundary before the first r11 request: the
+  candidate gate jointly binds both admission files to the live descriptor,
+  config, exact serving argv, packages, and revisions; requires the B-only
+  four-GPU device request and A-only LB HTTP/KV topology; probes both engines;
+  holds the common deployment lock; and rejects unreconciled native DSpark
+  counters. Startup/model load and automatic rollback still require the future
+  container-aware rollout owner.
   This makes r11 a high-value candidate, not a performance claim. After cooling
   repair: preflight engine arguments without GPUs, isolate one TP4 pair under
   facility/BMC observation, then stop at the first failed five-request smoke,
@@ -463,7 +470,11 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   and only then the full matrix. Every boundary rejects restart drift and late
   JIT/CUDA/NCCL/OOM/Xid/runtime markers; successful stages resume only under
   the identical hashed plan. r115 additionally refuses every request-generating
-  stage outside the eight-GPU 78C-or-lower watchdog. Stable safety policy is
+  stage outside the eight-GPU 78C-or-lower watchdog. The r11-B profile also
+  pins the exact committed admission bytes and re-attests the current vLLM
+  child lifetime, argv, allow-listed environment, and launcher/NCCL artifacts
+  around every stage; journals and artifacts require private no-follow
+  authority. Stable safety policy is
   plan-bound while every result record links the fresh guard run ID, preserving
   safe resume across watchdog invocations. Engine startup/model load remains
   outside this wrapper and requires one-TP4 isolation plus manual BMC/driver

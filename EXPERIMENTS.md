@@ -5854,3 +5854,66 @@ model or engine configuration. This is a strong pre-start gate, not a claim
 that CUDA kernels or model correctness passed. The next live step remains one
 guarded B-only five-request smoke after cooling repair, followed by the c8
 code/prose scout only if green.
+
+## 2026-08-14 — r124 exact r11 live-admission boundary
+
+A read-only audit found that the generic candidate gate could accept engine
+metadata without an upstream receipt, did not bind the new r11 runtime receipt,
+accepted any positive agent GPU count, and treated HTTP-successful matrix cells
+as green even when native DSpark counters were missing, reset, disabled, or
+contaminated. It also did not prove that the LB remained A-only or that B kept
+its intended GPU assignment while measurements ran. These were false-green
+risks, so downstream SLO/Pareto reporting was deferred until the measurement
+authority was corrected.
+
+The engine identity capture now adds a content-free hash of the exact live
+argv beginning at `vllm serve`, aligned with the committed runtime receipt's
+65-argument boundary and rejects sensitive serving options before hashing.
+`candidate_gate.py --profile infernal-r11-b` pins the SHA-256 of both committed
+r11 admission files, the candidate name, descriptor, config, and digest-pinned
+image. It jointly verifies the captured engine identity plus the current live
+`vllm serve` child start time, exact argv hash, allow-listed 216-variable
+environment hash, and three launcher/NCCL artifact hashes before and after
+every stage. Extra environment keys in the CUDA/NCCL/B12X/vLLM and related
+performance namespaces also fail; only named credential variables and
+non-performance runtime metadata remain outside the receipt hash. Artifacts
+are streamed through a bounded no-follow descriptor rather than loaded into
+RAM. An in-container child restart or environment/artifact drift now fails even
+when the Docker container itself did not restart. Docker's manifest-valued and
+traditional config-valued `.Image` representations both remain accepted
+because the separately captured descriptor and config digests are the actual
+admission authorities. It requires agent
+metadata for exactly four GPUs, requires one Docker NVIDIA device request for
+host devices 4-7, compares only the three bounded LB HTTP/KV endpoint fields
+against the A-only contract, and probes A and B health. The canonical node06
+deployment lock is plan-bound and held across the complete
+inspect/request/verify interval. Full environments are read only in memory and
+never journaled.
+
+Admission and metadata are opened once with no-follow, owner, regular-file,
+single-link, size, and write-permission checks. Journals and unique artifacts
+are created without overwrite below an already-existing owner-only mode-0700
+experiment directory; resume rejects unsafe or changed files. This removes the
+previous `/tmp` symlink/permission window from the documented procedure.
+
+Agent correctness now always requests native speculative reconciliation. Scout
+and matrix cells set a separate fail-closed reconciliation switch in
+`codebench.py`; an unreconciled interval returns nonzero with the bounded
+`speculation_not_reconciled` class even when all HTTP requests completed. A
+local synthetic SSE/Prometheus test proves both the exact interval and a
+one-token contaminated interval. The latest focused candidate, identity,
+codebench, and metric suite passed 41 tests in 1.11s. The final full 358-test
+Python lane plus the five-case static agent corpus passed in 7.96s, while the
+41-test semantic Compose lane passed in 8.49s. The earlier fresh no-layer
+registry admission passed in 2.65s. The complete Rust lint/test/release gate
+also passed (414 unit
+tests plus integration suites), but took 169.85s because this disk-backed
+worktree accidentally used a fresh target instead of the canonical warm target.
+`AGENTS.md` now makes the shared-target check explicit so that cold dependency
+rebuild is not repeated. No node06 connection, image pull, container mutation,
+or GPU request occurred.
+
+This still does not own candidate startup/model load/JIT or automatic rollback.
+Those remain the next container-aware rollout-owner boundary. The first live
+r11 request remains forbidden until cooling repair evidence, one-TP4 isolation,
+exact metadata capture, and the guarded smoke are all current.

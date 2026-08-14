@@ -30,8 +30,9 @@ definitions before running GPU work.
 - Direct engine throughput: use `bench/codebench.py` or
   `bench/engine_matrix.sh` with the same engine's metrics endpoint.
 - Long-prefill interference: use `bench/mixed_bench.py` in both request orders.
-- New engine image: use `bench/candidate_gate.py`; stop at the first failed
-  correctness, runtime, or scout gate.
+- Infernal r11 on B: use `bench/candidate_gate.py --profile infernal-r11-b`;
+  stop at the first failed correctness, runtime, or scout gate. Add and review
+  a pinned admission profile before using the gate for another engine image.
 
 Start with a correctness smoke and one representative scout. Run a full matrix
 only when the candidate passes. Always use fresh synthetic salts; never compare

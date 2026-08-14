@@ -97,6 +97,20 @@ thermal guard owns the workload. Rollback also holds the common lock: recreate
 only B and the LB from base Compose, then verify the original images, render,
 and 2/2 health before releasing it.
 
+Before the guarded smoke, use `install -m 0600` to copy `manifest.json` and
+`serving-runtime.json` from this directory into an owner-only mode-0700 node06
+experiment directory; keep engine metadata, agent metadata, the journal, and
+artifacts in that directory rather than `/tmp`. Pass both paths to
+`candidate_gate.py --profile infernal-r11-b` together with
+`--expected-gpu-count 4` and
+`--engine-metrics http://127.0.0.1:8013/metrics`. The gate holds the common
+deployment lock, pins the exact committed receipt bytes, and binds the live
+image/config plus the current `vllm serve` child lifetime, argv, environment,
+launcher/NCCL artifacts, and packages to them. It requires B's sole Docker GPU
+request to select exactly 4-7, verifies all LB HTTP/KV endpoints remain A-only,
+probes A and B health at every boundary, and requires native request/token
+reconciliation. It does not supervise model startup or perform rollback.
+
 The decision ladder is deliberately fail-fast:
 
 1. Five deterministic agent-protocol requests

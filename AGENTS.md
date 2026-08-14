@@ -49,6 +49,18 @@ Keep `TMPDIR` short: snapshot tests create Unix sockets below it and production
 correctly rejects paths longer than 64 bytes. The scratch parent must also be
 mode `0700`; a group/world-writable parent is rejected by authority tests.
 
+Feature worktrees on disk should still reuse the canonical checkout's warm
+target unless another Rust lane is active:
+
+```bash
+CARGO_TARGET_DIR=/home/karolis/go/src/github.com/helixml/mini-dynamo/target \
+  cargo test --locked <module-or-test-name>
+```
+
+A fresh per-worktree target turned the unchanged r124 Rust pre-push gate into a
+169.85s cold rebuild; this is workflow noise, not a useful qualification step.
+Check `CARGO_TARGET_DIR` before starting a full gate from any worktree.
+
 Do not launch two Rust gates concurrently against that shared target; fan out
 Python and Compose beside one Rust lane instead. Check both `df -h /tmp` and target
 size before a cold build. Clean only build artifacts created by this project;
@@ -1025,22 +1037,33 @@ before a performance scout or full matrix. Capture candidate and direct-engine
 metadata once, then keep the same files for resume:
 
 ```bash
-bench/node06_engine_metadata.sh /tmp/candidate-engine.json dspark-0731-b \
-  /tmp/upstream-receipt.json
+experiment_root=/home/luke/inference/dspark_0731/.experiments/r11-b
+install -d -o root -g root -m 0700 "$experiment_root" \
+  "$experiment_root/admission"
+install -o root -g root -m 0600 \
+  deploy/dspark_0731/infernal-r11-candidate/manifest.json \
+  "$experiment_root/admission/manifest.json"
+install -o root -g root -m 0600 \
+  deploy/dspark_0731/infernal-r11-candidate/serving-runtime.json \
+  "$experiment_root/admission/serving-runtime.json"
+bench/node06_engine_metadata.sh "$experiment_root/engine.json" dspark-0731-b
 BENCH_GPU_COUNT=4 bench/node06_agent_metadata.sh \
-  /tmp/candidate-agent.json dspark-0731-b
+  "$experiment_root/agent.json" dspark-0731-b
 
-install -d -o root -g root -m 0700 \
-  /home/luke/inference/dspark_0731/.experiments
 python3 bench/node06_gpu_guard.py \
   --label candidate-smoke \
-  --output /home/luke/inference/dspark_0731/.experiments/candidate-smoke-thermal.jsonl \
+  --output "$experiment_root/candidate-smoke-thermal.jsonl" \
   -- python3 bench/candidate_gate.py \
+    --profile infernal-r11-b \
     --base http://127.0.0.1:8013 --model deepseek-v4-flash \
     --container dspark-0731-b \
-    --engine-metadata /tmp/candidate-engine.json \
-    --agent-metadata /tmp/candidate-agent.json \
-    --output /tmp/candidate-gate.jsonl --through smoke
+    --candidate-manifest "$experiment_root/admission/manifest.json" \
+    --runtime-manifest "$experiment_root/admission/serving-runtime.json" \
+    --expected-gpu-count 4 \
+    --engine-metrics http://127.0.0.1:8013/metrics \
+    --engine-metadata "$experiment_root/engine.json" \
+    --agent-metadata "$experiment_root/agent.json" \
+    --output "$experiment_root/gate.jsonl" --through smoke
 ```
 
 Only a green smoke may continue to `--through scout --resume` (one code and
@@ -1050,7 +1073,19 @@ Every resumed invocation needs a fresh thermal-journal path; the candidate
 plan binds the same stable eight-GPU ceiling while each candidate record links
 its fresh guard run ID; resume therefore never reuses a thermal journal or
 invalidates otherwise identical plan policy. The gate refuses to run outside
-the guard. The wrapper covers request generation only; use the separate
+the guard. It holds the common deployment lock for the complete
+inspect/request/verify interval, jointly binds the live image descriptor,
+config, exact live `vllm serve` child lifetime/argv/environment, launcher/NCCL
+artifact hashes, package set, and model revisions to the exact committed r11
+admission bytes. It requires exactly four GPUs on B, checks the sole Docker
+device request, proves every live LB HTTP/KV endpoint remains A-only,
+and probes both A and B health at every stage boundary. Copy the two committed
+manifests into the owner-only `.experiments/r11-b/admission` directory and verify
+their SHA-256 values before the first invocation; never assert an invented
+upstream receipt. Agent and matrix stages require exact native
+request/generation-token reconciliation, so disabled, reset, missing, or
+production-contaminated DSpark counters fail the stage even when HTTP requests
+succeeded. The wrapper covers request generation only; use the separate
 one-TP4 isolation and manual BMC/driver watch above for engine startup and model
 load.
 Every boundary rechecks image/start/restart identity and scans only that
