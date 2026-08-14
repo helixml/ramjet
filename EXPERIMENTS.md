@@ -852,7 +852,7 @@ other engine. Replay predicted alpha 4/cap 32 would retain all probes while
 alpha 16/cap 32 would migrate all three.
 
 The LB-only live A/B confirmed that prediction. Both variants ran on the same
-unchanged engines and rc5 image; only `DS4_ROUTE_ALPHA` changed. Each sample
+unchanged engines and rc5 image; only `MD_ROUTE_ALPHA` changed. Each sample
 used three fresh trunks with four blockers and 1,024-token blocker budgets.
 
 | Policy | Probe routes | Probe cached tokens | Median probe TTFT |
@@ -1805,7 +1805,7 @@ logged no error, panic, or fatal. A real internal-account Helix
 `POST /api/v1/sessions/chat` through provider `ds4-flash-node06` also returned
 HTTP 200 with the requested exact sentinel. The exact placement mode remains
 absent; rollback is the stateless r19 LB image or
-`DS4_EXACT_ROUTE_MODE=off`.
+`MD_EXACT_ROUTE_MODE=off`.
 
 Verdict: r20 proves exact IDs and exact KV overlap can be joined before cache
 mutation with bounded single-digit-millisecond frontend cost and independent
@@ -1817,7 +1817,7 @@ transitions, and event recovery long enough to set a conservative route gate.
 ## 2026-08-12 — r21 health contract, Drone gate, and exact-placement canary
 
 r21 makes replica health part of the serving contract and introduces an
-explicit `DS4_EXACT_ROUTE_MODE=placement` canary without changing the
+explicit `MD_EXACT_ROUTE_MODE=placement` canary without changing the
 production default. `/health` returns opaque replica ordinals and aggregate
 `ok`, `degraded`, or `unhealthy` readiness; zero healthy replicas returns 503.
 The serving loop filters every known-unhealthy candidate before opening a
@@ -1894,7 +1894,7 @@ Unit tests compare the complete route before/after shadow `would_move` and
 strict Clippy, release build, the Go oracle, and **97 Rust tests**.
 
 The node06-local `rust-r21-shadow-policy-718012c` image replaced only the
-isolated canary and ran with `DS4_EXACT_ROUTE_MODE=shadow`. A fresh A/B event
+isolated canary and ran with `MD_EXACT_ROUTE_MODE=shadow`. A fresh A/B event
 pair replayed 930/947 retained batches and made both inventories authoritative.
 The controlled two-request proof then behaved as follows:
 
@@ -1932,7 +1932,7 @@ access and rerun; no source/build repair is indicated by that failure.
 The public multi-architecture image
 `ghcr.io/helixml/ds4-loadbalancer:rust-r21-shadow-policy-718012c` (digest
 `sha256:12bb463ad554099e856b3b5a8beb6a23002cdf2d3da96efea57b59f2834d49f3`)
-replaced r20 in production with `DS4_EXACT_ROUTE_MODE=shadow`. This was an
+replaced r20 in production with `MD_EXACT_ROUTE_MODE=shadow`. This was an
 LB-only swap: A and B retained their 12:11Z/12:21Z start times and zero restart
 counts, so neither engine nor its KV cache was disturbed. `/health` returned
 `ok` with 2/2 replicas, both runtime compatibility gauges attested, and the LB
@@ -3980,8 +3980,8 @@ current engine metadata before either per-engine service can be enabled.
 
 The standalone companion metrics server now has an explicit endpoint type:
 loopback TCP remains available for local use, while
-`DS4_SNAPSHOT_METRICS_SOCKET_PATH` selects a Unix listener only when a dedicated
-non-root `DS4_SNAPSHOT_METRICS_GROUP_GID` is also supplied. TCP and UDS settings
+`MD_SNAPSHOT_METRICS_SOCKET_PATH` selects a Unix listener only when a dedicated
+non-root `MD_SNAPSHOT_METRICS_GROUP_GID` is also supplied. TCP and UDS settings
 are mutually exclusive. UDS configuration rejects non-normalized/oversized
 paths and any parent shared with the snapshot socket before filesystem work.
 
@@ -4136,7 +4136,7 @@ secret, authenticated incarnation, and selected KV group per upstream. Every
 protected authority and socket parent is validated before reconnect owners are
 spawned, and direct raw-event and snapshot authority cannot be enabled together.
 
-Snapshot mode is deliberately limited to `DS4_EXACT_ROUTE_MODE=shadow`.
+Snapshot mode is deliberately limited to `MD_EXACT_ROUTE_MODE=shadow`.
 Configuration rejects placement and the scorer independently forces compact
 inventories back to shadow, so they feed only the exact
 counterfactual scorer, and approximate routing plus `/health` remain backed by
@@ -4215,7 +4215,7 @@ incarnation for the lifetime of the stateless LB. Startup still preflights all
 session secrets, digest secrets, attestation envelopes, socket parents, and
 upstream cardinality before spawning anything. Each per-engine watcher then
 reloads the attestation at the bounded
-`DS4_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS` interval using the same symlink,
+`MD_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS` interval using the same symlink,
 owner, permission, link-count, inode-stability, size, schema, field, and HMAC
 checks as startup.
 
@@ -4339,8 +4339,8 @@ still off.
 Independent pre-merge review caught two production-contract gaps. First, the
 base Compose exact-shadow default survived the intended off-mode overlay and
 would have made the LB reject startup when both exact authorities were off.
-The overlay now derives both `DS4_EXACT_ROUTE_MODE` and snapshot authority from
-the same bounded `DS4_SNAPSHOT_ROUTE_MODE=off|shadow` control, with positive
+The overlay now derives both `MD_EXACT_ROUTE_MODE` and snapshot authority from
+the same bounded `MD_SNAPSHOT_ROUTE_MODE=off|shadow` control, with positive
 renders and a divergence rejection test. Second, the initial Caddy validator
 required both metrics sockets but did not reject an additional session-socket
 proxy. It now accepts exactly the two ordered metrics UDS upstreams and rejects
@@ -5699,7 +5699,7 @@ This evidence binds a process and its listening sockets. It does not show that
 the publisher thread is live, that events advance, that sequence zero remains
 available, or that replay is complete within its deadline. Those remain live
 node06 event/replay qualification gates, so compatibility admission remains
-default-off and `DS4_UPSTREAM_ADMISSION_MODE=http` remains required.
+default-off and `MD_UPSTREAM_ADMISSION_MODE=http` remains required.
 
 The exact cached r34 image remains
 `voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b`

@@ -27,14 +27,14 @@
 #
 # That last point is the operational risk worth naming: once a stopped engine
 # is genuinely down, the fleet runs single-homed until it finishes restarting.
-# Size DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS so that only windows you are willing to
+# Size MD_IDLE_DRAIN_IDLE_AFTER_SECONDS so that only windows you are willing to
 # serve single-homed ever trigger a stop.
 services:
   ds4-loadbalancer:
     environment:
-      DS4_IDLE_DRAIN_MODE: drain
-      DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS: "900"
-      DS4_IDLE_DRAIN_MIN_WARM: "1"
-      DS4_IDLE_DRAIN_COOLDOWN_SECONDS: "300"
-      DS4_IDLE_DRAIN_GRACE_SECONDS: "30"
-      DS4_IDLE_DRAIN_INTERVAL_SECONDS: "15"
+      MD_IDLE_DRAIN_MODE: drain
+      MD_IDLE_DRAIN_IDLE_AFTER_SECONDS: "900"
+      MD_IDLE_DRAIN_MIN_WARM: "1"
+      MD_IDLE_DRAIN_COOLDOWN_SECONDS: "300"
+      MD_IDLE_DRAIN_GRACE_SECONDS: "30"
+      MD_IDLE_DRAIN_INTERVAL_SECONDS: "15"

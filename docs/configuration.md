@@ -6,13 +6,13 @@ and snapshot routing are all disabled unless explicitly enabled.
 
 ## Start with the defaults
 
-If the engine is reachable as `http://ds4-flash:8000`, no `DS4_*` variable is
+If the engine is reachable as `http://ds4-flash:8000`, no `MD_*` variable is
 required. In most deployments, set only the upstream list:
 
 ```yaml
 environment:
-  DS4_UPSTREAM: http://engine-a:8000,http://engine-b:8000
-  # DS4_UPSTREAM_TOKEN: ${VLLM_API_KEY} # only for protected engines
+  MD_UPSTREAM: http://engine-a:8000,http://engine-b:8000
+  # MD_UPSTREAM_TOKEN: ${VLLM_API_KEY} # only for protected engines
 ```
 
 The proxy listens on `0.0.0.0:8000`; Prometheus metrics listen on
@@ -26,20 +26,20 @@ secret manager.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DS4_UPSTREAM` | `http://ds4-flash:8000` | Comma-separated OpenAI-compatible engine URLs. |
-| `DS4_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
-| `DS4_AFFINITY` | `prefix` | `prefix` for locality/load scoring; `load` for the load-only baseline. |
-| `DS4_ROUTE_ALPHA` | `4` | Non-negative load penalty in the routing score. |
-| `DS4_ROUTE_CHUNK_BYTES` | `2048` | Bytes per approximate prefix fingerprint block. |
-| `DS4_ROUTE_MAX_PREFIX_BYTES` | `2097152` | Maximum request prefix bytes fingerprinted. |
-| `DS4_ROUTE_MAX_OVERLAP_BLOCKS` | `32` | Cap on affinity credit in fingerprint blocks. |
-| `DS4_ROUTE_INDEX_CAPACITY` | `100000` | Maximum entries in the approximate locality index. |
-| `DS4_ROUTE_LOAD_UNIT_BYTES` | `32768` | Request bytes represented by one reserved load unit. |
-| `DS4_ROUTE_MAX_LOAD_UNITS` | `8` | Maximum size-weighted load reservation per request. |
-| `DS4_ROUTE_PHASE_AWARE_LOAD` | `false` | Experimental: after the first generated token on a streaming response, reduce the request's size-weighted prefill reservation to one decode unit. |
-| `DS4_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
-| `DS4_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary. |
-| `DS4_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
+| `MD_UPSTREAM` | `http://ds4-flash:8000` | Comma-separated OpenAI-compatible engine URLs. |
+| `MD_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
+| `MD_AFFINITY` | `prefix` | `prefix` for locality/load scoring; `load` for the load-only baseline. |
+| `MD_ROUTE_ALPHA` | `4` | Non-negative load penalty in the routing score. |
+| `MD_ROUTE_CHUNK_BYTES` | `2048` | Bytes per approximate prefix fingerprint block. |
+| `MD_ROUTE_MAX_PREFIX_BYTES` | `2097152` | Maximum request prefix bytes fingerprinted. |
+| `MD_ROUTE_MAX_OVERLAP_BLOCKS` | `32` | Cap on affinity credit in fingerprint blocks. |
+| `MD_ROUTE_INDEX_CAPACITY` | `100000` | Maximum entries in the approximate locality index. |
+| `MD_ROUTE_LOAD_UNIT_BYTES` | `32768` | Request bytes represented by one reserved load unit. |
+| `MD_ROUTE_MAX_LOAD_UNITS` | `8` | Maximum size-weighted load reservation per request. |
+| `MD_ROUTE_PHASE_AWARE_LOAD` | `false` | Experimental: after the first generated token on a streaming response, reduce the request's size-weighted prefill reservation to one decode unit. |
+| `MD_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
+| `MD_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary. |
+| `MD_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
 | `RUST_LOG` | `info` | Standard tracing filter, for example `mini_dynamo=debug`. |
 
 `GET /health` returns opaque replica ordinals, serving health, DSpark
@@ -52,14 +52,14 @@ opaque replica ordinal.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DS4_DSPARK_GUARD_MODE` | `off` | `off`, telemetry-only `observe`, or enforcing `quarantine`. |
-| `DS4_DSPARK_GUARD_INTERVAL_MS` | `5000` | Native engine `/metrics` polling interval, from 1–60 seconds. Missed ticks delay instead of bursting. Each request has a separate two-second timeout and 4MiB body cap. |
-| `DS4_DSPARK_GUARD_CONSECUTIVE_WINDOWS` | `3` | Consecutive qualifying zero-acceptance windows required, from 2 through 12. |
-| `DS4_DSPARK_GUARD_MIN_PROPOSED_TOKENS` | `256` | Minimum proposed draft tokens in each qualifying window. |
-| `DS4_DSPARK_GUARD_EXPECTED_POSITIONS` | `5` | Exact speculative positions required in every sample; use `5` for fixed K5. |
-| `DS4_DSPARK_GUARD_STATE_PATH` | unset | Required only for `quarantine`: normalized absolute path to a pre-created mode-0600 durable state file in a protected mode-0700 directory. |
-| `DS4_DSPARK_GUARD_STATE_OWNER_UID` | `0` | Required owner UID for the durable state file and directory. |
-| `DS4_DSPARK_GUARD_STATE_GROUP_GID` | `0` | Required group GID for the durable state file and directory. |
+| `MD_DSPARK_GUARD_MODE` | `off` | `off`, telemetry-only `observe`, or enforcing `quarantine`. |
+| `MD_DSPARK_GUARD_INTERVAL_MS` | `5000` | Native engine `/metrics` polling interval, from 1–60 seconds. Missed ticks delay instead of bursting. Each request has a separate two-second timeout and 4MiB body cap. |
+| `MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS` | `3` | Consecutive qualifying zero-acceptance windows required, from 2 through 12. |
+| `MD_DSPARK_GUARD_MIN_PROPOSED_TOKENS` | `256` | Minimum proposed draft tokens in each qualifying window. |
+| `MD_DSPARK_GUARD_EXPECTED_POSITIONS` | `5` | Exact speculative positions required in every sample; use `5` for fixed K5. |
+| `MD_DSPARK_GUARD_STATE_PATH` | unset | Required only for `quarantine`: normalized absolute path to a pre-created mode-0600 durable state file in a protected mode-0700 directory. |
+| `MD_DSPARK_GUARD_STATE_OWNER_UID` | `0` | Required owner UID for the durable state file and directory. |
+| `MD_DSPARK_GUARD_STATE_GROUP_GID` | `0` | Required group GID for the durable state file and directory. |
 
 The guard detects the production-shaped DSpark failure where an active engine
 continues proposing draft work but accepts exactly zero tokens at every K5
@@ -79,7 +79,7 @@ and a persistence failure itself fails closed. Re-admission first durably
 removes the record and then requires a different canonical SHA-256 commitment
 of the compatibility-attested EngineCore incarnation set. A frontend-only
 identity change cannot rearm it. Enforcing mode therefore requires
-`DS4_UPSTREAM_ADMISSION_MODE=compatibility` and the protected state path. Raw
+`MD_UPSTREAM_ADMISSION_MODE=compatibility` and the protected state path. Raw
 incarnations and upstream URLs are never stored. The bounded schema-v1 file
 also precommits a runtime-dirty marker. After an unclean LB exit or a failed
 store mutation, every replica without an existing record starts fenced and its
@@ -103,10 +103,10 @@ no process identity, metric payload, prompt, or completion content is exposed.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DS4_SESSION_AFFINITY_MODE` | `off` | `off` or observation-only `shadow`; shadow never changes the served replica. |
-| `DS4_SESSION_AFFINITY_KEY` | unset | Independent 32–256-byte HMAC key required in shadow mode. |
-| `DS4_SESSION_AFFINITY_BONUS_BLOCKS` | `4` | Counterfactual cache-equivalent bonus, at most `DS4_ROUTE_MAX_OVERLAP_BLOCKS`. |
-| `DS4_SESSION_AFFINITY_MAX_LOAD_DELTA` | `0` | Maximum load above the least-loaded healthy replica admitted for a counterfactual affinity target. |
+| `MD_SESSION_AFFINITY_MODE` | `off` | `off` or observation-only `shadow`; shadow never changes the served replica. |
+| `MD_SESSION_AFFINITY_KEY` | unset | Independent 32–256-byte HMAC key required in shadow mode. |
+| `MD_SESSION_AFFINITY_BONUS_BLOCKS` | `4` | Counterfactual cache-equivalent bonus, at most `MD_ROUTE_MAX_OVERLAP_BLOCKS`. |
+| `MD_SESSION_AFFINITY_MAX_LOAD_DELTA` | `0` | Maximum load above the least-loaded healthy replica admitted for a counterfactual affinity target. |
 
 For one bounded `X-Session-ID`, shadow mode uses keyed rendezvous hashing to
 derive a stable primary and secondary from the configured upstream ordinals.
@@ -130,15 +130,15 @@ exact-canary and snapshot secrets.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DS4_TOKENIZER_MODE` | `off` | `off`, `remote-shadow`, or `local-shadow`; shadow modes never change the approximate decision alone. |
-| `DS4_TOKENIZER_PATH` | unset | `tokenizer.json` path; required by `local-shadow`. |
-| `DS4_TOKENIZER_SHA256` | unset | Expected 64-character artifact SHA-256; required by `local-shadow`. |
-| `DS4_TOKENIZER_PROFILE` | `deepseek-v4-r34` | Pinned prompt-renderer compatibility profile. |
-| `DS4_TOKENIZER_MIN_BYTES` | `32768` | Minimum request bytes admitted to shadow tokenization. |
-| `DS4_TOKENIZER_MAX_BYTES` | `2097152` | Maximum request bytes admitted to shadow tokenization. |
-| `DS4_TOKENIZER_WORKERS` | `1` | Bounded blocking workers for local tokenization. |
-| `DS4_TOKENIZER_QUEUE_CAPACITY` | `8` | Non-blocking remote-shadow queue capacity. |
-| `DS4_TOKENIZER_TIMEOUT_MS` | `2000` | Per-tokenization timeout. |
+| `MD_TOKENIZER_MODE` | `off` | `off`, `remote-shadow`, or `local-shadow`; shadow modes never change the approximate decision alone. |
+| `MD_TOKENIZER_PATH` | unset | `tokenizer.json` path; required by `local-shadow`. |
+| `MD_TOKENIZER_SHA256` | unset | Expected 64-character artifact SHA-256; required by `local-shadow`. |
+| `MD_TOKENIZER_PROFILE` | `deepseek-v4-r34` | Pinned prompt-renderer compatibility profile. |
+| `MD_TOKENIZER_MIN_BYTES` | `32768` | Minimum request bytes admitted to shadow tokenization. |
+| `MD_TOKENIZER_MAX_BYTES` | `2097152` | Maximum request bytes admitted to shadow tokenization. |
+| `MD_TOKENIZER_WORKERS` | `1` | Bounded blocking workers for local tokenization. |
+| `MD_TOKENIZER_QUEUE_CAPACITY` | `8` | Non-blocking remote-shadow queue capacity. |
+| `MD_TOKENIZER_TIMEOUT_MS` | `2000` | Per-tokenization timeout. |
 
 `remote-shadow` calls the selected engine's authenticated `/tokenize` endpoint
 after request completion. `local-shadow` compares bounded local token IDs with
@@ -149,23 +149,23 @@ logs, metrics, or journals.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DS4_EXACT_ROUTE_MODE` | `off` | `off`, observation-only `shadow`, or canary `placement`. |
-| `DS4_EXACT_ROUTE_MANIFEST_PATH` | unset | Compatibility manifest; required when exact routing is enabled. |
-| `DS4_EXACT_ROUTE_MANIFEST_SHA256` | unset | Expected manifest SHA-256; required when exact routing is enabled. |
-| `DS4_SERVING_RUNTIME_MANIFEST_PATH` | unset | Separate serving-runtime manifest linked to the compatibility-manifest digest; required by `compatibility` admission and safe to stage while admission remains `http`. |
-| `DS4_SERVING_RUNTIME_MANIFEST_SHA256` | unset | Expected serving-runtime manifest SHA-256; must be configured together with its path. |
-| `DS4_EXACT_ROUTE_WORKERS` | `4` | Bounded exact-index lookup workers. |
-| `DS4_EXACT_ROUTE_TIMEOUT_MS` | `250` | Exact pre-route evaluation timeout. |
-| `DS4_EXACT_ROUTE_MIN_GAIN_TOKENS` | `8192` | Minimum exact cached-token gain required to move a canary request. |
-| `DS4_EXACT_ROUTE_MAX_LOAD_DELTA` | `0` | Maximum additional load allowed on an exact winner. |
-| `DS4_EXACT_ROUTE_CANARY_BPS` | `0` | Stable placement cohort size in basis points, from `0` to `10000`. Zero is instant rollback. |
-| `DS4_EXACT_ROUTE_CANARY_KEY` | unset | 32–256-byte HMAC key required when the placement cohort is nonzero. |
-| `DS4_UPSTREAM_ADMISSION_MODE` | `http` | `http` admits a replica after `/v1/models`. `compatibility` additionally requires one atomic `/v1/mini-dynamo/identity` response to match the pinned manifest. |
-| `DS4_UPSTREAM_ADMISSION_TIMEOUT_MS` | `5000` | Absolute timeout, at most 30 seconds, for the atomic serving-identity request. Independent of tokenization timeouts. |
+| `MD_EXACT_ROUTE_MODE` | `off` | `off`, observation-only `shadow`, or canary `placement`. |
+| `MD_EXACT_ROUTE_MANIFEST_PATH` | unset | Compatibility manifest; required when exact routing is enabled. |
+| `MD_EXACT_ROUTE_MANIFEST_SHA256` | unset | Expected manifest SHA-256; required when exact routing is enabled. |
+| `MD_SERVING_RUNTIME_MANIFEST_PATH` | unset | Separate serving-runtime manifest linked to the compatibility-manifest digest; required by `compatibility` admission and safe to stage while admission remains `http`. |
+| `MD_SERVING_RUNTIME_MANIFEST_SHA256` | unset | Expected serving-runtime manifest SHA-256; must be configured together with its path. |
+| `MD_EXACT_ROUTE_WORKERS` | `4` | Bounded exact-index lookup workers. |
+| `MD_EXACT_ROUTE_TIMEOUT_MS` | `250` | Exact pre-route evaluation timeout. |
+| `MD_EXACT_ROUTE_MIN_GAIN_TOKENS` | `8192` | Minimum exact cached-token gain required to move a canary request. |
+| `MD_EXACT_ROUTE_MAX_LOAD_DELTA` | `0` | Maximum additional load allowed on an exact winner. |
+| `MD_EXACT_ROUTE_CANARY_BPS` | `0` | Stable placement cohort size in basis points, from `0` to `10000`. Zero is instant rollback. |
+| `MD_EXACT_ROUTE_CANARY_KEY` | unset | 32–256-byte HMAC key required when the placement cohort is nonzero. |
+| `MD_UPSTREAM_ADMISSION_MODE` | `http` | `http` admits a replica after `/v1/models`. `compatibility` additionally requires one atomic `/v1/mini-dynamo/identity` response to match the pinned manifest. |
+| `MD_UPSTREAM_ADMISSION_TIMEOUT_MS` | `5000` | Absolute timeout, at most 30 seconds, for the atomic serving-identity request. Independent of tokenization timeouts. |
 
-Exact routing requires `DS4_TOKENIZER_MODE=local-shadow`, a pinned manifest,
+Exact routing requires `MD_TOKENIZER_MODE=local-shadow`, a pinned manifest,
 and exactly one inventory source: direct KV events or snapshot companions.
-Placement additionally requires `DS4_AFFINITY=prefix`; snapshot inventories are
+Placement additionally requires `MD_AFFINITY=prefix`; snapshot inventories are
 shadow-only. Any timeout, attestation failure, event gap, revision change, or
 missing `X-Session-ID` preserves the approximate route.
 
@@ -173,7 +173,7 @@ When exact placement applies, admission reservations are recomputed from the
 exact warm-prefix overlap instead of the approximate block estimate that was
 derived before the inventory was consulted. A request whose prefix is already
 resident therefore reserves proportionally less capacity, bounded by the same
-`DS4_ROUTE_LOAD_UNIT_BYTES` quantum and `DS4_ROUTE_MAX_LOAD_UNITS` cap. The
+`MD_ROUTE_LOAD_UNIT_BYTES` quantum and `MD_ROUTE_MAX_LOAD_UNITS` cap. The
 recompute is atomic across healthy candidates and fails closed: if any healthy
 candidate lacks a trusted overlap, every original reservation is preserved. It
 never changes the selected replica for the request being recomputed — placement
@@ -184,11 +184,11 @@ becomes the next request's alpha-weighted load term. Steering warm work to an
 engine that now reports lower load is the intended effect, but it is a feedback
 loop, not a no-op.
 
-This applies only to `DS4_EXACT_ROUTE_MODE=placement`, and there whether or not
+This applies only to `MD_EXACT_ROUTE_MODE=placement`, and there whether or not
 the exact winner actually moves the request. `shadow` stays strictly
 observation-only: it never alters a reservation.
 
-The recompute can also *raise* a reservation, up to `DS4_ROUTE_MAX_LOAD_UNITS`.
+The recompute can also *raise* a reservation, up to `MD_ROUTE_MAX_LOAD_UNITS`.
 If the approximate prefix index is stale and the engine has actually evicted
 the prefix, exact overlap is zero and the request correctly reserves the cold
 cost the approximate estimate understated. Expect `ds4proxy_upstream_load_units`
@@ -196,7 +196,7 @@ to step up on the first placement rollout; watch the upstream-split panel and
 compare against the journal rather than assuming a regression.
 
 Compatibility admission is an independent serving gate. It requires
-`DS4_TOKENIZER_MODE=local-shadow` plus the SHA-pinned manifest so local golden
+`MD_TOKENIZER_MODE=local-shadow` plus the SHA-pinned manifest so local golden
 validation exists, the separately SHA-pinned serving-runtime manifest, and at
 least two upstreams. It does not enable exact routing. The schema-v2 runtime
 manifest binds the expected EngineCore cardinality, KV-event publisher
@@ -315,15 +315,15 @@ existing raw-residency shadow.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DS4_KV_EVENT_MODE` | `off` | `off` or observation-only `shadow`. |
-| `DS4_KV_EVENT_LIVE_ENDPOINTS` | unset | Comma-separated internal `tcp://host:port` endpoints, one per upstream. |
-| `DS4_KV_EVENT_REPLAY_ENDPOINTS` | unset | Matching replay endpoints, one per upstream. |
-| `DS4_KV_EVENT_TOPIC` | empty | Optional ZMQ topic, at most 256 bytes. |
-| `DS4_KV_EVENT_REPLAY_LIMIT` | `1024` | Maximum replay batches accepted during recovery. |
-| `DS4_KV_EVENT_REPLAY_TAIL_LIMIT` | `64` | Maximum bounded replay tail. |
-| `DS4_KV_EVENT_TIMEOUT_MS` | `5000` | Connect/replay operation deadline. |
-| `DS4_KV_EVENT_RECONNECT_MIN_MS` | `250` | Initial reconnect backoff. |
-| `DS4_KV_EVENT_RECONNECT_MAX_MS` | `10000` | Maximum reconnect backoff. |
+| `MD_KV_EVENT_MODE` | `off` | `off` or observation-only `shadow`. |
+| `MD_KV_EVENT_LIVE_ENDPOINTS` | unset | Comma-separated internal `tcp://host:port` endpoints, one per upstream. |
+| `MD_KV_EVENT_REPLAY_ENDPOINTS` | unset | Matching replay endpoints, one per upstream. |
+| `MD_KV_EVENT_TOPIC` | empty | Optional ZMQ topic, at most 256 bytes. |
+| `MD_KV_EVENT_REPLAY_LIMIT` | `1024` | Maximum replay batches accepted during recovery. |
+| `MD_KV_EVENT_REPLAY_TAIL_LIMIT` | `64` | Maximum bounded replay tail. |
+| `MD_KV_EVENT_TIMEOUT_MS` | `5000` | Connect/replay operation deadline. |
+| `MD_KV_EVENT_RECONNECT_MIN_MS` | `250` | Initial reconnect backoff. |
+| `MD_KV_EVENT_RECONNECT_MAX_MS` | `10000` | Maximum reconnect backoff. |
 
 Inventories start untrusted and fence on disconnect or invalid replay. Sparse
 vLLM scheduler sequence numbers are valid; duplicate, decreasing,
@@ -334,20 +334,20 @@ never enter logs, metrics, or journals.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DS4_SNAPSHOT_ROUTE_MODE` | `off` | `off` or observation-only `shadow`. |
-| `DS4_SNAPSHOT_ROUTE_SOCKET_PATHS` | unset | Unix socket path per upstream. |
-| `DS4_SNAPSHOT_ROUTE_COMPANION_UIDS` | unset | Non-root companion UID per upstream. |
-| `DS4_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS` | unset | Session secret path per upstream. |
-| `DS4_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS` | unset | Digest secret path per upstream. |
-| `DS4_SNAPSHOT_ROUTE_ATTESTATION_PATHS` | unset | Engine attestation path per upstream. |
-| `DS4_SNAPSHOT_ROUTE_GROUPS` | unset | `data_parallel_rank:group_index` per upstream. |
-| `DS4_SNAPSHOT_ROUTE_SECRET_OWNER_UID` | `0` | Expected owner of protected inputs. |
-| `DS4_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS` | `1000` | Attestation refresh interval. |
-| `DS4_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS` | `30000` | Absolute connection/snapshot attempt deadline. |
-| `DS4_SNAPSHOT_ROUTE_RECONNECT_MIN_MS` | `250` | Initial reconnect backoff. |
-| `DS4_SNAPSHOT_ROUTE_RECONNECT_MAX_MS` | `5000` | Maximum reconnect backoff. |
+| `MD_SNAPSHOT_ROUTE_MODE` | `off` | `off` or observation-only `shadow`. |
+| `MD_SNAPSHOT_ROUTE_SOCKET_PATHS` | unset | Unix socket path per upstream. |
+| `MD_SNAPSHOT_ROUTE_COMPANION_UIDS` | unset | Non-root companion UID per upstream. |
+| `MD_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS` | unset | Session secret path per upstream. |
+| `MD_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS` | unset | Digest secret path per upstream. |
+| `MD_SNAPSHOT_ROUTE_ATTESTATION_PATHS` | unset | Engine attestation path per upstream. |
+| `MD_SNAPSHOT_ROUTE_GROUPS` | unset | `data_parallel_rank:group_index` per upstream. |
+| `MD_SNAPSHOT_ROUTE_SECRET_OWNER_UID` | `0` | Expected owner of protected inputs. |
+| `MD_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS` | `1000` | Attestation refresh interval. |
+| `MD_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS` | `30000` | Absolute connection/snapshot attempt deadline. |
+| `MD_SNAPSHOT_ROUTE_RECONNECT_MIN_MS` | `250` | Initial reconnect backoff. |
+| `MD_SNAPSHOT_ROUTE_RECONNECT_MAX_MS` | `5000` | Maximum reconnect backoff. |
 
-All per-upstream lists must match `DS4_UPSTREAM` in length. Socket, session
+All per-upstream lists must match `MD_UPSTREAM` in length. Socket, session
 secret, digest secret, and attestation paths must be normalized, absolute, and
 distinct across every authority domain. Use the validated production overlay
 in [`deploy/dspark_0731`](../deploy/dspark_0731/README.md); do not improvise
@@ -362,41 +362,41 @@ validated Compose overlay.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DS4_SNAPSHOT_COMPANION_MODE` | `off` | `off` or `serve`. |
-| `DS4_SNAPSHOT_SOCKET_PATH` | unset | Required serve-mode Unix socket path. |
-| `DS4_SNAPSHOT_COMPANION_UID` | unset | Required non-root process UID. |
-| `DS4_SNAPSHOT_CLIENT_UID` | unset | Required, distinct non-root LB UID. |
-| `DS4_SNAPSHOT_SECRET_PATH` | unset | Required 32-byte session secret path. |
-| `DS4_SNAPSHOT_SECRET_OWNER_UID` | `0` | Expected owner of protected inputs. |
-| `DS4_SNAPSHOT_LIVE_ENDPOINTS` | unset | Required live KV endpoint; standalone mode accepts exactly one. |
-| `DS4_SNAPSHOT_REPLAY_ENDPOINTS` | unset | Matching replay endpoint. |
-| `DS4_SNAPSHOT_EVENT_TOPIC` | empty | Optional ZMQ topic, at most 256 bytes. |
-| `DS4_SNAPSHOT_MAX_CLIENTS` | `2` | Active authenticated clients; standalone serve mode requires `2`. |
-| `DS4_SNAPSHOT_TAIL_QUEUE_CAPACITY` | `1024` | Maximum queued tail entries. |
-| `DS4_SNAPSHOT_TAIL_QUEUE_MAX_BYTES` | `16777216` | Maximum queued tail payload bytes. |
-| `DS4_SNAPSHOT_DEADLINE_MS` | `3000` | Snapshot-phase deadline. |
-| `DS4_SNAPSHOT_TAIL_IDLE_DEADLINE_MS` | `30000` | Tail idle/write budget. |
-| `DS4_SNAPSHOT_SHUTDOWN_DEADLINE_MS` | `5000` | Supervisor drain deadline. |
-| `DS4_SNAPSHOT_MAX_FRAME_BYTES` | `33554432` | Maximum snapshot frame bytes. |
-| `DS4_SNAPSHOT_MAX_TAIL_FRAME_BYTES` | `8392704` | Maximum tail frame bytes. |
-| `DS4_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES` | `8388608` | Maximum decoded event-batch payload; must be smaller than a tail frame. |
-| `DS4_SNAPSHOT_MAX_BATCH_EVENTS` | `4096` | Maximum events per decoded batch. |
-| `DS4_SNAPSHOT_DIGEST_SECRET_PATH` | unset | Required, distinct digest secret path. |
-| `DS4_SNAPSHOT_ATTESTATION_PATH` | unset | Required, distinct authenticated engine identity path. |
-| `DS4_SNAPSHOT_ATTESTATION_REFRESH_MS` | `1000` | Engine identity refresh interval. |
-| `DS4_SNAPSHOT_BLOCK_SIZE` | unset | Required engine KV block size. |
-| `DS4_SNAPSHOT_ATTENTION_KIND` | `mla` | `full`, `mla`, or `sink_full`. |
-| `DS4_SNAPSHOT_DATA_PARALLEL_RANK` | `0` | Group data-parallel rank. |
-| `DS4_SNAPSHOT_GROUP_INDEX` | `0` | Group index. |
-| `DS4_SNAPSHOT_CONNECT_TIMEOUT_MS` | `2000` | Engine KV-event connect timeout. |
-| `DS4_SNAPSHOT_REPLAY_TIMEOUT_MS` | `30000` | Engine replay timeout. |
-| `DS4_SNAPSHOT_REPLAY_LIMIT` | `10000` | Maximum replay batches. |
-| `DS4_SNAPSHOT_REPLAY_TAIL_LIMIT` | `1024` | Maximum replay tail batches. |
-| `DS4_SNAPSHOT_RECONNECT_MIN_MS` | `250` | Initial source reconnect backoff. |
-| `DS4_SNAPSHOT_RECONNECT_MAX_MS` | `5000` | Maximum source reconnect backoff. |
-| `DS4_SNAPSHOT_METRICS_BIND` | `127.0.0.1:9091` | Loopback-only TCP metrics address. |
-| `DS4_SNAPSHOT_METRICS_SOCKET_PATH` | unset | Metrics-only Unix socket; mutually exclusive with `DS4_SNAPSHOT_METRICS_BIND`. |
-| `DS4_SNAPSHOT_METRICS_GROUP_GID` | unset | Required dedicated non-root group when using a metrics Unix socket. |
+| `MD_SNAPSHOT_COMPANION_MODE` | `off` | `off` or `serve`. |
+| `MD_SNAPSHOT_SOCKET_PATH` | unset | Required serve-mode Unix socket path. |
+| `MD_SNAPSHOT_COMPANION_UID` | unset | Required non-root process UID. |
+| `MD_SNAPSHOT_CLIENT_UID` | unset | Required, distinct non-root LB UID. |
+| `MD_SNAPSHOT_SECRET_PATH` | unset | Required 32-byte session secret path. |
+| `MD_SNAPSHOT_SECRET_OWNER_UID` | `0` | Expected owner of protected inputs. |
+| `MD_SNAPSHOT_LIVE_ENDPOINTS` | unset | Required live KV endpoint; standalone mode accepts exactly one. |
+| `MD_SNAPSHOT_REPLAY_ENDPOINTS` | unset | Matching replay endpoint. |
+| `MD_SNAPSHOT_EVENT_TOPIC` | empty | Optional ZMQ topic, at most 256 bytes. |
+| `MD_SNAPSHOT_MAX_CLIENTS` | `2` | Active authenticated clients; standalone serve mode requires `2`. |
+| `MD_SNAPSHOT_TAIL_QUEUE_CAPACITY` | `1024` | Maximum queued tail entries. |
+| `MD_SNAPSHOT_TAIL_QUEUE_MAX_BYTES` | `16777216` | Maximum queued tail payload bytes. |
+| `MD_SNAPSHOT_DEADLINE_MS` | `3000` | Snapshot-phase deadline. |
+| `MD_SNAPSHOT_TAIL_IDLE_DEADLINE_MS` | `30000` | Tail idle/write budget. |
+| `MD_SNAPSHOT_SHUTDOWN_DEADLINE_MS` | `5000` | Supervisor drain deadline. |
+| `MD_SNAPSHOT_MAX_FRAME_BYTES` | `33554432` | Maximum snapshot frame bytes. |
+| `MD_SNAPSHOT_MAX_TAIL_FRAME_BYTES` | `8392704` | Maximum tail frame bytes. |
+| `MD_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES` | `8388608` | Maximum decoded event-batch payload; must be smaller than a tail frame. |
+| `MD_SNAPSHOT_MAX_BATCH_EVENTS` | `4096` | Maximum events per decoded batch. |
+| `MD_SNAPSHOT_DIGEST_SECRET_PATH` | unset | Required, distinct digest secret path. |
+| `MD_SNAPSHOT_ATTESTATION_PATH` | unset | Required, distinct authenticated engine identity path. |
+| `MD_SNAPSHOT_ATTESTATION_REFRESH_MS` | `1000` | Engine identity refresh interval. |
+| `MD_SNAPSHOT_BLOCK_SIZE` | unset | Required engine KV block size. |
+| `MD_SNAPSHOT_ATTENTION_KIND` | `mla` | `full`, `mla`, or `sink_full`. |
+| `MD_SNAPSHOT_DATA_PARALLEL_RANK` | `0` | Group data-parallel rank. |
+| `MD_SNAPSHOT_GROUP_INDEX` | `0` | Group index. |
+| `MD_SNAPSHOT_CONNECT_TIMEOUT_MS` | `2000` | Engine KV-event connect timeout. |
+| `MD_SNAPSHOT_REPLAY_TIMEOUT_MS` | `30000` | Engine replay timeout. |
+| `MD_SNAPSHOT_REPLAY_LIMIT` | `10000` | Maximum replay batches. |
+| `MD_SNAPSHOT_REPLAY_TAIL_LIMIT` | `1024` | Maximum replay tail batches. |
+| `MD_SNAPSHOT_RECONNECT_MIN_MS` | `250` | Initial source reconnect backoff. |
+| `MD_SNAPSHOT_RECONNECT_MAX_MS` | `5000` | Maximum source reconnect backoff. |
+| `MD_SNAPSHOT_METRICS_BIND` | `127.0.0.1:9091` | Loopback-only TCP metrics address. |
+| `MD_SNAPSHOT_METRICS_SOCKET_PATH` | unset | Metrics-only Unix socket; mutually exclusive with `MD_SNAPSHOT_METRICS_BIND`. |
+| `MD_SNAPSHOT_METRICS_GROUP_GID` | unset | Required dedicated non-root group when using a metrics Unix socket. |
 
 The metrics Unix socket must use a separate, setgid authority directory and a
 group that is not the snapshot/session group. Scrapers may join only the
@@ -409,12 +409,12 @@ success. It requires all settings below except the age override.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DS4_SNAPSHOT_ENGINE_METADATA_PATH` | required | Fresh, protected schema-v1 engine metadata input. |
-| `DS4_SNAPSHOT_DIGEST_SECRET_PATH` | required | Digest secret used to authenticate the output. |
-| `DS4_SNAPSHOT_ATTESTATION_PATH` | required | Atomically published attestation output. |
-| `DS4_SNAPSHOT_SECRET_OWNER_UID` | required | Exact output/input owner UID. |
-| `DS4_SNAPSHOT_SECRET_GROUP_GID` | required | Exact output group GID. |
-| `DS4_SNAPSHOT_ATTESTATION_MAX_AGE_MS` | `30000` | Maximum metadata age; bounded to five minutes. |
+| `MD_SNAPSHOT_ENGINE_METADATA_PATH` | required | Fresh, protected schema-v1 engine metadata input. |
+| `MD_SNAPSHOT_DIGEST_SECRET_PATH` | required | Digest secret used to authenticate the output. |
+| `MD_SNAPSHOT_ATTESTATION_PATH` | required | Atomically published attestation output. |
+| `MD_SNAPSHOT_SECRET_OWNER_UID` | required | Exact output/input owner UID. |
+| `MD_SNAPSHOT_SECRET_GROUP_GID` | required | Exact output group GID. |
+| `MD_SNAPSHOT_ATTESTATION_MAX_AGE_MS` | `30000` | Maximum metadata age; bounded to five minutes. |
 
 ## Metrics and route journals
 
@@ -434,7 +434,7 @@ families are:
   effective-tokens-per-step gauges describe each valid window, while
   quarantine transitions use a separate fixed-reason counter.
 
-With `DS4_ROUTE_JOURNAL=true`, replay bounded decision snapshots without
+With `MD_ROUTE_JOURNAL=true`, replay bounded decision snapshots without
 changing live traffic:
 
 ```bash

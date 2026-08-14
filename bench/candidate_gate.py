@@ -69,9 +69,9 @@ RUNTIME_PACKAGE_ALIASES = {
 }
 SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 LB_ENDPOINT_KEYS = (
-    "DS4_UPSTREAM",
-    "DS4_KV_EVENT_LIVE_ENDPOINTS",
-    "DS4_KV_EVENT_REPLAY_ENDPOINTS",
+    "MD_UPSTREAM",
+    "MD_KV_EVENT_LIVE_ENDPOINTS",
+    "MD_KV_EVENT_REPLAY_ENDPOINTS",
 )
 NODE06_PROFILE = {
     "profile": "infernal-r11-b",
@@ -483,9 +483,9 @@ def exclusive_deployment_lock(path):
 def validate_live_isolation(runner, args):
     environment = runner.environment(args.load_balancer_container)
     expected = {
-        "DS4_UPSTREAM": args.expected_lb_upstream,
-        "DS4_KV_EVENT_LIVE_ENDPOINTS": args.expected_lb_live_endpoints,
-        "DS4_KV_EVENT_REPLAY_ENDPOINTS": args.expected_lb_replay_endpoints,
+        "MD_UPSTREAM": args.expected_lb_upstream,
+        "MD_KV_EVENT_LIVE_ENDPOINTS": args.expected_lb_live_endpoints,
+        "MD_KV_EVENT_REPLAY_ENDPOINTS": args.expected_lb_replay_endpoints,
     }
     mismatches = [
         key for key in LB_ENDPOINT_KEYS if environment.get(key) != expected[key]

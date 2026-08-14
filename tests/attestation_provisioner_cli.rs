@@ -121,11 +121,11 @@ fn fresh_explicit_metadata_provisions_authenticated_output_silently() {
     for _ in 0..2 {
         let output = Command::new(env!("CARGO_BIN_EXE_mini-dynamo-attestation-provisioner"))
             .env_clear()
-            .env("DS4_SNAPSHOT_ENGINE_METADATA_PATH", &metadata_path)
-            .env("DS4_SNAPSHOT_DIGEST_SECRET_PATH", &secret_path)
-            .env("DS4_SNAPSHOT_ATTESTATION_PATH", &output_path)
-            .env("DS4_SNAPSHOT_SECRET_OWNER_UID", identity.uid().to_string())
-            .env("DS4_SNAPSHOT_SECRET_GROUP_GID", identity.gid().to_string())
+            .env("MD_SNAPSHOT_ENGINE_METADATA_PATH", &metadata_path)
+            .env("MD_SNAPSHOT_DIGEST_SECRET_PATH", &secret_path)
+            .env("MD_SNAPSHOT_ATTESTATION_PATH", &output_path)
+            .env("MD_SNAPSHOT_SECRET_OWNER_UID", identity.uid().to_string())
+            .env("MD_SNAPSHOT_SECRET_GROUP_GID", identity.gid().to_string())
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");

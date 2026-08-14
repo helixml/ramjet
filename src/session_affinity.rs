@@ -380,10 +380,10 @@ mod tests {
 
     fn config() -> Config {
         let values = HashMap::from([
-            ("DS4_UPSTREAM", "http://a:8000,http://b:8000,http://c:8000"),
-            ("DS4_SESSION_AFFINITY_MODE", "shadow"),
+            ("MD_UPSTREAM", "http://a:8000,http://b:8000,http://c:8000"),
+            ("MD_SESSION_AFFINITY_MODE", "shadow"),
             (
-                "DS4_SESSION_AFFINITY_KEY",
+                "MD_SESSION_AFFINITY_KEY",
                 "0123456789abcdef0123456789abcdef",
             ),
         ]);

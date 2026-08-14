@@ -58,8 +58,8 @@ services:
       - "8000:8000" # OpenAI API + /health
       - "9090:9090" # Prometheus
     environment:
-      DS4_UPSTREAM: http://model-server-1:8000,http://model-server-2:8000
-      # DS4_UPSTREAM_TOKEN: ${MODEL_SERVER_API_KEY} # if required
+      MD_UPSTREAM: http://model-server-1:8000,http://model-server-2:8000
+      # MD_UPSTREAM_TOKEN: ${MODEL_SERVER_API_KEY} # if required
 ```
 
 ```bash

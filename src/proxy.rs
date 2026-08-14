@@ -2336,7 +2336,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let config =
-            Config::from_lookup(|key| (key == "DS4_UPSTREAM").then(|| joined.clone())).unwrap();
+            Config::from_lookup(|key| (key == "MD_UPSTREAM").then(|| joined.clone())).unwrap();
         proxy_for_config(config, inventories)
     }
 
@@ -2347,8 +2347,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let config = Config::from_lookup(|key| match key {
-            "DS4_UPSTREAM" => Some(joined.clone()),
-            "DS4_UPSTREAM_TOKEN" => Some(token.to_owned()),
+            "MD_UPSTREAM" => Some(joined.clone()),
+            "MD_UPSTREAM_TOKEN" => Some(token.to_owned()),
             _ => None,
         })
         .unwrap();
@@ -2381,14 +2381,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let config = Config::from_lookup(|key| match key {
-            "DS4_UPSTREAM" => Some(joined.clone()),
-            "DS4_IDLE_DRAIN_MODE" => Some(mode.to_owned()),
+            "MD_UPSTREAM" => Some(joined.clone()),
+            "MD_IDLE_DRAIN_MODE" => Some(mode.to_owned()),
             // Shortest window the validator permits, so the injected clock
             // only has to step a little past it.
-            "DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS" | "DS4_IDLE_DRAIN_COOLDOWN_SECONDS" => {
+            "MD_IDLE_DRAIN_IDLE_AFTER_SECONDS" | "MD_IDLE_DRAIN_COOLDOWN_SECONDS" => {
                 Some("60".to_owned())
             }
-            "DS4_IDLE_DRAIN_GRACE_SECONDS" => Some("1".to_owned()),
+            "MD_IDLE_DRAIN_GRACE_SECONDS" => Some("1".to_owned()),
             _ => None,
         })
         .unwrap();
@@ -2618,8 +2618,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let mut config = Config::from_lookup(|key| match key {
-            "DS4_UPSTREAM" => Some(joined.clone()),
-            "DS4_DSPARK_GUARD_MODE" => Some("observe".to_owned()),
+            "MD_UPSTREAM" => Some(joined.clone()),
+            "MD_DSPARK_GUARD_MODE" => Some("observe".to_owned()),
             _ => None,
         })
         .unwrap();
@@ -3029,6 +3029,89 @@ mod tests {
         task.abort();
     }
 
+    /// A vision request must reach the engine with its image intact.
+    ///
+    /// The sanitizer rewrites the body that is actually forwarded, so a
+    /// regression here does not fail the request — it silently answers a
+    /// question about an image the model never saw.
+    #[tokio::test]
+    async fn vision_content_parts_reach_the_upstream_unaltered() {
+        let seen = Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
+        let upstream = {
+            let seen = Arc::clone(&seen);
+            AxumRouter::new().fallback(any(move |request: Request<Body>| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    let body = to_bytes(request.into_body(), MAX_REQUEST_BODY).await.unwrap();
+                    *seen.lock().unwrap() = serde_json::from_slice(&body).unwrap();
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"choices":[{"message":{"content":"a cat"},"finish_reason":"stop"}],"usage":{"prompt_tokens":800,"completion_tokens":3}}"#,
+                        ))
+                        .unwrap()
+                }
+            }))
+        };
+        let (url, task) = start_upstream(upstream).await;
+        let proxy = proxy_for(&[url]);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"model":"qwen3.8-27b","messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image_url","image_url":{"url":"https://example.invalid/cat.png"}}]}]}"#,
+            ))
+            .unwrap();
+        assert_eq!(proxy.serve(request).await.status(), StatusCode::OK);
+
+        let seen = seen.lock().unwrap().clone();
+        let content = &seen["messages"][0]["content"];
+        assert!(
+            content.is_array(),
+            "multimodal content was flattened into {content}"
+        );
+        assert_eq!(content[0]["text"], "what is this?");
+        assert_eq!(
+            content[1]["image_url"]["url"], "https://example.invalid/cat.png",
+            "the image part must survive the proxy"
+        );
+        task.abort();
+    }
+
+    /// A message whose parts are all text is still normalized, so the existing
+    /// text path and its fingerprints are unchanged by the vision fix.
+    #[tokio::test]
+    async fn all_text_content_parts_are_still_flattened() {
+        let seen = Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
+        let upstream = {
+            let seen = Arc::clone(&seen);
+            AxumRouter::new().fallback(any(move |request: Request<Body>| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    let body = to_bytes(request.into_body(), MAX_REQUEST_BODY)
+                        .await
+                        .unwrap();
+                    *seen.lock().unwrap() = serde_json::from_slice(&body).unwrap();
+                    (StatusCode::OK, r#"{"ok":true}"#)
+                }
+            }))
+        };
+        let (url, task) = start_upstream(upstream).await;
+        let proxy = proxy_for(&[url]);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}]}"#,
+            ))
+            .unwrap();
+        assert_eq!(proxy.serve(request).await.status(), StatusCode::OK);
+        assert_eq!(seen.lock().unwrap()["messages"][0]["content"], "ab");
+        task.abort();
+    }
+
     #[tokio::test]
     async fn session_affinity_shadow_is_header_private_and_does_not_change_dispatch() {
         let requests_a = Arc::new(AtomicUsize::new(0));
@@ -3051,10 +3134,10 @@ mod tests {
         let (url_b, task_b) = start_upstream(upstream(Arc::clone(&requests_b))).await;
         let joined = format!("{url_a},{url_b}");
         let values = HashMap::from([
-            ("DS4_UPSTREAM", joined),
-            ("DS4_SESSION_AFFINITY_MODE", "shadow".to_owned()),
+            ("MD_UPSTREAM", joined),
+            ("MD_SESSION_AFFINITY_MODE", "shadow".to_owned()),
             (
-                "DS4_SESSION_AFFINITY_KEY",
+                "MD_SESSION_AFFINITY_KEY",
                 "0123456789abcdef0123456789abcdef".to_owned(),
             ),
         ]);
@@ -3114,9 +3197,9 @@ mod tests {
         let (url_b, task_b) = start_upstream(upstream()).await;
         let joined = format!("{url_a},{url_b}");
         let values = HashMap::from([
-            ("DS4_UPSTREAM", joined),
-            ("DS4_TOKENIZER_MODE", "remote-shadow".to_owned()),
-            ("DS4_TOKENIZER_MIN_BYTES", "0".to_owned()),
+            ("MD_UPSTREAM", joined),
+            ("MD_TOKENIZER_MODE", "remote-shadow".to_owned()),
+            ("MD_TOKENIZER_MIN_BYTES", "0".to_owned()),
         ]);
         let config = Config::from_lookup(|key| values.get(key).cloned()).unwrap();
         let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
@@ -3685,8 +3768,8 @@ mod tests {
         let (url, task) = start_upstream(upstream).await;
         let joined = url.to_string();
         let config = Config::from_lookup(|key| match key {
-            "DS4_UPSTREAM" => Some(joined.clone()),
-            "DS4_DSPARK_GUARD_MODE" => Some("observe".to_owned()),
+            "MD_UPSTREAM" => Some(joined.clone()),
+            "MD_DSPARK_GUARD_MODE" => Some("observe".to_owned()),
             _ => None,
         })
         .unwrap();
@@ -3746,7 +3829,7 @@ mod tests {
         let (url, task) = start_upstream(upstream).await;
         let joined = url.as_str().to_owned();
         let mut config =
-            Config::from_lookup(|key| (key == "DS4_UPSTREAM").then(|| joined.clone())).unwrap();
+            Config::from_lookup(|key| (key == "MD_UPSTREAM").then(|| joined.clone())).unwrap();
         // Config parsing requires a real manifest before this mode can be set.
         // Mutating the public structure here proves the proxy still fails closed
         // if an embedding constructs an inconsistent Config directly.
@@ -3841,7 +3924,7 @@ mod tests {
         let (url, task) = start_upstream(upstream).await;
         let joined = url.as_str().to_owned();
         let mut config =
-            Config::from_lookup(|key| (key == "DS4_UPSTREAM").then(|| joined.clone())).unwrap();
+            Config::from_lookup(|key| (key == "MD_UPSTREAM").then(|| joined.clone())).unwrap();
         config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
         let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
 
@@ -3934,7 +4017,7 @@ mod tests {
         let (url, task) = start_upstream(upstream).await;
         let joined = url.as_str().to_owned();
         let mut config =
-            Config::from_lookup(|key| (key == "DS4_UPSTREAM").then(|| joined.clone())).unwrap();
+            Config::from_lookup(|key| (key == "MD_UPSTREAM").then(|| joined.clone())).unwrap();
         config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
         let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
         proxy.probe(0).await;
@@ -4034,7 +4117,7 @@ mod tests {
         let (fast_url, fast_task) = start_upstream(fast).await;
         let joined = format!("{slow_url},{fast_url}");
         let mut config =
-            Config::from_lookup(|key| (key == "DS4_UPSTREAM").then(|| joined.clone())).unwrap();
+            Config::from_lookup(|key| (key == "MD_UPSTREAM").then(|| joined.clone())).unwrap();
         config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
         let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
 
@@ -4138,7 +4221,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let mut config =
-            Config::from_lookup(|key| (key == "DS4_UPSTREAM").then(|| joined.clone())).unwrap();
+            Config::from_lookup(|key| (key == "MD_UPSTREAM").then(|| joined.clone())).unwrap();
         config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
         let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
 
@@ -4304,10 +4387,10 @@ mod tests {
         let (url, task) = start_upstream(upstream).await;
         let joined = url.as_str().to_owned();
         let config = Config::from_lookup(|key| match key {
-            "DS4_UPSTREAM" => Some(joined.clone()),
-            "DS4_ROUTE_PHASE_AWARE_LOAD" => Some("true".to_owned()),
-            "DS4_ROUTE_LOAD_UNIT_BYTES" => Some("32".to_owned()),
-            "DS4_ROUTE_MAX_LOAD_UNITS" => Some("4".to_owned()),
+            "MD_UPSTREAM" => Some(joined.clone()),
+            "MD_ROUTE_PHASE_AWARE_LOAD" => Some("true".to_owned()),
+            "MD_ROUTE_LOAD_UNIT_BYTES" => Some("32".to_owned()),
+            "MD_ROUTE_MAX_LOAD_UNITS" => Some("4".to_owned()),
             _ => None,
         })
         .unwrap();
