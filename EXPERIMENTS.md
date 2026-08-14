@@ -5809,3 +5809,48 @@ gate passed and has negative coverage for every required setting. Production A
 remains unchanged, the LB remains single-homed on A, and candidate B remains on
 GPUs 4-7 and port 8013. node06 was still unreachable, so no image pull, GPU,
 container, or live deployment was touched.
+
+## 2026-08-14 — r120 Infernal r11 exact no-GPU runtime receipt
+
+The immutable r11 image was pulled once onto the development host, outside all
+benchmark timing. The transfer plus unpack took roughly five minutes and the
+local filesystem moved from 273GiB to 232GiB free; node06 remained offline and
+untouched. This is the cold setup cost, not an iteration cost. The local image
+ID exactly matches the admitted manifest digest and reports the vendor wrapper
+plus DS4 launcher entrypoint with no image command.
+
+The existing serving-image probe now renders an arbitrary reviewed Compose
+overlay and follows its effective entrypoint rather than hard-coding r34's
+direct launcher. For r11 this exercises `lmcache-mp-wrapper.sh` with
+`LMCACHE_MODE=off`, then `serve-ds4-flash.sh`, while replacing only the terminal
+vLLM executable. The final probe requires the local image (`--pull=never`),
+forces the ordinary `runc` runtime, binds the collector over the image's actual
+vLLM executable without changing production `PATH`, and keeps the container
+read-only with no network, model mount, GPU, host environment, or secret-bearing
+Compose values. Its template explicitly allowlists 216 reviewed stable
+non-secret environment names; unknown names and the GPU-dependent
+`_CUDA_COMPAT_STATUS` launcher diagnostic are never captured. Warm generation
+took 0.76s and produced a manifest with the exact 65-argument vLLM command,
+216 allowlisted environment values, eight package versions, and SHA-256s
+for both launcher scripts and `/opt/local-inference/nccl/lib/libnccl.so.2.31.2`.
+
+The captured contract is the intended node06 shape: model and tokenizer
+revision `9e165c30...`, TP4/DCP1, K5 fixed depth with probabilistic draft and
+standard rejection sampling, graph 96, max length 393216, MNS16, MBT4096,
+GMU0.975, FP8 KV, InstantTensor buffered load, B12X attention/MoE/linear,
+prefix caching, exact KV publisher/replay settings, and default top-p 0.95.
+Packages resolve to vLLM 0.26.1rc0 Infernal r11, B12X 1.2.3, Torch 2.13.0,
+FlashInfer 0.6.18+cu133, LMCache 0.5.2+glm52dcp.5, InstantTensor 0.1.9,
+Triton 3.7.1, and XGrammar 0.2.5. This confirms the effective CUTLASS
+environment is 4.6.2 and the new ExLlama online cache remains read-write even
+though the selected serving backend is B12X.
+
+A final exact receipt check took 0.73-1.05s. The same command then parsed the
+captured argv through r11's native CLI and `AsyncEngineArgs`, including its
+feature-support check, in 8.75-12.82s; combined time was 9.53-13.70s across
+two hardened repeats. Parser construction uses
+CPU defaults because the hermetic container has no GPU and does not create
+model or engine configuration. This is a strong pre-start gate, not a claim
+that CUDA kernels or model correctness passed. The next live step remains one
+guarded B-only five-request smoke after cooling repair, followed by the c8
+code/prose scout only if green.

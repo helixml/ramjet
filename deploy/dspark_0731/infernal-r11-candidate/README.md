@@ -26,6 +26,43 @@ Observed warm registry reads took 2.6-7.9 seconds. The 40-test local Infernal
 gate takes about 0.12 seconds. Run both before a large pull and repeat the
 registry check immediately before a live qualification.
 
+After the immutable image is present locally, capture its real vendor-wrapper
+chain without a network, model mount, vLLM process, or GPU allocation:
+
+```bash
+R11_RECEIPT_DIR=$(mktemp -d)
+python3 bench/serving_runtime_image_probe.py \
+  --compose-overlay deploy/dspark_0731/infernal-r11-candidate/docker-compose.overlay.yaml \
+  --service dspark-0731-b \
+  --manifest deploy/dspark_0731/infernal-r11-candidate/serving-runtime.template.json \
+  --output "${R11_RECEIPT_DIR}/serving-runtime.json"
+```
+
+The template carries an explicit reviewed allowlist of 216 stable non-secret
+container environment names; unknown names, secrets, and the hardware-derived
+`_CUDA_COMPAT_STATUS` diagnostic are never captured. Review the
+resulting argv, environment values, package versions,
+and hashes for both launcher scripts and the exact NCCL library before
+committing it. The committed receipt is then a single exact runtime and
+image-native argument-parser gate:
+
+```bash
+python3 bench/serving_runtime_image_probe.py \
+  --compose-overlay deploy/dspark_0731/infernal-r11-candidate/docker-compose.overlay.yaml \
+  --service dspark-0731-b \
+  --manifest deploy/dspark_0731/infernal-r11-candidate/serving-runtime.json \
+  --validate-engine-args
+```
+
+Final hardened warm repeats put receipt generation/check at 0.73-1.05 seconds
+and the image-native CLI/`AsyncEngineArgs` parse at 8.75-12.82 seconds, for
+9.53-13.70 seconds combined. Both commands require the local immutable
+image (`--pull=never`), force the ordinary `runc` runtime, and bind the evidence
+collector over the image's actual vLLM executable without changing production
+`PATH`. The parser uses CPU defaults solely because the container has no GPU;
+it does not construct an engine or load model configuration, and does not
+replace the guarded live smoke. Image download time is outside probe timing.
+
 The r4/r11 manifests contain 95/96 layer descriptors and 78/79 unique layer
 blobs respectively. r11 contains 12.79 GiB of unique compressed blobs and
 shares 51 blobs (9.85 GiB) with immutable r4, leaving 2.94 GiB/28 blobs unique

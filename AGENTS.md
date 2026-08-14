@@ -655,6 +655,11 @@ For Infernal r11, keep the first decision loop GPU-free and layer-free:
 ```bash
 python3 bench/infernal_registry_candidate.py
 python3 deploy/dspark_0731/infernal-r11-candidate/validate-compose.py
+python3 bench/serving_runtime_image_probe.py \
+  --compose-overlay deploy/dspark_0731/infernal-r11-candidate/docker-compose.overlay.yaml \
+  --service dspark-0731-b \
+  --manifest deploy/dspark_0731/infernal-r11-candidate/serving-runtime.json \
+  --validate-engine-args
 ```
 
 The registry check runs all r4/r11 manifest/config reads concurrently and took
@@ -674,6 +679,24 @@ material mismatch is `CUTLASS_DSL_VERSION=4.5.2` in r4 versus `4.6.2` in r11,
 while both provenance labels say 4.6.2. Treat this as an effective-environment
 and provenance inconsistency requiring the pulled-image package probe, not as a
 proven package upgrade.
+
+The third command requires the immutable image to be present, but performs no
+network access, model mount, vLLM startup, or GPU allocation. It follows the
+effective vendor wrapper plus launcher, replaces only the terminal `vllm`
+executable, checks exact argv/reviewed non-secret environment/package/artifact
+receipt hashes, and
+then parses the captured argv through the image-native CLI and
+`AsyncEngineArgs._check_feature_supported()`. Final hardened warm repeats took
+0.73-1.05s for the runtime receipt and 8.75-12.82s for argument parsing,
+9.53-13.70s combined. Both commands require the local digest (`--pull=never`),
+force `runc`, and bind over the actual image vLLM path without changing `PATH`.
+The environment keys come only from the explicit committed allowlist; exclude
+hardware-derived diagnostics such as `_CUDA_COMPAT_STATUS` so the GPU-less
+receipt cannot pin a false node06 value. It uses a CPU
+platform only to satisfy parser default construction on a GPU-less container;
+it never constructs an engine or model config, so the live smoke remains
+mandatory. Keep this image-heavy probe out of Drone; its committed receipt has
+GPU-free unit coverage there.
 
 Registry manifests contain 95/96 layer descriptors and 78/79 unique layer blobs
 for r4/r11. r11 has 12.79GiB of unique compressed blobs; the two images share
