@@ -309,3 +309,22 @@ public image/config identities, bounded readiness state, aggregate block/token
 counts, timings, and rollback status. It never records commands, environment,
 credentials, socket paths, prompts, token IDs, responses, or logs. Use a fresh
 output path for every run; the gate never overwrites evidence.
+
+### Detached exact-route shadow-soak gate
+
+The 104-source/100K compact-index qualification has a separate deployment
+owner, `bench/node06_shadow_soak_gate.py`. Launch it as a detached transient
+systemd service using the command in `AGENTS.md`; do not attach the workload and
+rollback lifetime to SSH. It admits only an explicitly named immutable current
+baseline and local `sha256:` candidate, recreates only `ds4-loadbalancer`, and
+holds the common deployment lock until the exact snapshot-shadow/soak-off
+baseline has been restored and verified. Both engine and companion identities
+must remain unchanged.
+
+The child retries only the two proxy-signed pre-dispatch outcomes
+`tokenizer_unavailable` and `attestation_changed`. Generic 503s, upstream 503s,
+and no-healthy-upstream responses fail immediately. A passing journal also
+requires the bounded client retry reasons and LB source-attempt counters to
+match exactly, so retry cannot conceal a serving failure. The gate reads the
+mode-0600 `.env` itself and never places the bearer in argv, systemd properties,
+or its content-free journal.

@@ -24,7 +24,7 @@ use url::Url;
 
 use crate::{
     compat::{CompatibilityManifest, RuntimeOutcome, sha256_hex, token_ids_sha256},
-    config::{Config, ExactRouteMode, TokenizerMode, TokenizerProfile},
+    config::{Config, ExactRouteMode, ShadowSoakMode, TokenizerMode, TokenizerProfile},
     exact_route_inventory::ExactRouteInventory,
     exact_shadow::{
         ExactPlacementMode, ExactPlacementPolicy, ExactRouteShadow, ExactRouteSnapshot,
@@ -32,6 +32,10 @@ use crate::{
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
     router::Decision,
+    shadow_soak::{
+        CaptureResult, ShadowSoak, ShadowSoakAttestation, ShadowSoakConfig, ShadowSoakSource,
+        ShadowSoakStatus, StartResult,
+    },
     shims::Endpoint,
 };
 
@@ -56,6 +60,7 @@ pub struct TokenizerObserver {
     exact_route_canary_bps: usize,
     exact_route_canary_key: Option<Arc<[u8]>>,
     exact_placement: ExactPlacementPolicy,
+    shadow_soak: ShadowSoak,
 }
 
 #[derive(Debug)]
@@ -331,6 +336,28 @@ impl TokenizerObserver {
             TokenizerMode::LocalShadow => LOCAL_BACKEND,
             TokenizerMode::Off | TokenizerMode::RemoteShadow => REMOTE_BACKEND,
         };
+        let shadow_soak = match config.shadow_soak_mode {
+            ShadowSoakMode::Off => ShadowSoak::off(&metrics),
+            ShadowSoakMode::Capture => {
+                let attestation = attestation
+                    .as_ref()
+                    .context("shadow soak requires runtime attestation")?
+                    .clone();
+                ShadowSoak::start(
+                    ShadowSoakConfig {
+                        source_target: config.shadow_soak_source_target,
+                        comparison_target: config.shadow_soak_comparison_target,
+                        attempt_limit: config.shadow_soak_attempt_limit,
+                        max_token_bytes: config.shadow_soak_max_token_bytes,
+                        timeout: Duration::from_millis(config.shadow_soak_timeout_ms as u64),
+                        min_gain_tokens: config.exact_route_min_gain_tokens,
+                    },
+                    exact_shadow.clone(),
+                    Arc::new(attestation),
+                    Arc::clone(&metrics),
+                )
+            }
+        };
         Ok(Self {
             sender,
             backend_label,
@@ -350,6 +377,7 @@ impl TokenizerObserver {
                 min_gain_tokens: config.exact_route_min_gain_tokens,
                 max_load_delta: config.exact_route_max_load_delta,
             },
+            shadow_soak,
         })
     }
 
@@ -485,6 +513,74 @@ impl TokenizerObserver {
             self.exact_placement,
             mode,
         );
+    }
+
+    pub(crate) fn prepare_shadow_soak_source(
+        &self,
+        tokens: &PreRouteTokens,
+        decision: &Decision,
+    ) -> Result<ShadowSoakSource, CaptureResult> {
+        if self
+            .attestation
+            .as_ref()
+            .is_none_or(|attestation| !attestation.still_ready(tokens.attestation_revision))
+        {
+            self.metrics
+                .shadow_soak_source_attempts
+                .with_label_values(&["attestation_changed"])
+                .inc();
+            return Err(CaptureResult::AttestationChanged);
+        }
+        let evaluation = self
+            .exact_shadow
+            .evaluate_pre_route_diagnostic(&tokens.tokens.token_ids, decision);
+        if self
+            .attestation
+            .as_ref()
+            .is_none_or(|attestation| !attestation.still_ready(tokens.attestation_revision))
+        {
+            self.metrics
+                .shadow_soak_source_attempts
+                .with_label_values(&["attestation_changed"])
+                .inc();
+            return Err(CaptureResult::AttestationChanged);
+        }
+        self.metrics
+            .shadow_soak_source_attempts
+            .with_label_values(&[if evaluation.stable() {
+                "stable"
+            } else {
+                match evaluation.outcome_label() {
+                    "inventory_changed" => "inventory_changed",
+                    "inventory_untrusted" => "inventory_untrusted",
+                    "lookup_error" => "lookup_error",
+                    "candidate_mismatch" => "candidate_mismatch",
+                    _ => "other",
+                }
+            }])
+            .inc();
+        self.shadow_soak
+            .prepare_source(&tokens.tokens.token_ids, decision, &evaluation)
+    }
+
+    pub(crate) fn record_shadow_soak_tokenizer_unavailable(&self) {
+        self.metrics
+            .shadow_soak_source_attempts
+            .with_label_values(&["tokenizer_unavailable"])
+            .inc();
+    }
+
+    pub(crate) fn commit_shadow_soak(&self, source: ShadowSoakSource) -> CaptureResult {
+        self.shadow_soak.capture(source)
+    }
+
+    #[must_use]
+    pub(crate) fn shadow_soak_status(&self) -> ShadowSoakStatus {
+        self.shadow_soak.status()
+    }
+
+    pub(crate) fn start_shadow_soak(&self) -> StartResult {
+        self.shadow_soak.start_run()
     }
 
     pub(crate) fn assign_canary(
@@ -961,6 +1057,16 @@ fn record_remote(
                 .with_label_values(&[REMOTE_BACKEND, endpoint, error.label()])
                 .inc();
         }
+    }
+}
+
+impl ShadowSoakAttestation for RuntimeAttestation {
+    fn marker(&self) -> Option<u64> {
+        Self::marker(self)
+    }
+
+    fn unchanged(&self, marker: u64) -> bool {
+        self.still_ready(marker)
     }
 }
 

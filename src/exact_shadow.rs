@@ -66,6 +66,57 @@ struct PreRouteResult {
     winner: Option<usize>,
 }
 
+/// Content-free result of one revision-fenced exact comparison.
+///
+/// This deliberately owns the private lookup result so diagnostics can sweep
+/// bounded placement policies without repeating the exact inventory reads.
+pub(crate) struct ExactRouteEvaluation {
+    result: PreRouteResult,
+}
+
+impl ExactRouteEvaluation {
+    pub(crate) const fn outcome_label(&self) -> &'static str {
+        self.result.shadow.outcome.label()
+    }
+
+    pub(crate) const fn stable(&self) -> bool {
+        matches!(
+            self.result.shadow.outcome,
+            ShadowOutcome::Agree
+                | ShadowOutcome::WouldMove
+                | ShadowOutcome::Tie
+                | ShadowOutcome::AllZero
+        )
+    }
+
+    pub(crate) fn placement_label(
+        &self,
+        decision: &Decision,
+        policy: ExactPlacementPolicy,
+    ) -> &'static str {
+        evaluate_placement(decision, &self.result, policy).label(false)
+    }
+
+    pub(crate) fn projected_balance_label(
+        &self,
+        decision: &Decision,
+        policy: ExactPlacementPolicy,
+    ) -> &'static str {
+        if self.result.shadow.outcome != ShadowOutcome::AllZero {
+            return "not_cold";
+        }
+        evaluate_projected_cold_balance(decision, &self.result, policy).label()
+    }
+
+    pub(crate) const fn selected_tokens(&self) -> usize {
+        self.result.shadow.selected_tokens
+    }
+
+    pub(crate) const fn best_tokens(&self) -> usize {
+        self.result.shadow.best_tokens
+    }
+}
+
 impl PreRouteResult {
     fn failure(outcome: ShadowOutcome) -> Self {
         Self {
@@ -283,7 +334,8 @@ impl ExactRouteShadow {
             mode
         };
         let started = Instant::now();
-        let result = self.evaluate_pre_route(token_ids, decision);
+        let evaluation = self.evaluate_pre_route_diagnostic(token_ids, decision);
+        let result = &evaluation.result;
         self.metrics
             .exact_route_preroute_duration
             .with_label_values(&[endpoint.label(), "lookup"])
@@ -293,7 +345,7 @@ impl ExactRouteShadow {
             .with_label_values(&[endpoint.label(), result.shadow.outcome.label()])
             .inc();
         self.record_result(endpoint, &result.shadow);
-        let placement = evaluate_placement(decision, &result, policy);
+        let placement = evaluate_placement(decision, result, policy);
         if let PlacementOutcome::WouldBalance { delta_tokens, .. } = placement {
             self.metrics
                 .exact_route_residency_delta
@@ -301,7 +353,7 @@ impl ExactRouteShadow {
                 .observe(usize_to_f64(delta_tokens));
         }
         if result.shadow.outcome == ShadowOutcome::AllZero {
-            let projected = evaluate_projected_cold_balance(decision, &result, policy);
+            let projected = evaluate_projected_cold_balance(decision, result, policy);
             if let ProjectedBalanceOutcome::WouldBalance { delta_tokens } = projected {
                 self.metrics
                     .exact_route_projected_residency_delta
@@ -320,7 +372,7 @@ impl ExactRouteShadow {
                 winner,
                 token_ids.len(),
                 decision,
-                &result,
+                result,
                 self.max_overlap_units,
             );
         }
@@ -332,6 +384,20 @@ impl ExactRouteShadow {
                 placement.label(mode.applies()),
             ])
             .inc();
+    }
+
+    /// Evaluate one exact/approximate comparison without metrics or route
+    /// mutation. Inventory markers are checked before, during, and after the
+    /// lookups; callers must independently fence tokenizer attestation.
+    #[must_use]
+    pub(crate) fn evaluate_pre_route_diagnostic(
+        &self,
+        token_ids: &[u32],
+        decision: &Decision,
+    ) -> ExactRouteEvaluation {
+        ExactRouteEvaluation {
+            result: self.evaluate_pre_route(token_ids, decision),
+        }
     }
 
     fn record_result(&self, endpoint: Endpoint, result: &ShadowResult) {
@@ -990,6 +1056,46 @@ mod tests {
         assert!(
             (value - 1.0).abs() < f64::EPSILON,
             "expected one, got {value}"
+        );
+    }
+
+    #[test]
+    fn diagnostic_evaluation_is_revision_fenced_and_route_immutable() {
+        let selected = trusted_inventory(Vec::new());
+        let alternative = trusted_inventory(vec![store(&[1, 2, 3, 4])]);
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative]),
+            Arc::new(Metrics::new(&Registry::new()).unwrap()),
+            1.0,
+            8,
+        );
+        let route = decision();
+        let original = route.clone();
+        let evaluation = shadow.evaluate_pre_route_diagnostic(&[1, 2, 3, 4], &route);
+        assert_eq!(route, original);
+        assert!(evaluation.stable());
+        assert_eq!(evaluation.outcome_label(), "would_move");
+        assert_eq!(evaluation.selected_tokens(), 0);
+        assert_eq!(evaluation.best_tokens(), 4);
+        assert_eq!(
+            evaluation.placement_label(
+                &route,
+                ExactPlacementPolicy {
+                    min_gain_tokens: 1,
+                    max_load_delta: 0,
+                },
+            ),
+            "would_move"
+        );
+        assert_eq!(
+            evaluation.projected_balance_label(
+                &route,
+                ExactPlacementPolicy {
+                    min_gain_tokens: 1,
+                    max_load_delta: 0,
+                },
+            ),
+            "not_cold"
         );
     }
 

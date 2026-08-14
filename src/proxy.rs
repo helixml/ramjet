@@ -174,6 +174,26 @@ impl Proxy {
         &self.inner.router
     }
 
+    /// Start the bounded comparison phase after all marked serving requests
+    /// have completed and their KV events have had the normal settle window.
+    #[must_use]
+    pub fn start_shadow_soak(&self, headers: &HeaderMap) -> Response<Body> {
+        let Some(token) = self.inner.config.upstream_token.as_deref() else {
+            return text_error(StatusCode::NOT_FOUND, "not found");
+        };
+        if !bearer_matches(headers, token) {
+            return text_error(StatusCode::UNAUTHORIZED, "unauthorized");
+        }
+        let result = self.inner.tokenizer.start_shadow_soak();
+        let status = match result {
+            crate::shadow_soak::StartResult::Started => StatusCode::ACCEPTED,
+            crate::shadow_soak::StartResult::Disabled => StatusCode::NOT_FOUND,
+            crate::shadow_soak::StartResult::NotReady => StatusCode::CONFLICT,
+            crate::shadow_soak::StartResult::QueueClosed => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        text_error(status, result.label())
+    }
+
     pub async fn handle(State(proxy): State<Self>, request: Request<Body>) -> Response<Body> {
         proxy.serve(request).await
     }
@@ -240,6 +260,16 @@ impl Proxy {
     async fn serve(&self, request: Request<Body>) -> Response<Body> {
         let started = Instant::now();
         let (parts, inbound_body) = request.into_parts();
+        let capture_shadow_soak = match shadow_soak_capture_requested(
+            &parts.headers,
+            self.inner.config.upstream_token.as_deref(),
+        ) {
+            Ok(capture) => capture,
+            Err(status) => return text_error(status, "shadow soak capture unauthorized"),
+        };
+        if capture_shadow_soak && !self.inner.tokenizer.shadow_soak_status().enabled {
+            return text_error(StatusCode::NOT_FOUND, "not found");
+        }
         let canary_session_id = exact_canary_session(&parts.headers);
         let endpoint = shims::endpoint(parts.uri.path());
         let endpoint_label = endpoint.label();
@@ -250,6 +280,12 @@ impl Proxy {
             );
         };
         let prepare_tokenizer_body = self.inner.tokenizer.wants_payload(endpoint, raw_body.len());
+        if capture_shadow_soak && (!prepare_tokenizer_body || endpoint != Endpoint::Chat) {
+            return json_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "request is outside the exact-token capture window",
+            );
+        }
         let canary_assignment =
             self.inner
                 .tokenizer
@@ -271,6 +307,29 @@ impl Proxy {
             None
         };
         let approximate_decision = prepared.route(&self.inner.router);
+        let pending_shadow_source = if capture_shadow_soak {
+            let Some(tokens) = &pre_route_tokens else {
+                self.inner
+                    .tokenizer
+                    .record_shadow_soak_tokenizer_unavailable();
+                return shadow_soak_retryable_error("tokenizer_unavailable");
+            };
+            match self
+                .inner
+                .tokenizer
+                .prepare_shadow_soak_source(tokens, &approximate_decision)
+            {
+                Ok(source) => Some(source),
+                Err(crate::shadow_soak::CaptureResult::AttestationChanged) => {
+                    return shadow_soak_retryable_error("attestation_changed");
+                }
+                Err(result) => {
+                    return json_error(StatusCode::SERVICE_UNAVAILABLE, result.label());
+                }
+            }
+        } else {
+            None
+        };
         let mut decision = approximate_decision.clone();
         if let Some(tokens) = &pre_route_tokens {
             self.inner.tokenizer.route_pre_route(
@@ -280,7 +339,6 @@ impl Proxy {
                 &mut decision,
             );
         }
-        let pre_route_tokens = pre_route_tokens.map(|tokens| tokens.tokens);
         let exact_route_snapshot =
             prepare_tokenizer_body.then(|| self.inner.tokenizer.capture_route(&decision));
         let fingerprints = if endpoint == Endpoint::Other {
@@ -391,6 +449,15 @@ impl Proxy {
         };
 
         let status = response.status();
+        if capture_shadow_soak
+            && (upstream != approximate_decision.candidates[0] || !status.is_success())
+        {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "capture source did not complete on its primary route",
+            );
+        }
+        let pre_route_tokens = pre_route_tokens.map(|tokens| tokens.tokens);
         let is_models = parts.method == Method::GET
             && parts
                 .uri
@@ -444,6 +511,7 @@ impl Proxy {
                     prepare_tokenizer_body,
                     exact_route_snapshot,
                     decision,
+                    pending_shadow_source,
                     load_guard,
                     inflight_guard,
                     journal_sequence,
@@ -471,6 +539,7 @@ impl Proxy {
         tokenizer_selected: bool,
         exact_route_snapshot: Option<ExactRouteSnapshot>,
         decision: Decision,
+        pending_shadow_source: Option<crate::shadow_soak::ShadowSoakSource>,
         _load_guard: RoutedLoad,
         _inflight_guard: InflightGuard,
         journal_sequence: Option<u64>,
@@ -570,6 +639,12 @@ impl Proxy {
                         route_snapshot,
                         pre_route_tokens,
                     );
+                }
+                if let Some(source) = pending_shadow_source {
+                    let capture = self.inner.tokenizer.commit_shadow_soak(source);
+                    if capture != crate::shadow_soak::CaptureResult::Accepted {
+                        tracing::warn!(outcome = capture.label(), "shadow soak source rejected");
+                    }
                 }
             }
         }
@@ -945,7 +1020,9 @@ fn upstream_url(base: &Url, uri: &Uri) -> Url {
 fn filtered_headers(source: &HeaderMap) -> HeaderMap {
     let mut destination = HeaderMap::with_capacity(source.len());
     for (name, value) in source {
-        if !hop_header(name) && name.as_str() != "x-session-id" {
+        if !hop_header(name)
+            && !matches!(name.as_str(), "x-session-id" | "x-mini-dynamo-shadow-soak")
+        {
             destination.append(name, value.clone());
         }
     }
@@ -1005,6 +1082,49 @@ fn json_error(status: StatusCode, message: &str) -> Response<Body> {
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .expect("valid error response")
+}
+
+fn shadow_soak_retryable_error(reason: &'static str) -> Response<Body> {
+    let body = serde_json::json!({"error": {
+        "message": "exact-token capture temporarily unavailable",
+        "type": StatusCode::SERVICE_UNAVAILABLE.as_str(),
+    }});
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("content-type", "application/json")
+        .header("x-mini-dynamo-shadow-soak-retry", reason)
+        .body(Body::from(body.to_string()))
+        .expect("valid shadow soak retry response")
+}
+
+fn bearer_matches(headers: &HeaderMap, expected: &str) -> bool {
+    let mut values = headers.get_all("authorization").iter();
+    let matches = values
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        == Some(expected);
+    matches && values.next().is_none()
+}
+
+fn shadow_soak_capture_requested(
+    headers: &HeaderMap,
+    expected_token: Option<&str>,
+) -> Result<bool, StatusCode> {
+    let mut values = headers.get_all("x-mini-dynamo-shadow-soak").iter();
+    let Some(value) = values.next() else {
+        return Ok(false);
+    };
+    if values.next().is_some() || value.as_bytes() != b"capture" {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let Some(expected_token) = expected_token else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    if !bearer_matches(headers, expected_token) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(true)
 }
 
 fn text_error(status: StatusCode, message: &str) -> Response<Body> {
@@ -1087,6 +1207,25 @@ mod tests {
             .join(",");
         let config =
             Config::from_lookup(|key| (key == "DS4_UPSTREAM").then(|| joined.clone())).unwrap();
+        proxy_for_config(config, inventories)
+    }
+
+    fn proxy_for_with_token(upstreams: &[Url], token: &str) -> Proxy {
+        let joined = upstreams
+            .iter()
+            .map(Url::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        let config = Config::from_lookup(|key| match key {
+            "DS4_UPSTREAM" => Some(joined.clone()),
+            "DS4_UPSTREAM_TOKEN" => Some(token.to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        proxy_for_config(config, Arc::from([]))
+    }
+
+    fn proxy_for_config(config: Config, inventories: Arc<[SharedFencedInventory]>) -> Proxy {
         let registry = Registry::new();
         let metrics = Arc::new(Metrics::new(&registry).unwrap());
         let router = Arc::new(Router::new(crate::router::RouterConfig {
@@ -1144,11 +1283,100 @@ mod tests {
         source.insert("connection", "close".parse().unwrap());
         source.insert("x-mini-dynamo-upstream", "secret".parse().unwrap());
         source.insert("x-session-id", "private-session".parse().unwrap());
+        source.insert("x-mini-dynamo-shadow-soak", "capture".parse().unwrap());
         let result = filtered_headers(&source);
         assert!(result.contains_key("authorization"));
         assert!(!result.contains_key("connection"));
         assert!(!result.contains_key("x-mini-dynamo-upstream"));
         assert!(!result.contains_key("x-session-id"));
+        assert!(!result.contains_key("x-mini-dynamo-shadow-soak"));
+    }
+
+    #[test]
+    fn shadow_soak_bearer_requires_one_exact_authorization_value() {
+        let mut headers = HeaderMap::new();
+        assert!(!bearer_matches(&headers, "secret"));
+        headers.insert("authorization", "Basic secret".parse().unwrap());
+        assert!(!bearer_matches(&headers, "secret"));
+        headers.insert("authorization", "Bearer wrong".parse().unwrap());
+        assert!(!bearer_matches(&headers, "secret"));
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        assert!(bearer_matches(&headers, "secret"));
+        headers.append("authorization", "Bearer secret".parse().unwrap());
+        assert!(!bearer_matches(&headers, "secret"));
+    }
+
+    #[test]
+    fn shadow_soak_marker_is_exact_single_and_bearer_authenticated() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(
+            shadow_soak_capture_requested(&headers, Some("secret")),
+            Ok(false)
+        );
+        headers.insert("x-mini-dynamo-shadow-soak", "wrong".parse().unwrap());
+        assert_eq!(
+            shadow_soak_capture_requested(&headers, Some("secret")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        headers.insert("x-mini-dynamo-shadow-soak", "capture".parse().unwrap());
+        assert_eq!(
+            shadow_soak_capture_requested(&headers, Some("secret")),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        assert_eq!(
+            shadow_soak_capture_requested(&headers, Some("secret")),
+            Ok(true)
+        );
+        headers.append("x-mini-dynamo-shadow-soak", "capture".parse().unwrap());
+        assert_eq!(
+            shadow_soak_capture_requested(&headers, Some("secret")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn only_explicit_shadow_admission_errors_carry_the_retry_header() {
+        let retryable = shadow_soak_retryable_error("tokenizer_unavailable");
+        assert_eq!(retryable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            retryable
+                .headers()
+                .get("x-mini-dynamo-shadow-soak-retry")
+                .unwrap(),
+            "tokenizer_unavailable"
+        );
+        let ordinary = json_error(StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable");
+        assert!(
+            ordinary
+                .headers()
+                .get("x-mini-dynamo-shadow-soak-retry")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn shadow_soak_capture_header_authenticates_and_hides_off_mode() {
+        let proxy = proxy_for_with_token(&[Url::parse("http://127.0.0.1:1").unwrap()], "secret");
+        let unauthorized = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header("x-mini-dynamo-shadow-soak", "capture")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            proxy.serve(unauthorized).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let disabled = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header("authorization", "Bearer secret")
+            .header("x-mini-dynamo-shadow-soak", "capture")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(proxy.serve(disabled).await.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]

@@ -78,6 +78,7 @@ class ContainerIdentity:
     running: bool
     health: str
     config_hash: str
+    compose_project: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -433,6 +434,7 @@ class NodeRuntime:
                         running=bool(state["Running"]),
                         health=health,
                         config_hash=labels.get("com.docker.compose.config-hash", ""),
+                        compose_project=labels.get("com.docker.compose.project", ""),
                     )
                 )
             except (KeyError, TypeError, ValueError) as error:

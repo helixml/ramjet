@@ -421,6 +421,37 @@ authoritative snapshot inventories look like a 0/2 serving failure because
 probes fall back to the public default token. Every manual shadow recreate must
 install an unconditional baseline rollback trap before the mutation.
 
+Run the 104-source/100K exact-route shadow soak only through
+`bench/node06_shadow_soak_gate.py`, not through an SSH-attached
+`shadow_soak.py`. The gate reserves a mode-0600 journal, verifies the explicitly
+named immutable baseline and candidate renders, holds the common deployment
+lock across the LB-only candidate recreate and measurement, checks that both
+engines and companions keep their identities, and restores the exact admitted
+snapshot-shadow/soak-off baseline on success, failure, timeout, or handled
+signal. It reads the bearer from the protected deployment `.env` internally;
+never put that token in argv or a systemd property. Copy the gate together with
+`snapshot_recovery_gate.py`, `shadow_soak.py`, `cachebench.py`, and
+`engine_metrics.py`, then detach it from Tailscale/SSH:
+
+```bash
+systemd-run --unit=mini-dynamo-shadow-soak-rNN --no-block \
+  --property=Type=exec --property=WorkingDirectory=/home/luke/inference/dspark_0731 \
+  --property=UMask=0077 --property=Restart=no --property=RuntimeMaxSec=2400 \
+  --property=TimeoutStopSec=900 --property=KillMode=mixed \
+  /usr/bin/python3 ./node06_shadow_soak_gate.py \
+  --candidate-image sha256:<local-image-id> \
+  --expected-baseline-image <repository:tag@sha256:digest> \
+  --salt rNN-<fresh-nonce> --output /tmp/rNN-shadow-soak.json
+```
+
+The runner retries only an authenticated proxy-marked pre-dispatch tokenizer or
+attestation admission. Generic/upstream/no-healthy 503s are never retried. Each
+logical request has a 20-retry cap and one 330-second absolute deadline, and a
+passing result requires retry-reason totals to match the proxy's source-attempt
+counters exactly. A host power loss cannot execute an in-memory rollback; after
+any connectivity loss, verify boot ID, detached-unit result, LB config/image,
+engine identities, and the journal before treating rollback as proved.
+
 ### Preflight engine flags before a rolling restart
 
 Do not discover an unsupported vLLM flag combination by restarting a resident

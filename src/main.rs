@@ -5,8 +5,8 @@ use axum::{
     Router,
     body::Body,
     extract::{Path, State},
-    http::{Response, StatusCode},
-    routing::{any, get},
+    http::{HeaderMap, Response, StatusCode},
+    routing::{any, get, post},
 };
 use mini_dynamo::{
     config::Config,
@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
     let metrics_api = Router::new()
         .route("/metrics", get(prometheus_metrics))
         .route("/metrics/upstream/{index}", get(upstream_metrics))
+        .route("/diagnostics/shadow-soak/start", post(shadow_soak_start))
         .with_state(MetricsState {
             proxy: proxy.clone(),
             registry,
@@ -156,6 +157,12 @@ fn log_startup(config: &Config) {
         exact_route_min_gain_tokens = config.exact_route_min_gain_tokens,
         exact_route_max_load_delta = config.exact_route_max_load_delta,
         exact_route_canary_bps = config.exact_route_canary_bps,
+        shadow_soak_mode = ?config.shadow_soak_mode,
+        shadow_soak_source_target = config.shadow_soak_source_target,
+        shadow_soak_comparison_target = config.shadow_soak_comparison_target,
+        shadow_soak_attempt_limit = config.shadow_soak_attempt_limit,
+        shadow_soak_max_token_bytes = config.shadow_soak_max_token_bytes,
+        shadow_soak_timeout_ms = config.shadow_soak_timeout_ms,
         exact_route_manifest = config.exact_route_manifest_path.is_some(),
         kv_event_mode = ?config.kv_event_mode,
         kv_event_sources = config.kv_event_sources.len(),
@@ -217,6 +224,13 @@ async fn upstream_metrics(
     Path(index): Path<usize>,
 ) -> Response<Body> {
     Proxy::upstream_metrics(State(state.proxy), Path(index)).await
+}
+
+async fn shadow_soak_start(
+    State(state): State<MetricsState>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    state.proxy.start_shadow_soak(&headers)
 }
 
 async fn shutdown_signal() {

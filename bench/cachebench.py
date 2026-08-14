@@ -370,7 +370,9 @@ def execute_waves(apps, sessions, turns, concurrency, execute, progress=None):
     return records
 
 
-def execute_request(base, model, token, messages, max_tokens, timeout):
+def execute_request(
+    base, model, token, messages, max_tokens, timeout, extra_headers=None
+):
     body = {
         "model": model,
         "messages": messages,
@@ -379,10 +381,16 @@ def execute_request(base, model, token, messages, max_tokens, timeout):
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    headers = {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
     request = urllib.request.Request(
         base.rstrip("/") + "/v1/chat/completions",
         data=json.dumps(body, separators=(",", ":")).encode(),
-        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+        headers=headers,
     )
     started = time.perf_counter()
     assembly = Assembly()
@@ -396,7 +404,21 @@ def execute_request(base, model, token, messages, max_tokens, timeout):
             decoder.finish()
     except urllib.error.HTTPError as error:
         error.read(4096)
-        return {"ok": False, "error": f"HTTP {error.code}"}
+        retry_reason = (
+            error.headers.get("X-Mini-Dynamo-Shadow-Soak-Retry")
+            if error.headers is not None
+            else None
+        )
+        retryable = error.code == 503 and retry_reason in {
+            "tokenizer_unavailable",
+            "attestation_changed",
+        }
+        return {
+            "ok": False,
+            "error": f"HTTP {error.code}",
+            "retryable": retryable,
+            "retry_reason": retry_reason if retryable else None,
+        }
     except Exception as error:  # benchmark failures are structured, never payload dumps
         return {"ok": False, "error": type(error).__name__}
     ended = time.perf_counter()
@@ -414,6 +436,35 @@ def execute_request(base, model, token, messages, max_tokens, timeout):
         "ttft_ms": None if ttft is None else round(1000 * ttft, 1),
         "wall_ms": round(1000 * (ended - started), 1),
     }
+
+
+def execute_with_retries(execute, retries, retry_delay_seconds, timeout_seconds):
+    """Retry only explicit pre-serving admissions within one absolute deadline."""
+    deadline = time.monotonic() + timeout_seconds
+    retry_reasons = collections.Counter()
+    for attempt in range(1, retries + 2):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {
+                "ok": False,
+                "error": "retry_deadline",
+                "retryable": False,
+                "retry_reason": None,
+                "client_attempts": attempt - 1,
+                "retry_reasons": dict(sorted(retry_reasons.items())),
+            }
+        result = execute(remaining)
+        result["client_attempts"] = attempt
+        if not result.get("retryable") or attempt == retries + 1:
+            result["retry_reasons"] = dict(sorted(retry_reasons.items()))
+            return result
+        retry_reasons[result["retry_reason"]] += 1
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            result["retry_reasons"] = dict(sorted(retry_reasons.items()))
+            return result
+        time.sleep(min(retry_delay_seconds, remaining))
+    raise AssertionError("bounded request attempt loop returned no result")
 
 
 def latency_by_outcome(records, field):
@@ -449,6 +500,9 @@ def summarize(
     cached = sum(record["cached_tokens"] for record in good)
     completion = sum(record["completion_tokens"] for record in good)
     outcomes = collections.Counter(record["cache_outcome"] for record in good)
+    errors = collections.Counter(
+        record["error"] for record in records if not record["ok"]
+    )
     routes = collections.Counter(record["route"] or "unknown" for record in good)
     ttfts = [record["ttft_ms"] for record in good if record["ttft_ms"] is not None]
     walls = [record["wall_ms"] for record in good]
@@ -481,6 +535,7 @@ def summarize(
         "requests": len(records),
         "successful": len(good),
         "outcomes": dict(sorted(outcomes.items())),
+        "errors": dict(sorted(errors.items())),
         "route_split": dict(sorted(routes.items())),
         "prompt_tokens": prompt,
         "initial_wave_prompt_tokens": initial_prompt,
@@ -525,7 +580,7 @@ def summarize(
     }
 
 
-def run_cell(args, apps, token):
+def run_cell(args, apps, token, extra_headers=None):
     salt = f"{args.salt}-a{apps}"
     lb_before = fetch_lb_metrics(args.metrics_url)
     inventory_before = fetch_replica_inventory(args.base)
@@ -535,13 +590,21 @@ def run_cell(args, apps, token):
 
     def execute(coordinate):
         app, session, turn = coordinate
-        return execute_request(
-            args.base,
-            args.model,
-            token,
-            messages_for(app, session, turn, args.prefix_kib, salt),
-            args.max_tokens,
-            args.timeout,
+        messages = messages_for(app, session, turn, args.prefix_kib, salt)
+        retry_timeout = getattr(args, "retry_timeout_seconds", None) or args.timeout
+        return execute_with_retries(
+            lambda remaining: execute_request(
+                args.base,
+                args.model,
+                token,
+                messages,
+                args.max_tokens,
+                min(args.timeout, remaining),
+                extra_headers,
+            ),
+            getattr(args, "request_retries", 0),
+            getattr(args, "retry_delay_seconds", 0.1),
+            retry_timeout,
         )
 
     def progress(state):
@@ -601,6 +664,16 @@ def run_cell(args, apps, token):
         replica_inventory_change(inventory_before, inventory_after),
     )
     summary["concurrency"] = args.concurrency
+    summary["client_attempts_total"] = sum(
+        record.get("client_attempts", 1) for record in records
+    )
+    summary["retried_requests"] = sum(
+        record.get("client_attempts", 1) > 1 for record in records
+    )
+    retry_reasons = collections.Counter()
+    for record in records:
+        retry_reasons.update(record.get("retry_reasons", {}))
+    summary["retry_reasons"] = dict(sorted(retry_reasons.items()))
     return summary
 
 
@@ -623,6 +696,9 @@ def parser():
     result.add_argument("--metrics-url")
     result.add_argument("--engine-metrics", action="append", default=[])
     result.add_argument("--timeout", type=float, default=300)
+    result.add_argument("--request-retries", type=int, default=0)
+    result.add_argument("--retry-delay-seconds", type=float, default=0.1)
+    result.add_argument("--retry-timeout-seconds", type=float)
     result.add_argument("--settle-seconds", type=float, default=0.25)
     result.add_argument("--reconcile-tolerance", type=float, default=0)
     result.add_argument("--require-reconciled", action="store_true")
@@ -645,10 +721,14 @@ def main():
         or args.max_tokens < 1
         or args.concurrency < 1
         or args.progress_every < 0
+        or args.request_retries < 0
+        or args.retry_delay_seconds < 0
+        or (args.retry_timeout_seconds is not None and args.retry_timeout_seconds <= 0)
     ):
         raise SystemExit(
             "sessions, turns, prefix-kib, max-tokens, and concurrency must be positive; "
-            "progress-every must be nonnegative"
+            "retry-timeout-seconds must be positive; other retry/progress bounds "
+            "must be nonnegative"
         )
     token = os.environ.get("BENCH_TOKEN") or os.environ.get("VLLM_API_KEY")
     if not token:

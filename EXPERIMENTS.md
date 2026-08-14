@@ -5047,3 +5047,79 @@ not infer that exact warm-prefix routing alone fixes this: the failing requests
 had already been evicted. Use the planned revision-stable soak to sweep the
 projected cold-balance load gate on the real captured decisions, then validate
 one conservative shadow policy before any canary. Exact placement remains off.
+
+## 2026-08-14 — r105 first served-source soak stopped by host loss
+
+r105 added the off-by-default capture mode needed for the remaining issue #41
+gate: marked, bearer-authenticated requests follow ordinary preparation,
+routing, dispatch, streaming, usage, and cache observation; their marker is
+stripped upstream; and only a complete primary-route HTTP 200 commits a bounded
+exact-token source. After 104 served sources an explicit authenticated metrics-
+listener control starts 100,000 serial marker-before/lookup/marker-after compact
+comparisons with no additional inference. The runner requires two trusted
+inventories before and after, exact response/LB/native usage reconciliation,
+positive non-all-zero overlap, fixed policy-row totals, and zero hard trust,
+lookup, candidate, attestation, timeout, or attempt-limit failures. This is 104
+real served policy samples plus 100,000 revision-fenced compact lookups, not
+100,000 independent served requests or a raw-versus-compact performance claim.
+
+Strict Clippy, 347 Rust tests plus integrations, 209 Python tests, the agent
+corpus, both ordinary and capture Compose validators, and the release build
+passed. The release link took 34.92s; the complete cached image build and
+Tailscale transfer took 45.67s. The candidate LB recovered two authoritative
+inventories without touching either engine: 21,103 blocks / 5,402,368 tokens
+on A and 18,177 / 4,653,312 on B. Both upstreams remained healthy while the
+52-app, 529KiB, two-wave, concurrency-two source workload ran.
+
+The first workload did not reach a result. At 96/104 logical requests only 57
+had succeeded; content-free live metrics showed 49 committed sources at the
+88-request progress point, with stable nonzero exact overlap. Many other marked
+requests failed fast with HTTP 503 while ordinary 2/2 health and exact authority
+remained present. The candidate lacked a terminal counter for the early
+`pre_route_tokens == None` path, so this trial cannot distinguish tokenizer
+busy/unattested/timeout from a revision change and is not admissible evidence.
+At approximately 96/104 the SSH connection closed and node06 disappeared from
+Tailscale. The remote shell had installed an unconditional rollback trap, but
+the host remains unreachable at the time of this entry; rollback, engine
+identity, and host reboot/OOM state are therefore unverified. Nothing observed
+before connectivity loss establishes that the LB caused the host outage.
+
+Decision: reject the r105 trial. r106 must retry only an explicit proxy-signed
+pre-dispatch tokenizer/attestation admission, place all attempts under one
+absolute logical-request deadline, and require retry-reason/source-counter
+equality so an upstream or health failure cannot be hidden. Run the next trial
+through the detached, common-lock-owning `node06_shadow_soak_gate.py`; it must
+verify the exact snapshot-shadow/soak-off baseline rollback before releasing
+the lock. Do not resume node06 mutation until connectivity returns and the r105
+rollback plus unchanged engine identities have been proved.
+
+## 2026-08-14 — r106 local shadow-soak recovery qualification
+
+r106 classifies and signs only the two safe pre-dispatch retry conditions,
+`tokenizer_unavailable` and `attestation_changed`; upstream, no-healthy, and
+generic HTTP 503 responses remain non-retryable. The client gives every logical
+request one 330-second deadline, caps retry count and delay, and requires its
+aggregate retry reasons to equal the proxy's fixed-cardinality source-attempt
+counters. This prevents a retry from concealing serving or upstream failure.
+
+The detached node06 owner now binds the immutable candidate, digest-pinned
+baseline, Compose project/config/file identities, engine process starts,
+companion identities, protected environment, and every executed helper digest.
+It copies rollback inputs into a private directory, proves that the frozen
+baseline and candidate reproduce the admitted hashes before mutation, and
+holds the common deployment lock until rollback verifies. A canonical rollback
+failure forces the second attempt onto the already-proved frozen inputs; signals
+are latched while rollback is active, and the documented 900-second systemd
+stop budget covers the maximum admitted double-attempt recovery window.
+
+The full local gate passed: strict Clippy and 348 Rust unit tests plus every
+integration suite completed in 5.87s; all 230 Python tests completed in 1.86s;
+the five-case agent corpus and both ordinary/capture production Compose
+validators passed; and the warm release build completed in 0.15s. Two
+independent blocker-only reviews found no remaining code-level rollout issue.
+The cached serving-image build took 36.22s, of which 31.64s was the expected
+thin-LTO source relink; the resulting runtime image was 14,492,167 bytes.
+node06 still timed out over both Tailscale and SSH, so this is local recovery-
+tool qualification only. The 104-source/100K live journal, r105 rollback audit,
+and unchanged engine-identity proof remain mandatory before issue #41 can
+advance.
