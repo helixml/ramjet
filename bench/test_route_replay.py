@@ -46,7 +46,7 @@ class RouteReplayTest(unittest.TestCase):
         self.assertEqual(rows[0]["agreement_pct"], 100.0)
         self.assertEqual(rows[0]["counterfactual_migrations"], 0)
 
-    def test_v3_through_v6_journal_records_are_accepted(self):
+    def test_v3_through_v7_journal_records_are_accepted(self):
         record = start()
         record["v"] = 3
         record["score_tie_break"] = "overlap"
@@ -66,6 +66,19 @@ class RouteReplayTest(unittest.TestCase):
             },
         }
         phase_aware = {**record, "v": 6, "phase_aware_load": True}
+        output_limit = {
+            **record,
+            "v": 7,
+            "output_limit": {
+                "policy_version": 1,
+                "requested_bucket": "65_256",
+                "requested_source": "max_completion_tokens",
+                "effective_bucket": "65_256",
+                "effective_source": "max_completion_tokens",
+                "mutation": "unchanged",
+                "stream_mode": "streaming",
+            },
+        }
         parsed = list(
             records(
                 [
@@ -73,10 +86,11 @@ class RouteReplayTest(unittest.TestCase):
                     __import__("json").dumps(canary),
                     __import__("json").dumps(session),
                     __import__("json").dumps(phase_aware),
+                    __import__("json").dumps(output_limit),
                 ]
             )
         )
-        self.assertEqual(parsed, [record, canary, session, phase_aware])
+        self.assertEqual(parsed, [record, canary, session, phase_aware, output_limit])
         row = replay([session], {}, [4], [32])[0]
         self.assertEqual(
             row["session_affinity_counts"], {"would_prefer_primary": 1}
@@ -85,6 +99,15 @@ class RouteReplayTest(unittest.TestCase):
             row["session_affinity_replay_counts"], {"would_prefer_primary": 1}
         )
         self.assertEqual(row["session_affinity_record_mismatches"], 0)
+
+    def test_boolean_and_future_journal_versions_are_not_accepted(self):
+        boolean = {**start(), "v": True}
+        future = {**start(), "v": 8}
+        self.assertEqual(
+            list(records([__import__("json").dumps(boolean), __import__("json").dumps(future)])),
+            [],
+        )
+        self.assertEqual(list(records(["[]", "true", '"string"'])), [])
 
     def test_session_affinity_replay_matches_weight_overlap_and_rotation(self):
         record = start(chosen=0, rotation=0, left=(5, 0), right=(0, 0))

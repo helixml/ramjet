@@ -30,7 +30,41 @@ import sys
 from route_replay import records
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+OUTPUT_LIMIT_POLICY_VERSION = 1
+OUTPUT_LIMIT_BUCKETS = {
+    "unset",
+    "invalid",
+    "1_64",
+    "65_256",
+    "257_1024",
+    "1025_4096",
+    "4097_plus",
+}
+OUTPUT_LIMIT_SOURCES = {
+    "none",
+    "max_tokens",
+    "max_completion_tokens",
+    "max_output_tokens",
+}
+OUTPUT_LIMIT_MUTATIONS = {
+    "unchanged",
+    "max_tokens_stripped",
+    "max_completion_tokens_stripped",
+    "both_stripped",
+}
+STREAM_MODES = {"unset", "non_streaming", "streaming", "invalid"}
+ENDPOINTS = {"chat", "messages", "responses", "completions"}
+OUTPUT_LIMIT_FIELDS = {
+    "policy_version",
+    "requested_bucket",
+    "requested_source",
+    "effective_bucket",
+    "effective_source",
+    "mutation",
+    "stream_mode",
+}
+MAX_SAFE_TOKEN_COUNT = (1 << 53) - 1
 
 
 def finite_number(value):
@@ -43,6 +77,18 @@ def finite_number(value):
 
 def nonnegative_number(value):
     return finite_number(value) and value >= 0
+
+
+def positive_number(value):
+    return finite_number(value) and value > 0
+
+
+def nonnegative_integral(value):
+    return (
+        nonnegative_number(value)
+        and float(value).is_integer()
+        and value <= MAX_SAFE_TOKEN_COUNT
+    )
 
 
 def percentile(values, quantile):
@@ -76,6 +122,244 @@ def served_candidate(start, finish):
     )
 
 
+def bounded_output_limit(start):
+    """Return only fixed-cardinality output-limit telemetry labels."""
+    version = start.get("v")
+    raw = start.get("output_limit")
+    if type(version) is int and version in range(1, 7):
+        return {
+            "telemetry_state": "legacy",
+            "requested_bucket": "legacy",
+            "requested_source": "legacy",
+            "effective_bucket": "legacy",
+            "effective_source": "legacy",
+            "mutation": "legacy",
+            "stream_mode": "legacy",
+        }
+    endpoint = start.get("endpoint")
+    allowed_sources = {
+        "chat": {"none", "max_tokens", "max_completion_tokens"},
+        "messages": {"none", "max_tokens"},
+        "responses": {"none", "max_output_tokens"},
+        "completions": {"none", "max_tokens"},
+    }.get(endpoint, set())
+    valid = (
+        type(version) is int
+        and version == 7
+        and isinstance(raw, dict)
+        and set(raw) == OUTPUT_LIMIT_FIELDS
+        and type(raw.get("policy_version")) is int
+        and raw.get("policy_version") == OUTPUT_LIMIT_POLICY_VERSION
+        and raw.get("requested_bucket") in OUTPUT_LIMIT_BUCKETS
+        and raw.get("requested_source") in OUTPUT_LIMIT_SOURCES
+        and raw.get("effective_bucket") in OUTPUT_LIMIT_BUCKETS
+        and raw.get("effective_source") in OUTPUT_LIMIT_SOURCES
+        and raw.get("mutation") in OUTPUT_LIMIT_MUTATIONS
+        and raw.get("stream_mode") in STREAM_MODES
+        and raw.get("requested_source") in allowed_sources
+        and raw.get("effective_source") in allowed_sources
+        and (
+            raw.get("requested_source") != "none"
+            or raw.get("requested_bucket") in {"unset", "invalid"}
+        )
+        and (
+            raw.get("effective_source") != "none"
+            or raw.get("effective_bucket") in {"unset", "invalid"}
+        )
+        and (
+            raw.get("requested_source") == "none"
+            or raw.get("requested_bucket") != "unset"
+        )
+        and (
+            raw.get("effective_source") == "none"
+            or raw.get("effective_bucket") != "unset"
+        )
+        and (
+            raw.get("mutation") != "unchanged"
+            or (
+                raw.get("requested_source") == raw.get("effective_source")
+                and raw.get("requested_bucket") == raw.get("effective_bucket")
+            )
+        )
+        and (
+            endpoint in {"chat", "completions"}
+            or raw.get("mutation") == "unchanged"
+        )
+    )
+    if not valid:
+        return {
+            "telemetry_state": "invalid",
+            "requested_bucket": "invalid",
+            "requested_source": "invalid",
+            "effective_bucket": "invalid",
+            "effective_source": "invalid",
+            "mutation": "invalid",
+            "stream_mode": "invalid",
+        }
+    return {
+        "telemetry_state": "valid",
+        "requested_bucket": raw["requested_bucket"],
+        "requested_source": raw["requested_source"],
+        "effective_bucket": raw["effective_bucket"],
+        "effective_source": raw["effective_source"],
+        "mutation": raw["mutation"],
+        "stream_mode": raw["stream_mode"],
+    }
+
+
+def decode_observation(start, finish):
+    """Join bounded requested policy to observed decode and cancellation state."""
+    output_limit = bounded_output_limit(start)
+    endpoint = start.get("endpoint")
+    endpoint = endpoint if endpoint in ENDPOINTS else "invalid"
+    result = finish.get("result")
+    status = finish.get("status")
+    complete = result == "complete" and type(status) is int and 200 <= status < 300
+    if result is None:
+        outcome = "missing_finish"
+    elif complete:
+        outcome = "complete"
+    elif result == "client_disconnect":
+        outcome = "client_disconnect"
+    else:
+        outcome = "other_failure"
+    duration = finish.get("duration_ms")
+    duration = float(duration) if positive_number(duration) else None
+    ttft = finish.get("ttft_ms")
+    ttft = float(ttft) if positive_number(ttft) else None
+    if duration is not None and ttft is not None and ttft > duration:
+        ttft = None
+    completion = finish.get("completion_tokens")
+    completion = float(completion) if nonnegative_integral(completion) else None
+    tpot = None
+    if completion is not None and completion > 1 and duration is not None and ttft is not None:
+        candidate_tpot = (duration - ttft) / (completion - 1)
+        if positive_number(candidate_tpot):
+            tpot = candidate_tpot
+    candidate = served_candidate(start, finish)
+    load_units = None if candidate is None else candidate.get("request_load_units")
+    if type(load_units) is not int or load_units < 1:
+        load_units = None
+    if load_units is None:
+        load_bucket = "missing"
+    elif load_units == 1:
+        load_bucket = "1"
+    elif load_units <= 4:
+        load_bucket = "2_4"
+    elif load_units <= 8:
+        load_bucket = "5_8"
+    else:
+        load_bucket = "9_plus"
+    return {
+        **output_limit,
+        "endpoint": endpoint,
+        "outcome": outcome,
+        "completion_tokens": completion,
+        "duration_ms": duration,
+        "ttft_ms": ttft,
+        "tpot_ms": tpot,
+        "request_load_units": load_units,
+        "request_load_bucket": load_bucket,
+    }
+
+
+def label_counts(items, field):
+    return {
+        value: sum(item[field] == value for item in items)
+        for value in sorted({item[field] for item in items})
+    }
+
+
+def measurement_summary(items):
+    completions = [
+        item["completion_tokens"]
+        for item in items
+        if item["completion_tokens"] is not None
+    ]
+    durations = [
+        item["duration_ms"] for item in items if item["duration_ms"] is not None
+    ]
+    ttfts = [item["ttft_ms"] for item in items if item["ttft_ms"] is not None]
+    tpots = [item["tpot_ms"] for item in items if item["tpot_ms"] is not None]
+    decode_durations = [
+        item["duration_ms"] - item["ttft_ms"]
+        for item in items
+        if item["duration_ms"] is not None and item["ttft_ms"] is not None
+    ]
+    return {
+        "requests": len(items),
+        "missing_completion_tokens": len(items) - len(completions),
+        "completion_token_samples": len(completions),
+        "completion_tokens_p50": percentile(completions, 0.50),
+        "completion_tokens_p95": percentile(completions, 0.95),
+        "missing_duration_ms": len(items) - len(durations),
+        "duration_samples": len(durations),
+        "duration_ms_p50": percentile(durations, 0.50),
+        "duration_ms_p95": percentile(durations, 0.95),
+        "missing_ttft_ms": len(items) - len(ttfts),
+        "ttft_samples": len(ttfts),
+        "ttft_ms_p50": percentile(ttfts, 0.50),
+        "ttft_ms_p95": percentile(ttfts, 0.95),
+        "missing_decode_duration_ms": len(items) - len(decode_durations),
+        "decode_duration_samples": len(decode_durations),
+        "decode_duration_ms_p50": percentile(decode_durations, 0.50),
+        "decode_duration_ms_p95": percentile(decode_durations, 0.95),
+        "missing_tpot_ms": len(items) - len(tpots),
+        "tpot_samples": len(tpots),
+        "tpot_ms_p50": percentile(tpots, 0.50),
+        "tpot_ms_p95": percentile(tpots, 0.95),
+    }
+
+
+def summarize_decode(items):
+    complete = [item for item in items if item["outcome"] == "complete"]
+    return {
+        "requests": len(items),
+        "complete_requests": sum(item["outcome"] == "complete" for item in items),
+        "client_disconnects": sum(item["outcome"] == "client_disconnect" for item in items),
+        "other_failures": sum(item["outcome"] == "other_failure" for item in items),
+        "missing_finishes": sum(item["outcome"] == "missing_finish" for item in items),
+        "missing_completion_tokens": sum(
+            item["completion_tokens"] is None for item in items
+        ),
+        "missing_duration_ms": sum(item["duration_ms"] is None for item in items),
+        "missing_ttft_ms": sum(item["ttft_ms"] is None for item in items),
+        "missing_tpot_ms": sum(item["tpot_ms"] is None for item in items),
+        "complete_measurements": measurement_summary(complete),
+        "by_outcome": {
+            outcome: measurement_summary(group)
+            for outcome in sorted({item["outcome"] for item in items})
+            if (group := [item for item in items if item["outcome"] == outcome])
+        },
+        "request_load_bucket_counts": label_counts(items, "request_load_bucket"),
+        "telemetry_state_counts": label_counts(items, "telemetry_state"),
+        "requested_source_counts": label_counts(items, "requested_source"),
+        "effective_bucket_counts": label_counts(items, "effective_bucket"),
+        "effective_source_counts": label_counts(items, "effective_source"),
+        "mutation_counts": label_counts(items, "mutation"),
+        "stream_mode_counts": label_counts(items, "stream_mode"),
+        "endpoint_counts": label_counts(items, "endpoint"),
+    }
+
+
+def grouped_decode(items, field):
+    return {
+        value: summarize_decode([item for item in items if item[field] == value])
+        for value in sorted({item[field] for item in items})
+    }
+
+
+def grouped_decode_with_buckets(items, field):
+    return {
+        value: {
+            "overall": summarize_decode(group),
+            "by_requested_bucket": grouped_decode(group, "requested_bucket"),
+        }
+        for value in sorted({item[field] for item in items})
+        if (group := [item for item in items if item[field] == value])
+    }
+
+
 def observation(start, finish):
     """Return one validated cost observation, or None when fields are unusable."""
     if finish.get("result") != "complete":
@@ -88,7 +372,13 @@ def observation(start, finish):
     ttft = finish.get("ttft_ms")
     duration = finish.get("duration_ms")
     completion = finish.get("completion_tokens")
-    if not all(nonnegative_number(value) for value in (prompt, cached, ttft, duration)):
+    if (
+        not nonnegative_integral(prompt)
+        or prompt <= 0
+        or not nonnegative_integral(cached)
+        or not positive_number(ttft)
+        or not positive_number(duration)
+    ):
         return None
     if cached > prompt or duration < ttft:
         return None
@@ -103,8 +393,10 @@ def observation(start, finish):
     uncached = float(prompt - cached)
     service_ms_per_uncached_token = float(ttft) / uncached if uncached > 0 else None
     tpot_ms = None
-    if nonnegative_number(completion) and completion > 1:
-        tpot_ms = float(duration - ttft) / float(completion - 1)
+    if nonnegative_integral(completion) and completion > 1:
+        candidate_tpot = float(duration - ttft) / float(completion - 1)
+        if positive_number(candidate_tpot):
+            tpot_ms = candidate_tpot
     if cached == 0:
         cache_outcome = "cold"
     elif cached >= prompt:
@@ -119,7 +411,9 @@ def observation(start, finish):
         "uncached_tokens": uncached,
         "ttft_ms": float(ttft),
         "duration_ms": float(duration),
-        "completion_tokens": float(completion) if nonnegative_number(completion) else None,
+        "completion_tokens": (
+            float(completion) if nonnegative_integral(completion) else None
+        ),
         "service_ms_per_uncached_token": service_ms_per_uncached_token,
         "tpot_ms": tpot_ms,
     }
@@ -174,12 +468,18 @@ def audit(parsed, ttft_slo_ms=None, tpot_slo_ms=None, gpu_count=None):
                 joined.append((pending_starts[sequence].pop(), record))
             else:
                 unmatched_finishes += 1
-    unmatched_starts = sum(len(entries) for entries in pending_starts.values())
+    unmatched_start_records = [
+        start for entries in pending_starts.values() for start in entries
+    ]
+    unmatched_starts = len(unmatched_start_records)
     observations = [
         item
         for start, finish in joined
         if (item := observation(start, finish)) is not None
     ]
+    decode_observations = [
+        decode_observation(start, finish) for start, finish in joined
+    ] + [decode_observation(start, {}) for start in unmatched_start_records]
     by_load = {
         str(units): summarize(
             [item for item in observations if item["request_load_units"] == units]
@@ -212,6 +512,25 @@ def audit(parsed, ttft_slo_ms=None, tpot_slo_ms=None, gpu_count=None):
         "overall": summarize(observations),
         "by_request_load_units": by_load,
         "by_cache_outcome": by_cache,
+        "output_limit_analysis": {
+            "policy_version": OUTPUT_LIMIT_POLICY_VERSION,
+            "overall": summarize_decode(decode_observations),
+            "requested_bucket_counts": label_counts(
+                decode_observations, "requested_bucket"
+            ),
+            "by_requested_bucket": grouped_decode(
+                decode_observations, "requested_bucket"
+            ),
+            "by_endpoint": grouped_decode_with_buckets(
+                decode_observations, "endpoint"
+            ),
+            "by_stream_mode": grouped_decode_with_buckets(
+                decode_observations, "stream_mode"
+            ),
+            "by_request_load_bucket": grouped_decode_with_buckets(
+                decode_observations, "request_load_bucket"
+            ),
+        },
     }
     if ttft_slo_ms is not None and tpot_slo_ms is not None:
         eligible = [item for item in observations if item["tpot_ms"] is not None]
@@ -278,6 +597,21 @@ def print_human(report):
             f"{str(summary['ttft_ms_p95']):>11} "
             f"{str(summary['ttft_ms_per_uncached_token_p50']):>36} "
             f"{str(summary['tpot_ms_p50']):>11}"
+        )
+    output_limits = report["output_limit_analysis"]
+    print(
+        "output_limits "
+        f"requests={output_limits['overall']['requests']} "
+        f"states={json.dumps(output_limits['overall']['telemetry_state_counts'], sort_keys=True)}"
+    )
+    print("requested_bucket requests complete disconnected completion_p50 duration_p50")
+    for bucket, summary in output_limits["by_requested_bucket"].items():
+        complete = summary["complete_measurements"]
+        print(
+            f"{bucket:>16} {summary['requests']:>8} "
+            f"{summary['complete_requests']:>8} {summary['client_disconnects']:>12} "
+            f"{str(complete['completion_tokens_p50']):>14} "
+            f"{str(complete['duration_ms_p50']):>12}"
         )
     if "slo" in report:
         slo = report["slo"]

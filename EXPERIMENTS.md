@@ -16,6 +16,34 @@ Compose dry-run validation, harness/unit/CI work, and offline analysis of
 already-captured results. No node06 experiment result was produced and no live
 performance claim should be inferred from this entry.
 
+## 2026-08-14 — offline requested-output telemetry foundation
+
+Issue #147's routing-neutral foundation was implemented without node06 access
+or new serving measurements. The existing request-preparation parse now emits
+only fixed requested/effective output-limit buckets, API-field source,
+compatibility-strip action, and stream mode. Raw requested values are discarded.
+Journal v7 remains replay-compatible with v1-v6, and malformed v7 combinations
+collapse to a fixed invalid state rather than becoming labels.
+
+Serving-cost audit schema v2 joins each bounded bucket to completion-token,
+total/decode duration, TTFT, TPOT, client-disconnect, endpoint, stream, and
+fixed initial-load-bucket summaries while explicitly counting missing
+measurements. Successful-completion distributions stay separate from disconnect
+and failure distributions. No routing score,
+reservation, or admission behavior changed. The production-shaped observation
+window and any decode-weighted proposal remain blocked by the cooling
+moratorium; this entry is not RTX PRO 6000 performance evidence.
+
+The release request-preparation example was rebuilt locally and run five times
+with the new observation consumed by `black_box`. Median single-parse time was
+604us for a 262,240-byte body and 6.90ms for a 2,097,240-byte body; the retained
+two-parse oracle in the same executable was 1.11x and 1.03x slower respectively.
+One of five 2MiB repetitions reversed that comparison, so these are a noisy
+regression check rather than a new performance claim. A partial dependency
+rebuild took 43.80s; the immediately repeated warm release-example build took
+0.29s. After the final schema-alignment test edit, the complete Rust suite took
+26.05s and the all-binary thin-LTO release relink took 44.24s; both passed.
+
 ## 2026-08-14 — offline SLO-goodput Pareto reporting contract
 
 Issue #148's reporting layer was implemented without node06 access or new

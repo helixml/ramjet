@@ -431,6 +431,48 @@ constraints in [DistServe](https://www.usenix.org/conference/osdi24/presentation
 Its TTFT-per-uncached-token statistic includes queueing and transport, so it is
 a serving-cost signal rather than isolated engine throughput.
 
+Route-journal v7 adds a fixed-cardinality `output_limit` observation without
+changing request admission or routing. Policy version 1 uses these endpoint
+field precedences:
+
+- OpenAI chat: `max_completion_tokens`, then legacy `max_tokens`.
+- OpenAI completions and Anthropic messages: `max_tokens`.
+- OpenAI Responses: `max_output_tokens`.
+
+Optional OpenAI cap fields set to JSON `null` are treated as absent caller
+policy; a non-null malformed preferred field remains invalid instead of
+silently selecting a fallback. Requested/effective here mean the request field
+before/after mini-dynamo's compatibility shim, not an engine-resolved default.
+For example, current vLLM Completions normalizes an absent or null `max_tokens`
+to its default of 16, but this journal intentionally records `unset` rather
+than misrepresenting that server default as a caller-selected budget. Chat
+still falls back from null `max_completion_tokens` to a non-null legacy
+`max_tokens`.
+Explicit `stream: null` is non-streaming for the four supported APIs, whose
+current vLLM schemas model it as optional false. See the upstream
+[chat protocol](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/chat_completion/protocol.py),
+[Completions protocol](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/completion/protocol.py),
+[Responses protocol](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/responses/protocol.py),
+and [Anthropic protocol](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/anthropic/protocol.py).
+
+Only `unset`, `invalid`, `1_64`, `65_256`, `257_1024`, `1025_4096`, and
+`4097_plus` are retained. The record contains requested and post-shim effective
+buckets/sources, one of four fixed strip actions, and `stream` classified as
+unset, non-streaming, streaming, or invalid. It never contains the requested
+number. A stripped preferred chat field can therefore be distinguished from
+the bounded fallback actually forwarded upstream.
+
+`serving_cost_audit.py` schema v2 joins those observations to bounded endpoint,
+stream, initial-load bucket, completion-token, total/decode duration, TTFT,
+TPOT, failure, and client-disconnect summaries. Headline latency/token
+distributions include successful completions only; each outcome has a separate
+distribution so early disconnects cannot look like cheaper successful work.
+Journal v1-v6 records remain readable and are
+labelled `legacy`; missing or semantically impossible v7 telemetry is collapsed
+to `invalid` instead of propagating an arbitrary label. This is evidence
+collection only. No output bucket affects scoring, replica choice, or load
+admission.
+
 Compare multiple correctness-qualified configurations with explicit TTFT/TPOT
 SLOs using the offline Pareto reporter:
 
