@@ -46,7 +46,7 @@ class RouteReplayTest(unittest.TestCase):
         self.assertEqual(rows[0]["agreement_pct"], 100.0)
         self.assertEqual(rows[0]["counterfactual_migrations"], 0)
 
-    def test_v3_through_v5_journal_records_are_accepted(self):
+    def test_v3_through_v6_journal_records_are_accepted(self):
         record = start()
         record["v"] = 3
         record["score_tie_break"] = "overlap"
@@ -65,16 +65,18 @@ class RouteReplayTest(unittest.TestCase):
                 "target": 1,
             },
         }
+        phase_aware = {**record, "v": 6, "phase_aware_load": True}
         parsed = list(
             records(
                 [
                     __import__("json").dumps(record),
                     __import__("json").dumps(canary),
                     __import__("json").dumps(session),
+                    __import__("json").dumps(phase_aware),
                 ]
             )
         )
-        self.assertEqual(parsed, [record, canary, session])
+        self.assertEqual(parsed, [record, canary, session, phase_aware])
         row = replay([session], {}, [4], [32])[0]
         self.assertEqual(
             row["session_affinity_counts"], {"would_prefer_primary": 1}

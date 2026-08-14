@@ -87,6 +87,15 @@ making the warm/cold choice at the precise decision boundary depend on round-
 robin rotation. The request-count metric
 remains a literal count; only placement uses weighted load.
 
+Experimental `DS4_ROUTE_PHASE_AWARE_LOAD=true` releases the size-weighted
+portion of that reservation when a streaming response emits its first real
+generated token, while retaining one unit until completion or cancellation.
+This uses the protocol-visible prefill/decode boundary without introducing an
+engine-specific scheduler dependency. The distinction follows
+[DistServe](https://arxiv.org/abs/2401.09670), which evaluates prefill through
+TTFT and decode through TPOT; this implementation changes only router
+accounting and does not claim physical prefill/decode disaggregation.
+
 Emergent behaviors (tested inline in `src/router.rs`):
 - conversation stickiness (deep overlap on every follow-up turn);
 - **template co-location** — sessions of one Helix app share the system

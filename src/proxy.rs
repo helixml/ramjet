@@ -547,9 +547,8 @@ struct RoutedLoad {
     label: String,
 }
 
-impl Drop for RoutedLoad {
-    fn drop(&mut self) {
-        drop(self.guard.take());
+impl RoutedLoad {
+    fn publish(&self) {
         if let Some((inflight, load, _, _)) = self.router.state(self.upstream) {
             self.metrics
                 .upstream_inflight
@@ -560,6 +559,23 @@ impl Drop for RoutedLoad {
                 .with_label_values(&[&self.label])
                 .set(usize_to_f64(load));
         }
+    }
+
+    fn reduce_to(&mut self, units: usize) {
+        if self
+            .guard
+            .as_mut()
+            .is_some_and(|guard| guard.reduce_to(units))
+        {
+            self.publish();
+        }
+    }
+}
+
+impl Drop for RoutedLoad {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        self.publish();
     }
 }
 
@@ -1178,7 +1194,7 @@ impl Proxy {
         exact_route_snapshot: Option<ExactRouteSnapshot>,
         decision: Decision,
         pending_shadow_source: Option<crate::shadow_soak::ShadowSoakSource>,
-        _load_guard: RoutedLoad,
+        mut load_guard: RoutedLoad,
         _inflight_guard: InflightGuard,
         journal_sequence: Option<u64>,
         started: Instant,
@@ -1215,8 +1231,16 @@ impl Proxy {
                     bytes_out += chunk.len();
                     if streaming {
                         feed_sse_chunk(&mut usage, &mut parse_buffer, &chunk);
-                        if usage.generated {
-                            first_token.get_or_insert(received);
+                        if usage.generated && first_token.is_none() {
+                            first_token = Some(received);
+                            if self.inner.config.route_phase_aware_load {
+                                // A generated token is the local, protocol-visible proof that
+                                // prompt prefill has completed. Retain one decode unit while
+                                // releasing only the size-weighted prefill reservation. This is
+                                // a colocated accounting analogue of the phase separation studied
+                                // by DistServe: https://arxiv.org/abs/2401.09670
+                                load_guard.reduce_to(1);
+                            }
                         }
                     } else {
                         parse_buffer.extend_from_slice(&chunk);
@@ -3857,6 +3881,97 @@ mod tests {
         let response = proxy.serve(request).await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(requests.load(Ordering::Relaxed), 0);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn phase_aware_load_releases_prefill_units_at_first_generated_token() {
+        let release_first_token = Arc::new(tokio::sync::Notify::new());
+        let release_finish = Arc::new(tokio::sync::Notify::new());
+        let first_gate = Arc::clone(&release_first_token);
+        let finish_gate = Arc::clone(&release_finish);
+        let upstream = AxumRouter::new().fallback(any(move || {
+            let first_gate = Arc::clone(&first_gate);
+            let finish_gate = Arc::clone(&finish_gate);
+            async move {
+                let stream = futures_util::stream::unfold(
+                    (0_u8, first_gate, finish_gate),
+                    |(step, first_gate, finish_gate)| async move {
+                        match step {
+                            0 => {
+                                first_gate.notified().await;
+                                Some((
+                                    Ok::<Bytes, io::Error>(Bytes::from_static(
+                                        b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
+                                    )),
+                                    (1, first_gate, finish_gate),
+                                ))
+                            }
+                            1 => {
+                                finish_gate.notified().await;
+                                Some((
+                                    Ok::<Bytes, io::Error>(Bytes::from_static(
+                                        b"data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\ndata: [DONE]\n\n",
+                                    )),
+                                    (2, first_gate, finish_gate),
+                                ))
+                            }
+                            _ => None,
+                        }
+                    },
+                );
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(stream))
+                    .unwrap()
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let joined = url.as_str().to_owned();
+        let config = Config::from_lookup(|key| match key {
+            "DS4_UPSTREAM" => Some(joined.clone()),
+            "DS4_ROUTE_PHASE_AWARE_LOAD" => Some("true".to_owned()),
+            "DS4_ROUTE_LOAD_UNIT_BYTES" => Some("32".to_owned()),
+            "DS4_ROUTE_MAX_LOAD_UNITS" => Some("4".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(format!(
+                "{{\"messages\":[{{\"role\":\"user\",\"content\":\"{}\"}}],\"stream\":true}}",
+                "x".repeat(256)
+            )))
+            .unwrap();
+
+        let response = proxy.serve(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(proxy.router().state(0).unwrap().0, 1);
+        assert_eq!(proxy.router().state(0).unwrap().1, 4);
+
+        release_first_token.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while proxy.router().state(0).unwrap().1 != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first generated token must release the prefill reservation");
+        assert_eq!(proxy.router().state(0).unwrap().0, 1);
+
+        release_finish.notify_one();
+        let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while proxy.router().state(0).unwrap().0 != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completed stream must release the remaining decode reservation");
+        assert_eq!(proxy.router().state(0).unwrap().1, 0);
         task.abort();
     }
 
