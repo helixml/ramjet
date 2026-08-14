@@ -52,6 +52,11 @@ QUERY_FIELDS = (
     "memory.total",
 )
 EXIT_TELEMETRY = 74
+# Consecutive missed telemetry samples tolerated before the interval fails
+# closed. At the 1Hz default poll this bounds the blind window to ~3s,
+# far below any plausible thermal excursion, while absorbing the driver
+# stalls that made single-miss aborts unavoidable on node06's 8-GPU box.
+MAX_CONSECUTIVE_TELEMETRY_FAILURES = 3
 EXIT_THERMAL = 75
 EXIT_INTERNAL = 76
 EXIT_SHIM_ESCALATED = 77
@@ -912,6 +917,7 @@ def run_guard(
     try:
         cooldown_started = time.monotonic()
         preflight_passed = False
+        consecutive_telemetry_failures = 0
         while True:
             if interrupted_signal:
                 record["reason"] = "interrupted"
@@ -920,9 +926,27 @@ def run_guard(
             try:
                 sample = sampler(args)
             except GuardError:
-                record["reason"] = "telemetry_unavailable"
-                result = EXIT_TELEMETRY
-                break
+                # A single slow nvidia-smi is not blindness. On node06 the
+                # driver intermittently exceeds the 2s sample deadline (~1 call
+                # in 12 measured at 1Hz), so failing the interval on the first
+                # miss made every run of more than a few seconds abort
+                # spuriously. Sustained loss still fails closed: only
+                # MAX_CONSECUTIVE_TELEMETRY_FAILURES back-to-back misses, which
+                # is a bounded blind window, end the run.
+                consecutive_telemetry_failures += 1
+                record["telemetry_retries"] = (
+                    record.get("telemetry_retries", 0) + 1
+                )
+                if (
+                    consecutive_telemetry_failures
+                    >= MAX_CONSECUTIVE_TELEMETRY_FAILURES
+                ):
+                    record["reason"] = "telemetry_unavailable"
+                    result = EXIT_TELEMETRY
+                    break
+                time.sleep(args.poll_seconds)
+                continue
+            consecutive_telemetry_failures = 0
             observe_sample(sample)
             if interrupted_signal:
                 record["reason"] = "interrupted"
@@ -1015,11 +1039,23 @@ def run_guard(
                     try:
                         sample = sampler(args)
                     except GuardError:
-                        record["reason"] = "telemetry_unavailable"
-                        result = EXIT_TELEMETRY
-                        break
-                    observe_sample(sample)
-                    if sample.hottest.temperature_c >= args.abort_c:
+                        consecutive_telemetry_failures += 1
+                        record["telemetry_retries"] = (
+                            record.get("telemetry_retries", 0) + 1
+                        )
+                        if (
+                            consecutive_telemetry_failures
+                            >= MAX_CONSECUTIVE_TELEMETRY_FAILURES
+                        ):
+                            record["reason"] = "telemetry_unavailable"
+                            result = EXIT_TELEMETRY
+                            break
+                        sample = None
+                    else:
+                        consecutive_telemetry_failures = 0
+                    if sample is not None:
+                        observe_sample(sample)
+                    if sample is not None and sample.hottest.temperature_c >= args.abort_c:
                         record["reason"] = "thermal_abort"
                         record["trigger"] = {
                             "gpu_index": sample.hottest.index,
@@ -1049,9 +1085,20 @@ def run_guard(
                 try:
                     sample = sampler(args)
                 except GuardError:
-                    record["reason"] = "telemetry_unavailable"
-                    result = EXIT_TELEMETRY
-                    break
+                    consecutive_telemetry_failures += 1
+                    record["telemetry_retries"] = (
+                        record.get("telemetry_retries", 0) + 1
+                    )
+                    if (
+                        consecutive_telemetry_failures
+                        >= MAX_CONSECUTIVE_TELEMETRY_FAILURES
+                    ):
+                        record["reason"] = "telemetry_unavailable"
+                        result = EXIT_TELEMETRY
+                        break
+                    time.sleep(args.poll_seconds)
+                    continue
+                consecutive_telemetry_failures = 0
                 observe_sample(sample)
                 if sample.hottest.temperature_c >= args.abort_c:
                     record["reason"] = "thermal_abort"

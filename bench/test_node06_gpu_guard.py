@@ -583,6 +583,66 @@ class Node06GpuGuardTests(unittest.TestCase):
             self.assertEqual(record["status"], "passed")
             self.assertEqual(record["telemetry"]["samples"], 2)
 
+    def test_transient_telemetry_miss_is_tolerated_but_sustained_loss_aborts(self):
+        # node06's driver intermittently exceeds the 2s sample deadline (~1
+        # call in 12 measured at 1Hz). Failing on the first miss made every run
+        # longer than a few seconds abort spuriously, so a bounded run of
+        # misses is absorbed -- but sustained blindness must still fail closed.
+        self.assertGreaterEqual(guard.MAX_CONSECUTIVE_TELEMETRY_FAILURES, 2)
+
+        for failures, expect_abort in (
+            (guard.MAX_CONSECUTIVE_TELEMETRY_FAILURES - 1, False),
+            (guard.MAX_CONSECUTIVE_TELEMETRY_FAILURES, True),
+        ):
+            with self.subTest(failures=failures):
+                remaining = [failures]
+                real = guard.query_gpus
+
+                def flaky(args, _remaining=remaining, _real=real):
+                    if _remaining[0] > 0:
+                        _remaining[0] -= 1
+                        raise guard.GuardError("GPU telemetry query failed")
+                    return _real(args)
+
+                with tempfile.TemporaryDirectory() as directory:
+                    output = pathlib.Path(directory) / "guard.jsonl"
+                    fake = pathlib.Path(directory) / "nvidia-smi"
+                    rows = "\\n".join(
+                        f"{index}, GPU-{index:032x}, NVIDIA RTX PRO 6000, "
+                        "40, 100, 600, 50, 20, 1000, 96000"
+                        for index in range(8)
+                    )
+                    fake.write_text(f"#!/bin/sh\nprintf '%b' '{rows}\\n'\n")
+                    fake.chmod(0o755)
+                    # run_guard binds query_gpus as a parameter default, so
+                    # inject the flaky sampler directly rather than patching
+                    # the module attribute.
+                    parsed = guard.parser().parse_args(
+                        [
+                            "--nvidia-smi",
+                            str(fake),
+                            "--output",
+                            str(output),
+                            "--poll-seconds",
+                            "0.25",
+                            "--",
+                            "true",
+                        ]
+                    )
+                    guard.validate_args(parsed)
+                    with contextlib.redirect_stdout(
+                        io.StringIO()
+                    ), contextlib.redirect_stderr(io.StringIO()):
+                        result = guard.run_guard(parsed, flaky)
+                    terminal = records(output)[-1]
+                    if expect_abort:
+                        self.assertEqual(result, guard.EXIT_TELEMETRY)
+                        self.assertEqual(terminal["reason"], "telemetry_unavailable")
+                    else:
+                        self.assertEqual(result, 0)
+                        self.assertEqual(terminal["status"], "passed")
+                        self.assertEqual(terminal["telemetry_retries"], failures)
+
     def test_cli_moratorium_blocks_before_telemetry_or_journal(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -591,9 +651,12 @@ class Node06GpuGuardTests(unittest.TestCase):
             fake = root / "nvidia-smi"
             fake.write_text(f"#!/bin/sh\ntouch {telemetry}\nexit 1\n")
             fake.chmod(0o755)
+            # Assert the mechanism, not the flag's current value: the
+            # moratorium is lifted for a supervised window, and re-arming it
+            # must still block before any telemetry or journal side effect.
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
                 io.StringIO()
-            ):
+            ), mock.patch.object(moratorium, "MORATORIUM_ACTIVE", True):
                 result = guard.main(
                     [
                         "--nvidia-smi",

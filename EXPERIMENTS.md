@@ -1,5 +1,74 @@
 # node06 experiment journal
 
+## 2026-08-14 — r132 idle-drain rollout and supervised ramped load window
+
+Deployed `f4ee0bc` (#162 idle drain) to node06 as
+`rust-r132-idle-drain-f4ee0bc`. Local build 54s, transfer 7.7s, 14.6MB image;
+LB-only swap took 1s with both engines untouched. Boot line confirmed
+`idle_drain_mode=drain`, `idle_after=600s`, `min_warm=1`. Inference verified
+green throughout.
+
+**The drain policy works, and cannot currently fire in production.** At the
+10-minute window the fleet never reached idle across a 14-minute watch:
+`fleet_idle` stayed 0 while the request counter climbed 3 -> 10. The cause is
+that `Proxy::serve` records idle-drain activity for *any* proxied request, and
+Helix polls `/v1/models` (`endpoint="other"`) roughly every two minutes. Any
+poll interval P therefore caps the achievable quiet period at P, so a window
+longer than P can never elapse. Re-running at the 60s floor proved the state
+machine itself is correct: two full cycles of warm -> draining (t=60s) ->
+drained with `safe_to_stop` after the 15s grace (t=80s) -> immediate resume on
+the next request (t=90s), with `ds4proxy_upstream_up` staying 1 for both
+replicas the whole time — drained is genuinely separate from healthy, and the
+warm floor never drained. Restored to 600s afterwards.
+
+Two things must be settled before this saves any power. First, nothing stops a
+container: the LB publishes `desired_running`/`safe_to_stop` by design and a
+separately privileged converger does not exist yet, so both engines stay
+resident and the ~800W idle draw is unchanged (measured peak box draw 2854W
+under load against 809W idle). Second, the #159 synthetic probe runs a real
+completion every 60s, which pins the fleet non-idle even harder than Helix
+polling; the probe timer was stopped for this observation and restarted after.
+Classifying non-inference endpoints as non-activity would fix both, but it is a
+policy decision, not a bug.
+
+**Supervised ramped load window.** The operator explicitly lifted the cooling
+moratorium for one supervised, watchdog-aborted run, and it was re-armed
+immediately afterwards. Admission was tight: eight GPUs idling at 57-62C at 0%
+utilisation against a 65C cool-start gate and a 78C abort ceiling.
+
+| cell | split A/B | failures | throughput | peak GPU | peak box |
+|---|---|---|---|---|---|
+| sameapp c4 | 2/2 | 0 | 219 tok/s | 70C | 2731W |
+| sameapp c8 | 4/4 | 0 | 484 tok/s | 71C | 2624W |
+| sameapp c16 | 8/8 | 0 | 672 tok/s | 72C | 2854W |
+| aggregate c24/max512 | — | 0 (24/24) | 983.6 tok/s | 72C | 2712W |
+| aggregate c24/max256 | — | 0 (24/24) | 1377.3 tok/s | 71C | 2680W |
+
+Perfect 50/50 router split at every concurrency and zero failed requests. No
+thermal abort and no throttling at any point: clocks held 2422-2430 MHz with
+throttle reasons 0x0. The idle baseline drifted 59-63C -> 61-67C across the
+ramp without fully recovering between steps, so the next window should still
+start ramped.
+
+The c24/max256 cell is the one comparable to the recorded 1,820-1,844 tok/s
+box gate and came in at 1,377 tok/s. Do not read that as a regression on this
+evidence: it is a single short cell on a box carrying live traffic, a 60s
+synthetic probe, and a changed LB build, and no throttling was observed. It
+needs a clean repeat before any capacity claim.
+
+**Guard defect found and fixed.** The window could not start at first: node06's
+driver intermittently exceeds the guard's 2s telemetry deadline — 1 call in 12
+at 1Hz, with persistence mode already on and a typical call at 0.55s. All three
+sampling loops failed the interval on the first miss, so any run over ~12s
+aborted with `telemetry_unavailable`. Worse, the abort SIGKILLs the process
+group, so the client's requests were already served 200 by the LB while its
+output files never landed — presenting as `failures=4` when serving was fine.
+The sample timeout is validation-capped at 2s and thermal thresholds are not
+adjustable, so the fix is a bounded tolerance: three consecutive misses still
+fail closed (~3s blind window at 1Hz), and misses are journalled as
+`telemetry_retries`. The ramp engaged it on two of four steps, so without it no
+interval would have completed.
+
 ## 2026-08-14 — serving-path tmpfs decoupling and engine-neutral model paths
 
 Follow-up to the #156 outage: node06 served nothing for ~50 minutes after the
