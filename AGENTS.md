@@ -416,7 +416,17 @@ outright below two upstreams. Keep the drain flag separate from health in the
 router: `upstream_up` must keep reporting reachability so a parked replica is
 never confused with a failing one. Qualify with `DS4_IDLE_DRAIN_MODE=observe`
 against real traffic before enforcing; observe advances the state machine and
-publishes intent but fences nothing and never reports `safe_to_stop`.
+publishes intent but fences nothing and never reports `safe_to_stop`. The drain
+knobs are expressed in seconds (`DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS`,
+`_COOLDOWN_SECONDS`, `_GRACE_SECONDS`, `_INTERVAL_SECONDS`) rather than the
+`_MS` spelling used elsewhere; there is deliberately no millisecond alias, so a
+stale `_MS` variable is inert rather than a thousand-fold misconfiguration.
+Restoring the warm floor runs on every tick, not only on traffic: a park that
+was safe when made becomes unsafe if the replica that stayed warm later fails,
+and during an idle window no request would arrive to notice. Keep
+`ds4proxy_idle_drain_state` labelled identically to `ds4proxy_upstream_up`; the
+Grafana readiness panel joins them on `upstream` to render a parked engine as
+grey PAUSED instead of green READY.
 
 ```bash
 cargo test --locked idle_drain

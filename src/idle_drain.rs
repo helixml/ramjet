@@ -269,6 +269,12 @@ impl IdleDrainPolicy {
             // that exists only to stop the policy flapping while quiet.
             self.states.fill(UpstreamDrainState::Warm);
         }
+        // Checked on every tick, including quiet ones. A replica parked while
+        // the fleet was healthy can be left below the floor later by an
+        // unrelated failure of the replica that stayed warm; waiting for
+        // traffic to notice would leave the fleet with nothing serving through
+        // the whole idle window.
+        self.restore_warm_floor(now_ms, observations);
 
         self.decide(now_ms, observations, &previous, idle)
     }
@@ -304,6 +310,38 @@ impl IdleDrainPolicy {
         if let Some(target) = self.select_target(observations) {
             self.states[target] = UpstreamDrainState::Draining;
             self.busy_since_ms[target] = now_ms;
+            self.last_drain_transition_ms = Some(now_ms);
+        }
+    }
+
+    /// Un-parks healthy fenced replicas until the warm floor is met again.
+    ///
+    /// The drain decision is only ever correct for the health it was made
+    /// under. If the replica that stayed warm later fails, a previously safe
+    /// park becomes a fleet with too little capacity, so the floor is
+    /// re-established here rather than waiting for the next request. Like every
+    /// other move toward capacity this ignores the cooldown.
+    ///
+    /// Restoring cannot conjure capacity that does not exist: an unhealthy
+    /// parked replica is skipped, because un-fencing it would only advertise a
+    /// replica that still cannot serve.
+    fn restore_warm_floor(&mut self, now_ms: u64, observations: &[UpstreamObservation]) {
+        let min_warm = self.config.effective_min_warm();
+        loop {
+            if self.warm_serving_count(observations) >= min_warm {
+                return;
+            }
+            let Some(restore) = self.states.iter().enumerate().position(|(index, state)| {
+                state.fenced()
+                    && observations
+                        .get(index)
+                        .is_some_and(|observation| observation.healthy)
+            }) else {
+                return;
+            };
+            self.states[restore] = UpstreamDrainState::Warm;
+            // Spaced like a drain transition so a flapping peer cannot drive a
+            // park/un-park cycle every tick.
             self.last_drain_transition_ms = Some(now_ms);
         }
     }
@@ -732,6 +770,208 @@ mod tests {
         // A tick that changes nothing reports nothing.
         let decision = policy.tick(now + 1_000, &healthy_idle(2));
         assert!(decision.transitions.is_empty());
+    }
+
+    /// Regression for a defect the randomized sweep found: parking replica 1
+    /// while both were healthy, then losing replica 0, left the fleet with
+    /// nothing serving and a healthy replica sitting fenced. During an idle
+    /// window no traffic would arrive to resume it, so the fleet would stay at
+    /// zero capacity until a request finally hit an empty candidate set.
+    #[test]
+    fn losing_the_warm_replica_restores_a_parked_healthy_one() {
+        let mut policy = IdleDrainPolicy::new(config(IdleDrainMode::Drain), 2, 0);
+        let mut now = drain_one(&mut policy);
+        assert_eq!(policy.state(1), Some(UpstreamDrainState::Drained));
+
+        // The replica that stayed warm now fails, unrelated to the drain.
+        now += MINUTE;
+        let decision = policy.tick(
+            now,
+            &[
+                UpstreamObservation {
+                    healthy: false,
+                    inflight: 0,
+                },
+                UpstreamObservation {
+                    healthy: true,
+                    inflight: 0,
+                },
+            ],
+        );
+        assert_eq!(
+            decision.upstreams[1].state,
+            UpstreamDrainState::Warm,
+            "the parked healthy replica must be restored, not left fenced"
+        );
+        assert!(!decision.upstreams[1].fenced);
+        assert!(decision.upstreams[1].desired_running);
+        assert!(
+            !decision.upstreams[1].safe_to_stop,
+            "a restored replica must never still read as safe to stop"
+        );
+    }
+
+    /// Restoring cannot invent capacity: if the parked replica is itself
+    /// unhealthy, un-fencing it would only advertise a replica that still
+    /// cannot serve, so it stays parked.
+    #[test]
+    fn an_unhealthy_parked_replica_is_not_restored() {
+        let mut policy = IdleDrainPolicy::new(config(IdleDrainMode::Drain), 2, 0);
+        let mut now = drain_one(&mut policy);
+        now += MINUTE;
+        let decision = policy.tick(
+            now,
+            &[
+                UpstreamObservation {
+                    healthy: false,
+                    inflight: 0,
+                },
+                UpstreamObservation {
+                    healthy: false,
+                    inflight: 0,
+                },
+            ],
+        );
+        assert_eq!(decision.upstreams[1].state, UpstreamDrainState::Drained);
+    }
+
+    /// Deterministic LCG so the randomized sweep below is reproducible without
+    /// pulling in a dependency.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 33
+        }
+
+        fn below(&mut self, bound: u64) -> u64 {
+            self.next() % bound
+        }
+    }
+
+    /// The safety property, swept over randomized traffic: whatever sequence of
+    /// activity, health flips, and in-flight work occurs, the policy must never
+    /// fence so many replicas that fewer than the warm floor remain serving.
+    ///
+    /// This is the invariant the whole design exists to protect, so it is
+    /// checked against arbitrary input rather than only hand-picked sequences.
+    #[test]
+    fn warm_floor_holds_under_randomized_activity_and_ticks() {
+        for seed in 0..64_u64 {
+            for fleet in 2..=4_usize {
+                let mut rng = Lcg(seed.wrapping_mul(0x9E37_79B9).wrapping_add(1));
+                let mut policy = IdleDrainPolicy::new(config(IdleDrainMode::Drain), fleet, 0);
+                let mut now = 0_u64;
+                for _ in 0..200 {
+                    now += rng.below(20 * MINUTE) + 1;
+                    let observations = (0..fleet)
+                        .map(|_| UpstreamObservation {
+                            // Health flips freely, including all-unhealthy.
+                            healthy: rng.below(4) != 0,
+                            inflight: usize::try_from(rng.below(3)).unwrap_or(0),
+                        })
+                        .collect::<Vec<_>>();
+                    if rng.below(3) == 0 {
+                        policy.observe_activity(now);
+                    }
+                    let decision = policy.tick(now, &observations);
+
+                    let serving = decision
+                        .upstreams
+                        .iter()
+                        .zip(observations.iter())
+                        .filter(|(intent, observation)| !intent.fenced && observation.healthy)
+                        .count();
+                    let fenced_healthy = decision
+                        .upstreams
+                        .iter()
+                        .zip(observations.iter())
+                        .filter(|(intent, observation)| intent.fenced && observation.healthy)
+                        .count();
+                    // The policy may only park a healthy replica while at least
+                    // `min_warm` healthy replicas remain unfenced. When every
+                    // replica is unhealthy there is nothing to protect and
+                    // nothing was parked by this policy either.
+                    assert!(
+                        fenced_healthy == 0 || serving >= policy.config().effective_min_warm(),
+                        "seed {seed} fleet {fleet}: parked {fenced_healthy} healthy replicas \
+                         leaving only {serving} serving"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Activity timestamps can arrive out of order when concurrent requests
+    /// stamp the clock; the newest must win so a late straggler cannot make an
+    /// active fleet look idle.
+    #[test]
+    fn out_of_order_activity_keeps_the_latest_timestamp() {
+        let mut policy = IdleDrainPolicy::new(config(IdleDrainMode::Drain), 2, 0);
+        policy.observe_activity(20 * MINUTE);
+        // A stale stamp from a slower thread must not rewind the clock.
+        policy.observe_activity(MINUTE);
+        let decision = policy.tick(25 * MINUTE, &healthy_idle(2));
+        assert!(
+            !decision.idle,
+            "only 5 minutes have passed since the newest activity"
+        );
+        assert_eq!(decision.desired_running(), 2);
+    }
+
+    /// A replica that is stopped and later restarted must not be readmitted by
+    /// health alone; only traffic clears the fence.
+    #[test]
+    fn a_restarted_replica_stays_parked_until_traffic_arrives() {
+        let mut policy = IdleDrainPolicy::new(config(IdleDrainMode::Drain), 2, 0);
+        let mut now = drain_one(&mut policy);
+        // Stopped, then healthy again after its restart completes.
+        now += 10 * MINUTE;
+        policy.tick(
+            now,
+            &[
+                UpstreamObservation {
+                    healthy: true,
+                    inflight: 0,
+                },
+                UpstreamObservation {
+                    healthy: false,
+                    inflight: 0,
+                },
+            ],
+        );
+        now += 10 * MINUTE;
+        let decision = policy.tick(now, &healthy_idle(2));
+        assert_eq!(
+            decision.upstreams[1].state,
+            UpstreamDrainState::Drained,
+            "recovered health alone must not resume a parked replica"
+        );
+        policy.observe_activity(now);
+        let decision = policy.tick(now + 1, &healthy_idle(2));
+        assert_eq!(decision.desired_running(), 2);
+    }
+
+    /// Every fenced replica resumes together, not one per tick, so returning
+    /// traffic recovers the whole fleet at once.
+    #[test]
+    fn resume_clears_every_fenced_replica_in_one_tick() {
+        let mut policy = IdleDrainPolicy::new(config(IdleDrainMode::Drain), 3, 0);
+        let mut now = 11 * MINUTE;
+        policy.tick(now, &healthy_idle(3));
+        now += 6 * MINUTE;
+        let decision = policy.tick(now, &healthy_idle(3));
+        assert_eq!(decision.desired_running(), 1, "two replicas parked");
+
+        policy.observe_activity(now);
+        let decision = policy.tick(now + 1, &healthy_idle(3));
+        assert_eq!(decision.desired_running(), 3);
+        assert!(decision.upstreams.iter().all(|intent| !intent.fenced));
+        assert_eq!(decision.transitions.len(), 2, "both resumed in one tick");
     }
 
     #[test]

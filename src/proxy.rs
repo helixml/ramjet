@@ -1621,8 +1621,8 @@ impl Proxy {
         if self.inner.idle_drain.is_none() {
             return;
         }
-        let mut interval = dspark_poll_interval(Duration::from_millis(
-            u64::try_from(self.inner.config.idle_drain_interval_ms).unwrap_or(u64::MAX),
+        let mut interval = dspark_poll_interval(Duration::from_secs(
+            u64::try_from(self.inner.config.idle_drain_interval_seconds).unwrap_or(u64::MAX),
         ));
         loop {
             interval.tick().await;
@@ -2385,10 +2385,10 @@ mod tests {
             "DS4_IDLE_DRAIN_MODE" => Some(mode.to_owned()),
             // Shortest window the validator permits, so the injected clock
             // only has to step a little past it.
-            "DS4_IDLE_DRAIN_IDLE_AFTER_MS" | "DS4_IDLE_DRAIN_COOLDOWN_MS" => {
-                Some("60000".to_owned())
+            "DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS" | "DS4_IDLE_DRAIN_COOLDOWN_SECONDS" => {
+                Some("60".to_owned())
             }
-            "DS4_IDLE_DRAIN_GRACE_MS" => Some("1000".to_owned()),
+            "DS4_IDLE_DRAIN_GRACE_SECONDS" => Some("1".to_owned()),
             _ => None,
         })
         .unwrap();
@@ -2559,6 +2559,39 @@ mod tests {
             .abs()
                 < f64::EPSILON
         );
+    }
+
+    /// The Grafana readiness panel combines `ds4proxy_upstream_up` with
+    /// `ds4proxy_idle_drain_state` by matching on the `upstream` label. If the
+    /// two ever disagree on the label value the join silently yields nothing
+    /// and the panel goes blank, so the contract is pinned here.
+    fn upstream_labels(collector: &dyn prometheus::core::Collector) -> Vec<String> {
+        let mut values = collector
+            .collect()
+            .iter()
+            .flat_map(prometheus::proto::MetricFamily::get_metric)
+            .flat_map(prometheus::proto::Metric::get_label)
+            .filter(|label| label.name() == "upstream")
+            .map(|label| label.value().to_owned())
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        values.dedup();
+        values
+    }
+
+    #[tokio::test]
+    async fn idle_drain_metrics_use_the_same_upstream_labels_as_upstream_up() {
+        let proxy = idle_drain_proxy(&upstreams_pair(), "drain");
+        advance_idle_drain(&proxy, 90_000);
+        proxy.publish_upstream_health(0, true);
+        proxy.publish_upstream_health(1, true);
+
+        let metrics = &proxy.inner.metrics;
+        let up = upstream_labels(&metrics.upstream_up);
+        assert_eq!(up, vec!["http://a:8000", "http://b:8000"]);
+        assert_eq!(upstream_labels(&metrics.idle_drain_state), up);
+        assert_eq!(upstream_labels(&metrics.idle_drain_desired_running), up);
+        assert_eq!(upstream_labels(&metrics.idle_drain_safe_to_stop), up);
     }
 
     #[tokio::test]

@@ -21,12 +21,11 @@ const MAX_SHADOW_SOAK_TOKEN_BYTES: usize = 256 << 20;
 const MAX_SHADOW_SOAK_TIMEOUT_MS: usize = 15 * 60 * 1_000;
 const MAX_UPSTREAM_ADMISSION_TIMEOUT_MS: usize = 30_000;
 const MAX_DSPARK_GUARD_INTERVAL_MS: usize = 60_000;
-/// A day of quiet is far beyond any useful setting and keeps the millisecond
-/// arithmetic well clear of overflow.
-const MAX_IDLE_DRAIN_MS: usize = 24 * 60 * 60 * 1_000;
-const MIN_IDLE_DRAIN_IDLE_AFTER_MS: usize = 60_000;
-const MAX_IDLE_DRAIN_INTERVAL_MS: usize = 300_000;
-const MIN_IDLE_DRAIN_INTERVAL_MS: usize = 1_000;
+/// A day of quiet is far beyond any useful setting and keeps the internal
+/// millisecond arithmetic well clear of overflow.
+const MAX_IDLE_DRAIN_SECONDS: usize = 24 * 60 * 60;
+const MIN_IDLE_DRAIN_IDLE_AFTER_SECONDS: usize = 60;
+const MAX_IDLE_DRAIN_INTERVAL_SECONDS: usize = 300;
 const MIN_DSPARK_GUARD_INTERVAL_MS: usize = 1_000;
 const MAX_DSPARK_GUARD_CONSECUTIVE_WINDOWS: usize = 12;
 const MAX_DSPARK_GUARD_MIN_PROPOSED_TOKENS: usize = 10_000_000;
@@ -49,7 +48,7 @@ pub struct Config {
     pub dspark_guard_state_owner_uid: u32,
     pub dspark_guard_state_group_gid: u32,
     pub idle_drain: IdleDrainConfig,
-    pub idle_drain_interval_ms: usize,
+    pub idle_drain_interval_seconds: usize,
     pub max_tokens_strip: i64,
     pub advertise_ctx_margin: i64,
     pub route_alpha: f64,
@@ -503,22 +502,12 @@ impl Config {
             dspark_guard_state_owner_uid,
             dspark_guard_state_group_gid,
             idle_drain,
-            idle_drain_interval_ms: {
-                let interval = bounded_positive(
-                    &mut get,
-                    "DS4_IDLE_DRAIN_INTERVAL_MS",
-                    15_000,
-                    MAX_IDLE_DRAIN_INTERVAL_MS,
-                )?;
-                if interval < MIN_IDLE_DRAIN_INTERVAL_MS {
-                    return Err(invalid(
-                        "DS4_IDLE_DRAIN_INTERVAL_MS",
-                        interval.to_string(),
-                        "an integer from 1000 through 300000",
-                    ));
-                }
-                interval
-            },
+            idle_drain_interval_seconds: bounded_positive(
+                &mut get,
+                "DS4_IDLE_DRAIN_INTERVAL_SECONDS",
+                15,
+                MAX_IDLE_DRAIN_INTERVAL_SECONDS,
+            )?,
             max_tokens_strip: parse(&mut get, "DS4_MAX_TOKENS_STRIP", 100_000, "an integer")?,
             advertise_ctx_margin: parse(
                 &mut get,
@@ -1512,9 +1501,9 @@ fn invalid(key: &'static str, value: String, reason: &'static str) -> ConfigErro
     ConfigError::InvalidValue { key, value, reason }
 }
 
-/// Widens a bounds-checked millisecond setting. Every caller has already been
-/// clamped to [`MAX_IDLE_DRAIN_MS`], so saturation is unreachable.
-fn ms_to_u64(value: usize) -> u64 {
+/// Widens a bounds-checked seconds setting. Every caller has already been
+/// clamped to [`MAX_IDLE_DRAIN_SECONDS`], so saturation is unreachable.
+fn seconds_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
@@ -1547,27 +1536,31 @@ fn idle_drain_settings(
         ));
     }
 
-    let idle_after_ms = bounded_positive(
+    let idle_after_seconds = bounded_positive(
         get,
-        "DS4_IDLE_DRAIN_IDLE_AFTER_MS",
-        900_000,
-        MAX_IDLE_DRAIN_MS,
+        "DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS",
+        900,
+        MAX_IDLE_DRAIN_SECONDS,
     )?;
-    if idle_after_ms < MIN_IDLE_DRAIN_IDLE_AFTER_MS {
+    if idle_after_seconds < MIN_IDLE_DRAIN_IDLE_AFTER_SECONDS {
         return Err(invalid(
-            "DS4_IDLE_DRAIN_IDLE_AFTER_MS",
-            idle_after_ms.to_string(),
-            "at least 60000; a shorter window parks engines between ordinary requests",
+            "DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS",
+            idle_after_seconds.to_string(),
+            "at least 60; a shorter window parks engines between ordinary requests",
         ));
     }
-    let cooldown_ms = bounded_positive(
+    let cooldown_seconds = bounded_positive(
         get,
-        "DS4_IDLE_DRAIN_COOLDOWN_MS",
-        300_000,
-        MAX_IDLE_DRAIN_MS,
+        "DS4_IDLE_DRAIN_COOLDOWN_SECONDS",
+        300,
+        MAX_IDLE_DRAIN_SECONDS,
     )?;
-    let drain_grace_ms =
-        bounded_positive(get, "DS4_IDLE_DRAIN_GRACE_MS", 30_000, MAX_IDLE_DRAIN_MS)?;
+    let drain_grace_seconds = bounded_positive(
+        get,
+        "DS4_IDLE_DRAIN_GRACE_SECONDS",
+        30,
+        MAX_IDLE_DRAIN_SECONDS,
+    )?;
 
     // The warm floor may equal the fleet size, which simply disables parking.
     // It may never be zero: something must stay warm to answer the next
@@ -1583,10 +1576,10 @@ fn idle_drain_settings(
 
     Ok(IdleDrainConfig {
         mode,
-        idle_after: Duration::from_millis(ms_to_u64(idle_after_ms)),
+        idle_after: Duration::from_secs(seconds_to_u64(idle_after_seconds)),
         min_warm,
-        cooldown: Duration::from_millis(ms_to_u64(cooldown_ms)),
-        drain_grace: Duration::from_millis(ms_to_u64(drain_grace_ms)),
+        cooldown: Duration::from_secs(seconds_to_u64(cooldown_seconds)),
+        drain_grace: Duration::from_secs(seconds_to_u64(drain_grace_seconds)),
     })
 }
 
@@ -1604,6 +1597,27 @@ mod tests {
         })
     }
 
+    /// The seconds-suffixed names are the deployment contract. A half-finished
+    /// rename that left a millisecond alias in place would silently apply a
+    /// value a thousand times too small, so the old names must be inert.
+    #[test]
+    fn idle_drain_reads_seconds_keys_and_ignores_millisecond_names() {
+        let config = two_upstreams(&[
+            ("DS4_IDLE_DRAIN_MODE", "drain"),
+            ("DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS", "1200"),
+            // Stale millisecond spellings must be ignored entirely.
+            ("DS4_IDLE_DRAIN_IDLE_AFTER_MS", "1"),
+            ("DS4_IDLE_DRAIN_COOLDOWN_MS", "1"),
+            ("DS4_IDLE_DRAIN_GRACE_MS", "1"),
+            ("DS4_IDLE_DRAIN_INTERVAL_MS", "1"),
+        ])
+        .unwrap();
+        assert_eq!(config.idle_drain.idle_after, Duration::from_mins(20));
+        assert_eq!(config.idle_drain.cooldown, Duration::from_mins(5));
+        assert_eq!(config.idle_drain.drain_grace, Duration::from_secs(30));
+        assert_eq!(config.idle_drain_interval_seconds, 15);
+    }
+
     #[test]
     fn idle_drain_defaults_to_off() {
         let config = Config::from_lookup(|_| None).unwrap();
@@ -1611,7 +1625,7 @@ mod tests {
         assert!(!config.idle_drain.mode.enabled());
         assert_eq!(config.idle_drain.min_warm, 1);
         assert_eq!(config.idle_drain.idle_after, Duration::from_mins(15));
-        assert_eq!(config.idle_drain_interval_ms, 15_000);
+        assert_eq!(config.idle_drain_interval_seconds, 15);
     }
 
     #[test]
@@ -1659,13 +1673,13 @@ mod tests {
     fn idle_drain_rejects_a_window_short_enough_to_park_between_requests() {
         let error = two_upstreams(&[
             ("DS4_IDLE_DRAIN_MODE", "drain"),
-            ("DS4_IDLE_DRAIN_IDLE_AFTER_MS", "5000"),
+            ("DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS", "5"),
         ])
         .unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "DS4_IDLE_DRAIN_IDLE_AFTER_MS",
+                key: "DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS",
                 ..
             }
         ));
@@ -1703,32 +1717,32 @@ mod tests {
     fn idle_drain_accepts_a_tuned_two_engine_policy() {
         let config = two_upstreams(&[
             ("DS4_IDLE_DRAIN_MODE", "drain"),
-            ("DS4_IDLE_DRAIN_IDLE_AFTER_MS", "600000"),
-            ("DS4_IDLE_DRAIN_COOLDOWN_MS", "120000"),
-            ("DS4_IDLE_DRAIN_GRACE_MS", "45000"),
+            ("DS4_IDLE_DRAIN_IDLE_AFTER_SECONDS", "600"),
+            ("DS4_IDLE_DRAIN_COOLDOWN_SECONDS", "120"),
+            ("DS4_IDLE_DRAIN_GRACE_SECONDS", "45"),
             ("DS4_IDLE_DRAIN_MIN_WARM", "1"),
-            ("DS4_IDLE_DRAIN_INTERVAL_MS", "30000"),
+            ("DS4_IDLE_DRAIN_INTERVAL_SECONDS", "30"),
         ])
         .unwrap();
         assert_eq!(config.idle_drain.mode, IdleDrainMode::Drain);
         assert_eq!(config.idle_drain.idle_after, Duration::from_mins(10));
         assert_eq!(config.idle_drain.cooldown, Duration::from_mins(2));
         assert_eq!(config.idle_drain.drain_grace, Duration::from_secs(45));
-        assert_eq!(config.idle_drain_interval_ms, 30_000);
+        assert_eq!(config.idle_drain_interval_seconds, 30);
     }
 
     #[test]
     fn idle_drain_rejects_an_evaluation_interval_outside_its_bounds() {
-        for value in ["500", "600000"] {
+        for value in ["0", "600"] {
             let error = two_upstreams(&[
                 ("DS4_IDLE_DRAIN_MODE", "drain"),
-                ("DS4_IDLE_DRAIN_INTERVAL_MS", value),
+                ("DS4_IDLE_DRAIN_INTERVAL_SECONDS", value),
             ])
             .unwrap_err();
             assert!(matches!(
                 error,
                 ConfigError::InvalidValue {
-                    key: "DS4_IDLE_DRAIN_INTERVAL_MS",
+                    key: "DS4_IDLE_DRAIN_INTERVAL_SECONDS",
                     ..
                 }
             ));
