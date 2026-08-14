@@ -1,5 +1,56 @@
 # node06 experiment journal
 
+## 2026-08-14 — rc6 gate reproduced, and the sustained-load thermal ceiling
+
+Second supervised window, authorized with an explicit instruction to abort on
+heat. Two questions: does the box still make the recorded rc6 number, and how
+long can it hold that load.
+
+**The rc6 gate reproduces.** Run as its actual harness —
+`codebench.py <lb> deepseek-v4-flash 256 24 3`, 72 requests, synthetic probe
+stopped so it did not contribute traffic:
+
+| metric | recorded rc6 | this run | delta |
+|---|---|---|---|
+| aggregate (median) | 1,891.2 tok/s | **1,863.3 tok/s** | -1.5% |
+| per-stream decode (median) | 125.0 tok/s | **123.9 tok/s** | -0.9% |
+| TTFT median | 934 ms | 962 ms | +3% |
+| TTFT p95 | 1,088 ms | 6,046 ms | see below |
+| split | 35/37 | **36/36** | — |
+| requests | 72/72 | 72/72, 0 failed | — |
+
+That settles the earlier 1,377 tok/s reading: it was measurement shape, not
+lost performance. `bench_serving.sh 24 256` runs a single 24-request wave, so
+cold prefill and ramp dominate a 4.5s window. The real gate runs three waves
+and reports the median, which discards the cold one — per-repetition rates were
+733.8, 1863.5, 1880.9 tok/s. Warm steady state is ~1,863-1,881 tok/s, matching
+rc6 within noise. No regression from the r132 LB.
+
+The TTFT p95 of 6,046 ms is entirely the first wave against a cold scheduler:
+every ~6s TTFT belongs to repetition 0, whose window was 8.37s versus 3.30s and
+3.27s for repetitions 1 and 2. The engines had been restarted about ninety
+minutes earlier and had served almost nothing.
+
+**The sustained ceiling is about fifteen to twenty seconds.** Extending the
+identical workload to 216 requests (`... 256 24 9`) drove GPU1 from 65 C to the
+78 C abort in roughly seventeen seconds, and the guard terminated the workload.
+Peak box draw 2,748 W. This is the finding that matters: the ramp cells peaked
+at 72 C only because they were 3-15s bursts. Burst peak is not steady state,
+and nothing in the earlier ramp justified extrapolating to sustained load.
+
+GPU1 is the constraint rather than the box average. Per-GPU peaks were
+73/78/71/73/75/74/74/73, and GPU1 also idles ~5 C above its neighbours, which
+points at airflow on that specific card rather than ambient cooling. Worth
+inspecting that slot before the next window.
+
+The abort was clean: both engines stayed up with zero CUDA/NCCL/Xid/OOM markers
+and an authenticated request returned 200 immediately afterwards. The 78 C
+ceiling is an operational policy sitting ~13 C below the hardware limit — the
+cards report 26 C and 22 C of margin at 59 C and 63 C respectively, both
+resolving to an 85 C throttle point — so this abort was policy, not silicon.
+
+Moratorium re-armed immediately after the window, locally and on node06.
+
 ## 2026-08-14 — r132 idle-drain rollout and supervised ramped load window
 
 Deployed `f4ee0bc` (#162 idle drain) to node06 as

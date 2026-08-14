@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Fail closed while node06's cooling/AC operational moratorium is active.
 
-RE-ARMED 2026-08-14, after the one supervised window it was lifted for closed.
+RE-ARMED 2026-08-14 after a second supervised window: a clean repeat of the rc6
+c24/max256 code gate, authorized with an explicit instruction to abort if the
+box got too hot. It did, and the guard aborted correctly -- see below.
+
+The first window is described after it and remains the basis for sizing.
 For that window the operator confirmed the AC repair and that they were
 supervising the complete startup, workload, and rollback interval, which is the
 authorization the moratorium requires; a reviewed change was the second half.
@@ -21,6 +25,20 @@ zero failed requests and no thermal abort. Peak GPU was 72 C and peak box draw
 reasons 0x0). The idle baseline drifted up from 59-63 C to 61-67 C across the
 ramp and did not fully recover between steps, which is why the next window
 should still start ramped rather than at full concurrency.
+
+Second window, and the reason the ceiling is real. The 72-request rc6 repeat
+matched the recorded gate: 1,863.3 tok/s median aggregate against 1,891.2, and
+123.9 tok/s median per-stream decode against 125.0, peaking at 72 C. Extending
+the SAME workload to 216 requests then drove GPU1 from 65 C to the 78 C abort
+in about seventeen seconds and the guard terminated it. Short cells stay near
+72 C only because they are short; this box cannot hold c24 for more than
+roughly fifteen to twenty seconds of sustained decode.
+
+GPU1 is the constraint, not the box average. It runs about 5 C hotter than its
+neighbours both at idle and under load (per-GPU peaks 73/78/71/73/75/74/74/73),
+which points at airflow on that specific card rather than ambient cooling.
+Serving was unaffected by the abort: both engines stayed up with zero
+CUDA/NCCL/Xid errors and an authenticated request returned 200 immediately.
 """
 
 from __future__ import annotations
