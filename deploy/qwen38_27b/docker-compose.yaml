@@ -4,6 +4,18 @@
 # Two TP4 engines behind the mini-dynamo load balancer, mirroring the
 # DeepSeek-V4-Flash topology: A on GPUs 0-3 (:8012), B on GPUs 4-7 (:8013).
 #
+# This file is the eight-GPU default, not the only option. The topology is
+# (engines x tensor-parallel size), and render_topology.py generates the
+# overlay for any valid combination down to a single GPU:
+#
+#   ./render_topology.py --gpus 4 --tensor-parallel 2 -o topology.4gpu-tp2.yaml
+#   docker compose -f docker-compose.yaml -f topology.4gpu-tp2.yaml up -d
+#
+# On this hardware four TP2 engines measured up to 25% better than this pair
+# for shared-prefix traffic, because engines partition the prefix cache and
+# tensor parallelism costs an allreduce per layer. See docs/models.md for the
+# selection table and the VRAM each topology needs.
+#
 # Qwen3.8-27B declares architectures ["Qwen3_5ForConditionalGeneration"] and is
 # already supported by the pinned r34 image, so this reuses that engine image
 # rather than introducing a new one. It deliberately does NOT use the
