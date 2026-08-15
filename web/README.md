@@ -38,20 +38,18 @@ npm install
 npm run dev                # then open http://localhost:5173/ui/?mock=1
 
 # Against a live LB (any mini-dynamo with machineview on). The dev server
-# proxies /api to UI_PROXY_TARGET (default http://127.0.0.1:9090):
-UI_PROXY_TARGET=http://127.0.0.1:8007 npm run dev
-
-# node06 example: tunnel the metrics port first
-ssh -N -L 8007:127.0.0.1:8007 node06 &
-UI_PROXY_TARGET=http://127.0.0.1:8007 npm run dev
+# proxies /api to UI_PROXY_TARGET (default http://127.0.0.1:9090). On the
+# VPN, point it straight at the box's tailnet address:
+UI_PROXY_TARGET=http://100.89.187.17:8007 npm run dev   # node06
 
 npm run build              # tsc + vite; output lands in web/dist
 ```
 
 The production bundle is built in the Dockerfile's `ui` stage and copied to
 `/ui` in the LB image, where the Rust side serves it on the metrics listener
-(`:9090` in-container, `:8007` on node06 — loopback only, so browse it
-through the same SSH tunnel).
+(`:9090` in-container, `:8007` on node06). With the metrics port published
+on the box's tailnet address, no dev server is needed at all — anyone on the
+VPN opens http://100.89.187.17:8007/ui/ directly.
 
 ## Runtime configuration (LB side)
 
