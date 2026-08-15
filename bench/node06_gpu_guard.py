@@ -29,6 +29,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from typing import Callable
 
 from node06_operational_moratorium import (
@@ -37,23 +39,24 @@ from node06_operational_moratorium import (
 )
 
 
-# Thermal policy. These are operational abort thresholds, not the hardware's
-# damage limit, and they exist to stop a benchmark rather than to protect the
-# silicon -- the driver does that itself.
+# Thermal policy. The gate is chassis intake-air temperature, the same signal
+# Grafana's bunker-temps dashboard plots, not GPU or CPU temperature.
 #
-# Measured on node06's RTX PRO 6000 Blackwell devices on 2026-08-14 via
-# nvidia-smi T.Limit margins, consistent across all eight cards: throttle onset
-# (max operating) is 85C and hardware shutdown is 90C. MAX_ABORT_C is therefore
-# capped at 84C: one degree below throttle onset, so a run that reaches the
-# ceiling has not yet been silently slowed, and six degrees below the point at
-# which the driver would cut power out from under a live serving stack.
+# A GPU defends itself: node06's devices throttle at 85C and the driver cuts
+# power at 90C, so gating on silicon largely re-implements the hardware. Room
+# cooling has no such backstop, it is shared between hosts, and it is the
+# failure that takes out more than one run. Measured 2026-08-14: a c64
+# shared-prefix run drove GPUs to 79C while intake air did not move from 43C,
+# so the old GPU gate was aborting work that carried no facility risk.
 #
-# Do not raise MAX_ABORT_C to or above 85C. Past that the GPUs throttle, so any
-# throughput measured there understates the hardware and is not comparable with
-# earlier records; past 90C the abort can never fire at all because the device
-# shuts down first.
-DEFAULT_ABORT_C = 78
-MAX_ABORT_C = 84
+# 55C is the agreed ceiling. For scale, node06 idles at 43C on FP_TEMP and the
+# infra alert rules warn at 62C for that sensor (55C for hosts exposing an
+# Inlet Temp sensor instead), so this stops a benchmark well before anyone is
+# paged.
+DEFAULT_ABORT_C = 55
+MAX_ABORT_C = 55
+DEFAULT_START_MAX_C = 50
+DEFAULT_AIR_METRICS_URL = "http://127.0.0.1:9100/metrics"
 
 # Continuous inference cap. Independent of temperature: it bounds how long a
 # single guarded workload may generate load even if it never approaches the
@@ -227,12 +230,36 @@ class GpuReading:
 
 
 @dataclasses.dataclass(frozen=True)
+class AirReading:
+    """One chassis air-temperature sensor, as Grafana's bunker-temps reads it."""
+
+    sensor: str
+    temperature_c: float
+
+
+@dataclasses.dataclass(frozen=True)
 class GpuSample:
     readings: tuple[GpuReading, ...]
+    air: tuple[AirReading, ...] = ()
 
     @property
     def hottest(self) -> GpuReading:
+        """Hottest GPU. Recorded for diagnosis; it no longer gates anything."""
+
         return max(self.readings, key=lambda item: item.temperature_c)
+
+    @property
+    def hottest_air(self) -> AirReading:
+        """The reading the guard actually decides on.
+
+        Room/inlet air is the signal that nothing else protects. A GPU
+        defends itself -- these devices throttle at 85C and the driver cuts
+        power at 90C -- so gating on silicon temperature mostly re-implements
+        the hardware. Facility cooling has no such backstop, and it is shared,
+        so it is the failure that takes out more than one run.
+        """
+
+        return max(self.air, key=lambda item: item.temperature_c)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -350,6 +377,7 @@ def set_child_subreaper(enabled: bool) -> bool:
 @dataclasses.dataclass
 class SampleSummary:
     samples: int = 0
+    max_air_temperature_c: float = 0
     max_temperature_c: float = 0
     max_total_power_w: float = 0
     max_power_fraction: float = 0
@@ -361,6 +389,11 @@ class SampleSummary:
 
     def observe(self, sample: GpuSample) -> None:
         self.samples += 1
+        if sample.air:
+            self.max_air_temperature_c = max(
+                self.max_air_temperature_c,
+                max(item.temperature_c for item in sample.air),
+            )
         self.max_temperature_c = max(
             self.max_temperature_c,
             max(item.temperature_c for item in sample.readings),
@@ -428,6 +461,9 @@ class SampleSummary:
     def public(self) -> dict[str, object]:
         return {
             "samples": self.samples,
+            # The gate's own signal comes first: this is the number that
+            # decides whether a run continues.
+            "max_air_temperature_c": round(self.max_air_temperature_c, 2),
             "max_temperature_c": round(self.max_temperature_c, 2),
             "max_total_power_w": round(self.max_total_power_w, 2),
             "max_power_fraction": round(self.max_power_fraction, 4),
@@ -583,6 +619,61 @@ def parse_sample(raw: str, expected_gpus: int) -> GpuSample:
     return GpuSample(tuple(readings))
 
 
+# The sensors Grafana's "Room / Inlet Air Temperature" panel selects. node06
+# exposes FP_TEMP (front panel) rather than an Inlet Temp sensor; the others
+# expose Inlet Temp. Both are chassis intake air.
+MAX_AIR_PAYLOAD_BYTES = 4 << 20
+AIR_SENSORS = ("Inlet Temp", "FP_TEMP")
+AIR_METRIC = "node_ipmi_temperature_celsius"
+AIR_SAMPLE_PATTERN = re.compile(
+    r'^node_ipmi_temperature_celsius\{[^}]*sensor="(?P<sensor>[^"]+)"[^}]*\}\s+'
+    r"(?P<value>-?\d+(?:\.\d+)?)\s*$",
+    re.MULTILINE,
+)
+
+
+def parse_air_metrics(payload: str) -> tuple[AirReading, ...]:
+    """Extracts intake-air readings from a Prometheus text exposition.
+
+    Only the dashboard's sensors are admitted. The same exporter publishes
+    CPU, DIMM, and per-slot GPU temperatures under the same metric name, and
+    silently averaging those in would make the gate meaningless.
+    """
+
+    readings = []
+    for match in AIR_SAMPLE_PATTERN.finditer(payload):
+        sensor = match.group("sensor")
+        if sensor in AIR_SENSORS:
+            readings.append(AirReading(sensor=sensor, temperature_c=float(match.group("value"))))
+    return tuple(readings)
+
+
+def query_air(args: argparse.Namespace) -> tuple[AirReading, ...]:
+    """Reads intake-air temperature from the local node exporter.
+
+    Deliberately the same metric and sensor set as the Grafana dashboard, read
+    from the host itself rather than from Prometheus: a watchdog that depends
+    on a remote query fails open exactly when the network is the problem.
+
+    # Errors
+
+    Raises GuardError when the exporter is unreachable, malformed, or exposes
+    none of the expected sensors, so a blind guard fails closed.
+    """
+
+    try:
+        with urllib.request.urlopen(
+            args.air_metrics_url, timeout=args.sample_timeout_seconds
+        ) as response:
+            payload = response.read(MAX_AIR_PAYLOAD_BYTES).decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        raise GuardError("air telemetry query failed") from error
+    readings = parse_air_metrics(payload)
+    if not readings:
+        raise GuardError("air telemetry exposed no intake sensor")
+    return readings
+
+
 def query_gpus(args: argparse.Namespace) -> GpuSample:
     command = [
         args.nvidia_smi,
@@ -630,7 +721,11 @@ def query_gpus(args: argparse.Namespace) -> GpuSample:
         decoded = stdout.decode("utf-8", "strict")
     except UnicodeError as error:
         raise GuardError("GPU telemetry query failed") from error
-    return parse_sample(decoded, args.expected_gpus)
+    # GPU readings are collected for the journal; the intake-air reading is
+    # what the guard actually decides on, so a failure to read it must fail
+    # the sample rather than silently produce an ungated one.
+    gpus = parse_sample(decoded, args.expected_gpus)
+    return dataclasses.replace(gpus, air=query_air(args))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -697,7 +792,7 @@ def terminate_tree(
                     initial_workload = []
             else:
                 next_sample = now + args.poll_seconds
-                if sample.hottest.temperature_c >= args.abort_c and initial_workload:
+                if sample.hottest_air.temperature_c >= args.abort_c and initial_workload:
                     tree.signal_identities(initial_workload, signal.SIGKILL)
                     escalated = True
                     initial_workload = []
@@ -979,23 +1074,23 @@ def run_guard(
                 record["reason"] = "interrupted"
                 result = 128 + interrupted_signal
                 break
-            if sample.hottest.temperature_c >= args.abort_c:
+            if sample.hottest_air.temperature_c >= args.abort_c:
                 record["reason"] = "preflight_thermal_abort"
                 record["trigger"] = {
-                    "gpu_index": sample.hottest.index,
-                    "temperature_c": sample.hottest.temperature_c,
+                    "sensor": sample.hottest_air.sensor,
+                    "temperature_c": sample.hottest_air.temperature_c,
                 }
                 checkpoint(True)
                 result = EXIT_THERMAL
                 break
-            if sample.hottest.temperature_c <= args.start_max_c:
+            if sample.hottest_air.temperature_c <= args.start_max_c:
                 preflight_passed = True
                 break
             if time.monotonic() - cooldown_started >= args.cooldown_timeout_seconds:
                 record["reason"] = "preflight_too_hot"
                 record["trigger"] = {
-                    "gpu_index": sample.hottest.index,
-                    "temperature_c": sample.hottest.temperature_c,
+                    "sensor": sample.hottest_air.sensor,
+                    "temperature_c": sample.hottest_air.temperature_c,
                 }
                 result = EXIT_THERMAL
                 break
@@ -1086,11 +1181,11 @@ def run_guard(
                         consecutive_telemetry_failures = 0
                     if sample is not None:
                         observe_sample(sample)
-                    if sample is not None and sample.hottest.temperature_c >= args.abort_c:
+                    if sample is not None and sample.hottest_air.temperature_c >= args.abort_c:
                         record["reason"] = "thermal_abort"
                         record["trigger"] = {
-                            "gpu_index": sample.hottest.index,
-                            "temperature_c": sample.hottest.temperature_c,
+                            "sensor": sample.hottest_air.sensor,
+                            "temperature_c": sample.hottest_air.temperature_c,
                         }
                         result = EXIT_THERMAL
                         break
@@ -1135,11 +1230,11 @@ def run_guard(
                     continue
                 consecutive_telemetry_failures = 0
                 observe_sample(sample)
-                if sample.hottest.temperature_c >= args.abort_c:
+                if sample.hottest_air.temperature_c >= args.abort_c:
                     record["reason"] = "thermal_abort"
                     record["trigger"] = {
-                        "gpu_index": sample.hottest.index,
-                        "temperature_c": sample.hottest.temperature_c,
+                        "sensor": sample.hottest_air.sensor,
+                        "temperature_c": sample.hottest_air.temperature_c,
                     }
                     checkpoint(True)
                     result = EXIT_THERMAL
@@ -1215,7 +1310,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--output", type=pathlib.Path, required=True)
     result.add_argument("--label", default="node06-experiment")
     result.add_argument("--expected-gpus", type=int, default=8)
-    result.add_argument("--start-max-c", type=float, default=65)
+    result.add_argument("--start-max-c", type=float, default=DEFAULT_START_MAX_C)
     result.add_argument("--abort-c", type=float, default=DEFAULT_ABORT_C)
     result.add_argument("--cooldown-timeout-seconds", type=float, default=300)
     result.add_argument("--poll-seconds", type=float, default=1)
@@ -1234,6 +1329,10 @@ def parser() -> argparse.ArgumentParser:
         help="preserve only a rollback-capable root until the owner grace expires",
     )
     result.add_argument("--nvidia-smi", default=DEFAULT_NVIDIA_SMI)
+    result.add_argument(
+        "--air-metrics-url", default=DEFAULT_AIR_METRICS_URL,
+        help="Prometheus text endpoint exposing node_ipmi_temperature_celsius",
+    )
     result.add_argument("command", nargs=argparse.REMAINDER)
     return result
 
@@ -1249,7 +1348,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise GuardError("label is invalid")
     if args.expected_gpus != 8:
         raise GuardError("node06 requires exactly eight GPUs")
-    if not 20 <= args.start_max_c <= 65:
+    if not 15 <= args.start_max_c <= MAX_ABORT_C - 3:
         raise GuardError("cool-start threshold is invalid")
     if not args.start_max_c + 3 <= args.abort_c <= MAX_ABORT_C:
         raise GuardError("thermal-abort threshold is invalid")
@@ -1267,6 +1366,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise GuardError("termination grace is invalid")
     if not isinstance(args.nvidia_smi, str) or not args.nvidia_smi:
         raise GuardError("nvidia-smi path is invalid")
+    if not str(args.air_metrics_url).startswith(("http://127.0.0.1", "http://localhost")):
+        # The gate must not depend on a remote query: a watchdog that reads
+        # the network fails open exactly when the network is the problem.
+        raise GuardError("air metrics URL must be local")
 
 
 def main(argv: list[str] | None = None) -> int:

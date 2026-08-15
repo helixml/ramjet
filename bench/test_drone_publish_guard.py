@@ -125,6 +125,13 @@ class DronePublishGuardTest(unittest.TestCase):
             companion,
             {"rust-deps": False, "lb": False, "companion": True},
         )
+        # The machine-view UI is baked into the LB image only.
+        web = self.commit({"web/src/App.tsx": "dashboard"})
+        self.assert_matrix(
+            companion,
+            web,
+            {"rust-deps": False, "lb": True, "companion": False},
+        )
 
     def test_release_tools_inputs_select_only_the_tools_publisher(self):
         before = self.commit({"README.md": "base"})

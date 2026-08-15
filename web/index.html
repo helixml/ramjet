@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>mini-dynamo · machine view</title>
+    <script>
+      // Apply the persisted theme before first paint to avoid a flash.
+      try {
+        const theme = localStorage.getItem("machineview-theme")
+        if (theme === "dark" || theme === "light") {
+          document.documentElement.dataset.theme = theme
+        }
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

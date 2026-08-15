@@ -13,6 +13,15 @@ COPY compat ./compat
 RUN cargo build --release --locked --offline --bin mini-dynamo \
     && cp target/release/mini-dynamo /mini-dynamo
 
+# The machine-view dashboard builds in its own stage so web/ edits never
+# invalidate the Rust layer and Rust edits never re-run npm.
+FROM node:24-alpine AS ui
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web ./
+RUN npm run build
+
 FROM gcr.io/distroless/cc-debian12
 ARG OCI_REVISION
 LABEL org.opencontainers.image.source="https://github.com/helixml/mini-dynamo"
@@ -22,5 +31,6 @@ LABEL org.opencontainers.image.revision="${OCI_REVISION}"
 COPY --from=build /lib/x86_64-linux-gnu/libpcre2-8.so.0.11.2 /lib/x86_64-linux-gnu/libpcre2-8.so.0
 COPY --from=build /mini-dynamo /mini-dynamo
 COPY compat /compat
+COPY --from=ui /web/dist /ui
 EXPOSE 8000 9090
 ENTRYPOINT ["/mini-dynamo"]

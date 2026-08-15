@@ -1,0 +1,162 @@
+@import "tailwindcss";
+
+/*
+ * Machine-view theme.
+ *
+ * All colors come from the validated dataviz reference palette: an 8-slot
+ * categorical order that passes adjacent-pair CVD checks in both modes,
+ * sequential blue steps for same-hue shading, a reserved status palette,
+ * and recessive chart chrome. Components consume roles (tokens), never raw
+ * hex, so the light/dark swap happens here and only here. Theme resolution:
+ * an explicit [data-theme] stamp wins both ways; otherwise the OS decides.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Chart chrome & ink (light) */
+  --background: #f9f9f7; /* page plane */
+  --card: #fcfcfb; /* chart surface */
+  --foreground: #0b0b0b; /* primary ink */
+  --card-foreground: #0b0b0b;
+  --muted: #f0efec;
+  --muted-foreground: #52514e; /* secondary ink */
+  --faint-foreground: #898781; /* axis/label ink */
+  --border: rgba(11, 11, 11, 0.1);
+  --grid: #e1e0d9; /* hairline gridline */
+  --axis: #c3c2b7; /* baseline/axis */
+  --primary: #0b0b0b;
+  --primary-foreground: #fcfcfb;
+  --accent: #f0efec;
+  --accent-foreground: #0b0b0b;
+  --ring: #2a78d6;
+
+  /* Categorical slots, fixed order (light steps) */
+  --chart-1: #2a78d6; /* blue */
+  --chart-2: #eb6834; /* orange */
+  --chart-3: #1baf7a; /* aqua */
+  --chart-4: #eda100; /* yellow */
+  --chart-5: #e87ba4; /* magenta */
+  --chart-6: #008300; /* green */
+  --chart-7: #4a3aa7; /* violet */
+  --chart-8: #e34948; /* red */
+
+  /* Sequential blue: the second shade when one hue carries two levels */
+  --chart-1-soft: #86b6ef; /* blue step 250 */
+
+  /* Status palette (fixed, never themed) */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --delta-good-text: #006300;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+
+    --background: #0d0d0d;
+    --card: #1a1a19;
+    --foreground: #ffffff;
+    --card-foreground: #ffffff;
+    --muted: #262624;
+    --muted-foreground: #c3c2b7;
+    --faint-foreground: #898781;
+    --border: rgba(255, 255, 255, 0.1);
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --primary: #ffffff;
+    --primary-foreground: #1a1a19;
+    --accent: #262624;
+    --accent-foreground: #ffffff;
+    --ring: #3987e5;
+
+    --chart-1: #3987e5;
+    --chart-2: #d95926;
+    --chart-3: #199e70;
+    --chart-4: #c98500;
+    --chart-5: #d55181;
+    --chart-6: #008300;
+    --chart-7: #9085e9;
+    --chart-8: #e66767;
+
+    --chart-1-soft: #184f95; /* blue step 600 */
+
+    --delta-good-text: #0ca30c;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --background: #0d0d0d;
+  --card: #1a1a19;
+  --foreground: #ffffff;
+  --card-foreground: #ffffff;
+  --muted: #262624;
+  --muted-foreground: #c3c2b7;
+  --faint-foreground: #898781;
+  --border: rgba(255, 255, 255, 0.1);
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --primary: #ffffff;
+  --primary-foreground: #1a1a19;
+  --accent: #262624;
+  --accent-foreground: #ffffff;
+  --ring: #3987e5;
+
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #d55181;
+  --chart-6: #008300;
+  --chart-7: #9085e9;
+  --chart-8: #e66767;
+
+  --chart-1-soft: #184f95;
+
+  --delta-good-text: #0ca30c;
+}
+
+@theme inline {
+  --font-sans:
+    system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-faint-foreground: var(--faint-foreground);
+  --color-border: var(--border);
+  --color-grid: var(--grid);
+  --color-axis: var(--axis);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-ring: var(--ring);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+  --color-chart-7: var(--chart-7);
+  --color-chart-8: var(--chart-8);
+  --color-chart-1-soft: var(--chart-1-soft);
+
+  --color-status-good: var(--status-good);
+  --color-status-warning: var(--status-warning);
+  --color-status-serious: var(--status-serious);
+  --color-status-critical: var(--status-critical);
+  --color-delta-good-text: var(--delta-good-text);
+}
+
+body {
+  @apply bg-background text-foreground font-sans antialiased;
+}

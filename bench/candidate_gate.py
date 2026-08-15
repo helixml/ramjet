@@ -504,12 +504,12 @@ def validate_live_isolation(runner, args):
 def thermal_guard_contract():
     try:
         guard = gpu_guard.validate_inherited_guard(
-            expected_gpus=8, maximum_abort_c=78
+            expected_gpus=8, maximum_abort_c=gpu_guard.MAX_ABORT_C
         )
     except gpu_guard.GuardError as error:
         raise GateError(
             "candidate gate requires an inherited eight-GPU thermal guard "
-            "capability at 78C or lower"
+            "capability bounded by the intake-air ceiling"
         ) from error
     return {
         "expected_gpus": guard["expected_gpus"],

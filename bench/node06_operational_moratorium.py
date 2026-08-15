@@ -77,14 +77,17 @@ class AuthorizedWindow:
 # previously went from 65C to an abort in roughly seventeen seconds of
 # sustained c24 decode, so 25 minutes is a ceiling rather than an expectation.
 #
-# 84C is one degree below these devices' measured 85C throttle onset and six
-# below their 90C shutdown, so reaching it means stopping before the hardware
-# either slows down or cuts power.
+# The bound is now intake-air temperature, not GPU temperature. A GPU defends
+# itself -- these devices throttle at 85C and the driver cuts power at 90C --
+# so gating on silicon mostly re-implements the hardware. Facility cooling has
+# no such backstop and is shared between hosts, so it is the failure that takes
+# out more than one run. 55C is the agreed ceiling on the same intake sensors
+# Grafana's bunker-temps dashboard plots.
 AUTHORIZED_WINDOWS = {
     "supervised-2026-08-14": AuthorizedWindow(
         identifier="supervised-2026-08-14",
         granted="2026-08-14",
-        max_abort_c=84,
+        max_abort_c=55,
         max_runtime_seconds=1500,
     ),
 }

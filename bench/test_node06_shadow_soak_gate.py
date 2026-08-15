@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+import node06_gpu_guard as gpu_guard
 from unittest import mock
 
 import node06_shadow_soak_gate as gate
@@ -275,7 +277,7 @@ class Node06ShadowSoakGateTests(unittest.TestCase):
             return_value=GUARD_CONTRACT,
         ) as validator:
             gate.validate_args(parsed)
-        validator.assert_called_once_with(expected_gpus=8, maximum_abort_c=78)
+        validator.assert_called_once_with(expected_gpus=8, maximum_abort_c=gpu_guard.MAX_ABORT_C)
         self.assertEqual(len(parsed.engine_metrics), 2)
         self.assertEqual(len(parsed.companion_metrics_socket), 2)
         self.assertEqual(parsed.health_url, "http://127.0.0.1:8006/health")
