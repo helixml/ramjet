@@ -1,6 +1,9 @@
 use std::{
     io,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -46,6 +49,27 @@ use crate::{
 const MAX_REQUEST_BODY: usize = 64 << 20;
 const MAX_PROBE_BODY: usize = 64 << 10;
 const MAX_CONCURRENT_UPSTREAM_PROBES: usize = 8;
+/// How recently a real request must have completed on an upstream for a failed
+/// readiness probe to be treated as evidence about the probe rather than about
+/// the engine.
+///
+/// The probe competes with request traffic for the same engine capacity, so a
+/// saturated engine stops answering `/v1/models` inside the five-second probe
+/// budget long before it stops serving. Because a fleet saturates together,
+/// believing those probes fences every replica at once. Thirty seconds is two
+/// probe intervals plus one probe budget: long enough that a single starved
+/// round cannot fence a replica that is demonstrably serving, short enough that
+/// an engine which actually died stops being credited after two probe rounds.
+/// The request path is unaffected — a failed *request* still fences its
+/// upstream immediately, so this only delays fencing an engine that no longer
+/// answers anything by at most this window.
+const RECENT_SERVING_SUCCESS_WINDOW_MS: u64 = 30_000;
+/// Upstreams a request may try while failing open. With every replica marked
+/// down there is no evidence about which one is best, and retrying all of them
+/// multiplies the latency of a genuinely dead fleet by the replica count. One
+/// alternate keeps the "a busy engine still answers" property while bounding
+/// the cost of the case where nothing answers.
+const FAIL_OPEN_MAX_ATTEMPTS: usize = 2;
 const STREAM_BUFFER_CHUNKS: usize = 8;
 const DSPARK_METRICS_TIMEOUT: Duration = Duration::from_secs(2);
 const DSPARK_RELIABILITY_STATES: &[&str] = &[
@@ -116,6 +140,41 @@ struct Inner {
     /// measured from. Absent unless the policy is enabled, so the default build
     /// carries no extra per-request work.
     idle_drain: Option<IdleDrainState>,
+    /// Monotonic origin for the serving-liveness clock below. Separate from the
+    /// idle-drain origin because that state is absent in the default build.
+    origin: Instant,
+    /// Per-upstream evidence that real serving traffic completed recently.
+    upstream_liveness: Arc<[UpstreamLiveness]>,
+    /// Whether the last routing decision had to fail open. Only used to publish
+    /// and log the transition once instead of once per request.
+    failing_open: AtomicBool,
+}
+
+/// Timestamp of the most recent completed response from one upstream, on the
+/// `Inner::origin` monotonic clock and offset by one so that the zero slot can
+/// mean "nothing has completed since this process started".
+struct UpstreamLiveness {
+    last_success_ms: AtomicU64,
+}
+
+impl UpstreamLiveness {
+    fn record(&self, now_ms: u64) {
+        self.last_success_ms
+            .store(now_ms.saturating_add(1), AtomicOrdering::Relaxed);
+    }
+
+    fn served_within(&self, now_ms: u64, window_ms: u64) -> bool {
+        match self.last_success_ms.load(AtomicOrdering::Relaxed) {
+            0 => false,
+            stamp => now_ms.saturating_sub(stamp - 1) <= window_ms,
+        }
+    }
+}
+
+impl Inner {
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
 }
 
 struct IdleDrainState {
@@ -650,6 +709,42 @@ fn initialize_dspark_guard_metrics(
     }
 }
 
+/// Publishes every replica's startup reliability and admission state. In
+/// compatibility mode the replicas are fenced after their guards publish, so a
+/// scrape taken during construction can never see an admitted replica that has
+/// not yet attested.
+fn publish_initial_replica_state(
+    config: &Config,
+    metrics: &Metrics,
+    router: &Router,
+    guards: &[DsparkGuardReplica],
+    initial_probe_health: bool,
+) {
+    for (index, guard) in guards.iter().enumerate() {
+        let replica = index.to_string();
+        initialize_dspark_guard_metrics(
+            metrics,
+            &replica,
+            guard.status().state,
+            config.dspark_guard_expected_positions,
+        );
+        let upstream_label = config.upstreams[index].as_str().trim_end_matches('/');
+        guard.publish_probe_health(router, metrics, index, upstream_label, initial_probe_health);
+    }
+    if config.upstream_admission_mode != UpstreamAdmissionMode::Compatibility {
+        return;
+    }
+    for (index, upstream) in config.upstreams.iter().enumerate() {
+        router.set_healthy(index, false);
+        let label = upstream.as_str().trim_end_matches('/');
+        metrics.upstream_up.with_label_values(&[label]).set(0.0);
+        metrics
+            .upstream_compatibility_admitted
+            .with_label_values(&[label])
+            .set(0.0);
+    }
+}
+
 impl Proxy {
     /// Builds the proxy and its optional tokenizer workers.
     ///
@@ -764,36 +859,13 @@ impl Proxy {
             })
             .collect::<anyhow::Result<Vec<_>>>()?
             .into();
-        for (index, guard) in dspark_guards.iter().enumerate() {
-            let replica = index.to_string();
-            initialize_dspark_guard_metrics(
-                metrics.as_ref(),
-                &replica,
-                guard.status().state,
-                config.dspark_guard_expected_positions,
-            );
-            let upstream_label = config.upstreams[index].as_str().trim_end_matches('/');
-            guard.publish_probe_health(
-                &router,
-                metrics.as_ref(),
-                index,
-                upstream_label,
-                initial_probe_health,
-            );
-        }
-        if config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility {
-            for (index, upstream) in config.upstreams.iter().enumerate() {
-                router.set_healthy(index, false);
-                metrics
-                    .upstream_up
-                    .with_label_values(&[upstream.as_str().trim_end_matches('/')])
-                    .set(0.0);
-                metrics
-                    .upstream_compatibility_admitted
-                    .with_label_values(&[upstream.as_str().trim_end_matches('/')])
-                    .set(0.0);
-            }
-        }
+        publish_initial_replica_state(
+            &config,
+            metrics.as_ref(),
+            &router,
+            &dspark_guards,
+            initial_probe_health,
+        );
         let idle_drain = config.idle_drain.mode.enabled().then(|| {
             let origin = Instant::now();
             IdleDrainState {
@@ -805,6 +877,12 @@ impl Proxy {
                 origin,
             }
         });
+        let upstream_liveness = (0..config.upstreams.len())
+            .map(|_| UpstreamLiveness {
+                last_success_ms: AtomicU64::new(0),
+            })
+            .collect::<Vec<_>>()
+            .into();
         Ok(Self {
             inner: Arc::new(Inner {
                 config,
@@ -818,6 +896,9 @@ impl Proxy {
                 dspark_guards,
                 dspark_guard_store,
                 idle_drain,
+                origin: Instant::now(),
+                upstream_liveness,
+                failing_open: AtomicBool::new(false),
             }),
         })
     }
@@ -1069,7 +1150,7 @@ impl Proxy {
         // Carry each candidate's own reservation rather than re-deriving it in
         // the retry loop: a failover target must acquire and journal its own
         // units, never the originally selected candidate's.
-        let serving_candidates = decision
+        let mut serving_candidates = decision
             .candidates
             .iter()
             .filter_map(|candidate| {
@@ -1081,6 +1162,16 @@ impl Proxy {
                     .map(|state| (*candidate, state.request_load_units))
             })
             .collect::<Vec<_>>();
+        // Nothing is healthy. Shedding here converts a fleet that is merely
+        // saturated — the state in which its readiness probes starve first —
+        // into a total outage, so dispatch anyway: a busy engine still answers,
+        // and a genuinely dead one fails this one request, which is no worse
+        // than the 503 the caller would otherwise already have received.
+        let failing_open = serving_candidates.is_empty();
+        if failing_open {
+            serving_candidates = self.fail_open_candidates(&decision);
+        }
+        self.publish_fail_open(failing_open && !serving_candidates.is_empty());
         let mut last_error = None;
         let mut selected = None;
         for (attempt, &(candidate, units)) in serving_candidates.iter().enumerate() {
@@ -1091,9 +1182,16 @@ impl Proxy {
                 .request(parts.method.clone(), url)
                 .body(body.clone());
             outbound = outbound.headers(filtered_headers(&parts.headers));
-            let Some(load) = self.acquire_if_healthy(candidate, units) else {
+            let Some(load) = self.acquire_for_dispatch(candidate, units, failing_open) else {
                 continue;
             };
+            if failing_open {
+                self.inner
+                    .metrics
+                    .route_fail_open_dispatches
+                    .with_label_values(&[&self.upstream_label(candidate)])
+                    .inc();
+            }
             match outbound.send().await {
                 Ok(response)
                     if matches!(
@@ -1436,8 +1534,94 @@ impl Proxy {
         }
     }
 
-    fn acquire_if_healthy(&self, upstream: usize, units: usize) -> Option<RoutedLoad> {
-        let guard = self.inner.router.acquire_if_healthy(upstream, units)?;
+    /// Candidates a request may still be dispatched to once every upstream is
+    /// marked down, in the router's own preference order and bounded by
+    /// [`FAIL_OPEN_MAX_ATTEMPTS`].
+    fn fail_open_candidates(&self, decision: &Decision) -> Vec<(usize, usize)> {
+        decision
+            .candidates
+            .iter()
+            .filter_map(|candidate| {
+                decision
+                    .candidate_state
+                    .iter()
+                    .find(|state| state.index == *candidate)
+                    .filter(|state| self.may_fail_open(state.index))
+                    .map(|state| (*candidate, state.request_load_units))
+            })
+            .take(FAIL_OPEN_MAX_ATTEMPTS)
+            .collect()
+    }
+
+    /// Whether a replica that is currently marked down may nevertheless be
+    /// dispatched to when nothing is healthy.
+    ///
+    /// Only probe-derived health may be overridden. A `DSpark` quarantine, an
+    /// unmet compatibility admission, and an idle-drain park are deliberate
+    /// fences backed by their own evidence: failing open past them would serve
+    /// from a replica this process has already decided must not serve, which is
+    /// a correctness or safety regression rather than an availability trade.
+    fn may_fail_open(&self, upstream: usize) -> bool {
+        if self.inner.router.drained(upstream) {
+            return false;
+        }
+        if self
+            .inner
+            .dspark_guards
+            .get(upstream)
+            .is_none_or(|guard| guard.status().quarantined)
+        {
+            return false;
+        }
+        if self.inner.config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility
+            && self.inner.tokenizer.compatibility_attested(upstream) != Some(true)
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Publishes the fail-open gauge and logs only the transitions, so a
+    /// saturated fleet cannot turn one incident into a request-rate log flood.
+    ///
+    /// This is deliberately a separate series from `ds4proxy_upstream_up`:
+    /// dashboards must keep reading that gauge as "this upstream passed its
+    /// admission probe", and a fail-open interval is exactly the case where it
+    /// reads zero while traffic is still being served.
+    fn publish_fail_open(&self, failing_open: bool) {
+        if self
+            .inner
+            .failing_open
+            .swap(failing_open, AtomicOrdering::Relaxed)
+            == failing_open
+        {
+            return;
+        }
+        self.inner
+            .metrics
+            .route_fail_open
+            .set(f64::from(failing_open));
+        if failing_open {
+            tracing::warn!(
+                upstreams = self.inner.config.upstreams.len(),
+                "no upstream is healthy; failing open and dispatching anyway"
+            );
+        } else {
+            tracing::info!("a healthy upstream is available again; fail-open routing ended");
+        }
+    }
+
+    fn acquire_for_dispatch(
+        &self,
+        upstream: usize,
+        units: usize,
+        failing_open: bool,
+    ) -> Option<RoutedLoad> {
+        let guard = if failing_open {
+            self.inner.router.acquire_failing_open(upstream, units)
+        } else {
+            self.inner.router.acquire_if_healthy(upstream, units)
+        }?;
         let label = self.upstream_label(upstream);
         if let Some((inflight, load, _, _)) = self.inner.router.state(upstream) {
             self.inner
@@ -1598,6 +1782,12 @@ impl Proxy {
             .upstream_requests
             .with_label_values(&[&label, status.as_str()])
             .inc();
+        // A server error is how both a shedding engine and a broken one answer,
+        // so it is not admitted as liveness evidence. Anything the engine
+        // generated itself is.
+        if !status.is_server_error() {
+            self.note_upstream_serving_success(upstream);
+        }
     }
 
     fn upstream_label(&self, upstream: usize) -> String {
@@ -2003,9 +2193,30 @@ impl Proxy {
     }
 
     fn mark_probe(&self, upstream: usize, healthy: bool, reason: &str) {
-        let effective_healthy = self.publish_upstream_health(upstream, healthy);
+        let suppressed = !healthy && self.probe_failure_is_starvation(upstream, reason);
+        let effective_healthy = if suppressed {
+            // The probe still failed and is still counted below; what it may not
+            // do is fence a replica that has just finished serving a real
+            // request, because that request is the stronger liveness evidence.
+            self.inner
+                .metrics
+                .upstream_probe_suppressed
+                .with_label_values(&[&self.upstream_label(upstream), reason])
+                .inc();
+            tracing::debug!(
+                upstream,
+                reason,
+                "readiness probe failed but recent serving traffic proves liveness"
+            );
+            self.inner
+                .router
+                .state(upstream)
+                .is_some_and(|state| state.3)
+        } else {
+            self.publish_upstream_health(upstream, healthy)
+        };
         let label = self.upstream_label(upstream);
-        if effective_healthy {
+        if healthy && effective_healthy {
             self.inner
                 .metrics
                 .last_upstream_success
@@ -2024,6 +2235,52 @@ impl Proxy {
                     },
                 ])
                 .inc();
+        }
+    }
+
+    /// Whether a failed probe says more about the probe than about the engine.
+    ///
+    /// Only a transport-level failure qualifies: a timeout or a refused/queued
+    /// connection is exactly what a saturated engine produces while it is still
+    /// draining its request queue. An answered probe that reported the wrong
+    /// thing — a non-200 status, an oversized body, a compatibility mismatch —
+    /// is a real statement by a live engine and always fences it. Compatibility
+    /// admission never suppresses anything: that mode requires positive, fresh
+    /// attestation to serve, so an unreachable engine must fail closed.
+    fn probe_failure_is_starvation(&self, upstream: usize, reason: &str) -> bool {
+        if self.inner.config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility
+            || !matches!(reason, "timeout" | "connect")
+        {
+            return false;
+        }
+        self.inner
+            .upstream_liveness
+            .get(upstream)
+            .is_some_and(|liveness| {
+                liveness.served_within(self.inner.now_ms(), RECENT_SERVING_SUCCESS_WINDOW_MS)
+            })
+    }
+
+    /// Records that a real request completed on this upstream.
+    ///
+    /// A completed response is the same class of liveness evidence as a passing
+    /// probe and is strictly fresher, so it both feeds the starvation window
+    /// above and restores probe health directly. Compatibility admission is
+    /// excluded because there serving authority additionally requires a
+    /// positive attestation that only the probe can renew.
+    fn note_upstream_serving_success(&self, upstream: usize) {
+        let Some(liveness) = self.inner.upstream_liveness.get(upstream) else {
+            return;
+        };
+        liveness.record(self.inner.now_ms());
+        if self.inner.config.upstream_admission_mode != UpstreamAdmissionMode::Compatibility
+            && !self
+                .inner
+                .router
+                .state(upstream)
+                .is_some_and(|state| state.3)
+        {
+            self.publish_upstream_health(upstream, true);
         }
     }
 
@@ -4314,31 +4571,223 @@ mod tests {
         task.abort();
     }
 
+    /// Issue #170: at c512 every readiness probe starved at once, the balancer
+    /// fenced all eight engines, and 512 of 512 requests were shed in 0.309s
+    /// while every engine was still answering. With nothing healthy left to
+    /// protect, dispatching is strictly better than shedding.
     #[tokio::test]
-    async fn no_healthy_replica_returns_503_without_dialing_upstream() {
+    async fn every_upstream_down_fails_open_instead_of_shedding_the_request() {
         let requests = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&requests);
         let upstream = AxumRouter::new().fallback(any(move || {
             let counter = Arc::clone(&counter);
             async move {
                 counter.fetch_add(1, Ordering::Relaxed);
-                StatusCode::OK
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    r#"{"ok":true}"#,
+                )
             }
         }));
         let (url, task) = start_upstream(upstream).await;
         let proxy = proxy_for(&[url]);
-        proxy.router().set_healthy(0, false);
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri("/v1/chat/completions")
-            .body(Body::from(
-                r#"{"messages":[{"role":"user","content":"hi"}]}"#,
-            ))
-            .unwrap();
-        let response = proxy.serve(request).await;
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(requests.load(Ordering::Relaxed), 0);
+        let label = proxy.upstream_label(0);
+        proxy.publish_upstream_health(0, false);
+
+        // Failing open must not make the balancer claim the replica is up.
+        let health = Proxy::health(State(proxy.clone())).await;
+        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            proxy
+                .inner
+                .metrics
+                .upstream_up
+                .with_label_values(&[&label])
+                .get()
+                .abs()
+                < f64::EPSILON
+        );
+
+        let response = proxy
+            .serve(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), 1 << 20).await.unwrap(),
+            Bytes::from_static(br#"{"ok":true}"#)
+        );
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .route_fail_open_dispatches
+                .with_label_values(&[&label])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!((proxy.inner.metrics.route_fail_open.get() - 1.0).abs() < f64::EPSILON);
+
+        // The completed request is fresher liveness evidence than the failed
+        // probe, so the replica returns to normal admission without waiting for
+        // the next probe round, and the fail-open interval ends.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !proxy.router().state(0).unwrap().3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a completed request must restore serving admission");
+        let response = proxy
+            .serve(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        assert!(proxy.inner.metrics.route_fail_open.get().abs() < f64::EPSILON);
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .route_fail_open_dispatches
+                .with_label_values(&[&label])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON,
+            "a healthy upstream must be routed to normally, not through fail-open"
+        );
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn fail_open_never_dispatches_into_a_parked_replica() {
+        let parked_requests = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&parked_requests);
+        let parked = AxumRouter::new().fallback(any(move || {
+            let observed = Arc::clone(&observed);
+            async move {
+                observed.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::OK, "must not be called")
+            }
+        }));
+        let serving = AxumRouter::new().fallback(any(|| async {
+            (
+                StatusCode::OK,
+                [("content-type", "application/json")],
+                r#"{"ok":true}"#,
+            )
+        }));
+        let (serving_url, serving_task) = start_upstream(serving).await;
+        let (parked_url, parked_task) = start_upstream(parked).await;
+        let proxy = proxy_for(&[serving_url, parked_url]);
+        // A parked replica may be stopped by the converging actor at any
+        // moment, so availability pressure must not reach it.
+        proxy.router().set_drained(1, true);
+        proxy.publish_upstream_health(0, false);
+        proxy.publish_upstream_health(1, false);
+
+        for _ in 0..4 {
+            let response = proxy
+                .serve(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/v1/chat/completions")
+                        .body(Body::from(
+                            r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-mini-dynamo-upstream"], "0");
+            let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        }
+        assert_eq!(parked_requests.load(Ordering::Relaxed), 0);
+        serving_task.abort();
+        parked_task.abort();
+    }
+
+    /// The other half of issue #170: the probe loses its race with request
+    /// traffic first, so a starved probe must not be allowed to fence a replica
+    /// that is demonstrably still completing requests.
+    #[tokio::test(start_paused = true)]
+    async fn a_starved_probe_never_fences_a_recently_serving_upstream() {
+        let proxy = proxy_for(&[Url::parse("http://127.0.0.1:1").unwrap()]);
+        let label = proxy.upstream_label(0);
+        proxy.record_upstream_request(0, StatusCode::OK);
+
+        proxy.mark_probe(0, false, "timeout");
+        assert!(
+            proxy.router().state(0).unwrap().3,
+            "a probe timeout alone must not fence a replica that just served"
+        );
+        proxy.mark_probe(0, false, "connect");
+        assert!(proxy.router().state(0).unwrap().3);
+        let suppressed = proxy.inner.metrics.upstream_probe_suppressed.clone();
+        assert!(
+            (suppressed.with_label_values(&[&label, "timeout"]).get() - 1.0).abs() < f64::EPSILON
+        );
+        assert!(
+            (suppressed.with_label_values(&[&label, "connect"]).get() - 1.0).abs() < f64::EPSILON
+        );
+        // The probe failures themselves stay visible to operators.
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .upstream_probe_errors
+                .with_label_values(&[&label, "timeout"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+
+        // An engine that answers the probe with a real error is stating
+        // something about itself, and is fenced whatever traffic it served.
+        proxy.mark_probe(0, false, "http");
+        assert!(!proxy.router().state(0).unwrap().3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn serving_evidence_expires_so_a_silent_upstream_is_still_fenced() {
+        let proxy = proxy_for(&[Url::parse("http://127.0.0.1:1").unwrap()]);
+        proxy.record_upstream_request(0, StatusCode::OK);
+        tokio::time::advance(Duration::from_millis(RECENT_SERVING_SUCCESS_WINDOW_MS + 1)).await;
+        proxy.mark_probe(0, false, "timeout");
+        assert!(
+            !proxy.router().state(0).unwrap().3,
+            "stale traffic must not keep an engine that answers nothing admitted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_shedding_upstream_does_not_earn_probe_immunity() {
+        let proxy = proxy_for(&[Url::parse("http://127.0.0.1:1").unwrap()]);
+        // A 5xx is how both an overloaded engine and a broken one answer, so it
+        // is not liveness evidence.
+        proxy.record_upstream_request(0, StatusCode::SERVICE_UNAVAILABLE);
+        proxy.mark_probe(0, false, "timeout");
+        assert!(!proxy.router().state(0).unwrap().3);
     }
 
     #[tokio::test]

@@ -48,6 +48,24 @@ reliability state, inflight work, load units, and index size. It returns `200 ok
 serve. Successful proxied responses include `X-Mini-Dynamo-Upstream` with an
 opaque replica ordinal.
 
+Serving admission fails open. A readiness probe competes with request traffic
+for the same engine capacity, so a saturated fleet stops answering probes
+before it stops serving, and all replicas saturate together. Two rules keep
+that from turning a busy stack into a total outage:
+
+- A probe timeout or connection failure does not fence a replica that
+  completed a real request in the last 30 seconds; the probe failure is still
+  counted in `ds4proxy_upstream_probe_failures_total`, and the suppression in
+  `ds4proxy_upstream_probe_suppressed_total`. A probe the engine *answers* with
+  an error, and any failed request, still fence it immediately.
+- When no replica is healthy, requests are dispatched anyway rather than shed,
+  which is visible in `ds4proxy_route_fail_open` and
+  `ds4proxy_route_fail_open_dispatches_total`. `/health` and
+  `ds4proxy_upstream_up` keep reporting the true admission state throughout.
+  Deliberate fences are never bypassed: a DSpark quarantine, an unmet
+  compatibility admission, and an idle-drain park still refuse traffic, and a
+  fleet in those states still returns `503`.
+
 ### DSpark reliability guard (experimental)
 
 | Variable | Default | Description |
@@ -425,6 +443,10 @@ single engine's metrics without exposing its address. The most useful router
 families are:
 
 - `ds4proxy_upstream_up`, inflight, and load gauges for availability.
+- `ds4proxy_route_fail_open` and `ds4proxy_route_fail_open_dispatches_total`
+  for intervals served while no replica passed its admission probe, and
+  `ds4proxy_upstream_probe_suppressed_total` for probe failures outvoted by
+  recent serving traffic.
 - `ds4proxy_route_decisions_total` for route distribution.
 - `ds4proxy_cache_requests_total` and prompt/cached token counters for observed
   cache outcomes.
