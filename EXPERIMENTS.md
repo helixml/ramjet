@@ -128,6 +128,31 @@ asserted. Two larger levers are consequently untested:
   image registers `Qwen3_5MTP`. Expect this to help single-stream latency and
   possibly to hurt saturated throughput, so it should be measured at both ends.
 
+### Fail-open verified against the original saturation outage (#170)
+
+The balancer fix from #172 was verified on node06 against the exact load that
+produced the outage, on the TP4 pair with MTP, every run under the thermal
+guard.
+
+Before, the second c512 cell returned 503 to all 512 requests in 0.309s while
+every engine was alive. After, across six c512 cells: 512/512, 505/512,
+504/512, then 512/512, 512/512, 511/512. The total outage is gone.
+
+Telemetry behaved as designed. `ds4proxy_route_fail_open` rose to 1 under
+saturation and returned to 0 afterwards without sticking,
+`ds4proxy_route_fail_open_dispatches_total` recorded 12 and 13 dispatches
+across the two upstreams, and `ds4proxy_upstream_probe_suppressed_total`
+counted a starved `connect` probe that correctly did not fence a replica that
+was still serving. `ds4proxy_upstream_up` stayed 1/1 for both engines
+throughout, so the gauge's meaning is intact for the dashboards.
+
+What remains is 0-1.4% of requests failing with **502**, not 503, and it is a
+different mechanism: the balancer now attempts the dispatch and the upstream
+connection fails under 512 simultaneous connects, rather than the balancer
+refusing to try. That is an engine accept-backlog limit and strictly better
+behaviour. It deserves its own issue only if 512-way connection bursts turn out
+to be a real workload rather than a benchmark artifact.
+
 ### MTP speculative decoding: large win below c128, a loss above it
 
 Qwen3.8-27B-FP8 ships a trained MTP head (`mtp.safetensors`, 477MB) and the r34
