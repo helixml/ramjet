@@ -76,10 +76,16 @@ export function fmtClockFull(t: number): string {
 
 /** Short display name for an upstream/engine endpoint URL. */
 export function endpointLabel(endpoint: string, index: number): string {
+  const letter = String.fromCharCode(65 + index)
   try {
     const url = new URL(endpoint)
-    return `${String.fromCharCode(65 + index)} · :${url.port || "80"}`
+    // Loopback/IP upstreams differ by port; named services differ by host.
+    if (/^[\d.[]/.test(url.hostname) || url.hostname === "localhost") {
+      return `${letter} · :${url.port || "80"}`
+    }
+    const host = url.hostname.split(".")[0]
+    return `${letter} · ${host.length > 14 ? host.slice(-14) : host}`
   } catch {
-    return `engine ${String.fromCharCode(65 + index)}`
+    return `engine ${letter}`
   }
 }

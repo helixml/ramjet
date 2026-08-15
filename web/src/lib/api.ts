@@ -31,6 +31,16 @@ export interface GpuSample {
   power_watts: number | null
   temp_c: number | null
   sm_mhz: number | null
+  mem_util_pct?: number | null
+  mem_clock_mhz?: number | null
+  power_limit_watts?: number | null
+  fan_pct?: number | null
+  pstate?: number | null
+  temp_mem_c?: number | null
+  throttle_sw_power?: number | null
+  throttle_sw_thermal?: number | null
+  throttle_hw_thermal?: number | null
+  throttle_hw?: number | null
 }
 
 export interface UpstreamSample {

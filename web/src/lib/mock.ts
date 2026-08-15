@@ -43,15 +43,26 @@ function buildSamples(): Sample[] {
     const gpus = Array.from({ length: 8 }, (_, index) => {
       const hot = index === 1 ? 6 : 0 // GPU1 runs hotter than its neighbours
       const util = Math.max(0, Math.min(100, gpuBase + random() * 14 - 7))
+      const power = 90 + (util / 100) * 480 + random() * 25
       return {
         index,
         name: GPU_NAME,
         util_pct: util,
         mem_used_bytes: (62 + load * 24 + random() * 3) * 2 ** 30,
         mem_total_bytes: 96 * 2 ** 30,
-        power_watts: 90 + (util / 100) * 480 + random() * 25,
+        power_watts: power,
         temp_c: 38 + (util / 100) * 30 + hot + random() * 3,
         sm_mhz: util > 5 ? 2400 + random() * 217 : 345,
+        mem_util_pct: util * (0.5 + random() * 0.2),
+        mem_clock_mhz: util > 5 ? 10251 : 810,
+        power_limit_watts: 600,
+        fan_pct: 30 + (util / 100) * 45,
+        pstate: util > 5 ? 0 : 8,
+        temp_mem_c: 44 + (util / 100) * 34 + hot,
+        throttle_sw_power: power > 560 ? 1 : 0,
+        throttle_sw_thermal: 0,
+        throttle_hw_thermal: 0,
+        throttle_hw: 0,
       }
     })
     const gpuWatts = gpus.reduce((sum, gpu) => sum + (gpu.power_watts ?? 0), 0)

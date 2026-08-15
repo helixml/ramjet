@@ -1,138 +1,177 @@
-import { Area, AreaChart, ResponsiveContainer, Tooltip } from "recharts"
-import { TriangleAlert } from "lucide-react"
+import { TriangleAlert, Zap } from "lucide-react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Meter } from "@/components/Meter"
-import { fmtBytes, fmtClockFull, fmtNum, fmtPct, fmtWatts } from "@/lib/format"
-import type { Sample } from "@/lib/api"
-
-interface GpuRow {
-  t: number
-  util: number | null
-}
+import { TimeChart } from "@/components/TimeChart"
+import { fmtBytes, fmtNum, fmtPct, fmtWatts } from "@/lib/format"
+import type { GpuSample, Sample } from "@/lib/api"
 
 interface GpuView {
-  index: number
-  name: string
-  utilPct: number | null
-  memUsed: number | null
-  memTotal: number | null
-  powerWatts: number | null
-  tempC: number | null
-  smMhz: number | null
-  trend: GpuRow[]
+  latest: GpuSample
+  trend: Array<{ t: number } & Record<string, number | null>>
 }
 
 function collect(points: Sample[], latest: Sample | null): GpuView[] {
   const source = latest?.gpus ?? points[points.length - 1]?.gpus ?? []
   return source.map((gpu) => ({
-    index: gpu.index,
-    name: gpu.name,
-    utilPct: gpu.util_pct,
-    memUsed: gpu.mem_used_bytes,
-    memTotal: gpu.mem_total_bytes,
-    powerWatts: gpu.power_watts,
-    tempC: gpu.temp_c,
-    smMhz: gpu.sm_mhz,
-    trend: points.map((sample) => ({
-      t: sample.t,
-      util: sample.gpus?.find((candidate) => candidate.index === gpu.index)?.util_pct ?? null,
-    })),
+    latest: gpu,
+    trend: points.map((sample) => {
+      const at = sample.gpus?.find((candidate) => candidate.index === gpu.index)
+      return {
+        t: sample.t,
+        util: at?.util_pct ?? null,
+        mem_util: at?.mem_util_pct ?? null,
+      }
+    }),
   }))
 }
 
-function TempBadge({ tempC }: { tempC: number | null }) {
-  if (tempC == null) return <span className="text-faint-foreground">—</span>
-  // Thermal context from the node06 policy: throttle onset at 85°C, the
-  // operational guard aborts at 84°C. Warn well before either.
-  const hot = tempC >= 83 ? "critical" : tempC >= 75 ? "warning" : null
+/**
+ * Throttle badges: reserved status colors with icon + label, never color
+ * alone. A software power cap is routine under sustained load; hardware
+ * slowdowns mean the silicon is protecting itself.
+ */
+function ThrottleBadges({ gpu }: { gpu: GpuSample }) {
+  const reasons: Array<{ label: string; color: string; hardware: boolean }> = []
+  if ((gpu.throttle_sw_power ?? 0) > 0.5) {
+    reasons.push({ label: "power cap", color: "var(--status-warning)", hardware: false })
+  }
+  if ((gpu.throttle_sw_thermal ?? 0) > 0.5) {
+    reasons.push({ label: "thermal (sw)", color: "var(--status-serious)", hardware: false })
+  }
+  if ((gpu.throttle_hw_thermal ?? 0) > 0.5) {
+    reasons.push({ label: "thermal (hw)", color: "var(--status-critical)", hardware: true })
+  }
+  if ((gpu.throttle_hw ?? 0) > 0.5) {
+    reasons.push({ label: "hw slowdown", color: "var(--status-critical)", hardware: true })
+  }
+  if (reasons.length === 0) {
+    return <span className="text-faint-foreground text-[11px]">no throttling</span>
+  }
   return (
-    <span className="flex items-center gap-1 tabular-nums">
-      {hot ? (
-        <TriangleAlert
-          aria-label={hot === "critical" ? "near abort ceiling" : "running hot"}
-          className="size-3"
-          style={{
-            color: hot === "critical" ? "var(--status-critical)" : "var(--status-warning)",
-          }}
-        />
-      ) : null}
-      {tempC.toFixed(0)}°C
+    <span className="flex flex-wrap items-center gap-2">
+      {reasons.map((reason) => (
+        <span
+          key={reason.label}
+          className="flex items-center gap-1 text-[11px] font-medium"
+        >
+          {reason.hardware ? (
+            <TriangleAlert aria-hidden className="size-3" style={{ color: reason.color }} />
+          ) : (
+            <Zap aria-hidden className="size-3" style={{ color: reason.color }} />
+          )}
+          {reason.label}
+        </span>
+      ))}
     </span>
   )
 }
 
-function GpuCard({ gpu, rangeLabel }: { gpu: GpuView; rangeLabel: string }) {
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-faint-foreground text-[10px]">{label}</span>
+      <span className="text-xs font-medium tabular-nums">{value}</span>
+    </div>
+  )
+}
+
+function TempStat({ label, tempC }: { label: string; tempC: number | null | undefined }) {
+  if (tempC == null) return <Stat label={label} value="—" />
+  // Throttle onset is 85°C on these parts; the node06 guard aborts earlier.
+  const hot = tempC >= 83 ? "var(--status-critical)" : tempC >= 75 ? "var(--status-warning)" : null
+  return (
+    <div className="flex flex-col">
+      <span className="text-faint-foreground text-[10px]">{label}</span>
+      <span className="flex items-center gap-1 text-xs font-medium tabular-nums">
+        {hot ? <TriangleAlert aria-label="running hot" className="size-3" style={{ color: hot }} /> : null}
+        {tempC.toFixed(0)}°C
+      </span>
+    </div>
+  )
+}
+
+function GpuRow({ gpu, rangeSeconds }: { gpu: GpuView; rangeSeconds: number }) {
+  const g = gpu.latest
   const memPct =
-    gpu.memUsed != null && gpu.memTotal != null && gpu.memTotal > 0
-      ? (gpu.memUsed / gpu.memTotal) * 100
+    g.mem_used_bytes != null && g.mem_total_bytes != null && g.mem_total_bytes > 0
+      ? (g.mem_used_bytes / g.mem_total_bytes) * 100
       : null
+  const power =
+    g.power_limit_watts != null && g.power_limit_watts > 0
+      ? `${fmtNum(g.power_watts)} / ${fmtNum(g.power_limit_watts)} W`
+      : fmtWatts(g.power_watts)
+  const hasMemUtil = gpu.trend.some((row) => typeof row.mem_util === "number")
   return (
     <Card>
-      <CardContent className="flex flex-col gap-2 px-3.5 py-3">
-        <div className="flex items-baseline justify-between gap-2">
-          <span className="text-xs font-medium">GPU {gpu.index}</span>
-          <span className="text-lg font-semibold tabular-nums">
-            {fmtPct(gpu.utilPct, 0)}
-          </span>
+      <CardContent className="flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-stretch">
+        <div className="flex w-full shrink-0 flex-col gap-2.5 lg:w-60">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-sm font-semibold">GPU {g.index}</span>
+            <span className="text-xl font-semibold tabular-nums">
+              {fmtPct(g.util_pct, 0)}
+            </span>
+          </div>
+          <Meter
+            label="memory"
+            pct={memPct}
+            tone="neutral"
+            detail={`${fmtBytes(g.mem_used_bytes)} / ${fmtBytes(g.mem_total_bytes)}`}
+          />
+          <div className="grid grid-cols-3 gap-x-3 gap-y-2">
+            <TempStat label="core" tempC={g.temp_c} />
+            <TempStat label="memory" tempC={g.temp_mem_c} />
+            <Stat label="power" value={power} />
+            <Stat label="SM clock" value={`${fmtNum(g.sm_mhz)} MHz`} />
+            <Stat label="mem clock" value={`${fmtNum(g.mem_clock_mhz)} MHz`} />
+            <Stat
+              label="fan · pstate"
+              value={`${g.fan_pct != null ? fmtPct(g.fan_pct, 0) : "—"} · ${
+                g.pstate != null ? `P${g.pstate.toFixed(0)}` : "—"
+              }`}
+            />
+          </div>
+          <ThrottleBadges gpu={g} />
         </div>
-        <div className="h-12 w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart
-              data={gpu.trend}
-              margin={{ top: 2, right: 0, bottom: 0, left: 0 }}
-            >
-              <Tooltip
-                cursor={{ stroke: "var(--axis)", strokeWidth: 1 }}
-                isAnimationActive={false}
-                content={({ active, payload, label }) => {
-                  const value = payload?.[0]?.value
-                  if (!active || typeof value !== "number" || typeof label !== "number")
-                    return null
-                  return (
-                    <div className="rounded-md border border-border bg-card px-2 py-1 text-[11px] shadow-md">
-                      <span className="font-medium tabular-nums">
-                        {fmtPct(value, 0)}
-                      </span>
-                      <span className="text-faint-foreground ml-1.5 tabular-nums">
-                        {fmtClockFull(label)}
-                      </span>
-                    </div>
-                  )
-                }}
+        <div className="min-w-0 flex-1">
+          <div className="text-muted-foreground mb-1 flex items-center gap-3 text-[11px]">
+            <span className="flex items-center gap-1.5">
+              <span
+                aria-hidden
+                className="h-0.5 w-3 rounded-full"
+                style={{ background: "var(--chart-1)" }}
               />
-              <Area
-                dataKey="util"
-                type="monotone"
-                stroke="var(--chart-1)"
-                strokeWidth={1.5}
-                fill="var(--chart-1)"
-                fillOpacity={0.1}
-                dot={false}
-                activeDot={{
-                  r: 4,
-                  fill: "var(--chart-1)",
-                  stroke: "var(--card)",
-                  strokeWidth: 2,
-                }}
-                isAnimationActive={false}
-                connectNulls={false}
-              />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-        <div className="text-faint-foreground -mt-1 text-[10px]">
-          utilization · {rangeLabel}
-        </div>
-        <Meter
-          label="memory"
-          pct={memPct}
-          tone="neutral"
-          detail={`${fmtBytes(gpu.memUsed)} / ${fmtBytes(gpu.memTotal)}`}
-        />
-        <div className="text-muted-foreground flex items-center justify-between text-[11px]">
-          <TempBadge tempC={gpu.tempC} />
-          <span className="tabular-nums">{fmtWatts(gpu.powerWatts)}</span>
-          <span className="tabular-nums">{fmtNum(gpu.smMhz)} MHz</span>
+              SM busy
+            </span>
+            {hasMemUtil ? (
+              <span className="flex items-center gap-1.5">
+                <span
+                  aria-hidden
+                  className="h-0.5 w-3 rounded-full"
+                  style={{ background: "var(--chart-1-soft)" }}
+                />
+                memory controller
+              </span>
+            ) : null}
+          </div>
+          <TimeChart
+            data={gpu.trend}
+            rangeSeconds={rangeSeconds}
+            format={(v) => fmtPct(v)}
+            domain={[0, 100]}
+            height={132}
+            series={[
+              { key: "util", label: "SM busy", color: "var(--chart-1)" },
+              ...(hasMemUtil
+                ? [
+                    {
+                      key: "mem_util",
+                      label: "memory controller",
+                      color: "var(--chart-1-soft)",
+                    },
+                  ]
+                : []),
+            ]}
+          />
         </div>
       </CardContent>
     </Card>
@@ -142,11 +181,11 @@ function GpuCard({ gpu, rangeLabel }: { gpu: GpuView; rangeLabel: string }) {
 export function GpuGrid({
   points,
   latest,
-  rangeLabel,
+  rangeSeconds,
 }: {
   points: Sample[]
   latest: Sample | null
-  rangeLabel: string
+  rangeSeconds: number
 }) {
   const gpus = collect(points, latest)
   if (gpus.length === 0) {
@@ -160,9 +199,9 @@ export function GpuGrid({
     )
   }
   return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+    <div className="flex flex-col gap-3">
       {gpus.map((gpu) => (
-        <GpuCard key={gpu.index} gpu={gpu} rangeLabel={rangeLabel} />
+        <GpuRow key={gpu.latest.index} gpu={gpu} rangeSeconds={rangeSeconds} />
       ))}
     </div>
   )

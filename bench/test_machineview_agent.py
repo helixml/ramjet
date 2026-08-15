@@ -37,6 +37,25 @@ class NvidiaSmiParsing(unittest.TestCase):
     def test_malformed_rows_are_skipped(self):
         self.assertEqual(agent.parse_nvidia_smi_csv("garbage\n1,2\n"), [])
 
+    def test_extended_rows_carry_throttle_and_clock_fields(self):
+        output = (
+            "0, NVIDIA RTX PRO 6000 Blackwell, 97, 81234, 97887, 412.53, 71, "
+            "2617, 64, 10251, 600.00, 45, P0, 78, Active, Not Active, "
+            "Not Active, Not Active\n"
+        )
+        gpus = agent.parse_nvidia_smi_csv(output)
+        self.assertEqual(len(gpus), 1)
+        gpu = gpus[0]
+        self.assertEqual(gpu["mem_util_pct"], 64.0)
+        self.assertEqual(gpu["mem_clock_mhz"], 10251.0)
+        self.assertEqual(gpu["power_limit_watts"], 600.0)
+        self.assertEqual(gpu["fan_pct"], 45.0)
+        self.assertEqual(gpu["pstate"], 0.0)
+        self.assertEqual(gpu["temp_mem_c"], 78.0)
+        self.assertEqual(gpu["throttle_sw_power"], 1.0)
+        self.assertEqual(gpu["throttle_sw_thermal"], 0.0)
+        self.assertEqual(gpu["throttle_hw"], 0.0)
+
 
 class ProcParsing(unittest.TestCase):
     def test_cpu_line_busy_and_total(self):
