@@ -31,6 +31,16 @@
 # where MTP is worth between +22% and +112%. Drop the overlay only for
 # workloads that genuinely sustain c256 or above, where it costs 12.5%.
 #
+# Depth 2 is the setting; deeper is worse. num_speculative_tokens=4 measured
+# 91.2 tok/s at c1 against depth 2's 117.9, because acceptance falls from 61.3%
+# to 37.8% and the extra draft compute buys only 2.23 -> 2.51 tokens per target
+# step. DS4-Flash's DSpark depth of 5-7 does not transfer: draft tokens are far
+# cheaper relative to the target step on a sparse MoE than on a dense model.
+#
+# This still leaves single-stream decode at about 121 tok/s against
+# DS4-Flash's 245.1. That gap is architectural, not a tuning miss -- see
+# EXPERIMENTS.md.
+#
 # Use with the base file:
 #   docker compose -f docker-compose.yaml -f docker-compose.mtp.yaml up -d
 services:
