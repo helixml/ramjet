@@ -381,23 +381,38 @@ class Node06GpuGuardTests(unittest.TestCase):
     def test_sigkill_escalation_is_bounded_and_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "result.json"
+            ready = pathlib.Path(directory) / "sigterm-handler-ready"
             args = self.args(
                 output,
                 [
                     sys.executable,
                     "-c",
-                    "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+                    "import pathlib,signal,time; "
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                    "pathlib.Path(%r).touch(); "
+                    "time.sleep(60)" % str(ready),
                 ],
             )
             args.poll_seconds = 0.1
             args.termination_grace_seconds = 1
-            sampler = SequenceSampler([sample([40] * 8, air=30), sample([40] * 8, air=55)])
+            cool = sample([40] * 8, air=30)
+            hot = sample([40] * 8, air=55)
+
+            def sampler(_args):
+                # The abort must not race child interpreter startup: on a
+                # loaded runner SIGTERM could land before the handler is
+                # installed, killing the child without escalation. Stay cool
+                # until the child reports the handler is live.
+                return hot if ready.exists() else cool
+
             result = self.run_guard(args, sampler)
             self.assertEqual(result, guard.EXIT_THERMAL)
             record = final_record(output)
             self.assertEqual(record["reason"], "thermal_abort")
             self.assertTrue(record["termination_escalated"])
-            self.assertLess(record["duration_seconds"], 0.8)
+            # Bounded means far below the 60s sleep and near the 1s grace;
+            # the margin absorbs interpreter startup on a loaded runner.
+            self.assertLess(record["duration_seconds"], 3.0)
 
     def test_journal_is_owner_only_and_never_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
