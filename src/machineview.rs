@@ -881,8 +881,15 @@ pub fn build_serving_sample(
         .and_then(|value| rates.rate("self.requests", t_ms, value));
     let prompt_tps = metric_sum(map, "ds4proxy_prompt_tokens_total")
         .and_then(|value| rates.rate("self.prompt_tokens", t_ms, value));
+    // Engines that never emit `prompt_tokens_details.cached_tokens` leave
+    // every cache outcome "unknown". Token-weighted hit data does not exist
+    // then, and a hard 0 would misreport absence as a cold cache.
+    let cache_reporting = metric_by_label(map, "ds4proxy_cache_requests_total", "outcome")
+        .iter()
+        .any(|(outcome, count)| outcome != "unknown" && *count > 0.0);
     let cached_tps = metric_sum(map, "ds4proxy_cached_prompt_tokens_total")
-        .and_then(|value| rates.rate("self.cached_tokens", t_ms, value));
+        .and_then(|value| rates.rate("self.cached_tokens", t_ms, value))
+        .filter(|_| cache_reporting);
     let gen_tps = metric_sum(map, "ds4proxy_completion_tokens_total")
         .and_then(|value| rates.rate("self.completion_tokens", t_ms, value));
     let cache_hit_pct = match (prompt_tps, cached_tps) {
@@ -1758,6 +1765,7 @@ mod tests {
             "ds4proxy_prompt_tokens_total{endpoint=\"chat\"} 2000\n",
             "ds4proxy_cached_prompt_tokens_total{endpoint=\"chat\"} 900\n",
             "ds4proxy_completion_tokens_total{endpoint=\"chat\"} 800\n",
+            "ds4proxy_cache_requests_total{endpoint=\"chat\",outcome=\"partial\"} 5\n",
         );
         let map = parse_prometheus_text(body);
         let second = build_serving_sample(&map, 6_000, &mut rates, &mut histograms);
@@ -1766,6 +1774,32 @@ mod tests {
         assert_eq!(second.cached_tps, Some(100.0));
         assert_eq!(second.gen_tps, Some(100.0));
         assert_eq!(second.cache_hit_pct, Some(50.0));
+    }
+
+    #[test]
+    fn cache_hit_is_absent_when_engines_never_report_cached_tokens() {
+        let mut rates = RateTracker::default();
+        let mut histograms = HistogramWindows::default();
+        let body_at = |prompt: u64, unknown: u64| {
+            format!(
+                concat!(
+                    "ds4proxy_prompt_tokens_total{{endpoint=\"chat\"}} {}\n",
+                    "ds4proxy_cached_prompt_tokens_total{{endpoint=\"chat\"}} 0\n",
+                    "ds4proxy_cache_requests_total{{endpoint=\"chat\",outcome=\"unknown\"}} {}\n",
+                ),
+                prompt, unknown
+            )
+        };
+        let map = parse_prometheus_text(&body_at(1_000, 40));
+        build_serving_sample(&map, 1_000, &mut rates, &mut histograms);
+        let map = parse_prometheus_text(&body_at(2_000, 80));
+        let sample = build_serving_sample(&map, 6_000, &mut rates, &mut histograms);
+        assert_eq!(sample.prompt_tps, Some(200.0));
+        assert_eq!(
+            sample.cached_tps, None,
+            "unknown-only outcomes mean the engine reports no cache detail"
+        );
+        assert_eq!(sample.cache_hit_pct, None);
     }
 
     #[test]

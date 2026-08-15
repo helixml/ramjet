@@ -52,6 +52,16 @@ function toRow(sample: Sample): Row {
   upstreams.forEach((upstream, index) => {
     row[`rps_${index}`] = upstream.requests_per_second
   })
+  const gpus = sample.gpus ?? []
+  gpus.forEach((gpu) => {
+    row[`gpu_${gpu.index}`] = gpu.util_pct
+  })
+  const engineHits = engines
+    .map((engine) => engine.prefix_hit_pct)
+    .filter((v): v is number => typeof v === "number")
+  row.hit_engines = engineHits.length
+    ? engineHits.reduce((sum, v) => sum + v, 0) / engineHits.length
+    : null
   row.watts_gpu = sample.energy?.gpu_watts ?? null
   row.watts_cpu = sample.energy?.cpu_watts ?? null
   row.wh = sample.energy?.total_watt_hours ?? null
@@ -261,6 +271,30 @@ export default function App() {
     },
   ]
 
+  const cacheHitCard: ChartCardProps = {
+    ...shared,
+    title: "Cache hit rate",
+    description: "engine-reported prefix cache",
+    format: (v) => fmtPct(v),
+    domain: [0, 100],
+    series: [{ key: "hit_engines", label: "engines", color: "var(--chart-1)" }],
+  }
+
+  const gpuCount = latest?.gpus?.length ?? 0
+  const gpuUtilCard: ChartCardProps = {
+    ...shared,
+    title: "GPU utilization",
+    description: "per device, SM busy share",
+    format: (v) => fmtPct(v),
+    domain: [0, 100],
+    height: 200,
+    series: Array.from({ length: Math.min(gpuCount, 8) }, (_, index) => ({
+      key: `gpu_${index}`,
+      label: `GPU ${index}`,
+      color: `var(--chart-${index + 1})`,
+    })),
+  }
+
   const storageCard = (
     <Card>
       <CardHeader>
@@ -331,8 +365,13 @@ export default function App() {
         />
         <StatTile
           label="Cache hit"
-          value={fmtPct(latestServing?.cache_hit_pct)}
-          trend={trend(rows, "hit_lb")}
+          value={fmtPct(
+            latestEngines.length
+              ? (rows[rows.length - 1]?.hit_engines ?? null)
+              : latestServing?.cache_hit_pct,
+          )}
+          detail={latestEngines.length ? "engine-reported" : undefined}
+          trend={trend(rows, latestEngines.length ? "hit_engines" : "hit_lb")}
         />
         <StatTile
           label="CPU"
@@ -366,14 +405,24 @@ export default function App() {
       <TabBar tabs={TABS} active={tab} onSelect={selectTab} />
 
       {tab === "overview" ? (
-        // High-level: the serving trio, sized to fit one screen with the KPIs.
-        <ChartGrid cards={servingCards.slice(0, 3)} />
+        // High-level: one compact serving row plus the GPU row — one screen.
+        <>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+            {[...servingCards.slice(0, 3), cacheHitCard].map((card) => (
+              <ChartCard key={card.title} {...card} />
+            ))}
+          </div>
+          {gpuCount > 0 ? <ChartCard {...gpuUtilCard} /> : null}
+        </>
       ) : null}
 
       {tab === "serving" ? <ChartGrid cards={servingCards} /> : null}
 
       {tab === "gpus" ? (
-        <GpuGrid points={points} latest={latest} rangeLabel={rangeLabel} />
+        <>
+          {gpuCount > 0 ? <ChartCard {...gpuUtilCard} /> : null}
+          <GpuGrid points={points} latest={latest} rangeLabel={rangeLabel} />
+        </>
       ) : null}
 
       {tab === "system" ? (
