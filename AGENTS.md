@@ -146,6 +146,26 @@ The router is the interesting surface — `src/router.rs` contains the active
 Rust tests and frozen legacy fingerprint goldens. Add a Rust test for every
 routing change and retain a golden wherever compatibility matters.
 
+For the machine-view dashboard (`src/machineview.rs`, `web/`,
+`bench/machineview_agent.py`), keep the loop GPU-free and local:
+
+```bash
+cargo test --locked machineview
+python3 -m unittest bench.test_machineview_agent
+cd web && npm run build           # tsc + vite; catches type and bundle breaks
+UI_PROXY_TARGET=http://127.0.0.1:8007 npm run dev   # live LB via SSH tunnel
+npm run dev                       # then /ui/?mock=1 for backend-free UI work
+```
+
+Machine view is observation-only: it must never influence routing, upstream
+health, `/health`, or request handling, and it publishes on the loopback
+metrics listener only. Engine scraping reuses `MD_UPSTREAM`; host/GPU/energy
+telemetry appears only when `MD_MACHINEVIEW_AGENT_URL` points at the
+loopback host agent. The UI bundle is built in the Dockerfile's `ui` stage
+(`web/**` is an lb-image input in `bench/drone_publish_plan.sh`); a `web/`
+edit re-runs npm but must not invalidate the Rust build layer. See
+`web/README.md` for the full contract.
+
 For compact-index work, keep the fast GPU-free correctness/performance loop
 separate from node06:
 
