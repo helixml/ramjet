@@ -3,9 +3,10 @@ import { useDashboardData } from "@/hooks/useDashboardData"
 import { TopBar } from "@/components/TopBar"
 import { RangePicker, RANGE_OPTIONS } from "@/components/RangePicker"
 import { StatTile } from "@/components/StatTile"
-import { ChartCard } from "@/components/ChartCard"
+import { ChartCard, type ChartCardProps } from "@/components/ChartCard"
 import { GpuGrid } from "@/components/GpuGrid"
 import { Meter } from "@/components/Meter"
+import { TabBar, useTabs, type TabDef } from "@/components/Tabs"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   endpointLabel,
@@ -62,16 +63,26 @@ function trend(rows: Row[], key: string): Array<number | null> {
   return rows.filter((_, index) => index % stride === 0).map((row) => row[key] ?? null)
 }
 
-function SectionTitle({ children }: { children: string }) {
+const TABS: TabDef[] = [
+  { id: "overview", label: "Overview" },
+  { id: "serving", label: "Serving" },
+  { id: "gpus", label: "GPUs" },
+  { id: "system", label: "System" },
+]
+
+function ChartGrid({ cards }: { cards: ChartCardProps[] }) {
   return (
-    <h2 className="text-muted-foreground mt-2 text-xs font-medium uppercase tracking-wider">
-      {children}
-    </h2>
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+      {cards.map((card) => (
+        <ChartCard key={card.title} {...card} />
+      ))}
+    </div>
   )
 }
 
 export default function App() {
   const [rangeSeconds, setRangeSeconds] = useState(3600)
+  const { active: tab, select: selectTab } = useTabs(TABS, "overview")
   const { summary, series, error, mock } = useDashboardData(rangeSeconds)
   const points = useMemo(() => series?.points ?? [], [series])
   const rows = useMemo(() => points.map(toRow), [points])
@@ -110,6 +121,170 @@ export default function App() {
     latestHost.swap_total_bytes > 0
       ? (latestHost.swap_used_bytes / latestHost.swap_total_bytes) * 100
       : null
+
+  const shared = { data: rows, rangeSeconds }
+  const engineSeries = (prefix: string) =>
+    engineDefs.map((engine) => ({
+      key: `${prefix}_${engine.index}`,
+      label: engine.label,
+      color: engine.color,
+    }))
+
+  const servingCards: ChartCardProps[] = [
+    {
+      ...shared,
+      title: "Token throughput",
+      description: "tokens per second through the load balancer",
+      format: (v) => fmtNum(v),
+      series: [
+        { key: "gen_tps", label: "generated", color: "var(--chart-1)" },
+        { key: "prompt_tps", label: "prompt", color: "var(--chart-2)" },
+        { key: "cached_tps", label: "prompt cached", color: "var(--chart-3)" },
+      ],
+    },
+    {
+      ...shared,
+      title: "Time to first token",
+      description: "window quantiles over the request stream",
+      format: (v) => fmtMs(v),
+      series: [
+        { key: "ttft_p95", label: "p95", color: "var(--chart-1)" },
+        { key: "ttft_p50", label: "p50", color: "var(--chart-1-soft)" },
+      ],
+    },
+    {
+      ...shared,
+      title: "Requests in flight",
+      format: (v) => fmtNum(v),
+      series: [{ key: "inflight", label: "in flight", color: "var(--chart-1)" }],
+    },
+    {
+      ...shared,
+      title: "Running per engine",
+      description: "requests in the running batch",
+      format: (v) => fmtNum(v),
+      stacked: true,
+      series: engineSeries("run"),
+    },
+    {
+      ...shared,
+      title: "KV cache usage",
+      description: "per-engine GPU KV cache occupancy",
+      format: (v) => fmtPct(v),
+      domain: [0, 100],
+      series: engineSeries("kv"),
+    },
+    {
+      ...shared,
+      title: "Prefix cache hit rate",
+      description: "LB token-weighted vs engine-reported",
+      format: (v) => fmtPct(v),
+      domain: [0, 100],
+      series: [
+        { key: "hit_lb", label: "LB tokens", color: "var(--chart-1)" },
+        ...engineSeries("hit"),
+      ],
+    },
+    {
+      ...shared,
+      title: "Request rate per upstream",
+      description: "requests per second after routing",
+      format: (v) => fmtNum(v, 1),
+      series: engineSeries("rps"),
+    },
+    {
+      ...shared,
+      title: "Waiting per engine",
+      description: "queued requests not yet scheduled",
+      format: (v) => fmtNum(v),
+      stacked: true,
+      series: engineSeries("wait"),
+    },
+  ]
+
+  const systemCards: ChartCardProps[] = [
+    {
+      ...shared,
+      title: "CPU",
+      description: "host busy share, all cores",
+      format: (v) => fmtPct(v),
+      domain: [0, 100],
+      series: [{ key: "cpu", label: "busy", color: "var(--chart-1)" }],
+    },
+    {
+      ...shared,
+      title: "Memory",
+      format: (v) => fmtBytes(v),
+      stacked: true,
+      series: [
+        { key: "mem_used", label: "used", color: "var(--chart-1)" },
+        { key: "mem_cached", label: "cache/buffers", color: "var(--chart-1-soft)" },
+      ],
+    },
+    {
+      ...shared,
+      title: "Network",
+      description: "host interfaces, virtual devices excluded",
+      format: (v) => fmtBps(v),
+      series: [
+        { key: "net_rx", label: "receive", color: "var(--chart-1)" },
+        { key: "net_tx", label: "transmit", color: "var(--chart-2)" },
+      ],
+    },
+    {
+      ...shared,
+      title: "Disk I/O",
+      description: "whole-disk transfer rates",
+      format: (v) => fmtBps(v),
+      series: [
+        { key: "disk_r", label: "read", color: "var(--chart-1)" },
+        { key: "disk_w", label: "write", color: "var(--chart-2)" },
+      ],
+    },
+    {
+      ...shared,
+      title: "Power draw",
+      description: "GPU board power plus CPU package (RAPL)",
+      format: (v) => fmtWatts(v),
+      stacked: true,
+      series: [
+        { key: "watts_gpu", label: "GPUs", color: "var(--chart-1)" },
+        { key: "watts_cpu", label: "CPU", color: "var(--chart-2)" },
+      ],
+    },
+    {
+      ...shared,
+      title: "Energy",
+      description: "cumulative since the load balancer started",
+      format: (v) => fmtWattHours(v),
+      series: [{ key: "wh", label: "energy", color: "var(--chart-1)" }],
+    },
+  ]
+
+  const storageCard = (
+    <Card>
+      <CardHeader>
+        <CardTitle>Storage</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        {(latestHost?.disks ?? []).map((disk) => (
+          <Meter
+            key={disk.mount}
+            label={disk.mount}
+            pct={disk.total_bytes > 0 ? (disk.used_bytes / disk.total_bytes) * 100 : null}
+            detail={`${fmtBytes(disk.used_bytes)} / ${fmtBytes(disk.total_bytes)}`}
+          />
+        ))}
+        {memPct != null ? <Meter label="memory" pct={memPct} /> : null}
+        {swapPct != null ? <Meter label="swap" pct={swapPct} /> : null}
+        {(latestHost?.disks ?? []).length === 0 && memPct == null ? (
+          <div className="text-faint-foreground py-6 text-center text-xs">
+            no host telemetry — run bench/machineview_agent.py
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
 
   return (
     <div className="mx-auto flex max-w-[1400px] flex-col gap-4 px-4 py-4 md:px-6">
@@ -188,197 +363,28 @@ export default function App() {
         />
       </div>
 
-      <SectionTitle>Serving</SectionTitle>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-        <ChartCard
-          title="Token throughput"
-          description="tokens per second through the load balancer"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtNum(v)}
-          series={[
-            { key: "gen_tps", label: "generated", color: "var(--chart-1)" },
-            { key: "prompt_tps", label: "prompt", color: "var(--chart-2)" },
-            { key: "cached_tps", label: "prompt cached", color: "var(--chart-3)" },
-          ]}
-        />
-        <ChartCard
-          title="Time to first token"
-          description="window quantiles over the request stream"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtMs(v)}
-          series={[
-            { key: "ttft_p95", label: "p95", color: "var(--chart-1)" },
-            { key: "ttft_p50", label: "p50", color: "var(--chart-1-soft)" },
-          ]}
-        />
-        <ChartCard
-          title="Requests in flight"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtNum(v)}
-          series={[{ key: "inflight", label: "in flight", color: "var(--chart-1)" }]}
-        />
-        <ChartCard
-          title="Running per engine"
-          description="requests in the running batch"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtNum(v)}
-          stacked
-          series={engineDefs.map((engine) => ({
-            key: `run_${engine.index}`,
-            label: engine.label,
-            color: engine.color,
-          }))}
-        />
-        <ChartCard
-          title="KV cache usage"
-          description="per-engine GPU KV cache occupancy"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtPct(v)}
-          domain={[0, 100]}
-          series={engineDefs.map((engine) => ({
-            key: `kv_${engine.index}`,
-            label: engine.label,
-            color: engine.color,
-          }))}
-        />
-        <ChartCard
-          title="Prefix cache hit rate"
-          description="LB token-weighted vs engine-reported"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtPct(v)}
-          domain={[0, 100]}
-          series={[
-            { key: "hit_lb", label: "LB tokens", color: "var(--chart-1)" },
-            ...engineDefs.map((engine) => ({
-              key: `hit_${engine.index}`,
-              label: engine.label,
-              color: engine.color,
-            })),
-          ]}
-        />
-        <ChartCard
-          title="Request rate per upstream"
-          description="requests per second after routing"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtNum(v, 1)}
-          series={engineDefs.map((engine) => ({
-            key: `rps_${engine.index}`,
-            label: engine.label,
-            color: engine.color,
-          }))}
-        />
-        <ChartCard
-          title="Waiting per engine"
-          description="queued requests not yet scheduled"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtNum(v)}
-          stacked
-          series={engineDefs.map((engine) => ({
-            key: `wait_${engine.index}`,
-            label: engine.label,
-            color: engine.color,
-          }))}
-        />
-      </div>
+      <TabBar tabs={TABS} active={tab} onSelect={selectTab} />
 
-      <SectionTitle>Machine</SectionTitle>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-        <ChartCard
-          title="CPU"
-          description="host busy share, all cores"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtPct(v)}
-          domain={[0, 100]}
-          series={[{ key: "cpu", label: "busy", color: "var(--chart-1)" }]}
-        />
-        <ChartCard
-          title="Memory"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtBytes(v)}
-          stacked
-          series={[
-            { key: "mem_used", label: "used", color: "var(--chart-1)" },
-            { key: "mem_cached", label: "cache/buffers", color: "var(--chart-1-soft)" },
-          ]}
-        />
-        <ChartCard
-          title="Network"
-          description="host interfaces, virtual devices excluded"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtBps(v)}
-          series={[
-            { key: "net_rx", label: "receive", color: "var(--chart-1)" },
-            { key: "net_tx", label: "transmit", color: "var(--chart-2)" },
-          ]}
-        />
-        <ChartCard
-          title="Disk I/O"
-          description="whole-disk transfer rates"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtBps(v)}
-          series={[
-            { key: "disk_r", label: "read", color: "var(--chart-1)" },
-            { key: "disk_w", label: "write", color: "var(--chart-2)" },
-          ]}
-        />
-        <ChartCard
-          title="Power draw"
-          description="GPU board power plus CPU package (RAPL)"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtWatts(v)}
-          stacked
-          series={[
-            { key: "watts_gpu", label: "GPUs", color: "var(--chart-1)" },
-            { key: "watts_cpu", label: "CPU", color: "var(--chart-2)" },
-          ]}
-        />
-        <Card>
-          <CardHeader>
-            <CardTitle>Storage</CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3">
-            {(latestHost?.disks ?? []).map((disk) => (
-              <Meter
-                key={disk.mount}
-                label={disk.mount}
-                pct={disk.total_bytes > 0 ? (disk.used_bytes / disk.total_bytes) * 100 : null}
-                detail={`${fmtBytes(disk.used_bytes)} / ${fmtBytes(disk.total_bytes)}`}
-              />
-            ))}
-            {memPct != null ? <Meter label="memory" pct={memPct} /> : null}
-            {swapPct != null ? <Meter label="swap" pct={swapPct} /> : null}
-            {(latestHost?.disks ?? []).length === 0 && memPct == null ? (
-              <div className="text-faint-foreground py-6 text-center text-xs">
-                no host telemetry — run bench/machineview_agent.py
-              </div>
-            ) : null}
-          </CardContent>
-        </Card>
-        <ChartCard
-          title="Energy"
-          description="cumulative since the load balancer started"
-          data={rows}
-          rangeSeconds={rangeSeconds}
-          format={(v) => fmtWattHours(v)}
-          series={[{ key: "wh", label: "energy", color: "var(--chart-1)" }]}
-        />
-      </div>
+      {tab === "overview" ? (
+        // High-level: the serving trio, sized to fit one screen with the KPIs.
+        <ChartGrid cards={servingCards.slice(0, 3)} />
+      ) : null}
 
-      <SectionTitle>GPUs</SectionTitle>
-      <GpuGrid points={points} latest={latest} rangeLabel={rangeLabel} />
+      {tab === "serving" ? <ChartGrid cards={servingCards} /> : null}
+
+      {tab === "gpus" ? (
+        <GpuGrid points={points} latest={latest} rangeLabel={rangeLabel} />
+      ) : null}
+
+      {tab === "system" ? (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {systemCards.slice(0, 5).map((card) => (
+            <ChartCard key={card.title} {...card} />
+          ))}
+          {storageCard}
+          <ChartCard {...systemCards[5]} />
+        </div>
+      ) : null}
 
       <footer className="text-faint-foreground pb-4 pt-2 text-[11px]">
         Metrics are sampled and stored locally by the mini-dynamo load balancer —
