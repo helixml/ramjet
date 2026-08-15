@@ -1282,7 +1282,7 @@ EXPERIMENTS.md — add yours there too):
 8. **Mirror a promoted config**: validate the canonical Compose file, run
    `deploy/dspark_0731/sync-compose.sh ../infra`, and commit the infra
    mirror. Never hand-edit the infra copy.
-9. **Watch after promote**: Grafana `ds4-flash-serving` for 10-15 min
+9. **Watch after promote**: Grafana `minidynamo-rtx6000pro` for 10-15 min
    (5xx, TTFT p95, upstream split) — rollback is one `LB_IMAGE` flip.
 
 ## Guardrails
@@ -1292,7 +1292,16 @@ EXPERIMENTS.md — add yours there too):
   prefer short `max_tokens`. Never stop the engines to test the LB.
 - Secrets (Caddy bearer, Helix API key) are fetched on-box, never committed.
 - Metric names keep the `ds4proxy_` prefix for dashboard continuity — do not
-  rename without updating `clusters/bunker/monitoring/` in the infra repo.
+  rename without updating `deploy/monitoring/rtx6000pro/` and re-running its
+  sync into the infra repo.
+- The serving dashboard is canonical in `deploy/monitoring/rtx6000pro/`
+  (`MiniDynamo rtx6000pro`, uid `minidynamo-rtx6000pro`); infra's
+  `clusters/bunker/monitoring/grafana-dashboards.yaml` is a mirror. Edit the
+  JSON here, then `python3 deploy/monitoring/rtx6000pro/sync-dashboards.py
+  ../infra` and commit both repositories. Never hand-edit the infra copy, and
+  never paste a Grafana UI export straight into the ConfigMap: the exports
+  carry an `"id"` and have already silently dropped the idle-drain panels
+  once. `bench/test_monitoring_dashboards.py` is the regression gate.
 - Verify end-to-end through Helix after a deploy, not just the LB:
   a chat via `POST $HELIX_URL/api/v1/sessions/chat` with the org's app id
   (connection details in the infra repo's `node06/inference/dspark_0731/
