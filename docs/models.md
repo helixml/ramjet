@@ -164,6 +164,54 @@ the two modes is large: the same TP4 pair reads 817 tok/s at c8 on unique
 prompts and 636 tok/s at c8 on shared prefixes, because the shared-prefix
 requests carry ~6000 prompt tokens each even when cached.
 
+### Running on fewer GPUs
+
+The topology is (number of engines) x (tensor-parallel size), and both come
+out of how many GPUs you have. `deploy/qwen38_27b/render_topology.py` generates
+the Compose overlay for any valid combination, so you are not limited to the
+eight-GPU layouts:
+
+```bash
+cd deploy/qwen38_27b
+./render_topology.py --gpus 2 --tensor-parallel 1 -o topology.2gpu-tp1.yaml
+docker compose -f docker-compose.yaml -f topology.2gpu-tp1.yaml up -d
+```
+
+`--json` prints the plan without writing anything, including how much VRAM each
+GPU needs. Renders for the common cases are committed beside it, and a test
+asserts they still match the generator so a hand-edit cannot drift.
+
+Qwen3.8-27B-FP8 is about 28GiB of weights, so the tensor-parallel size is
+bounded from below by what fits and chosen from above by the trade-offs already
+described. Allow roughly 1.4x the weight share per card for KV cache,
+activations, and CUDA graphs:
+
+| GPUs | TP | Engines | Weights/GPU | Needs about | Notes |
+|---|---|---|---|---|---|
+| 1 | 1 | 1 | 28GiB | 40GiB | Smallest workable box. No load balancing to do, but the shims, metrics, and journal still apply. |
+| 2 | 2 | 1 | 14GiB | 20GiB | Fits 24GiB cards. One engine, so no cache partitioning. |
+| 2 | 1 | 2 | 28GiB | 40GiB | Prefer this over 2xTP2 if the weights fit: two engines can hold two warm prefixes. |
+| 4 | 2 | 2 | 14GiB | 20GiB | Good middle ground on 24GiB cards. |
+| 4 | 1 | 4 | 28GiB | 40GiB | Best cache partitioning at this size when the weights fit on one card. |
+| 8 | 2 | 4 | 14GiB | 20GiB | **Measured best** on node06 for shared-prefix traffic. |
+| 8 | 4 | 2 | 7GiB | 10GiB | The base file. Largest per-engine KV pool; fewest engines. |
+
+Two rules of thumb, both following from the measurements above rather than from
+theory:
+
+1. **Use the smallest tensor-parallel size the weights fit into.** TP costs an
+   allreduce per layer and buys nothing the prefix cache cares about. Going
+   from TP4 to TP2 on the same eight GPUs was worth up to 25%.
+2. **More engines is better until you run out of distinct system prompts.**
+   Engines partition the prefix cache, so the gain flattens once engines
+   outnumber the apps in your workload. If you serve one system prompt to
+   everyone, extra engines only split your KV pool.
+
+The exception to both is long-context serving. Each engine gets its own KV
+pool, so eight small pools hold fewer simultaneous long conversations than two
+large ones even though the total is similar. If your workload is a handful of
+very long sessions rather than many short ones, prefer the larger shard.
+
 ### Thermal envelope can be the real capacity limit
 
 On node06 the binding constraint is not the GPUs' compute. Sustained c64 with
