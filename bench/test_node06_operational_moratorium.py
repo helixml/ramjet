@@ -41,3 +41,39 @@ class Node06OperationalMoratoriumTests(unittest.TestCase):
                     moratorium.MoratoriumError
                 ):
                     moratorium.require_active_work_permitted(operation)
+
+
+class AuthorizedWindowTests(unittest.TestCase):
+    def test_an_unnamed_environment_still_fails_closed(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(moratorium.MoratoriumError):
+                moratorium.require_active_work_permitted("gpu-workload.smoke")
+
+    def test_an_unknown_window_name_fails_closed(self):
+        with mock.patch.dict(
+            "os.environ", {moratorium.ENV_AUTHORIZATION: "made-up"}, clear=True
+        ):
+            self.assertIsNone(moratorium.active_authorization())
+            with self.assertRaises(moratorium.MoratoriumError):
+                moratorium.require_active_work_permitted("gpu-workload.smoke")
+
+    def test_a_reviewed_window_permits_the_run_and_carries_its_bounds(self):
+        with mock.patch.dict(
+            "os.environ",
+            {moratorium.ENV_AUTHORIZATION: "supervised-2026-08-14"},
+            clear=True,
+        ):
+            self.assertIsNone(
+                moratorium.require_active_work_permitted("gpu-workload.smoke")
+            )
+            window = moratorium.active_authorization()
+        self.assertEqual(window.max_abort_c, 84)
+        self.assertEqual(window.max_runtime_seconds, 1500)
+
+    def test_every_window_stays_below_hardware_throttle_onset(self):
+        # 85C is throttle onset and 90C is shutdown on node06's devices. No
+        # reviewed window may authorize a ceiling that measures throttled
+        # hardware or that the driver would preempt.
+        for window in moratorium.AUTHORIZED_WINDOWS.values():
+            self.assertLess(window.max_abort_c, 85, window.identifier)
+            self.assertLessEqual(window.max_runtime_seconds, 1500, window.identifier)
