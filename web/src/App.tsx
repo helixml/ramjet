@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react"
 import { useDashboardData } from "@/hooks/useDashboardData"
 import { TopBar } from "@/components/TopBar"
-import { RangePicker, RANGE_OPTIONS } from "@/components/RangePicker"
+import { RangePicker } from "@/components/RangePicker"
 import { StatTile } from "@/components/StatTile"
 import { ChartCard, type ChartCardProps } from "@/components/ChartCard"
 import { GpuGrid } from "@/components/GpuGrid"
@@ -52,10 +52,14 @@ function toRow(sample: Sample): Row {
   upstreams.forEach((upstream, index) => {
     row[`rps_${index}`] = upstream.requests_per_second
   })
-  const gpus = sample.gpus ?? []
-  gpus.forEach((gpu) => {
-    row[`gpu_${gpu.index}`] = gpu.util_pct
-  })
+  const gpuUtils = (sample.gpus ?? [])
+    .map((gpu) => gpu.util_pct)
+    .filter((v): v is number => typeof v === "number")
+  row.gpu_mean = gpuUtils.length
+    ? gpuUtils.reduce((sum, v) => sum + v, 0) / gpuUtils.length
+    : null
+  row.gpu_min = gpuUtils.length ? Math.min(...gpuUtils) : null
+  row.gpu_max = gpuUtils.length ? Math.max(...gpuUtils) : null
   const engineHits = engines
     .map((engine) => engine.prefix_hit_pct)
     .filter((v): v is number => typeof v === "number")
@@ -97,8 +101,6 @@ export default function App() {
   const points = useMemo(() => series?.points ?? [], [series])
   const rows = useMemo(() => points.map(toRow), [points])
   const latest = summary?.latest ?? null
-  const rangeLabel =
-    RANGE_OPTIONS.find((option) => option.seconds === rangeSeconds)?.label ?? ""
 
   // Engine identity is positional and stable: slot 2 for A, 3 for B, …
   // (slot 1 stays the load balancer / aggregate color).
@@ -284,15 +286,23 @@ export default function App() {
   const gpuUtilCard: ChartCardProps = {
     ...shared,
     title: "GPU utilization",
-    description: "per device, SM busy share",
+    description:
+      gpuCount > 1
+        ? `mean across ${gpuCount} devices with the min–max envelope`
+        : "SM busy share",
     format: (v) => fmtPct(v),
     domain: [0, 100],
     height: 200,
-    series: Array.from({ length: Math.min(gpuCount, 8) }, (_, index) => ({
-      key: `gpu_${index}`,
-      label: `GPU ${index}`,
-      color: `var(--chart-${index + 1})`,
-    })),
+    series: [{ key: "gpu_mean", label: "mean", color: "var(--chart-1)" }],
+    band:
+      gpuCount > 1
+        ? {
+            lowKey: "gpu_min",
+            highKey: "gpu_max",
+            label: "min–max",
+            color: "var(--chart-1)",
+          }
+        : undefined,
   }
 
   const storageCard = (
@@ -421,7 +431,7 @@ export default function App() {
       {tab === "gpus" ? (
         <>
           {gpuCount > 0 ? <ChartCard {...gpuUtilCard} /> : null}
-          <GpuGrid points={points} latest={latest} rangeLabel={rangeLabel} />
+          <GpuGrid points={points} latest={latest} rangeSeconds={rangeSeconds} />
         </>
       ) : null}
 

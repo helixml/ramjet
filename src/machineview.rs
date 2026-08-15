@@ -234,6 +234,28 @@ pub struct GpuSample {
     pub power_watts: Option<f64>,
     pub temp_c: Option<f64>,
     pub sm_mhz: Option<f64>,
+    // Extended telemetry; absent from older agents and optional per driver.
+    #[serde(default)]
+    pub mem_util_pct: Option<f64>,
+    #[serde(default)]
+    pub mem_clock_mhz: Option<f64>,
+    #[serde(default)]
+    pub power_limit_watts: Option<f64>,
+    #[serde(default)]
+    pub fan_pct: Option<f64>,
+    #[serde(default)]
+    pub pstate: Option<f64>,
+    #[serde(default)]
+    pub temp_mem_c: Option<f64>,
+    // Throttle reasons as 0/1 flags; a bucket mean is the throttled fraction.
+    #[serde(default)]
+    pub throttle_sw_power: Option<f64>,
+    #[serde(default)]
+    pub throttle_sw_thermal: Option<f64>,
+    #[serde(default)]
+    pub throttle_hw_thermal: Option<f64>,
+    #[serde(default)]
+    pub throttle_hw: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -771,6 +793,16 @@ fn merge_samples(bucket: &[&Sample]) -> Sample {
                 power_watts: mean(matching.iter().map(|g| g.power_watts)),
                 temp_c: mean(matching.iter().map(|g| g.temp_c)),
                 sm_mhz: mean(matching.iter().map(|g| g.sm_mhz)),
+                mem_util_pct: mean(matching.iter().map(|g| g.mem_util_pct)),
+                mem_clock_mhz: mean(matching.iter().map(|g| g.mem_clock_mhz)),
+                power_limit_watts: mean(matching.iter().map(|g| g.power_limit_watts)),
+                fan_pct: mean(matching.iter().map(|g| g.fan_pct)),
+                pstate: mean(matching.iter().map(|g| g.pstate)),
+                temp_mem_c: mean(matching.iter().map(|g| g.temp_mem_c)),
+                throttle_sw_power: mean(matching.iter().map(|g| g.throttle_sw_power)),
+                throttle_sw_thermal: mean(matching.iter().map(|g| g.throttle_sw_thermal)),
+                throttle_hw_thermal: mean(matching.iter().map(|g| g.throttle_hw_thermal)),
+                throttle_hw: mean(matching.iter().map(|g| g.throttle_hw)),
             }
         })
         .collect();
@@ -1023,6 +1055,16 @@ fn sanitize_gpus(mut gpus: Vec<GpuSample>) -> Vec<GpuSample> {
         gpu.power_watts = finite(gpu.power_watts).map(|v| v.max(0.0));
         gpu.temp_c = finite(gpu.temp_c);
         gpu.sm_mhz = finite(gpu.sm_mhz).map(|v| v.max(0.0));
+        gpu.mem_util_pct = finite(gpu.mem_util_pct).map(|v| v.clamp(0.0, 100.0));
+        gpu.mem_clock_mhz = finite(gpu.mem_clock_mhz).map(|v| v.max(0.0));
+        gpu.power_limit_watts = finite(gpu.power_limit_watts).map(|v| v.max(0.0));
+        gpu.fan_pct = finite(gpu.fan_pct).map(|v| v.clamp(0.0, 100.0));
+        gpu.pstate = finite(gpu.pstate).map(|v| v.clamp(0.0, 15.0));
+        gpu.temp_mem_c = finite(gpu.temp_mem_c);
+        gpu.throttle_sw_power = finite(gpu.throttle_sw_power).map(|v| v.clamp(0.0, 1.0));
+        gpu.throttle_sw_thermal = finite(gpu.throttle_sw_thermal).map(|v| v.clamp(0.0, 1.0));
+        gpu.throttle_hw_thermal = finite(gpu.throttle_hw_thermal).map(|v| v.clamp(0.0, 1.0));
+        gpu.throttle_hw = finite(gpu.throttle_hw).map(|v| v.clamp(0.0, 1.0));
     }
     gpus
 }
@@ -1868,9 +1910,13 @@ mod tests {
             index: 0,
             name: "x".repeat(200),
             util_pct: Some(f64::INFINITY),
+            throttle_sw_power: Some(7.0),
+            fan_pct: Some(-3.0),
             ..GpuSample::default()
         }]);
         assert_eq!(gpus[0].name.len(), 80);
         assert_eq!(gpus[0].util_pct, None);
+        assert_eq!(gpus[0].throttle_sw_power, Some(1.0));
+        assert_eq!(gpus[0].fan_pct, Some(0.0));
     }
 }

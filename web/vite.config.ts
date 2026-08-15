@@ -24,6 +24,10 @@ export default defineConfig({
         target: proxyTarget,
         changeOrigin: true,
       },
+      "/metrics": {
+        target: proxyTarget,
+        changeOrigin: true,
+      },
     },
   },
 })

@@ -8,7 +8,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { TimeChart, type SeriesDef, type TimeChartProps } from "@/components/TimeChart"
+import { TimeChart, type BandDef, type SeriesDef, type TimeChartProps } from "@/components/TimeChart"
 import { fmtClockFull } from "@/lib/format"
 
 export interface ChartCardProps extends TimeChartProps {
@@ -16,9 +16,9 @@ export interface ChartCardProps extends TimeChartProps {
   description?: string
 }
 
-function Legend({ series }: { series: SeriesDef[] }) {
-  // A legend is always present for ≥2 series; one series is named by the title.
-  if (series.length < 2) return null
+function Legend({ series, band }: { series: SeriesDef[]; band?: BandDef }) {
+  // A legend is always present for ≥2 entries; one series is named by the title.
+  if (series.length + (band ? 1 : 0) < 2) return null
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
       {series.map((def) => (
@@ -34,6 +34,16 @@ function Legend({ series }: { series: SeriesDef[] }) {
           {def.label}
         </span>
       ))}
+      {band ? (
+        <span className="text-muted-foreground flex items-center gap-1.5 text-[11px]">
+          <span
+            aria-hidden
+            className="h-2 w-3 rounded-sm opacity-40"
+            style={{ background: band.color }}
+          />
+          {band.label}
+        </span>
+      ) : null}
     </div>
   )
 }
@@ -41,9 +51,19 @@ function Legend({ series }: { series: SeriesDef[] }) {
 function TableView({
   data,
   series,
+  band,
   format,
-}: Pick<TimeChartProps, "data" | "series" | "format">) {
+}: Pick<TimeChartProps, "data" | "series" | "band" | "format">) {
   const rows = [...data].reverse()
+  const columns = [
+    ...series.map((def) => ({ key: def.key, label: def.label })),
+    ...(band
+      ? [
+          { key: band.lowKey, label: `${band.label} low` },
+          { key: band.highKey, label: `${band.label} high` },
+        ]
+      : []),
+  ]
   return (
     <div className="max-h-[180px] overflow-y-auto rounded-md border border-border">
       <table className="w-full text-[11px] tabular-nums">
@@ -52,12 +72,12 @@ function TableView({
             <th className="text-faint-foreground px-2 py-1 text-left font-medium">
               time
             </th>
-            {series.map((def) => (
+            {columns.map((column) => (
               <th
-                key={def.key}
+                key={column.key}
                 className="text-faint-foreground px-2 py-1 text-right font-medium"
               >
-                {def.label}
+                {column.label}
               </th>
             ))}
           </tr>
@@ -68,10 +88,10 @@ function TableView({
               <td className="text-muted-foreground px-2 py-0.5">
                 {fmtClockFull(row.t)}
               </td>
-              {series.map((def) => {
-                const value = row[def.key]
+              {columns.map((column) => {
+                const value = row[column.key]
                 return (
-                  <td key={def.key} className="px-2 py-0.5 text-right">
+                  <td key={column.key} className="px-2 py-0.5 text-right">
                     {typeof value === "number" ? format(value) : "—"}
                   </td>
                 )
@@ -95,7 +115,7 @@ export function ChartCard({ title, description, ...chart }: ChartCardProps) {
         <div className="flex flex-col gap-1">
           <CardTitle>{title}</CardTitle>
           {description ? <CardDescription>{description}</CardDescription> : null}
-          <Legend series={chart.series} />
+          <Legend series={chart.series} band={chart.band} />
         </div>
         <Button
           variant="ghost"
@@ -109,7 +129,12 @@ export function ChartCard({ title, description, ...chart }: ChartCardProps) {
       <CardContent>
         {hasData ? (
           table ? (
-            <TableView data={chart.data} series={chart.series} format={chart.format} />
+            <TableView
+              data={chart.data}
+              series={chart.series}
+              band={chart.band}
+              format={chart.format}
+            />
           ) : (
             <TimeChart {...chart} />
           )

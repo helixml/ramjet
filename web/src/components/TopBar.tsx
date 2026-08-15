@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Moon, Sun } from "lucide-react"
+import { Activity, Moon, Sun } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 
@@ -52,6 +52,15 @@ export function TopBar({
         {mock ? <Badge>mock data</Badge> : null}
       </div>
       <div className="flex items-center gap-2">
+        <a
+          href="/metrics"
+          target="_blank"
+          rel="noreferrer"
+          className="text-muted-foreground hover:bg-accent hover:text-accent-foreground inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors"
+        >
+          <Activity aria-hidden className="size-3.5" />
+          Prometheus
+        </a>
         <span className="text-muted-foreground flex items-center gap-1.5 text-[11px]">
           <span
             aria-hidden
