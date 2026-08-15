@@ -1,0 +1,57 @@
+# Multi-Token Prediction speculative decoding overlay for the TP4 pair.
+#
+# Qwen3.8-27B-FP8 ships a trained MTP head (`mtp.safetensors`, 477MB) and the
+# pinned r34 image registers `Qwen3_5MTP`, so no draft model is needed: the
+# checkpoint drafts for itself.
+#
+# Measured 2026-08-14 against the same TP4 pair, matched methodology
+# (deterministic output length, first cell discarded, both runs under the
+# thermal guard):
+#
+#   concurrency |  baseline  |    MTP     | delta
+#   ------------|------------|------------|-------
+#            1  |    76.1    |   117.9    |  +55%
+#            8  |   386.1    |   817.1    | +112%
+#           32  |  2201.4    |  2888.9    |  +31%
+#           64  |  3810.1    |  4633.9    |  +22%
+#          128  |  5571.1    |  5966.4    |   +7%
+#          256  |  7890.9    |  6902.0    | -12.5%
+#
+# All figures aggregate output tok/s. Draft acceptance is ~60% at
+# num_speculative_tokens=2 (77% at position 0, 46% at position 1), giving about
+# 2.2 tokens per target forward pass.
+#
+# The crossover sits between c128 and c256, and the shape is the expected one:
+# speculative decoding buys fewer sequential steps with more compute per step.
+# Below the crossover the device is waiting on sequential decode and the trade
+# is nearly free; above it the batch already saturates the GPU, so the ~40% of
+# draft tokens that get rejected are pure waste.
+#
+# Recommended for this deployment. Helix agent traffic runs far below c128,
+# where MTP is worth between +22% and +112%. Drop the overlay only for
+# workloads that genuinely sustain c256 or above, where it costs 12.5%.
+#
+# Use with the base file:
+#   docker compose -f docker-compose.yaml -f docker-compose.mtp.yaml up -d
+services:
+  qwen38-a: &mtp
+    command:
+      - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-27b}
+      - --host=0.0.0.0
+      - --port=8000
+      - --tensor-parallel-size=4
+      - --max-model-len=${MAX_MODEL_LEN:-262144}
+      - --max-num-seqs=${MAX_NUM_SEQS:-256}
+      - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
+      - --enable-prefix-caching
+      - --reasoning-parser=qwen3
+      - --tool-call-parser=${TOOL_CALL_PARSER:-qwen3_xml}
+      - --enable-auto-tool-choice
+      - --limit-mm-per-prompt={"image":${MM_IMAGE_LIMIT:-4},"video":${MM_VIDEO_LIMIT:-1}}
+      - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
+      - --override-generation-config={"top_p":0.95}
+      # The draft head lives in the served checkpoint, so `model` is not set.
+      - --speculative-config={"method":"mtp","num_speculative_tokens":${NUM_SPECULATIVE_TOKENS:-2}}
+
+  qwen38-b:
+    <<: *mtp

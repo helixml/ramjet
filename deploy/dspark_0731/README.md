@@ -165,8 +165,8 @@ setting must be reviewed explicitly. Generate away from the committed file
 first:
 
 ```bash
-install -d -m 0700 /home/karolis/.ctmp
-r114_dir=$(mktemp -d /home/karolis/.ctmp/runtime-manifest.XXXXXX)
+install -d -m 0700 "$HOME/.ctmp"
+r114_dir=$(mktemp -d "$HOME/.ctmp/runtime-manifest.XXXXXX")
 python3 bench/serving_runtime_image_probe.py \
   --output "${r114_dir}/serving-runtime.json"
 cmp compat/deepseek-v4-r34-serving-runtime.json \

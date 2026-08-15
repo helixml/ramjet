@@ -40,9 +40,9 @@ disk-backed home filesystem. If an existing temporary worktree must be used,
 reuse the canonical checkout's warm target and move compiler scratch to disk:
 
 ```bash
-install -d -m 0700 /home/karolis/.ctmp
-CARGO_TARGET_DIR=/home/karolis/go/src/github.com/helixml/mini-dynamo/target \
-TMPDIR=/home/karolis/.ctmp cargo test --locked
+install -d -m 0700 "$HOME/.ctmp"
+CARGO_TARGET_DIR=/path/to/canonical/mini-dynamo/target \
+TMPDIR="$HOME/.ctmp" cargo test --locked
 ```
 
 Keep `TMPDIR` short: snapshot tests create Unix sockets below it and production
@@ -53,7 +53,7 @@ Feature worktrees on disk should still reuse the canonical checkout's warm
 target unless another Rust lane is active:
 
 ```bash
-CARGO_TARGET_DIR=/home/karolis/go/src/github.com/helixml/mini-dynamo/target \
+CARGO_TARGET_DIR=/path/to/canonical/mini-dynamo/target \
   cargo test --locked <module-or-test-name>
 ```
 
