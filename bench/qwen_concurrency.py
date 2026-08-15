@@ -26,12 +26,50 @@ PROMPT = (
     "distributed KV cache design, in about three sentences."
 )
 
+# One app's shared system prompt. Everything before the per-request tail is
+# byte-identical across that app's requests, which is what makes the prefix
+# cacheable and what gives the router something to route on.
+APP_PREAMBLE = (
+    "You are assistant {app} for salt {salt}. Operating manual section {line}: "
+    "follow the escalation policy, cite the runbook, and never invent an "
+    "identifier that is not present in the provided context.\n"
+)
 
-def one_request(base, model, token, index, salt, max_tokens, timeout, deterministic):
+
+def shared_prefix(app, salt, kib):
+    """Builds a deterministic, app-specific system prompt of about `kib` KiB."""
+
+    target = kib * 1024
+    parts = []
+    size = 0
+    line = 0
+    while size < target:
+        chunk = APP_PREAMBLE.format(app=app, salt=salt, line=line)
+        parts.append(chunk)
+        size += len(chunk)
+        line += 1
+    return "".join(parts)
+
+
+def one_request(
+    base, model, token, index, salt, max_tokens, timeout, deterministic,
+    apps=0, prefix_kib=0,
+):
     """Issues one streaming request and returns (ttft, wall, output_tokens)."""
+    if apps > 0 and prefix_kib > 0:
+        # Round-robin over apps so every app is exercised and its prefix is
+        # reused, which is the shape of real agent traffic: a handful of large
+        # system prompts, each shared by many short turns.
+        app = index % apps
+        messages = [
+            {"role": "system", "content": shared_prefix(app, salt, prefix_kib)},
+            {"role": "user", "content": f"Turn {index}: summarise the policy in one sentence."},
+        ]
+    else:
+        messages = [{"role": "user", "content": PROMPT.format(index=index, salt=salt)}]
     body = {
         "model": model,
-        "messages": [{"role": "user", "content": PROMPT.format(index=index, salt=salt)}],
+        "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0.0,
         "stream": True,
@@ -75,14 +113,20 @@ def one_request(base, model, token, index, salt, max_tokens, timeout, determinis
     return ttft, time.time() - started, completion_tokens, upstream
 
 
-def run_cell(base, model, token, concurrency, salt, max_tokens, timeout, deterministic):
+def run_cell(
+    base, model, token, concurrency, salt, max_tokens, timeout, deterministic,
+    apps=0, prefix_kib=0,
+):
     results = []
     errors = []
     lock = threading.Lock()
 
     def worker(index):
         try:
-            result = one_request(base, model, token, index, salt, max_tokens, timeout, deterministic)
+            result = one_request(
+                base, model, token, index, salt, max_tokens, timeout,
+                deterministic, apps, prefix_kib,
+            )
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as error:
             with lock:
                 errors.append(repr(error)[:120])
@@ -106,6 +150,8 @@ def run_cell(base, model, token, concurrency, salt, max_tokens, timeout, determi
     return {
         "concurrency": concurrency,
         "salt": salt,
+        "apps": apps,
+        "prefix_kib": prefix_kib,
         "completed": len(results),
         "errors": errors[:3],
         "error_count": len(errors),
@@ -127,6 +173,14 @@ def main():
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--salt", default=None)
     parser.add_argument(
+        "--apps", type=int, default=0,
+        help="distinct shared system prompts to round-robin over (0 disables)",
+    )
+    parser.add_argument(
+        "--prefix-kib", type=int, default=0,
+        help="approximate KiB of shared system prompt per app",
+    )
+    parser.add_argument(
         "--thinking", action="store_true",
         help="leave thinking on and let requests stop early; realistic but high variance",
     )
@@ -144,7 +198,7 @@ def main():
         cell = run_cell(
             base, args.model, token, concurrency,
             f"{salt_base}-c{concurrency}", args.tokens, args.timeout,
-            not args.thinking,
+            not args.thinking, args.apps, args.prefix_kib,
         )
         print(json.dumps(cell), flush=True)
 

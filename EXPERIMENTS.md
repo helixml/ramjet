@@ -128,6 +128,59 @@ asserted. Two larger levers are consequently untested:
   image registers `Qwen3_5MTP`. Expect this to help single-stream latency and
   possibly to hurt saturated throughput, so it should be measured at both ends.
 
+### Shared-prefix workload and TP2x4: the configuration that actually fits
+
+Every earlier sweep used unique prompts, which cannot see prefix cache
+partitioning at all -- it measures the one thing this router is not for.
+`bench/qwen_concurrency.py` gained `--apps` and `--prefix-kib` to model the real
+shape: a few large system prompts, each shared by many short turns.
+
+The two modes disagree substantially. The same TP4 pair reads 817 tok/s at c8
+on unique prompts and 636 tok/s at c8 with four 24KiB shared prefixes, because
+the shared-prefix requests carry ~6000 prompt tokens each even when cached.
+Prefix caching is nonetheless doing heavy lifting: warm TTFT at c8 is 0.65s
+against 68.8s cold, and the router attributed 104 of 208 decisions to prefix
+overlap.
+
+**Four TP2 engines beat two TP4 engines on identical hardware**, measured warm
+on that shared-prefix workload:
+
+| concurrency | TP4 x2 | TP2 x4 | delta | TTFT p50 |
+|---|---|---|---|---|
+| 8 | 636.3 | 659.1 | +3.6% | 0.65s -> 0.31s |
+| 32 | 1804.6 | 2068.5 | +14.6% | 1.74s -> 1.03s |
+| 64 | 2182.5 | 2725.6 | **+24.9%** | 2.50s -> 1.83s |
+
+Two compounding causes, and the first is the interesting one: with four apps
+and four engines each app can own a warm engine instead of sharing one, so the
+router can reach a hit rate that two engines make impossible. TP2 also pays
+less allreduce than TP4, which matters because this model realises only ~29% of
+its bandwidth roofline at TP4.
+
+Shrinking the shard cost nothing in context. Raising `TP2_MAX_MODEL_LEN` to
+262144 restored the full 253,952-token advertised window and the KV pool
+actually grew slightly, to 1,970,706 tokens per engine; throughput at c8 and
+c32 was unchanged within noise (687.8 and 1949.2). The KV pool bounds
+concurrency, not request length.
+
+**The thermal guard fired, and the 84C ceiling was the right number.** The
+c64 cell at full context drove GPU1 to exactly 85.0C in 92.7 seconds and the
+guard terminated the workload with `thermal_abort`. 85C is this hardware's
+throttle onset, so the run was stopped one degree into the ceiling and before
+any throttled measurement could be recorded. Had the originally requested 95C
+been set, GPU1 would have been throttling here and would have kept climbing
+toward the 90C hardware shutdown on a live serving box. GPU1 remains ~5C hotter
+than its neighbours, consistent with the older evidence.
+
+The stack survived cleanly: all four engines healthy immediately afterwards,
+4/4 upstreams admitted, vision still correct through the balancer and Caddy.
+
+**Operationally this means c32 is the sustainable ceiling on this box**, not
+c64. Sustained c64 with large shared prefixes is thermally bounded to about a
+minute and a half, so it is a burst capability rather than a steady state.
+Measure how long a configuration can hold a load, not only how fast it goes
+while it does.
+
 ### Single-stream decode is half of DeepSeek-V4-Flash, and that is architectural
 
 Comparing like for like against the DS4-Flash figures recorded earlier in this

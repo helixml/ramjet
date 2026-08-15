@@ -1,0 +1,214 @@
+# TP2 x4 overlay: four two-GPU engines.
+#
+# A middle point between the base TP4 pair and the TP1x8 fleet, aimed at the
+# regime this deployment actually runs in: moderate concurrency with a handful
+# of large shared system prompts.
+#
+# Two reasons it can beat TP4x2 here, neither of which is about raw speed:
+#
+#  1. Cache partitioning. mini-dynamo routes on prefix overlap, so N engines
+#     partition M apps N ways. With four apps on two engines each engine holds
+#     two prefixes; on four engines each app can own one, which raises the hit
+#     rate the router is able to achieve.
+#  2. Less tensor-parallel communication. Qwen3.8-27B is 64 layers, and at TP4
+#     only about 29% of the weight-bandwidth roofline is realised, so allreduce
+#     and kernel overhead dominate rather than bandwidth.
+#
+# It also halves per-engine KV pool relative to TP4, so long-context
+# concurrency drops. Measure before promoting; see EXPERIMENTS.md.
+#
+# Use with the base file:
+#   docker compose -f docker-compose.yaml -f docker-compose.tp2x4.yaml up -d
+services:
+  ds4-loadbalancer:
+    environment:
+      MD_UPSTREAM: ${MD_UPSTREAM:-http://qwen38-p0:8000,http://qwen38-p1:8000,http://qwen38-p2:8000,http://qwen38-p3:8000}
+      MD_KV_EVENT_LIVE_ENDPOINTS: ${MD_KV_EVENT_LIVE_ENDPOINTS:-tcp://qwen38-p0:5557,tcp://qwen38-p1:5557,tcp://qwen38-p2:5557,tcp://qwen38-p3:5557}
+      MD_KV_EVENT_REPLAY_ENDPOINTS: ${MD_KV_EVENT_REPLAY_ENDPOINTS:-tcp://qwen38-p0:5558,tcp://qwen38-p1:5558,tcp://qwen38-p2:5558,tcp://qwen38-p3:5558}
+  qwen38-a:
+    profiles: ["tp4-only"]
+  qwen38-b:
+    profiles: ["tp4-only"]
+  qwen38-p0:
+    image: ${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}
+    container_name: qwen38-p0
+    entrypoint: ["/opt/venv/bin/vllm", "serve", "/workspace/model"]
+    restart: unless-stopped
+    ipc: host
+    init: true
+    shm_size: 16gb
+    cpuset: "0-11,24-35"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile: {soft: 1048576, hard: 1048576}
+    ports:
+      - "127.0.0.1:8030:8000"
+    volumes:
+      - ${QWEN_MODEL_DIR:-/prod/models/Qwen/Qwen3.8-27B-FP8}:/workspace/model:ro
+      - /prod/engine-cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1"]
+              capabilities: [gpu]
+    environment:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-0}
+      VLLM_API_KEY: ${VLLM_API_KEY:-qwen-local}
+    command:
+      - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-27b}
+      - --host=0.0.0.0
+      - --port=8000
+      - --tensor-parallel-size=2
+      - --max-model-len=${TP2_MAX_MODEL_LEN:-262144}
+      - --max-num-seqs=${MAX_NUM_SEQS:-256}
+      - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
+      - --enable-prefix-caching
+      - --reasoning-parser=qwen3
+      - --tool-call-parser=${TOOL_CALL_PARSER:-qwen3_xml}
+      - --enable-auto-tool-choice
+      - --limit-mm-per-prompt={"image":${MM_IMAGE_LIMIT:-4},"video":${MM_VIDEO_LIMIT:-1}}
+      - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
+      - --override-generation-config={"top_p":0.95}
+      - --speculative-config={"method":"mtp","num_speculative_tokens":${NUM_SPECULATIVE_TOKENS:-2}}
+
+  qwen38-p1:
+    image: ${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}
+    container_name: qwen38-p1
+    entrypoint: ["/opt/venv/bin/vllm", "serve", "/workspace/model"]
+    restart: unless-stopped
+    ipc: host
+    init: true
+    shm_size: 16gb
+    cpuset: "0-11,24-35"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile: {soft: 1048576, hard: 1048576}
+    ports:
+      - "127.0.0.1:8031:8000"
+    volumes:
+      - ${QWEN_MODEL_DIR:-/prod/models/Qwen/Qwen3.8-27B-FP8}:/workspace/model:ro
+      - /prod/engine-cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["2", "3"]
+              capabilities: [gpu]
+    environment:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-0}
+      VLLM_API_KEY: ${VLLM_API_KEY:-qwen-local}
+    command:
+      - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-27b}
+      - --host=0.0.0.0
+      - --port=8000
+      - --tensor-parallel-size=2
+      - --max-model-len=${TP2_MAX_MODEL_LEN:-262144}
+      - --max-num-seqs=${MAX_NUM_SEQS:-256}
+      - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
+      - --enable-prefix-caching
+      - --reasoning-parser=qwen3
+      - --tool-call-parser=${TOOL_CALL_PARSER:-qwen3_xml}
+      - --enable-auto-tool-choice
+      - --limit-mm-per-prompt={"image":${MM_IMAGE_LIMIT:-4},"video":${MM_VIDEO_LIMIT:-1}}
+      - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
+      - --override-generation-config={"top_p":0.95}
+      - --speculative-config={"method":"mtp","num_speculative_tokens":${NUM_SPECULATIVE_TOKENS:-2}}
+
+  qwen38-p2:
+    image: ${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}
+    container_name: qwen38-p2
+    entrypoint: ["/opt/venv/bin/vllm", "serve", "/workspace/model"]
+    restart: unless-stopped
+    ipc: host
+    init: true
+    shm_size: 16gb
+    cpuset: "12-23,36-47"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile: {soft: 1048576, hard: 1048576}
+    ports:
+      - "127.0.0.1:8032:8000"
+    volumes:
+      - ${QWEN_MODEL_DIR:-/prod/models/Qwen/Qwen3.8-27B-FP8}:/workspace/model:ro
+      - /prod/engine-cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["4", "5"]
+              capabilities: [gpu]
+    environment:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-0}
+      VLLM_API_KEY: ${VLLM_API_KEY:-qwen-local}
+    command:
+      - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-27b}
+      - --host=0.0.0.0
+      - --port=8000
+      - --tensor-parallel-size=2
+      - --max-model-len=${TP2_MAX_MODEL_LEN:-262144}
+      - --max-num-seqs=${MAX_NUM_SEQS:-256}
+      - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
+      - --enable-prefix-caching
+      - --reasoning-parser=qwen3
+      - --tool-call-parser=${TOOL_CALL_PARSER:-qwen3_xml}
+      - --enable-auto-tool-choice
+      - --limit-mm-per-prompt={"image":${MM_IMAGE_LIMIT:-4},"video":${MM_VIDEO_LIMIT:-1}}
+      - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
+      - --override-generation-config={"top_p":0.95}
+      - --speculative-config={"method":"mtp","num_speculative_tokens":${NUM_SPECULATIVE_TOKENS:-2}}
+
+  qwen38-p3:
+    image: ${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}
+    container_name: qwen38-p3
+    entrypoint: ["/opt/venv/bin/vllm", "serve", "/workspace/model"]
+    restart: unless-stopped
+    ipc: host
+    init: true
+    shm_size: 16gb
+    cpuset: "12-23,36-47"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile: {soft: 1048576, hard: 1048576}
+    ports:
+      - "127.0.0.1:8033:8000"
+    volumes:
+      - ${QWEN_MODEL_DIR:-/prod/models/Qwen/Qwen3.8-27B-FP8}:/workspace/model:ro
+      - /prod/engine-cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["6", "7"]
+              capabilities: [gpu]
+    environment:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-0}
+      VLLM_API_KEY: ${VLLM_API_KEY:-qwen-local}
+    command:
+      - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-27b}
+      - --host=0.0.0.0
+      - --port=8000
+      - --tensor-parallel-size=2
+      - --max-model-len=${TP2_MAX_MODEL_LEN:-262144}
+      - --max-num-seqs=${MAX_NUM_SEQS:-256}
+      - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
+      - --enable-prefix-caching
+      - --reasoning-parser=qwen3
+      - --tool-call-parser=${TOOL_CALL_PARSER:-qwen3_xml}
+      - --enable-auto-tool-choice
+      - --limit-mm-per-prompt={"image":${MM_IMAGE_LIMIT:-4},"video":${MM_VIDEO_LIMIT:-1}}
+      - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
+      - --override-generation-config={"top_p":0.95}
+      - --speculative-config={"method":"mtp","num_speculative_tokens":${NUM_SPECULATIVE_TOKENS:-2}}
