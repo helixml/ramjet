@@ -381,11 +381,35 @@ impl Router {
         upstream: usize,
         units: usize,
     ) -> Option<LoadGuard> {
+        self.acquire_gated(upstream, units, true)
+    }
+
+    /// Reserves load on a replica that is currently marked unhealthy.
+    ///
+    /// This is the proxy's fail-open reservation, used only when no upstream is
+    /// healthy at all. The idle-drain fence is still honoured: a parked replica
+    /// may be stopped by the converging actor at any moment, so it must never
+    /// receive traffic, whereas an unhealthy replica may merely be too busy to
+    /// answer a probe and will still serve the request.
+    pub fn acquire_failing_open(
+        self: &Arc<Self>,
+        upstream: usize,
+        units: usize,
+    ) -> Option<LoadGuard> {
+        self.acquire_gated(upstream, units, false)
+    }
+
+    fn acquire_gated(
+        self: &Arc<Self>,
+        upstream: usize,
+        units: usize,
+        require_healthy: bool,
+    ) -> Option<LoadGuard> {
         let units = units.max(1);
         {
             let mut inner = self.inner.lock();
             let state = inner.states.get_mut(upstream)?;
-            if !state.serving() {
+            if state.drained || (require_healthy && !state.serving()) {
                 return None;
             }
             state.inflight += 1;
@@ -837,6 +861,25 @@ mod tests {
             Some((1, 4))
         );
         drop(guard);
+    }
+
+    #[test]
+    fn fail_open_reservation_ignores_health_but_never_a_drain() {
+        let router = Arc::new(Router::new(config()));
+        let upstream = router.route(&chat("sys", "hello")).candidates[0];
+        router.set_healthy(upstream, false);
+        // A starved probe marked this replica down; the fail-open path still has
+        // to be able to reserve on it, because shedding the request is worse.
+        let guard = router
+            .acquire_failing_open(upstream, 2)
+            .expect("unhealthy replica is still reservable when failing open");
+        assert_eq!(router.inflight(upstream), 1);
+        drop(guard);
+        // Parking is a deliberate decision by an actor that may stop the
+        // container, so it outranks fail-open.
+        router.set_drained(upstream, true);
+        assert!(router.acquire_failing_open(upstream, 2).is_none());
+        assert_eq!(router.inflight(upstream), 0);
     }
 
     #[test]

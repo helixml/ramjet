@@ -38,6 +38,9 @@ pub struct Metrics {
     pub idle_drain_fleet_idle: Gauge,
     pub upstream_probe_time: GaugeVec,
     pub upstream_probe_errors: CounterVec,
+    pub upstream_probe_suppressed: CounterVec,
+    pub route_fail_open: Gauge,
+    pub route_fail_open_dispatches: CounterVec,
     pub upstream_compatibility_admitted: GaugeVec,
     pub upstream_admission_checks: CounterVec,
     pub dspark_guard_state: GaugeVec,
@@ -288,6 +291,20 @@ impl Metrics {
                 "ds4proxy_upstream_probe_failures_total",
                 "Failed upstream readiness probes",
                 &["upstream", "reason"],
+            )?,
+            upstream_probe_suppressed: counter(
+                "ds4proxy_upstream_probe_suppressed_total",
+                "Failed readiness probes that did not fence the upstream because it had completed a real request within the recent-serving window",
+                &["upstream", "reason"],
+            )?,
+            route_fail_open: prometheus::Gauge::new(
+                "ds4proxy_route_fail_open",
+                "Whether routing is currently dispatching into upstreams that are all marked down, because shedding every request is worse than trying a busy engine",
+            )?,
+            route_fail_open_dispatches: counter(
+                "ds4proxy_route_fail_open_dispatches_total",
+                "Requests dispatched to an upstream that was marked down because no upstream was healthy",
+                &["upstream"],
             )?,
             upstream_compatibility_admitted: gauge(
                 "ds4proxy_upstream_compatibility_admitted",
@@ -867,6 +884,7 @@ impl Metrics {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // One registration entry per public series.
     fn collectors(&self) -> Vec<Box<dyn prometheus::core::Collector>> {
         vec![
             Box::new(self.requests.clone()),
@@ -894,6 +912,9 @@ impl Metrics {
             Box::new(self.idle_drain_fleet_idle.clone()),
             Box::new(self.upstream_probe_time.clone()),
             Box::new(self.upstream_probe_errors.clone()),
+            Box::new(self.upstream_probe_suppressed.clone()),
+            Box::new(self.route_fail_open.clone()),
+            Box::new(self.route_fail_open_dispatches.clone()),
             Box::new(self.upstream_compatibility_admitted.clone()),
             Box::new(self.upstream_admission_checks.clone()),
             Box::new(self.dspark_guard_state.clone()),
