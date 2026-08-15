@@ -128,6 +128,65 @@ asserted. Two larger levers are consequently untested:
   image registers `Qwen3_5MTP`. Expect this to help single-stream latency and
   possibly to hurt saturated throughput, so it should be measured at both ends.
 
+### Data-parallel TP1x8, and a raised thermal ceiling (same day)
+
+The thermal policy was re-derived from the hardware rather than raised on
+request. A 95C ceiling was asked for; these RTX PRO 6000 Blackwell devices
+report T.Limit *margins*, not absolute thresholds, and reading them across all
+eight cards gives a consistent **85C throttle onset and 90C hardware
+shutdown**. 95C is therefore inoperable as an abort threshold: it sits above
+the point where the driver cuts power, so it could never fire and would have
+removed thermal protection entirely. The ceiling is now **84C** -- one degree
+below throttle onset, so a run that reaches it has not yet been silently
+slowed, and six below shutdown.
+
+`node06_gpu_guard.py` gained a **25-minute continuous-inference cap**
+(`--max-runtime-seconds`, exit code 79) checked in the same loop as the thermal
+ceiling and terminating by the same bounded workload/owner grace. The clock
+starts when the workload starts, not when the guard does, so waiting for a cool
+start does not consume the budget.
+
+The moratorium was lifted **per run, not globally**. A committed
+`MORATORIUM_ACTIVE = False` would have been standing permission for every
+future caller, and the module's own tests say so. Instead an authorized run
+names a reviewed window in `MINI_DYNAMO_NODE06_AUTHORIZATION`, and the window
+carries its own bounds (84C, 1500s). An unnamed or unknown window still fails
+closed.
+
+**TP1x8 wins on throughput and loses on everything else.** Eight independent
+single-GPU engines, no NCCL in the decode path:
+
+| config | warm c256 | TTFT p50 | c512 |
+|---|---|---|---|
+| TP4 x2 | ~7800 tok/s | not captured | ~9100 tok/s, 1.6% shed |
+| TP1 x8 | **8412 tok/s** | 0.265s | 12,948 tok/s, then total failure |
+
++8% at c256. The guarded run passed with no thermal abort, peaking at 78C on
+GPU1 -- still the hottest card, consistent with the older evidence in
+`node06_operational_moratorium.py`.
+
+It is **not** promoted to production. Eight engines mean eight separate
+818,471-token KV pools, so a shared system prompt is resident on one engine in
+eight rather than one in two. Helix agent traffic is precisely the shared-prefix
+workload that penalises, and the sweep behind the +8% uses unique prompts, so
+it is structurally blind to that cost. The measured run also advertised only
+57,344 tokens of context against the TP4 pair's 253,952; that part is an
+artifact of the 65536 cap chosen for the run rather than of the topology, and
+the committed overlay now defaults to 262144, unmeasured.
+
+**The load balancer sheds all traffic when saturated (#170).** The second c512
+cell returned 503 to all 512 requests in 0.309s while every engine was alive
+and answering `/health` directly, and the balancer reported 8/8 up immediately
+afterwards. Saturated engines starve the health probe, all upstreams are marked
+down together, and there is no fail-open path. The 1.6% shed seen earlier on
+TP4 is the same mechanism in milder form. This is a self-inflicted outage on a
+stack that is merely busy, and it invalidates any measurement taken near
+saturation.
+
+**MTP speculative decoding is still untested.** It remains the one untried
+lever with a plausible large win, and it is the natural next step now that the
+guard permits a bounded window.
+
 **Vision works end to end.** A 128x128 solid-red PNG sent as a base64
 `image_url` part returns "Red" with 132 prompt tokens against 60 for the same
 text alone, so roughly 72 tokens of image. Verified identically against the

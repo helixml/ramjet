@@ -467,7 +467,33 @@ and must not become flaky CI thresholds.
 node06 is a Tailscale host running two vLLM+DSpark TP4 instances behind this
 LB. Connect with the SSH alias (config already set up):
 
-### Active cooling/AC moratorium (2026-08-14)
+### Thermal policy and the supervised-window lift (2026-08-14)
+
+The moratorium below was lifted **per run**, not globally. An authorized run
+names a reviewed window in `MINI_DYNAMO_NODE06_AUTHORIZATION`
+(`supervised-2026-08-14`) and inherits that window's bounds; an unnamed or
+unknown window still fails closed, so a stale environment cannot become
+standing permission.
+
+Thermal thresholds were re-derived from the hardware, not chosen. These RTX PRO
+6000 Blackwell devices report T.Limit *margins* rather than absolute
+temperatures; across all eight cards that resolves to **85C throttle onset and
+90C hardware shutdown**. The guard ceiling is capped at **84C**
+(`MAX_ABORT_C`): one degree below throttle onset, so reaching it means stopping
+before measurements are silently slowed, and six below the point at which the
+driver would cut power out from under a live serving stack. Do not raise it to
+or above 85C; at or above 90C an abort can never fire at all.
+
+Guarded runs are additionally capped at **25 minutes of continuous inference**
+(`--max-runtime-seconds`, default and maximum 1500, exit code 79). The clock
+starts with the workload, not with the guard, so cool-start waiting does not
+consume it. Thermals remain the likelier stopping condition: GPU1 runs about
+5C hotter than its neighbours and has previously gone from 65C to an abort in
+roughly seventeen seconds of sustained c24 decode.
+
+AC repair has still **not** been confirmed. These bounds are doing real work.
+
+### Superseded: active cooling/AC moratorium (2026-08-14)
 
 Do not run request-generating traffic on node06, start or restart either vLLM
 engine, load a model, run JIT/warmup, or execute an engine-candidate rollout,

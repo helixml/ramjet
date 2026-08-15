@@ -80,8 +80,51 @@ class Node06GpuGuardTests(unittest.TestCase):
             termination_grace_seconds=1,
             preserve_rollback_owner=False,
             nvidia_smi="/usr/bin/nvidia-smi",
+            max_runtime_seconds=guard.DEFAULT_MAX_RUNTIME_SECONDS,
             command=command,
         )
+
+    def test_the_abort_ceiling_stays_below_hardware_throttle_onset(self):
+        # node06's RTX PRO 6000 Blackwell devices throttle at 85C and shut down
+        # at 90C. A ceiling at or above 85C measures throttled hardware; at or
+        # above 90C it can never fire because the driver cuts power first.
+        self.assertLess(
+            guard.MAX_ABORT_C, 85, "ceiling must stay below throttle onset"
+        )
+        self.assertLessEqual(guard.DEFAULT_ABORT_C, guard.MAX_ABORT_C)
+
+    def test_an_abort_threshold_above_the_ceiling_is_rejected(self):
+        parsed = guard.parser().parse_args(
+            ["--output", "/tmp/x.jsonl", "--abort-c", "95", "--", "/bin/true"]
+        )
+        with self.assertRaises(guard.GuardError):
+            guard.validate_args(parsed)
+
+    def test_continuous_inference_is_capped(self):
+        self.assertEqual(guard.MAX_RUNTIME_SECONDS, 1500)
+        parsed = guard.parser().parse_args(
+            [
+                "--output", "/tmp/x.jsonl",
+                "--max-runtime-seconds", str(guard.MAX_RUNTIME_SECONDS + 1),
+                "--", "/bin/true",
+            ]
+        )
+        with self.assertRaises(guard.GuardError):
+            guard.validate_args(parsed)
+
+    def test_a_long_but_cool_run_is_terminated_by_the_runtime_limit(self):
+        # Temperature never approaches the ceiling, so only the continuous
+        # inference cap can stop this workload.
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "journal.jsonl"
+            args = self.args(output, ["/bin/sleep", "30"])
+            args.max_runtime_seconds = 1
+            args.poll_seconds = 0.25
+            code = self.run_guard(args, SequenceSampler([sample([50] * 8)]))
+            self.assertEqual(code, guard.EXIT_RUNTIME_LIMIT)
+            record = final_record(output)
+            self.assertEqual(record["reason"], "runtime_limit")
+            self.assertEqual(record["thresholds"]["max_runtime_seconds"], 1)
 
     def run_guard(self, args, sampler):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(

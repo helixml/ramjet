@@ -49,6 +49,56 @@ import re
 MORATORIUM_ACTIVE = True
 MORATORIUM_REASON = "cooling_ac_failure_2026_08_14"
 
+# The moratorium is lifted per run, never globally. A committed MORATORIUM_ACTIVE
+# of False would be standing permission for every future caller rather than for
+# the window it was granted for, so an authorized run instead names a reviewed
+# window in the environment and inherits that window's bounds.
+ENV_AUTHORIZATION = "MINI_DYNAMO_NODE06_AUTHORIZATION"
+
+
+class AuthorizedWindow:
+    """A reviewed, bounded exception to the moratorium."""
+
+    __slots__ = ("identifier", "granted", "max_abort_c", "max_runtime_seconds")
+
+    def __init__(self, identifier, granted, max_abort_c, max_runtime_seconds):
+        self.identifier = identifier
+        self.granted = granted
+        self.max_abort_c = max_abort_c
+        self.max_runtime_seconds = max_runtime_seconds
+
+
+# Granted 2026-08-14 by explicit user authorization for supervised work on an
+# otherwise-idle node06 serving no production traffic.
+#
+# This does NOT assert that the AC repair is complete; it was never confirmed.
+# The bounds below are therefore load-bearing. The evidence in this module's
+# docstring still stands: GPU1 runs about 5C hotter than its neighbours and
+# previously went from 65C to an abort in roughly seventeen seconds of
+# sustained c24 decode, so 25 minutes is a ceiling rather than an expectation.
+#
+# 84C is one degree below these devices' measured 85C throttle onset and six
+# below their 90C shutdown, so reaching it means stopping before the hardware
+# either slows down or cuts power.
+AUTHORIZED_WINDOWS = {
+    "supervised-2026-08-14": AuthorizedWindow(
+        identifier="supervised-2026-08-14",
+        granted="2026-08-14",
+        max_abort_c=84,
+        max_runtime_seconds=1500,
+    ),
+}
+
+
+def active_authorization(environ=None):
+    """Returns the reviewed window named by the environment, or None."""
+
+    import os
+
+    source = os.environ if environ is None else environ
+    name = source.get(ENV_AUTHORIZATION, "")
+    return AUTHORIZED_WINDOWS.get(name)
+
 
 class MoratoriumError(RuntimeError):
     pass
@@ -59,7 +109,7 @@ def require_active_work_permitted(operation: str) -> None:
 
     if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,95}", operation) is None:
         raise MoratoriumError("node06 operation name is invalid")
-    if MORATORIUM_ACTIVE:
+    if MORATORIUM_ACTIVE and active_authorization() is None:
         raise MoratoriumError(
             "node06 cooling/AC moratorium is active; explicit supervised "
             "authorization and a reviewed repository change are required"

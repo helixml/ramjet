@@ -37,6 +37,30 @@ from node06_operational_moratorium import (
 )
 
 
+# Thermal policy. These are operational abort thresholds, not the hardware's
+# damage limit, and they exist to stop a benchmark rather than to protect the
+# silicon -- the driver does that itself.
+#
+# Measured on node06's RTX PRO 6000 Blackwell devices on 2026-08-14 via
+# nvidia-smi T.Limit margins, consistent across all eight cards: throttle onset
+# (max operating) is 85C and hardware shutdown is 90C. MAX_ABORT_C is therefore
+# capped at 84C: one degree below throttle onset, so a run that reaches the
+# ceiling has not yet been silently slowed, and six degrees below the point at
+# which the driver would cut power out from under a live serving stack.
+#
+# Do not raise MAX_ABORT_C to or above 85C. Past that the GPUs throttle, so any
+# throughput measured there understates the hardware and is not comparable with
+# earlier records; past 90C the abort can never fire at all because the device
+# shuts down first.
+DEFAULT_ABORT_C = 78
+MAX_ABORT_C = 84
+
+# Continuous inference cap. Independent of temperature: it bounds how long a
+# single guarded workload may generate load even if it never approaches the
+# thermal ceiling.
+DEFAULT_MAX_RUNTIME_SECONDS = 1500
+MAX_RUNTIME_SECONDS = 1500
+
 SCHEMA_VERSION = 1
 DEFAULT_NVIDIA_SMI = "/usr/bin/nvidia-smi"
 QUERY_FIELDS = (
@@ -61,6 +85,7 @@ EXIT_THERMAL = 75
 EXIT_INTERNAL = 76
 EXIT_SHIM_ESCALATED = 77
 EXIT_SHIM_ORPHAN = 78
+EXIT_RUNTIME_LIMIT = 79
 PR_SET_CHILD_SUBREAPER = 36
 PR_GET_CHILD_SUBREAPER = 37
 PR_SET_PDEATHSIG = 1
@@ -133,7 +158,7 @@ def create_guard_capability(
 
 
 def validate_inherited_guard(
-    expected_gpus: int = 8, maximum_abort_c: float = 78
+    expected_gpus: int = 8, maximum_abort_c: float = MAX_ABORT_C
 ) -> dict[str, object]:
     try:
         active = os.environ["MINI_DYNAMO_GPU_GUARD_ACTIVE"]
@@ -864,6 +889,7 @@ def run_guard(
             "poll_seconds": args.poll_seconds,
             "workload_grace_seconds": args.workload_grace_seconds,
             "termination_grace_seconds": args.termination_grace_seconds,
+            "max_runtime_seconds": args.max_runtime_seconds,
         },
     }
     journal.append(
@@ -916,6 +942,7 @@ def run_guard(
     result = EXIT_INTERNAL
     try:
         cooldown_started = time.monotonic()
+        workload_started = cooldown_started
         preflight_passed = False
         consecutive_telemetry_failures = 0
         while True:
@@ -975,6 +1002,10 @@ def run_guard(
             time.sleep(args.poll_seconds)
 
         if preflight_passed:
+            # The continuous-inference clock starts when the workload starts,
+            # not when the guard does: waiting for a cool start is not
+            # inference and must not consume the caller's budget.
+            workload_started = time.monotonic()
             child_environment = os.environ.copy()
             capability = create_guard_capability(
                 args.expected_gpus, args.abort_c, run_id
@@ -1063,6 +1094,10 @@ def run_guard(
                         }
                         result = EXIT_THERMAL
                         break
+                    if time.monotonic() - workload_started >= args.max_runtime_seconds:
+                        record["reason"] = "runtime_limit"
+                        result = EXIT_RUNTIME_LIMIT
+                        break
                     child_tree.reap_adopted(child.pid)
                     if child_tree.live():
                         record["reason"] = "orphaned_process_tree"
@@ -1108,6 +1143,17 @@ def run_guard(
                     }
                     checkpoint(True)
                     result = EXIT_THERMAL
+                    break
+                # The continuous-inference cap is deliberately checked in the
+                # same loop as the thermal ceiling and terminates by the same
+                # path, so a run that is cool but simply long is stopped with
+                # the identical bounded workload/owner grace.
+                elapsed = time.monotonic() - workload_started
+                if elapsed >= args.max_runtime_seconds:
+                    record["reason"] = "runtime_limit"
+                    record["trigger"] = {"elapsed_seconds": round(elapsed, 3)}
+                    checkpoint(True)
+                    result = EXIT_RUNTIME_LIMIT
                     break
     except GuardInterrupted as error:
         record["reason"] = "interrupted"
@@ -1170,12 +1216,18 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--label", default="node06-experiment")
     result.add_argument("--expected-gpus", type=int, default=8)
     result.add_argument("--start-max-c", type=float, default=65)
-    result.add_argument("--abort-c", type=float, default=78)
+    result.add_argument("--abort-c", type=float, default=DEFAULT_ABORT_C)
     result.add_argument("--cooldown-timeout-seconds", type=float, default=300)
     result.add_argument("--poll-seconds", type=float, default=1)
     result.add_argument("--sample-timeout-seconds", type=float, default=2)
     result.add_argument("--workload-grace-seconds", type=float, default=5)
     result.add_argument("--termination-grace-seconds", type=float, default=30)
+    result.add_argument(
+        "--max-runtime-seconds",
+        type=float,
+        default=DEFAULT_MAX_RUNTIME_SECONDS,
+        help="terminate the workload after this much continuous inference",
+    )
     result.add_argument(
         "--preserve-rollback-owner",
         action="store_true",
@@ -1199,8 +1251,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise GuardError("node06 requires exactly eight GPUs")
     if not 20 <= args.start_max_c <= 65:
         raise GuardError("cool-start threshold is invalid")
-    if not args.start_max_c + 3 <= args.abort_c <= 78:
+    if not args.start_max_c + 3 <= args.abort_c <= MAX_ABORT_C:
         raise GuardError("thermal-abort threshold is invalid")
+    if not 1 <= args.max_runtime_seconds <= MAX_RUNTIME_SECONDS:
+        raise GuardError("continuous inference limit is invalid")
     if not 0 <= args.cooldown_timeout_seconds <= 1800:
         raise GuardError("cooldown timeout is invalid")
     if not 0.25 <= args.poll_seconds <= 1:
