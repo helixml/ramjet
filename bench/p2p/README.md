@@ -29,9 +29,9 @@ compiles inside the exact r34 image, exports two binaries plus a SHA-256
 manifest, and never contacts node06:
 
 ```bash
-mkdir -p /home/karolis/.cache/mini-dynamo-p2p-tools
-bench/p2p/build_tools.sh /home/karolis/.cache/mini-dynamo-p2p-tools
-scp -r /home/karolis/.cache/mini-dynamo-p2p-tools node06:/tmp/
+mkdir -p "$HOME/.cache/mini-dynamo-p2p-tools"
+bench/p2p/build_tools.sh "$HOME/.cache/mini-dynamo-p2p-tools"
+scp -r "$HOME/.cache/mini-dynamo-p2p-tools" node06:/tmp/
 ```
 
 Record the manifest digest from the development host through a separate trusted
@@ -39,7 +39,7 @@ channel, then make the transferred tree root-owned and immutable. Do not copy a
 digest from node06's adjacent manifest and treat it as external evidence:
 
 ```bash
-sha256sum /home/karolis/.cache/mini-dynamo-p2p-tools/manifest.json
+sha256sum "$HOME/.cache/mini-dynamo-p2p-tools/manifest.json"
 ssh node06 'chown -R root:root /tmp/mini-dynamo-p2p-tools && \
   chmod 0555 /tmp/mini-dynamo-p2p-tools \
     /tmp/mini-dynamo-p2p-tools/nvbandwidth \

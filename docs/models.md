@@ -115,6 +115,13 @@ without them:
 - **`max_num_seqs`.** This caps concurrent sequences per engine and is a direct
   throughput ceiling. Raising Qwen3.8's from 64 to 256 measured +32% aggregate
   throughput at c256.
+- **Speculative decoding, if the checkpoint ships a draft head.** Qwen3.8-27B
+  carries a trained MTP head, and enabling it measured +112% at c8 and +55% at
+  c1 -- but **-12.5% at c256**. Speculative decoding buys fewer sequential
+  steps with more compute per step, so it wins while the device waits on
+  decode and loses once the batch saturates it. Measure both ends: a good
+  acceptance rate is not sufficient justification, because at saturation the
+  rejected fraction is pure waste.
 
 See `deploy/qwen38_27b/docker-compose.yaml` for a worked example and
 `EXPERIMENTS.md` for the measurements behind these numbers.

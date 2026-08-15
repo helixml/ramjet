@@ -128,6 +128,51 @@ asserted. Two larger levers are consequently untested:
   image registers `Qwen3_5MTP`. Expect this to help single-stream latency and
   possibly to hurt saturated throughput, so it should be measured at both ends.
 
+### MTP speculative decoding: large win below c128, a loss above it
+
+Qwen3.8-27B-FP8 ships a trained MTP head (`mtp.safetensors`, 477MB) and the r34
+image registers `Qwen3_5MTP`, so the checkpoint drafts for itself and no draft
+model is needed. `--speculative-config={"method":"mtp",
+"num_speculative_tokens":2}` passed the GPU-free `EngineArgs` preflight before
+any restart, and the engine logs confirm activation ("Detected MTP model.
+Sharing target model lm_head weights with the draft model"). KV cache drops
+from 4,901,554 to 4,366,239 tokens because the draft head takes memory.
+
+Matched methodology on both sides -- deterministic output length, first cell of
+every sweep discarded, every run under the thermal guard at the new 84C ceiling
+and 25-minute cap. All four guarded runs passed with no thermal abort, peaking
+at 70C.
+
+| concurrency | baseline | MTP | delta |
+|---|---|---|---|
+| 1 | 76.1 | 117.9 | **+55%** |
+| 8 | 386.1 | 817.1 | **+112%** |
+| 32 | 2201.4 | 2888.9 | +31% |
+| 64 | 3810.1 | 4633.9 | +22% |
+| 128 | 5571.1 | 5966.4 | +7% |
+| 256 | 7890.9 | 6902.0 | **-12.5%** |
+
+Draft acceptance is ~60% across two independent runs (61.3% and 59.5%), split
+76.9% at position 0 and 45.8% at position 1, giving about 2.2 tokens per target
+forward pass.
+
+The crossover sits between c128 and c256 and the shape is the textbook one.
+Speculative decoding buys fewer sequential steps with more compute per step.
+Below the crossover the device is waiting on sequential decode, so 2.2 tokens
+per pass converts almost directly into throughput. Above it the batch already
+saturates the GPU, so the ~40% of draft tokens that get rejected are pure waste
+-- which is exactly why acceptance being good is not sufficient to promote it.
+
+**Recommended and left enabled.** Helix agent traffic runs far below c128,
+where this is worth between +22% and +112%. The earlier headline of ~7800
+tok/s at c256 is unchanged and remains the right number for a saturated box;
+it is simply not the regime this deployment operates in. Drop the overlay for
+workloads that genuinely sustain c256 or above.
+
+Note that MTP and the TP1x8 data-parallel overlay were not combined. TP1x8's
++8% was measured at c256, which is precisely where MTP costs 12.5%, so the two
+optimise opposite ends and stacking them is not obviously additive.
+
 ### Data-parallel TP1x8, and a raised thermal ceiling (same day)
 
 The thermal policy was re-derived from the hardware rather than raised on
@@ -2369,7 +2414,7 @@ The local parallel pre-push gate found a second workflow trap: `/tmp` is a
 Cargo target failed after 4.74s with `ENOSPC` despite 283GiB remaining on the
 disk-backed filesystem. Only this task's 298MiB of partial build artifacts was
 cleaned. Reusing the canonical checkout target with compiler scratch under
-`/home/karolis/.cache/mini-dynamo-tmp` completed strict Clippy, all 104 tests,
+`$HOME/.cache/mini-dynamo-tmp` completed strict Clippy, all 104 tests,
 and the release build in 26.32s; Go and protocol lanes independently took
 1.59s and 0.12s. `AGENTS.md` now forbids Rust worktrees/build scratch on this
 shared tmpfs and documents the shared-target escape hatch.
