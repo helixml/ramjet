@@ -3,10 +3,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import re
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+METRICS_SOURCE = ROOT / "src" / "metrics.rs"
 DASHBOARD_DIR = ROOT / "deploy" / "monitoring" / "rtx6000pro"
 SYNC = DASHBOARD_DIR / "sync-dashboards.py"
 SPEC = importlib.util.spec_from_file_location("sync_dashboards", SYNC)
@@ -21,12 +23,23 @@ DASHBOARD = DASHBOARD_DIR / "minidynamo-rtx6000pro.json"
 RETIRED_MARKERS = ("ds4-flash-serving", "DeepSeek V4 Flash Serving", "Layout Preview")
 
 
+def visualizations(panels: list[dict]) -> list[dict]:
+    """Every panel that draws something, including panels nested in a row."""
+    out: list[dict] = []
+    for panel in panels:
+        if panel["type"] == "row":
+            out.extend(panel.get("panels", []))
+        else:
+            out.append(panel)
+    return out
+
+
 class DashboardSourceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.raw = DASHBOARD.read_text(encoding="utf-8")
         cls.document = json.loads(cls.raw)
-        cls.panels = cls.document["panels"]
+        cls.panels = visualizations(cls.document["panels"])
 
     def test_owned_keys_exist_on_disk(self) -> None:
         for key in sync.OWNED_KEYS:
@@ -49,18 +62,37 @@ class DashboardSourceTest(unittest.TestCase):
         self.assertNotIn("id", self.document)
 
     def test_panel_ids_are_unique(self) -> None:
+        # Rows share the id space with the panels they contain.
         ids = [panel["id"] for panel in self.panels]
+        ids.extend(row["id"] for row in self.document["panels"] if row["type"] == "row")
         self.assertEqual(len(ids), len(set(ids)))
 
-    def test_panels_fit_the_grid_without_overlapping(self) -> None:
+    def _assert_laid_out(self, panels: list[dict]) -> None:
         occupied: dict[tuple[int, int], str] = {}
-        for panel in self.panels:
+        for panel in panels:
             grid = panel["gridPos"]
             self.assertLessEqual(grid["x"] + grid["w"], 24, panel["title"])
             for x in range(grid["x"], grid["x"] + grid["w"]):
                 for y in range(grid["y"], grid["y"] + grid["h"]):
                     self.assertNotIn((x, y), occupied, f"{panel['title']} overlaps {occupied.get((x, y))}")
                     occupied[(x, y)] = panel["title"]
+
+    def test_panels_fit_the_grid_without_overlapping(self) -> None:
+        # A row's children are laid out in their own space, below the row header.
+        self._assert_laid_out([p for p in self.document["panels"] if p["type"] != "row"])
+        for row in self.document["panels"]:
+            if row["type"] == "row":
+                self._assert_laid_out(row.get("panels", []))
+
+    def test_rows_sit_below_the_always_visible_panels(self) -> None:
+        rows = [p for p in self.document["panels"] if p["type"] == "row"]
+        self.assertTrue(rows, "expected the idle-drain row")
+        highest_row = min(row["gridPos"]["y"] for row in rows)
+        for panel in self.document["panels"]:
+            if panel["type"] == "row":
+                continue
+            bottom = panel["gridPos"]["y"] + panel["gridPos"]["h"]
+            self.assertLessEqual(bottom, highest_row, panel["title"])
 
     def test_every_target_names_the_prometheus_datasource(self) -> None:
         for panel in self.panels:
@@ -101,6 +133,159 @@ class DashboardSourceTest(unittest.TestCase):
         # would silently split a parked engine into two unrelated rows.
         for title in ("Engine readiness", "Idle drain state"):
             self.assertEqual(self._panel(title)["targets"][0]["legendFormat"], "{{upstream}}")
+
+    def test_readiness_survives_the_policy_being_off(self) -> None:
+        # ds4proxy_idle_drain_state is only exported while the policy runs, and
+        # it is off in the canonical deployment. Without the `or` fallback the
+        # whole readiness tile evaluates empty, so the panel would go blank
+        # rather than degrade to DOWN/READY.
+        expression = self._panel("Engine readiness")["targets"][0]["expr"]
+        self.assertIn("or (ds4proxy_upstream_up * 0)", expression)
+        # A down engine must read DOWN even while it is drained, which is why
+        # health multiplies the drain term instead of adding to it.
+        self.assertIn("ds4proxy_upstream_up * (1 +", expression)
+
+    def test_stop_intent_panel_shows_both_converger_inputs(self) -> None:
+        # The privileged actor stops an engine only when desired running is
+        # false AND safe to stop is true; either alone is not an instruction.
+        panel = self._panel("Stop intent (desired running / safe to stop)")
+        self.assertEqual(
+            [target["expr"] for target in panel["targets"]],
+            ["ds4proxy_idle_drain_desired_running", "ds4proxy_idle_drain_safe_to_stop"],
+        )
+        mappings = panel["fieldConfig"]["defaults"]["mappings"][0]["options"]
+        self.assertEqual([mappings[key]["text"] for key in ("0", "1")], ["no", "yes"])
+
+    def test_fleet_idle_window_panel_is_present(self) -> None:
+        panel = self._panel("Fleet idle window")
+        self.assertEqual(panel["targets"][0]["expr"], "ds4proxy_idle_drain_fleet_idle")
+        mappings = panel["fieldConfig"]["defaults"]["mappings"][0]["options"]
+        self.assertEqual([mappings[key]["text"] for key in ("0", "1")], ["serving", "idle"])
+
+    def test_transitions_panel_reports_a_rate_not_a_raw_counter(self) -> None:
+        # Raw ds4proxy_idle_drain_transitions_total only ever climbs; the
+        # flapping this panel exists to catch is visible in the rate.
+        panel = self._panel("Drain transitions (per hour)")
+        expression = panel["targets"][0]["expr"]
+        self.assertIn("rate(ds4proxy_idle_drain_transitions_total", expression)
+        self.assertIn("sum by (upstream, state)", expression)
+        self.assertIn("* 3600", expression)
+
+    def test_idle_drain_panels_explain_an_empty_result(self) -> None:
+        # The policy is off in the canonical deployment, so these panels are
+        # normally empty; without noValue they read as broken rather than idle.
+        for title in (
+            "Idle drain state",
+            "Stop intent (desired running / safe to stop)",
+            "Fleet idle window",
+            "Drain transitions (per hour)",
+        ):
+            defaults = self._panel(title)["fieldConfig"]["defaults"]
+            self.assertEqual(defaults.get("noValue"), "idle-drain policy is off", title)
+
+    def test_idle_drain_panels_are_grouped_in_one_row(self) -> None:
+        rows = [p for p in self.document["panels"] if p["type"] == "row"]
+        self.assertEqual([row["title"] for row in rows], ["Idle drain (idle power parking)"])
+        row = rows[0]
+        self.assertTrue(row["collapsed"], "the policy is off by default; keep the row folded")
+        self.assertEqual(
+            [panel["title"] for panel in row["panels"]],
+            [
+                "Idle drain state",
+                "Stop intent (desired running / safe to stop)",
+                "Fleet idle window",
+                "Drain transitions (per hour)",
+            ],
+        )
+
+    def test_readiness_tile_shows_a_state_not_a_sparkline(self) -> None:
+        # graphMode "area" draws a sparkline of the 0/1/2 state code, which
+        # renders a DOWN -> READY recovery as a meaningless ramp.
+        panel = self._panel("Engine readiness")
+        self.assertEqual(panel["options"]["graphMode"], "none")
+
+
+def exported_metrics() -> dict[str, tuple[str, ...]]:
+    """Map each `ds4proxy_` metric declared in src/metrics.rs to its labels.
+
+    The registrations are `name, help, &[labels]` triples, so the label list is
+    whatever `&[...]` appears before the constructor's closing `)?`. Metrics
+    built from a plain `Gauge` carry no labels and yield an empty tuple.
+    """
+    source = METRICS_SOURCE.read_text(encoding="utf-8")
+    declared: dict[str, tuple[str, ...]] = {}
+    for match in re.finditer(r'"(ds4proxy_[a-z0-9_]+)"', source):
+        name = match.group(1)
+        if name in declared:
+            continue  # A later mention is a test or a registration, not a new metric.
+        tail = source[match.end() : match.end() + 400]
+        end = tail.find(")?")
+        labels = re.search(r"&\[([^\]]*)\]", tail if end == -1 else tail[:end])
+        declared[name] = tuple(re.findall(r'"([a-z_]+)"', labels.group(1))) if labels else ()
+    return declared
+
+
+def referenced_metrics(panels: list[dict]) -> set[str]:
+    names: set[str] = set()
+    for panel in visualizations(panels):
+        for target in panel["targets"]:
+            names.update(re.findall(r"\bds4proxy_[a-z0-9_]+", target["expr"]))
+    return names
+
+
+class MetricContractTest(unittest.TestCase):
+    """Ties the dashboard's queries to the metrics the LB actually exports.
+
+    Without this, renaming a metric in Rust leaves a silently empty panel: the
+    query stays valid PromQL and Grafana just renders "No data".
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.declared = exported_metrics()
+        cls.document = json.loads(DASHBOARD.read_text(encoding="utf-8"))
+        cls.referenced = referenced_metrics(cls.document["panels"])
+
+    def base_name(self, metric: str) -> str:
+        # Histograms are registered under their base name and queried per suffix.
+        for suffix in ("_bucket", "_sum", "_count"):
+            if metric.endswith(suffix) and metric[: -len(suffix)] in self.declared:
+                return metric[: -len(suffix)]
+        return metric
+
+    def test_every_queried_metric_is_exported(self) -> None:
+        self.assertTrue(self.referenced, "expected ds4proxy queries on the dashboard")
+        undefined = sorted(m for m in self.referenced if self.base_name(m) not in self.declared)
+        self.assertEqual(undefined, [], "queried but never exported")
+
+    def test_all_idle_drain_metrics_are_surfaced(self) -> None:
+        # The dashboard previously showed 1 of the 5; the drain state alone does
+        # not tell an operator whether stopping an engine is safe or why.
+        drain = {name for name in self.declared if "idle_drain" in name}
+        self.assertEqual(sorted(drain - self.referenced), [])
+
+    def test_drain_and_readiness_labels_agree(self) -> None:
+        # The readiness panel multiplies these two series together, which in
+        # PromQL requires identical label sets, not merely a shared `upstream`.
+        self.assertEqual(
+            self.declared["ds4proxy_idle_drain_state"],
+            self.declared["ds4proxy_upstream_up"],
+        )
+
+    def test_transitions_are_grouped_by_their_real_labels(self) -> None:
+        self.assertEqual(
+            self.declared["ds4proxy_idle_drain_transitions_total"], ("upstream", "state")
+        )
+
+    def test_fleet_idle_is_unlabelled(self) -> None:
+        # It is fleet-wide, so a {{upstream}} legend on it would render empty.
+        self.assertEqual(self.declared["ds4proxy_idle_drain_fleet_idle"], ())
+        panel = next(
+            p
+            for p in visualizations(self.document["panels"])
+            if p["title"] == "Fleet idle window"
+        )
+        self.assertNotIn("{{", panel["targets"][0]["legendFormat"])
 
 
 class ConfigMapMirrorTest(unittest.TestCase):

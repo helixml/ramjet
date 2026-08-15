@@ -41,20 +41,57 @@ straight into the infra ConfigMap. A UI export also carries an `"id"` field
 and a bumped `"version"`; strip the `id`, because it collides with whatever
 Grafana already stores for that uid.
 
+## Idle drain
+
+The idle-drain policy parks one engine during a quiet window to save idle
+power. It is **off** in the canonical deployment (`MD_IDLE_DRAIN_MODE` is
+unset), and it exports nothing at all while off — so every panel below reads
+`idle-drain policy is off` rather than going blank.
+
+Two places show it:
+
+- **`Engine readiness`**, always visible at the top. A parked engine reads grey
+  PAUSED, not green READY. Health multiplies the drain term rather than adding
+  to it, so a *stopped* engine still reads DOWN even while it is drained; the
+  trailing `or (ds4proxy_upstream_up * 0)` keeps the tile working when the
+  policy is off and exports no drain series at all.
+- **The collapsed `Idle drain (idle power parking)` row** at the bottom, which
+  carries the four diagnostics. It stays folded because the policy is off; open
+  it when qualifying `observe` mode.
+
+| panel | metric | reads |
+|---|---|---|
+| Idle drain state | `ds4proxy_idle_drain_state` | warm / draining / drained |
+| Stop intent | `..._desired_running`, `..._safe_to_stop` | the converger's two inputs |
+| Fleet idle window | `..._fleet_idle` | serving / idle |
+| Drain transitions (per hour) | `rate(..._transitions_total)` | flapping detector |
+
+The LB never stops a container itself — it publishes intent and a separately
+privileged actor converges on it, stopping an engine only when desired running
+is `no` **and** safe to stop is `yes`. Neither value alone is an instruction,
+which is why they share one panel. The transitions rate is the qualification
+signal: a badly tuned idle threshold shows up as draining/warm churn, not as an
+error, and AGENTS.md requires a clean interval there before dual-pair observe.
+
 ## Invariants the tests enforce
 
 `bench/test_monitoring_dashboards.py` guards the parts that are easy to lose
 when a dashboard is round-tripped through the UI:
 
-- **Engine readiness must fold in `ds4proxy_idle_drain_state`.** A panel that
-  reads `ds4proxy_upstream_up` alone renders an idle-drained engine as green
-  READY instead of grey PAUSED, which reads as healthy capacity that is not
-  actually serving. The exported preview had regressed exactly this.
-- **The `Idle drain state` timeline must exist**, with the warm / draining /
-  drained mappings.
-- Both panels keep the `{{upstream}}` legend so they join on the same label.
-- Canonical JSON formatting, unique panel ids, no grid overlaps, and no
-  surviving `ds4-flash-serving` identity.
+- **Engine readiness must fold in `ds4proxy_idle_drain_state`**, keep the
+  policy-off fallback, and keep the DOWN / READY / PAUSED mappings. A panel
+  that reads `ds4proxy_upstream_up` alone renders an idle-drained engine as
+  green READY — healthy-looking capacity that is not serving. The exported
+  preview had regressed exactly this.
+- **All five `ds4proxy_idle_drain_*` metrics stay on the dashboard**, with the
+  transitions counter shown as a rate rather than a raw total.
+- **Every `ds4proxy_*` query resolves against `src/metrics.rs`**, including
+  label sets. Renaming a metric in Rust otherwise leaves valid PromQL that
+  silently renders "No data".
+- Panels that depend on the policy carry a `noValue` explaining it may be off.
+- Canonical JSON formatting, unique panel ids (rows share that id space), no
+  grid overlaps within the top level or within a row, and no surviving
+  `ds4-flash-serving` identity.
 
 ## Scope caveat
 
