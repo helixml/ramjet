@@ -67,7 +67,7 @@ for kind in rust-deps release-tools lb companion; do
       ;;
     lb)
       set -- ':(top)Cargo.toml' ':(top)Cargo.lock' ':(top)rust-toolchain.toml' \
-        ':(top)Dockerfile' ':(top)compat/**' ':(top)src/**'
+        ':(top)Dockerfile' ':(top)compat/**' ':(top)src/**' ':(top)web/**'
       ;;
     companion)
       set -- ':(top)Cargo.toml' ':(top)Cargo.lock' ':(top)rust-toolchain.toml' \

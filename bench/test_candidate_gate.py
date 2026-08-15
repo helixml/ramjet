@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+import node06_gpu_guard as gpu_guard
 from unittest import mock
 
 from candidate_gate import (
@@ -627,7 +629,7 @@ class CandidateGateTest(unittest.TestCase):
         runner = FakeRunner(self.identity)
         self.assertEqual(run_gate(self.args(), runner), 0)
         self.guard_validator.assert_called_once_with(
-            expected_gpus=8, maximum_abort_c=78
+            expected_gpus=8, maximum_abort_c=gpu_guard.MAX_ABORT_C
         )
 
     def test_real_runner_uses_a_secret_free_bounded_inspect_format(self):

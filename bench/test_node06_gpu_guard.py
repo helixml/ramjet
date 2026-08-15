@@ -32,7 +32,10 @@ def pid_is_active(pid):
     return raw[raw.rfind(")") + 2 :].split()[0] != "Z"
 
 
-def sample(temperatures, utilization=50, power=100):
+def sample(temperatures, utilization=50, power=100, air=30):
+    """Builds a sample. `air` is the intake temperature the guard gates on;
+    `temperatures` are GPU readings, which are now recorded but never gate."""
+
     rows = []
     for index, temperature in enumerate(temperatures):
         rows.append(
@@ -49,7 +52,9 @@ def sample(temperatures, utilization=50, power=100):
                 memory_total_mib=96000,
             )
         )
-    return guard.GpuSample(tuple(rows))
+    return guard.GpuSample(
+        tuple(rows), (guard.AirReading(sensor="FP_TEMP", temperature_c=air),)
+    )
 
 
 class SequenceSampler:
@@ -65,14 +70,52 @@ class SequenceSampler:
         return value
 
 
+class FakeAirExporter:
+    """Serves one Prometheus text payload on loopback for the guard to read."""
+
+    def __init__(self, celsius=30, sensor="FP_TEMP"):
+        import http.server
+        import threading
+
+        payload = (
+            "# HELP node_ipmi_temperature_celsius IPMI temperature\n"
+            "# TYPE node_ipmi_temperature_celsius gauge\n"
+            'node_ipmi_temperature_celsius{sensor="CPU0_TEMP"} 65\n'
+            f'node_ipmi_temperature_celsius{{sensor="{sensor}"}} {celsius}\n'
+        ).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("content-type", "text/plain")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *_args):
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self):
+        return f"http://127.0.0.1:{self.server.server_port}/metrics"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
 class Node06GpuGuardTests(unittest.TestCase):
     def args(self, output, command):
         return argparse.Namespace(
             output=pathlib.Path(output),
             label="test-cell",
             expected_gpus=8,
-            start_max_c=65,
-            abort_c=78,
+            start_max_c=50,
+            abort_c=55,
             cooldown_timeout_seconds=0,
             poll_seconds=0.01,
             sample_timeout_seconds=1,
@@ -80,6 +123,7 @@ class Node06GpuGuardTests(unittest.TestCase):
             termination_grace_seconds=1,
             preserve_rollback_owner=False,
             nvidia_smi="/usr/bin/nvidia-smi",
+            air_metrics_url="http://127.0.0.1:9100/metrics",
             max_runtime_seconds=guard.DEFAULT_MAX_RUNTIME_SECONDS,
             command=command,
         )
@@ -185,12 +229,12 @@ class Node06GpuGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "result.json"
             args = self.args(output, ["does-not-exist"])
-            result = self.run_guard(args, SequenceSampler([sample([66] * 8)]))
+            result = self.run_guard(args, SequenceSampler([sample([50] * 8, air=51)]))
             self.assertEqual(result, guard.EXIT_THERMAL)
             record = final_record(output)
             self.assertEqual(record["reason"], "preflight_too_hot")
             self.assertNotIn("child_exit_code", record)
-            self.assertEqual(record["trigger"]["gpu_index"], 0)
+            self.assertEqual(record["trigger"]["sensor"], "FP_TEMP")
 
     def test_preflight_abort_temperature_fails_immediately(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -198,7 +242,7 @@ class Node06GpuGuardTests(unittest.TestCase):
             args = self.args(output, ["does-not-exist"])
             args.cooldown_timeout_seconds = 300
             with mock.patch("node06_gpu_guard.time.sleep") as sleep:
-                result = self.run_guard(args, SequenceSampler([sample([78] * 8)]))
+                result = self.run_guard(args, SequenceSampler([sample([50] * 8, air=55)]))
             self.assertEqual(result, guard.EXIT_THERMAL)
             self.assertEqual(final_record(output)["reason"], "preflight_thermal_abort")
             sleep.assert_not_called()
@@ -273,19 +317,19 @@ class Node06GpuGuardTests(unittest.TestCase):
                 output,
                 [sys.executable, "-c", "import time; time.sleep(60)"],
             )
-            sampler = SequenceSampler([sample([40] * 8), sample([40] * 7 + [78])])
+            sampler = SequenceSampler([sample([40] * 8, air=30), sample([40] * 8, air=55)])
             result = self.run_guard(args, sampler)
             self.assertEqual(result, guard.EXIT_THERMAL)
             record = final_record(output)
             self.assertEqual(record["reason"], "thermal_abort")
-            self.assertEqual(record["trigger"], {"gpu_index": 7, "temperature_c": 78})
+            self.assertEqual(record["trigger"], {"sensor": "FP_TEMP", "temperature_c": 55})
             self.assertIn("termination_escalated", record)
 
     def test_final_sample_rejects_a_hot_short_child(self):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "result.json"
             args = self.args(output, [sys.executable, "-c", "pass"])
-            sampler = SequenceSampler([sample([40] * 8), sample([78] + [40] * 7)])
+            sampler = SequenceSampler([sample([40] * 8, air=30), sample([40] * 8, air=55)])
             result = self.run_guard(args, sampler)
             self.assertEqual(result, guard.EXIT_THERMAL)
             record = final_record(output)
@@ -347,7 +391,7 @@ class Node06GpuGuardTests(unittest.TestCase):
             )
             args.poll_seconds = 0.1
             args.termination_grace_seconds = 1
-            sampler = SequenceSampler([sample([40] * 8), sample([78] * 8)])
+            sampler = SequenceSampler([sample([40] * 8, air=30), sample([40] * 8, air=55)])
             result = self.run_guard(args, sampler)
             self.assertEqual(result, guard.EXIT_THERMAL)
             record = final_record(output)
@@ -393,7 +437,7 @@ class Node06GpuGuardTests(unittest.TestCase):
                 "import node06_gpu_guard as g; "
                 "print(json.dumps(g.validate_inherited_guard()))"
             )
-            capability = guard.create_guard_capability(8, 78, "a" * 32)
+            capability = guard.create_guard_capability(8, 55, "a" * 32)
             environment = os.environ.copy()
             environment.update(capability.environment)
             valid = subprocess.run(
@@ -420,6 +464,8 @@ class Node06GpuGuardTests(unittest.TestCase):
             self.assertNotEqual(invalid.returncode, 0)
 
     def test_guard_sigkill_cancels_candidate_owned_request_process(self):
+        exporter = FakeAirExporter()
+        self.addCleanup(exporter.close)
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             nvidia_smi = root / "nvidia-smi"
@@ -462,6 +508,8 @@ class Node06GpuGuardTests(unittest.TestCase):
                     module_dir,
                     "--nvidia-smi",
                     str(nvidia_smi),
+                    "--air-metrics-url",
+                    exporter.url,
                     "--output",
                     str(output),
                     "--poll-seconds",
@@ -521,7 +569,7 @@ class Node06GpuGuardTests(unittest.TestCase):
             args.workload_grace_seconds = 0.1
 
             def sampler(_args):
-                return sample([78] * 8) if ready.exists() else sample([40] * 8)
+                return sample([40] * 8, air=55) if ready.exists() else sample([40] * 8, air=30)
 
             result = self.run_guard(args, sampler)
             self.assertEqual(result, guard.EXIT_THERMAL)
@@ -577,8 +625,8 @@ class Node06GpuGuardTests(unittest.TestCase):
         )
         guard.validate_args(parsed)
         self.assertEqual(parsed.expected_gpus, 8)
-        self.assertEqual(parsed.start_max_c, 65)
-        self.assertEqual(parsed.abort_c, 78)
+        self.assertEqual(parsed.start_max_c, 50)
+        self.assertEqual(parsed.abort_c, 55)
         self.assertEqual(parsed.command, ["true"])
 
         for field, value in (
@@ -595,6 +643,8 @@ class Node06GpuGuardTests(unittest.TestCase):
                 guard.validate_args(candidate)
 
     def test_cli_uses_real_subprocess_boundaries_with_fake_telemetry(self):
+        exporter = FakeAirExporter()
+        self.addCleanup(exporter.close)
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             nvidia_smi = root / "nvidia-smi"
@@ -613,6 +663,8 @@ class Node06GpuGuardTests(unittest.TestCase):
                     [
                         "--nvidia-smi",
                         str(nvidia_smi),
+                        "--air-metrics-url",
+                        exporter.url,
                         "--output",
                         str(output),
                         "--",
@@ -627,6 +679,8 @@ class Node06GpuGuardTests(unittest.TestCase):
             self.assertEqual(record["telemetry"]["samples"], 2)
 
     def test_transient_telemetry_miss_is_tolerated_but_sustained_loss_aborts(self):
+        exporter = FakeAirExporter()
+        self.addCleanup(exporter.close)
         # node06's driver intermittently exceeds the 2s sample deadline (~1
         # call in 12 measured at 1Hz). Failing on the first miss made every run
         # longer than a few seconds abort spuriously, so a bounded run of
@@ -664,6 +718,8 @@ class Node06GpuGuardTests(unittest.TestCase):
                         [
                             "--nvidia-smi",
                             str(fake),
+                            "--air-metrics-url",
+                            exporter.url,
                             "--output",
                             str(output),
                             "--poll-seconds",
@@ -717,3 +773,78 @@ class Node06GpuGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class AirTemperatureGateTests(unittest.TestCase):
+    """The guard gates on chassis intake air, matching Grafana bunker-temps."""
+
+    def test_only_the_dashboard_intake_sensors_are_admitted(self):
+        # The same exporter publishes CPU, DIMM, and per-slot GPU temperatures
+        # under this metric name. Admitting those would put a 65C CPU reading
+        # on a 55C room gate and abort every run instantly.
+        payload = (
+            'node_ipmi_temperature_celsius{sensor="CPU0_TEMP"} 65\n'
+            'node_ipmi_temperature_celsius{sensor="DIMMG1_TEMP"} 46\n'
+            'node_ipmi_temperature_celsius{sensor="SLOT3_GPU_TEMP"} 59\n'
+            'node_ipmi_temperature_celsius{sensor="FP_TEMP"} 43\n'
+            'node_ipmi_temperature_celsius{sensor="Inlet Temp"} 37\n'
+        )
+        readings = guard.parse_air_metrics(payload)
+        self.assertEqual(
+            sorted((r.sensor, r.temperature_c) for r in readings),
+            [("FP_TEMP", 43.0), ("Inlet Temp", 37.0)],
+        )
+
+    def test_the_hottest_intake_sensor_decides(self):
+        readings = (
+            guard.AirReading(sensor="Inlet Temp", temperature_c=37),
+            guard.AirReading(sensor="FP_TEMP", temperature_c=43),
+        )
+        built = guard.GpuSample(sample([90] * 8).readings, readings)
+        self.assertEqual(built.hottest_air.sensor, "FP_TEMP")
+        # A 90C GPU must not influence the decision any more.
+        self.assertEqual(built.hottest_air.temperature_c, 43)
+
+    def test_missing_intake_telemetry_fails_closed(self):
+        # An exporter that publishes everything except the intake sensors
+        # would otherwise leave the run ungated.
+        with self.assertRaises(guard.GuardError):
+            exporter = FakeAirExporter(sensor="CPU0_TEMP")
+            self.addCleanup(exporter.close)
+            args = argparse.Namespace(
+                air_metrics_url=exporter.url, sample_timeout_seconds=2
+            )
+            guard.query_air(args)
+
+    def test_an_unreachable_exporter_fails_closed(self):
+        args = argparse.Namespace(
+            # Port 1 on loopback is not listening.
+            air_metrics_url="http://127.0.0.1:1/metrics",
+            sample_timeout_seconds=1,
+        )
+        with self.assertRaises(guard.GuardError):
+            guard.query_air(args)
+
+    def test_the_gate_must_not_depend_on_a_remote_query(self):
+        # A watchdog that reads the network fails open exactly when the
+        # network is the problem.
+        parsed = guard.parser().parse_args(
+            ["--output", "/tmp/x.jsonl", "--air-metrics-url",
+             "http://grafana.example.invalid/metrics", "--", "/bin/true"]
+        )
+        with self.assertRaises(guard.GuardError):
+            guard.validate_args(parsed)
+
+    def test_the_ceiling_is_a_room_scale_temperature(self):
+        self.assertEqual(guard.MAX_ABORT_C, 55)
+        self.assertLess(guard.DEFAULT_START_MAX_C, guard.MAX_ABORT_C)
+        parsed = guard.parser().parse_args(
+            ["--output", "/tmp/x.jsonl", "--abort-c", "78", "--", "/bin/true"]
+        )
+        with self.assertRaises(guard.GuardError):
+            guard.validate_args(parsed)
+
+    def test_intake_temperature_is_recorded_in_the_summary(self):
+        summary = guard.SampleSummary()
+        summary.observe(sample([40] * 8, air=44))
+        summary.observe(sample([40] * 8, air=41))
+        self.assertEqual(summary.public()["max_air_temperature_c"], 44)

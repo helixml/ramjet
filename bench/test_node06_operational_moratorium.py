@@ -67,13 +67,13 @@ class AuthorizedWindowTests(unittest.TestCase):
                 moratorium.require_active_work_permitted("gpu-workload.smoke")
             )
             window = moratorium.active_authorization()
-        self.assertEqual(window.max_abort_c, 84)
+        self.assertEqual(window.max_abort_c, 55)
         self.assertEqual(window.max_runtime_seconds, 1500)
 
-    def test_every_window_stays_below_hardware_throttle_onset(self):
-        # 85C is throttle onset and 90C is shutdown on node06's devices. No
-        # reviewed window may authorize a ceiling that measures throttled
-        # hardware or that the driver would preempt.
+    def test_every_window_bounds_intake_air_not_silicon(self):
+        # The gate is chassis intake air, so the ceiling lives on a room-scale
+        # temperature. A window carrying a GPU-scale number would silently
+        # never fire: intake air does not reach 78C before the room is lost.
         for window in moratorium.AUTHORIZED_WINDOWS.values():
-            self.assertLess(window.max_abort_c, 85, window.identifier)
+            self.assertLessEqual(window.max_abort_c, 55, window.identifier)
             self.assertLessEqual(window.max_runtime_seconds, 1500, window.identifier)

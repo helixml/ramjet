@@ -11,6 +11,7 @@ use axum::{
 use mini_dynamo::{
     config::Config,
     kv_consumer::KvEventConsumers,
+    machineview,
     metrics::Metrics,
     proxy::Proxy,
     router::{Router as LocalityRouter, RouterConfig},
@@ -65,18 +66,27 @@ async fn main() -> anyhow::Result<()> {
         };
     let proxy = Proxy::new_with_exact_inventories(
         config.clone(),
-        client,
+        client.clone(),
         metrics.clone(),
         routing,
         exact_inventories,
     )
     .context("initialize mini-dynamo proxy")?;
+    let machineview_settings =
+        machineview::Settings::from_env().context("invalid machineview configuration")?;
+    let machineview = machineview::MachineView::start(
+        machineview_settings,
+        registry.clone(),
+        client,
+        config.upstreams.clone(),
+        shutdown_tx.subscribe(),
+    );
 
     let api = Router::new()
         .route("/health", get(Proxy::health))
         .fallback(any(Proxy::handle))
         .with_state(proxy.clone());
-    let metrics_api = Router::new()
+    let mut metrics_api = Router::new()
         .route("/metrics", get(prometheus_metrics))
         .route("/metrics/upstream/{index}", get(upstream_metrics))
         .route("/diagnostics/shadow-soak/start", post(shadow_soak_start))
@@ -84,6 +94,9 @@ async fn main() -> anyhow::Result<()> {
             proxy: proxy.clone(),
             registry,
         });
+    if let Some(view) = &machineview {
+        metrics_api = metrics_api.merge(view.router());
+    }
     let api_listener = TcpListener::bind("0.0.0.0:8000")
         .await
         .context("bind API listener")?;
@@ -133,6 +146,9 @@ async fn main() -> anyhow::Result<()> {
     probe.abort();
     dspark_guard.abort();
     idle_drain.abort();
+    if let Some(view) = machineview {
+        view.shutdown().await;
+    }
     kv_consumers.shutdown().await;
     snapshot_consumers.shutdown().await;
     Ok(())

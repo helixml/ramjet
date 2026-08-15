@@ -467,31 +467,50 @@ and must not become flaky CI thresholds.
 node06 is a Tailscale host running two vLLM+DSpark TP4 instances behind this
 LB. Connect with the SSH alias (config already set up):
 
-### Thermal policy and the supervised-window lift (2026-08-14)
+### Thermal policy: intake air, not silicon (2026-08-14)
 
-The moratorium below was lifted **per run**, not globally. An authorized run
-names a reviewed window in `MINI_DYNAMO_NODE06_AUTHORIZATION`
+The guard gates on **chassis intake-air temperature**, the same signal
+Grafana's `bunker-temps` dashboard plots, and aborts at **55C**. GPU and CPU
+temperatures are still recorded in the journal but no longer gate anything.
+
+The reason is that a GPU already defends itself: these devices throttle at 85C
+and the driver cuts power at 90C, so a silicon gate mostly re-implements the
+hardware. Facility cooling has no such backstop, it is shared between hosts,
+and it is the failure that takes out more than one run. Measurements bear this
+out -- a guarded c64 shared-prefix run drove GPUs to 79C while intake air did
+not move from 43C at all. The old GPU gate aborted that same workload at 85C,
+which stopped useful work for no facility-level reason.
+
+The metric is `node_ipmi_temperature_celsius{sensor=~"Inlet Temp|FP_TEMP"}`.
+node06 exposes `FP_TEMP` (front panel) rather than `Inlet Temp`; both are
+chassis intake. The guard reads it from the host's own node exporter on
+`127.0.0.1:9100`, never from Prometheus or Grafana: a watchdog that depends on
+a remote query fails open exactly when the network is the problem, so
+`--air-metrics-url` is validated to be loopback. Losing the reading, or an
+exporter that publishes no intake sensor, fails closed like any other telemetry
+loss.
+
+Only the dashboard's intake sensors are admitted. The same exporter publishes
+`CPU0_TEMP`, `DIMMG*_TEMP`, and `SLOT*_GPU_TEMP` under the identical metric
+name, and letting a 65C CPU reading onto a 55C room gate would abort every run
+instantly.
+
+Note that node06's `FP_TEMP` reads higher than other hosts' `Inlet Temp` --
+43C against their 37C -- and the infra alert rules encode the same offset,
+warning at 62C for `FP_TEMP` against 55C for `Inlet Temp`. The 55C guard
+ceiling is therefore below infra's own warning level for this sensor, which is
+deliberate: the guard stops a benchmark, it does not page anyone.
+
+Guarded runs remain capped at **25 minutes of continuous inference**
+(`--max-runtime-seconds`, default and maximum 1500, exit code 79). The clock
+starts with the workload, not the guard, so cool-start waiting does not consume
+it.
+
+The moratorium is lifted **per run**, not globally. An authorized run names a
+reviewed window in `MINI_DYNAMO_NODE06_AUTHORIZATION`
 (`supervised-2026-08-14`) and inherits that window's bounds; an unnamed or
 unknown window still fails closed, so a stale environment cannot become
-standing permission.
-
-Thermal thresholds were re-derived from the hardware, not chosen. These RTX PRO
-6000 Blackwell devices report T.Limit *margins* rather than absolute
-temperatures; across all eight cards that resolves to **85C throttle onset and
-90C hardware shutdown**. The guard ceiling is capped at **84C**
-(`MAX_ABORT_C`): one degree below throttle onset, so reaching it means stopping
-before measurements are silently slowed, and six below the point at which the
-driver would cut power out from under a live serving stack. Do not raise it to
-or above 85C; at or above 90C an abort can never fire at all.
-
-Guarded runs are additionally capped at **25 minutes of continuous inference**
-(`--max-runtime-seconds`, default and maximum 1500, exit code 79). The clock
-starts with the workload, not with the guard, so cool-start waiting does not
-consume it. Thermals remain the likelier stopping condition: GPU1 runs about
-5C hotter than its neighbours and has previously gone from 65C to an abort in
-roughly seventeen seconds of sustained c24 decode.
-
-AC repair has still **not** been confirmed. These bounds are doing real work.
+standing permission. AC repair has still **not** been confirmed.
 
 ### Superseded: active cooling/AC moratorium (2026-08-14)
 

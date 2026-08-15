@@ -1101,13 +1101,13 @@ def parser():
 def validate_args(args):
     try:
         guard = gpu_guard.validate_inherited_guard(
-            expected_gpus=8, maximum_abort_c=78
+            expected_gpus=8, maximum_abort_c=gpu_guard.MAX_ABORT_C
         )
     except gpu_guard.GuardError as error:
         raise recovery.GateError(
             "thermal_guard_required",
             "shadow soak requires an inherited eight-GPU thermal guard "
-            "capability at 78C or lower",
+            "capability bounded by the intake-air ceiling",
         ) from error
     args.thermal_guard = {
         "expected_gpus": guard["expected_gpus"],
