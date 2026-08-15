@@ -99,6 +99,80 @@ including the multimodal ones. Counting image tokens requires reproducing the
 engine's patch/preprocessing pipeline exactly, which this process deliberately
 does not do. Those requests defer to the remote authority.
 
+## Choosing and sizing a model
+
+The load balancer is model-neutral, but which model you put behind it and how
+you shard it change the answer by more than any router tuning does. These are
+measured on node06 (8x RTX PRO 6000 Blackwell) and are meant as a worked
+example of what to look at, not as universal constants.
+
+### Sparse MoE and dense models fail differently
+
+A sparse mixture-of-experts activates a fraction of its parameters per token; a
+dense model activates all of them. That difference dominates single-stream
+decode and barely shows up in aggregate throughput.
+
+| | DeepSeek-V4-Flash (sparse MoE) | Qwen3.8-27B (dense) |
+|---|---|---|
+| per-stream decode @ c1 | 245.1 tok/s | 77, or 121 with MTP |
+| per-stream decode @ c8 | 107.5 tok/s | ~102 |
+| aggregate @ c8 | 556 tok/s | 817 |
+
+Neither is "better". Pick against the workload: a single interactive user feels
+the c1 column, a fleet of agents feels the aggregate column. Do not generalise
+from one to the other -- the aggregate figures completely hide the c1 gap.
+
+Two consequences worth knowing before tuning:
+
+- **Speculative-decoding depth does not transfer between them.** DeepSeek ran
+  DSpark at depth 5-7. On Qwen3.8, depth 4 measured *worse* than depth 2 (91.2
+  vs 117.9 tok/s at c1) because acceptance falls from 61% to 38% and the extra
+  draft compute is not repaid. Draft tokens are cheap relative to the target
+  step on a sparse MoE and expensive on a dense one.
+- **Being far from the bandwidth roofline means the bottleneck is elsewhere.**
+  Qwen3.8-27B at TP4 realises about 29% of its weight-bandwidth roofline, so
+  the missing time is kernel and tensor-parallel communication across 64
+  layers, not memory. That is a signal to change the sharding, not the
+  scheduler.
+
+### Shard count is a cache decision, not just a parallelism decision
+
+This is the part that is easy to miss. mini-dynamo routes on prefix overlap, so
+the number of engines determines how many distinct system prompts can each own
+a warm engine. N engines partition M apps N ways.
+
+Measured with four apps, 24KiB of shared system prompt each, warm:
+
+| concurrency | TP4 x2 | TP2 x4 | TTFT p50 |
+|---|---|---|---|
+| 8 | 636 tok/s | **659** | 0.65s -> **0.31s** |
+| 32 | 1805 tok/s | **2069** | 1.74s -> **1.03s** |
+| 64 | 2183 tok/s | **2726** | 2.50s -> **1.83s** |
+
+Four two-GPU engines beat two four-GPU engines by up to 25% on throughput and
+cut TTFT roughly in half, on identical hardware, for two compounding reasons:
+each app can own an engine rather than sharing one, and TP2 pays less
+allreduce than TP4. Halving the shard size did not cost context -- both serve
+the full 253,952-token window, because the KV pool bounds concurrency rather
+than request length.
+
+The corollary is that **benchmarking with unique prompts will mislead you
+here**. A sweep where every request is unique cannot see cache partitioning at
+all; it measures the one thing this router is not for. `bench/qwen_concurrency.py`
+takes `--apps` and `--prefix-kib` for this reason, and the difference between
+the two modes is large: the same TP4 pair reads 817 tok/s at c8 on unique
+prompts and 636 tok/s at c8 on shared prefixes, because the shared-prefix
+requests carry ~6000 prompt tokens each even when cached.
+
+### Thermal envelope can be the real capacity limit
+
+On node06 the binding constraint is not the GPUs' compute. Sustained c64 with
+large shared prefixes drove GPU1 -- consistently ~5C hotter than its
+neighbours -- to 85C in 92.7 seconds, and the thermal guard terminated the
+run. c32 sustains fine. Measure how long a configuration can hold a load, not
+only how fast it goes while it does; see AGENTS.md for the guard's ceiling and
+continuous-inference cap.
+
 ## Engine-side settings that are not our concern but bite anyway
 
 These live in the deployment, not in a profile, but a model will appear broken
