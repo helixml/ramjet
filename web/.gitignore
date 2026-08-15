@@ -2,3 +2,5 @@ node_modules
 dist
 *.local
 *.tsbuildinfo
+# web/.env is committed dev config (proxy target), not secrets.
+!.env
