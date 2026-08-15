@@ -34,16 +34,21 @@ mini-dynamo LB               samples every MD_MACHINEVIEW_INTERVAL_MS:
 cd web
 npm install
 
+# Live node06 data with zero setup (on the VPN): web/.env points the dev
+# proxy at node06's LB, so this alone shows the real box with HMR.
+npm run dev                # open http://localhost:5173/ui/
+
 # Pure UI work, no backend at all — deterministic synthetic data:
 npm run dev                # then open http://localhost:5173/ui/?mock=1
 
-# Against a live LB (any mini-dynamo with machineview on). The dev server
-# proxies /api to UI_PROXY_TARGET (default http://127.0.0.1:9090). On the
-# VPN, point it straight at the box's tailnet address:
-UI_PROXY_TARGET=http://100.89.187.17:8007 npm run dev   # node06
+# Another box or a locally running LB: a shell UI_PROXY_TARGET beats web/.env.
+UI_PROXY_TARGET=http://127.0.0.1:9090 npm run dev
 
 npm run build              # tsc + vite; output lands in web/dist
 ```
+
+The dev server proxies both `/api` and `/metrics` to the same target, so the
+Prometheus button works in dev too.
 
 The production bundle is built in the Dockerfile's `ui` stage and copied to
 `/ui` in the LB image, where the Rust side serves it on the metrics listener
