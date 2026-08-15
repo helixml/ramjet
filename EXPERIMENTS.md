@@ -128,6 +128,54 @@ asserted. Two larger levers are consequently untested:
   image registers `Qwen3_5MTP`. Expect this to help single-stream latency and
   possibly to hurt saturated throughput, so it should be measured at both ends.
 
+### Single-stream decode is half of DeepSeek-V4-Flash, and that is architectural
+
+Comparing like for like against the DS4-Flash figures recorded earlier in this
+journal (engine A direct, c1):
+
+| | DS4-Flash | Qwen3.8-27B | Qwen3.8-27B + MTP |
+|---|---|---|---|
+| per-stream decode @ c1 | **245.1 tok/s** | 77 tok/s | 121 tok/s |
+
+Even with MTP, single-user decode is roughly half the model it replaced. This
+was not visible in the aggregate numbers and is the honest headline for
+interactive use.
+
+The cause is the model, not the deployment. DS4-Flash is a sparse MoE that
+activates a small fraction of its parameters per token; Qwen3.8-27B is
+**dense**, so all 27B participate in every token and decode is bound by weight
+traffic in a way DS4 is not.
+
+**Deeper speculation does not close the gap; it widens it.**
+`num_speculative_tokens=4` was measured against 2:
+
+| depth | acceptance | tokens/target step | c1 aggregate | c8 | c32 |
+|---|---|---|---|---|---|
+| 2 | 61.3% | 2.23 | **117.9** | **817.1** | **2888.9** |
+| 4 | 37.8% | 2.51 | 91.2 | 769.1 | 2455.9 |
+
+Doubling the draft depth buys only 2.23 -> 2.51 tokens per target step while
+doubling the draft compute, because acceptance falls off fast with position
+(77% at position 0, 46% at position 1). Depth 2 stays the setting. DS4's
+DSpark depth of 5-7 does not transfer: it worked there because a sparse MoE
+makes draft tokens far cheaper relative to the target step.
+
+Also note Qwen is only behind at low concurrency. At c8 DS4 recorded 107.5
+tok/s per-stream and 556.3 aggregate; Qwen+MTP records about 102 tok/s
+per-stream and 817.1 aggregate. The regression is specifically single-user
+latency, and it is traded for vision, a 262144 window, and better aggregate
+throughput.
+
+**Where the remaining headroom is.** 77 tok/s at TP4 is about 29% of this
+model's weight-bandwidth roofline (27GB FP8 over four cards at roughly 1.8TB/s
+implies ~3.75ms/token, or ~267 tok/s, against the ~13ms/token observed). The
+missing ~9ms is not bandwidth, so it is kernel and tensor-parallel
+communication overhead across 64 layers. That points at a TP-size sweep -- TP8
+for maximum bandwidth per token, TP2 for fewer allreduces -- as the next
+diagnostic. It is only a diagnostic: TP8 collapses the stack to a single
+engine, which removes the redundancy and the load balancing that this
+deployment exists to provide.
+
 ### Fail-open verified against the original saturation outage (#170)
 
 The balancer fix from #172 was verified on node06 against the exact load that
