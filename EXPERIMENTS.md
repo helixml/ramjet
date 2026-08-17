@@ -1,5 +1,55 @@
 # node06 experiment journal
 
+## 2026-08-17 — 1 Hz WebSocket stream and dot heatmaps (LB-only)
+
+Second LB-only recreate of the day. The dashboard refreshed every five
+seconds because that is how often it scrapes engines and the host agent; the
+numbers that move fastest come from the proxy's own in-process registry and
+cost nothing to read. `/api/machineview/stream` now publishes those at 1 Hz
+(`MD_MACHINEVIEW_STREAM_INTERVAL_MS`, 200–10000) and pushes the full sample
+onto the same socket when it lands. The effect on real traffic is visible:
+per-second prompt spikes above 60K tok/s that the 5 s series had averaged
+away.
+
+The stream is bounded on purpose. Nothing is published while no client is
+connected and the rate tracker resets when the last one leaves, so an
+unwatched dashboard costs what it did before; at most 8 clients stream at
+once; a client too slow for the interval is dropped rather than served a
+backlog. Engine- and host-derived charts stay on the sampling interval,
+because a live frame carries no engine or host fields and interpolating them
+would be invention. The UI keeps polling underneath and reconnects with
+backoff, so no route, no upgrade, or a dropped socket degrades to the
+five-second dashboard.
+
+The heatmaps became dot matrices: area proportional to value over the same
+quantile-stepped color, and `Tokens by day` regridded to one column per date
+× one row per three-hour band.
+
+| | |
+|---|---|
+| candidate | `ghcr.io/helixml/ds4-loadbalancer:rust-livestream-4784993` (local build, image ID `sha256:e0cd047f…`) |
+| rollback | `ghcr.io/helixml/ds4-loadbalancer:rust-tokenheatmaps-89f7926` |
+| build / transfer | 62.8s (cold deps) then 7.3s / 4.2s |
+| healthy after | 2s; 4/4 upstreams, `/health` 200, `/ui/` 200, stream handshake 101 |
+| token history | 4 buckets before and after the recreate — persistence held |
+
+Verified before deploying by running the exact candidate image locally and
+driving the socket from a browser: `hello`, then `serving` frames 1002ms
+apart, with `sample` frames interleaved on the 5 s interval.
+
+Enabling axum's `ws` feature moved the dependency content key to
+`rust-deps-sha256-6b57bfd2`. That image was seeded locally
+(`docker build -f Dockerfile.deps`) because it is not published yet; note
+that the `docker-container` buildx builder cannot see the local daemon's
+image store, so this build had to go through the default builder.
+
+**Correction to the previous entry's gate claim.** The clippy run recorded
+there returned "Finished in 0.13s" from cache without linting. Run properly
+it found real violations (`float_cmp` in the new tests, unnested or-patterns,
+identical match arms), all fixed here. The shipped binary was unaffected —
+every finding was in test code or a style lint — but the earlier "clippy
+`-D warnings` green" statement was not evidence.
+
 ## 2026-08-17 — machine-view token history and the History heatmaps (LB-only)
 
 Added a second, much cheaper store beside the machine-view sample ring:
