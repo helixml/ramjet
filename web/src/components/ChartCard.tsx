@@ -8,12 +8,27 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import { TimeChart, type BandDef, type SeriesDef, type TimeChartProps } from "@/components/TimeChart"
 import { fmtClockFull } from "@/lib/format"
 
 export interface ChartCardProps extends TimeChartProps {
   title: string
   description?: string
+  loading?: boolean
+}
+
+function ChartSkeleton({ height }: { height: number }) {
+  return (
+    <div className="flex flex-col gap-3" aria-hidden>
+      <div className="flex gap-2">
+        <Skeleton className="h-2.5 w-12" />
+        <Skeleton className="h-2.5 w-16" />
+        <Skeleton className="h-2.5 w-10" />
+      </div>
+      <Skeleton className="w-full rounded-md" style={{ height }} />
+    </div>
+  )
 }
 
 function Legend({ series, band }: { series: SeriesDef[]; band?: BandDef }) {
@@ -104,30 +119,37 @@ function TableView({
   )
 }
 
-export function ChartCard({ title, description, ...chart }: ChartCardProps) {
+export function ChartCard({ title, description, loading = false, ...chart }: ChartCardProps) {
   const [table, setTable] = useState(false)
   const hasData = chart.data.some((row) =>
     chart.series.some((def) => typeof row[def.key] === "number"),
   )
   return (
-    <Card>
+    <Card aria-busy={loading || undefined}>
       <CardHeader className="flex-row items-start justify-between gap-2">
         <div className="flex flex-col gap-1">
           <CardTitle>{title}</CardTitle>
-          {description ? <CardDescription>{description}</CardDescription> : null}
-          <Legend series={chart.series} band={chart.band} />
+          {loading ? (
+            <Skeleton className="h-3 w-40" />
+          ) : description ? (
+            <CardDescription>{description}</CardDescription>
+          ) : null}
+          {loading ? null : <Legend series={chart.series} band={chart.band} />}
         </div>
         <Button
           variant="ghost"
           size="icon"
           aria-label={table ? "Show chart" : "Show table"}
           onClick={() => setTable((current) => !current)}
+          disabled={loading}
         >
           {table ? <ChartArea /> : <Table2 />}
         </Button>
       </CardHeader>
       <CardContent>
-        {hasData ? (
+        {loading ? (
+          <ChartSkeleton height={chart.height ?? 180} />
+        ) : hasData ? (
           table ? (
             <TableView
               data={chart.data}

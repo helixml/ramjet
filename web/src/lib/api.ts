@@ -4,6 +4,8 @@ export interface DiskSample {
   mount: string
   total_bytes: number
   used_bytes: number
+  inodes_total?: number | null
+  inodes_used?: number | null
 }
 
 export interface HostSample {
@@ -14,10 +16,19 @@ export interface HostSample {
   mem_cached_bytes: number | null
   swap_total_bytes: number | null
   swap_used_bytes: number | null
+  dirty_bytes?: number | null
+  writeback_bytes?: number | null
   net_rx_bps: number | null
   net_tx_bps: number | null
   disk_read_bps: number | null
   disk_write_bps: number | null
+  disk_read_iops?: number | null
+  disk_write_iops?: number | null
+  disk_util_pct?: number | null
+  disk_inflight?: number | null
+  iowait_pct?: number | null
+  io_pressure_pct?: number | null
+  mem_pressure_pct?: number | null
   cpu_watts: number | null
   disks?: DiskSample[]
 }

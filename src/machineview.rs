@@ -208,10 +208,28 @@ pub struct HostSample {
     pub mem_cached_bytes: Option<f64>,
     pub swap_total_bytes: Option<f64>,
     pub swap_used_bytes: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_bytes: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writeback_bytes: Option<f64>,
     pub net_rx_bps: Option<f64>,
     pub net_tx_bps: Option<f64>,
     pub disk_read_bps: Option<f64>,
     pub disk_write_bps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_read_iops: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_write_iops: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_util_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_inflight: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iowait_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_pressure_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_pressure_pct: Option<f64>,
     pub cpu_watts: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disks: Vec<DiskSample>,
@@ -222,6 +240,10 @@ pub struct DiskSample {
     pub mount: String,
     pub total_bytes: f64,
     pub used_bytes: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inodes_total: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inodes_used: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -771,6 +793,15 @@ fn merge_samples(bucket: &[&Sample]) -> Sample {
             net_tx_bps: mean(hosts.iter().map(|h| h.net_tx_bps)),
             disk_read_bps: mean(hosts.iter().map(|h| h.disk_read_bps)),
             disk_write_bps: mean(hosts.iter().map(|h| h.disk_write_bps)),
+            disk_read_iops: mean(hosts.iter().map(|h| h.disk_read_iops)),
+            disk_write_iops: mean(hosts.iter().map(|h| h.disk_write_iops)),
+            disk_util_pct: mean(hosts.iter().map(|h| h.disk_util_pct)),
+            disk_inflight: mean(hosts.iter().map(|h| h.disk_inflight)),
+            iowait_pct: mean(hosts.iter().map(|h| h.iowait_pct)),
+            io_pressure_pct: mean(hosts.iter().map(|h| h.io_pressure_pct)),
+            mem_pressure_pct: mean(hosts.iter().map(|h| h.mem_pressure_pct)),
+            dirty_bytes: mean(hosts.iter().map(|h| h.dirty_bytes)),
+            writeback_bytes: mean(hosts.iter().map(|h| h.writeback_bytes)),
             cpu_watts: mean(hosts.iter().map(|h| h.cpu_watts)),
             disks: hosts.last().map(|h| h.disks.clone()).unwrap_or_default(),
         }
@@ -1037,10 +1068,32 @@ fn sanitize_host(mut host: HostSample) -> HostSample {
     host.net_tx_bps = finite(host.net_tx_bps).map(|v| v.max(0.0));
     host.disk_read_bps = finite(host.disk_read_bps).map(|v| v.max(0.0));
     host.disk_write_bps = finite(host.disk_write_bps).map(|v| v.max(0.0));
+    host.disk_read_iops = finite(host.disk_read_iops).map(|v| v.max(0.0));
+    host.disk_write_iops = finite(host.disk_write_iops).map(|v| v.max(0.0));
+    host.disk_util_pct = finite(host.disk_util_pct).map(|v| v.clamp(0.0, 100.0));
+    host.disk_inflight = finite(host.disk_inflight).map(|v| v.max(0.0));
+    host.iowait_pct = finite(host.iowait_pct).map(|v| v.clamp(0.0, 100.0));
+    host.io_pressure_pct = finite(host.io_pressure_pct).map(|v| v.clamp(0.0, 100.0));
+    host.mem_pressure_pct = finite(host.mem_pressure_pct).map(|v| v.clamp(0.0, 100.0));
+    host.dirty_bytes = finite(host.dirty_bytes).map(|v| v.max(0.0));
+    host.writeback_bytes = finite(host.writeback_bytes).map(|v| v.max(0.0));
     host.cpu_watts = finite(host.cpu_watts).map(|v| v.max(0.0));
     host.disks.retain(|disk| {
         disk.total_bytes.is_finite() && disk.used_bytes.is_finite() && disk.total_bytes >= 0.0
     });
+    for disk in &mut host.disks {
+        disk.mount.truncate(128);
+        match (finite(disk.inodes_total), finite(disk.inodes_used)) {
+            (Some(total), Some(used)) if total > 0.0 => {
+                disk.inodes_total = Some(total);
+                disk.inodes_used = Some(used.clamp(0.0, total));
+            }
+            _ => {
+                disk.inodes_total = None;
+                disk.inodes_used = None;
+            }
+        }
+    }
     host.disks.truncate(16);
     host
 }
@@ -1906,6 +1959,24 @@ mod tests {
         assert_eq!(host.cpu_pct, Some(100.0));
         assert_eq!(host.net_rx_bps, Some(0.0));
         assert_eq!(host.cpu_watts, None);
+        let host = sanitize_host(HostSample {
+            iowait_pct: Some(140.0),
+            io_pressure_pct: Some(-2.0),
+            disk_inflight: Some(-1.0),
+            disks: vec![DiskSample {
+                mount: "/".repeat(200),
+                total_bytes: 100.0,
+                used_bytes: 40.0,
+                inodes_total: Some(100.0),
+                inodes_used: Some(250.0),
+            }],
+            ..HostSample::default()
+        });
+        assert_eq!(host.iowait_pct, Some(100.0));
+        assert_eq!(host.io_pressure_pct, Some(0.0));
+        assert_eq!(host.disk_inflight, Some(0.0));
+        assert_eq!(host.disks[0].mount.len(), 128);
+        assert_eq!(host.disks[0].inodes_used, Some(100.0));
         let gpus = sanitize_gpus(vec![GpuSample {
             index: 0,
             name: "x".repeat(200),

@@ -144,7 +144,11 @@ def parse_nvidia_smi_csv(output):
 
 
 def parse_proc_stat_cpu(text):
-    """Returns (busy_jiffies, total_jiffies) from the aggregate cpu line."""
+    """Returns (busy, total, iowait) jiffies from the aggregate cpu line.
+
+    Idle includes iowait (the usual CPU-busy definition). iowait is also
+    returned separately so the dashboard can show IO stall beside disk rates.
+    """
     for line in text.splitlines():
         fields = line.split()
         if len(fields) >= 5 and fields[0] == "cpu":
@@ -155,8 +159,9 @@ def parse_proc_stat_cpu(text):
                 except ValueError:
                     return None
             total = sum(values)
-            idle = values[3] + (values[4] if len(values) > 4 else 0)
-            return (total - idle, total)
+            iowait = values[4] if len(values) > 4 else 0
+            idle = values[3] + iowait
+            return (total - idle, total, iowait)
     return None
 
 
@@ -191,6 +196,8 @@ def parse_meminfo(text):
         "mem_cached_bytes": cached_total,
         "swap_total_bytes": swap_total,
         "swap_used_bytes": swap_used,
+        "dirty_bytes": fields.get("Dirty"),
+        "writeback_bytes": fields.get("Writeback"),
     }
 
 
@@ -219,9 +226,13 @@ def parse_net_dev(text):
 
 
 def parse_diskstats(text):
-    """Sums sectors read/written across whole disks (not partitions)."""
+    """Sums whole-disk counters (not partitions). Returns None if none seen."""
     read_sectors = 0
     written_sectors = 0
+    reads = 0
+    writes = 0
+    inflight = 0
+    io_ticks = {}
     seen = False
     for line in text.splitlines():
         fields = line.split()
@@ -237,12 +248,45 @@ def parse_diskstats(text):
         if not is_whole:
             continue
         try:
+            reads += int(fields[3])
             read_sectors += int(fields[5])
+            writes += int(fields[7])
             written_sectors += int(fields[9])
+            inflight += int(fields[11])
+            io_ticks[name] = int(fields[12])
         except ValueError:
             continue
         seen = True
-    return (read_sectors * 512, written_sectors * 512) if seen else None
+    if not seen:
+        return None
+    return {
+        "read_bytes": read_sectors * 512,
+        "write_bytes": written_sectors * 512,
+        "reads": reads,
+        "writes": writes,
+        "inflight": inflight,
+        "io_ticks": io_ticks,
+    }
+
+
+def parse_pressure(text):
+    """Returns some-avg10 (0–100) from a /proc/pressure/{cpu,io,memory} file."""
+    if not text:
+        return None
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields or fields[0] != "some":
+            continue
+        for field in fields[1:]:
+            if field.startswith("avg10="):
+                try:
+                    value = float(field.split("=", 1)[1])
+                except ValueError:
+                    return None
+                if value != value or value in (float("inf"), float("-inf")):
+                    return None
+                return max(0.0, min(100.0, value))
+    return None
 
 
 def parse_loadavg(text):
@@ -288,22 +332,26 @@ class Collector:
             return None
         return (value - prior_value) / (now - prior_t)
 
-    def _cpu_pct(self, now):
+    def _cpu_shares(self, now):
+        """Returns (cpu_pct, iowait_pct); both None on the first sample."""
         text = self._read(os.path.join(self.proc_root, "stat"))
         parsed = parse_proc_stat_cpu(text) if text else None
         if parsed is None:
-            return None
-        busy, total = parsed
+            return (None, None)
+        busy, total, iowait = parsed
         prior = self.previous.get("cpu")
-        self.previous["cpu"] = (now, (busy, total))
+        self.previous["cpu"] = (now, (busy, total, iowait))
         if prior is None:
-            return None
-        _, (prior_busy, prior_total) = prior
+            return (None, None)
+        _, (prior_busy, prior_total, prior_iowait) = prior
         delta_total = total - prior_total
         delta_busy = busy - prior_busy
-        if delta_total <= 0 or delta_busy < 0:
-            return None
-        return max(0.0, min(100.0, delta_busy * 100.0 / delta_total))
+        delta_iowait = iowait - prior_iowait
+        if delta_total <= 0 or delta_busy < 0 or delta_iowait < 0:
+            return (None, None)
+        cpu_pct = max(0.0, min(100.0, delta_busy * 100.0 / delta_total))
+        iowait_pct = max(0.0, min(100.0, delta_iowait * 100.0 / delta_total))
+        return (cpu_pct, iowait_pct)
 
     def _rapl_watts(self, now):
         try:
@@ -331,6 +379,26 @@ class Collector:
                 total = (total or 0.0) + watts
         return total
 
+    def _disk_util_pct(self, io_ticks, now):
+        """Busiest whole disk: io_ticks delta as a percent of wall time."""
+        prior = self.previous.get("disk.io_ticks")
+        self.previous["disk.io_ticks"] = (now, io_ticks)
+        if prior is None or not io_ticks:
+            return None
+        prior_t, prior_map = prior
+        elapsed_ms = (now - prior_t) * 1000.0
+        if elapsed_ms <= 0:
+            return None
+        busiest = None
+        for name, ticks in io_ticks.items():
+            previous = prior_map.get(name)
+            if previous is None or ticks < previous:
+                continue
+            util = min(100.0, (ticks - previous) * 100.0 / elapsed_ms)
+            if busiest is None or util > busiest:
+                busiest = util
+        return busiest
+
     def _disks(self):
         disks = []
         for mount in self.mounts:
@@ -342,13 +410,15 @@ class Collector:
             free = stats.f_frsize * stats.f_bavail
             if total <= 0:
                 continue
-            disks.append(
-                {
-                    "mount": mount,
-                    "total_bytes": total,
-                    "used_bytes": max(total - free, 0),
-                }
-            )
+            disk = {
+                "mount": mount,
+                "total_bytes": total,
+                "used_bytes": max(total - free, 0),
+            }
+            if stats.f_files > 0:
+                disk["inodes_total"] = float(stats.f_files)
+                disk["inodes_used"] = float(max(stats.f_files - stats.f_favail, 0))
+            disks.append(disk)
         return disks
 
     def _query_gpus(self, fields):
@@ -391,22 +461,44 @@ class Collector:
             load_text = self._read(os.path.join(self.proc_root, "loadavg"))
             mem_text = self._read(os.path.join(self.proc_root, "meminfo"))
             memory = parse_meminfo(mem_text) if mem_text else None
+            cpu_pct, iowait_pct = self._cpu_shares(now)
+            io_pressure = parse_pressure(
+                self._read(os.path.join(self.proc_root, "pressure", "io"))
+            )
+            mem_pressure = parse_pressure(
+                self._read(os.path.join(self.proc_root, "pressure", "memory"))
+            )
             host = {
-                "cpu_pct": self._cpu_pct(now),
+                "cpu_pct": cpu_pct,
                 "load1": parse_loadavg(load_text) if load_text else None,
                 "mem_total_bytes": None,
                 "mem_used_bytes": None,
                 "mem_cached_bytes": None,
                 "swap_total_bytes": None,
                 "swap_used_bytes": None,
+                "dirty_bytes": None,
+                "writeback_bytes": None,
                 "net_rx_bps": self._rate("net.rx", net[0] if net else None, now),
                 "net_tx_bps": self._rate("net.tx", net[1] if net else None, now),
                 "disk_read_bps": self._rate(
-                    "disk.read", disk[0] if disk else None, now
+                    "disk.read", disk["read_bytes"] if disk else None, now
                 ),
                 "disk_write_bps": self._rate(
-                    "disk.write", disk[1] if disk else None, now
+                    "disk.write", disk["write_bytes"] if disk else None, now
                 ),
+                "disk_read_iops": self._rate(
+                    "disk.reads", disk["reads"] if disk else None, now
+                ),
+                "disk_write_iops": self._rate(
+                    "disk.writes", disk["writes"] if disk else None, now
+                ),
+                "disk_util_pct": self._disk_util_pct(
+                    disk["io_ticks"] if disk else {}, now
+                ),
+                "disk_inflight": None if disk is None else float(disk["inflight"]),
+                "iowait_pct": iowait_pct,
+                "io_pressure_pct": io_pressure,
+                "mem_pressure_pct": mem_pressure,
                 "cpu_watts": self._rapl_watts(now),
                 "disks": self._disks(),
             }

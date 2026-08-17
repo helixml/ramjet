@@ -111,6 +111,7 @@ export function TimeChart({
   domain = [0, "auto"],
   height = 180,
 }: TimeChartProps) {
+  const fillOpacity = stacked ? 0.45 : series.length === 1 ? 0.4 : 0
   return (
     <div style={{ height }} className="w-full">
       <ResponsiveContainer width="100%" height="100%">
@@ -177,8 +178,8 @@ export function TimeChart({
               strokeWidth={2}
               strokeLinejoin="round"
               strokeLinecap="round"
-              fill={def.color}
-              fillOpacity={0.1}
+              fill={fillOpacity > 0 ? def.color : "none"}
+              fillOpacity={fillOpacity}
               dot={false}
               activeDot={{
                 r: 4,
