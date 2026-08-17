@@ -110,17 +110,22 @@ example of what to look at, not as universal constants.
 
 A sparse mixture-of-experts activates a fraction of its parameters per token; a
 dense model activates all of them. That difference dominates single-stream
-decode and barely shows up in aggregate throughput.
+decode, while full-box capacity also depends heavily on batching, speculation,
+and the concurrency at which each stack saturates.
 
 | | DeepSeek-V4-Flash (sparse MoE) | Qwen3.8-27B (dense) |
 |---|---|---|
 | per-stream decode @ c1 | 245.1 tok/s | 77, or 121 with MTP |
-| per-stream decode @ c8 | 107.5 tok/s | ~102 |
-| aggregate @ c8 | 556 tok/s | 817 |
+| best qualified full-box throughput | 1,891.2 tok/s | 7,890.9 tok/s |
+| measured shape | c24/max256 | c256/max256, MTP off |
 
 Neither is "better". Pick against the workload: a single interactive user feels
-the c1 column, a fleet of agents feels the aggregate column. Do not generalise
-from one to the other -- the aggregate figures completely hide the c1 gap.
+the c1 row, while a saturated fleet cares about the full-box row. The capacity
+figures are each model's best qualified point on the same two-TP4/eight-GPU
+topology, but they come from separate model-specific workloads and are not a
+matched head-to-head benchmark. DeepSeek's c24 result completed 72/72 requests;
+Qwen's c256 result uses deterministic 256-token outputs and disables MTP,
+which measured 12.5% slower once the box was saturated.
 
 Two consequences worth knowing before tuning:
 
