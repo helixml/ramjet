@@ -24,8 +24,8 @@ IMAGE = (
 )
 FINGERPRINT = "vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8"
 SOURCES = {
-    "dspark-0731": f"/prod/mini-dynamo/jit-cache/{FINGERPRINT}/engine-a",
-    "dspark-0731-b": f"/prod/mini-dynamo/jit-cache/{FINGERPRINT}/engine-b",
+    "dspark-0731": f"/prod/ramjet/jit-cache/{FINGERPRINT}/engine-a",
+    "dspark-0731-b": f"/prod/ramjet/jit-cache/{FINGERPRINT}/engine-b",
 }
 _FINGERPRINT = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 

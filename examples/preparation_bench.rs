@@ -1,6 +1,6 @@
 use std::{hint::black_box, time::Instant};
 
-use mini_dynamo::{
+use ramjet::{
     config::Affinity,
     prepare::PreparedRequest,
     router::{Router, RouterConfig},

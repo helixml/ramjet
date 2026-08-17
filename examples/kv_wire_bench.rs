@@ -1,6 +1,6 @@
 use std::{hint::black_box, time::Instant};
 
-use mini_dynamo::kv_wire::{KvWireLimits, decode_batch};
+use ramjet::kv_wire::{KvWireLimits, decode_batch};
 use serde::Serialize;
 use serde_json::json;
 

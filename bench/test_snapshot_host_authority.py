@@ -168,7 +168,7 @@ class SnapshotHostAuthorityTests(unittest.TestCase):
                 "--system",
                 "--gid",
                 "12000",
-                "mini-dynamo-snapshot",
+                "ramjet-snapshot",
             ),
         )
         self.assertEqual(
@@ -232,10 +232,10 @@ class SnapshotHostAuthorityTests(unittest.TestCase):
 
     def test_user_collision_and_unsafe_existing_identity_fail(self):
         cases = (
-            ("mini-dynamo", 22002, 12000, frozenset()),
+            ("ramjet", 22002, 12000, frozenset()),
             ("occupied", 12002, 12000, frozenset()),
-            ("mini-dynamo", 12002, 12000, frozenset({12004})),
-            ("mini-dynamo", 12002, 12004, frozenset()),
+            ("ramjet", 12002, 12000, frozenset({12004})),
+            ("ramjet", 12002, 12004, frozenset()),
         )
         for name, uid, primary, supplementary in cases:
             with self.subTest(name=name, uid=uid, primary=primary):

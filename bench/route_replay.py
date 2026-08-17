@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static counterfactual replay for mini-dynamo route-journal JSONL.
+"""Static counterfactual replay for ramjet route-journal JSONL.
 
 Usage:
   docker logs ds4-loadbalancer 2>&1 | python3 route_replay.py -

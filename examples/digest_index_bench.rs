@@ -4,7 +4,7 @@
 
 use std::{fs, hint::black_box, time::Instant};
 
-use mini_dynamo::{
+use ramjet::{
     block_digest::BlockDigester,
     digest_index::{DigestIndexLimits, DigestKvIndex, SnapshotGroupKey},
     exact_index::{ExactIndexLimits, ExactKvIndex},

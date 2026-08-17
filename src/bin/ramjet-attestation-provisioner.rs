@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use mini_dynamo::companion_attestation_provisioner::{
+use ramjet::companion_attestation_provisioner::{
     CompanionAttestationProvisionerConfig, provision_authenticated_engine_incarnation,
 };
 

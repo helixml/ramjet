@@ -1,4 +1,4 @@
-use mini_dynamo::kv_snapshot::*;
+use ramjet::kv_snapshot::*;
 use serde::Serialize;
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};

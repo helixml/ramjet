@@ -2408,7 +2408,7 @@ mod tests {
         guarded.insert("RJ_DSPARK_GUARD_MODE", "quarantine");
         guarded.insert(
             "RJ_DSPARK_GUARD_STATE_PATH",
-            "/run/mini-dynamo-dspark-guard/state.json",
+            "/run/ramjet-dspark-guard/state.json",
         );
         assert_eq!(
             Config::from_lookup(|key| guarded.get(key).map(ToString::to_string))
@@ -2491,7 +2491,7 @@ mod tests {
             ("RJ_DSPARK_GUARD_MODE", "observe"),
             (
                 "RJ_DSPARK_GUARD_STATE_PATH",
-                "/run/mini-dynamo-dspark-guard/state.json",
+                "/run/ramjet-dspark-guard/state.json",
             ),
         ]);
         assert!(matches!(

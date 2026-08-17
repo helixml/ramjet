@@ -3088,7 +3088,7 @@
   "refresh": "30s",
   "schemaVersion": 41,
   "tags": [
-    "mini-dynamo",
+    "ramjet",
     "rtx6000pro"
   ],
   "templating": {
@@ -3100,7 +3100,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "MiniDynamo rtx6000pro",
+  "title": "Ramjet rtx6000pro",
   "uid": "minidynamo-rtx6000pro",
   "version": 1
 }

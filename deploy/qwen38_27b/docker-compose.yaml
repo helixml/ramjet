@@ -1,7 +1,7 @@
 # Canonical source: helixml/ramjet/deploy/qwen38_27b/docker-compose.yaml
 # Qwen3.8-27B-FP8 (vision-language) on 8x RTX PRO 6000 Blackwell (SM120), x86.
 #
-# Two TP4 engines behind the mini-dynamo load balancer, mirroring the
+# Two TP4 engines behind the ramjet load balancer, mirroring the
 # DeepSeek-V4-Flash topology: A on GPUs 0-3 (:8012), B on GPUs 4-7 (:8013).
 #
 # This file is the eight-GPU default, not the only option. The topology is

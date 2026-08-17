@@ -8,7 +8,8 @@ use axum::{
     http::{HeaderMap, Response, StatusCode},
     routing::{any, get, post},
 };
-use mini_dynamo::{
+use prometheus::{Encoder, Registry, TextEncoder};
+use ramjet::{
     config::Config,
     kv_consumer::KvEventConsumers,
     machineview,
@@ -17,7 +18,6 @@ use mini_dynamo::{
     router::{Router as LocalityRouter, RouterConfig},
     snapshot_route::SnapshotRouteConsumers,
 };
-use prometheus::{Encoder, Registry, TextEncoder};
 use tokio::{net::TcpListener, sync::broadcast};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
-    let config = Config::from_env().context("invalid mini-dynamo configuration")?;
+    let config = Config::from_env().context("invalid ramjet configuration")?;
     let registry = Arc::new(Registry::new());
     let metrics = Arc::new(Metrics::new(&registry).context("register metrics")?);
     let routing = Arc::new(LocalityRouter::new(RouterConfig {
@@ -54,14 +54,14 @@ async fn main() -> anyhow::Result<()> {
         .context("initialize snapshot route consumers")?;
     let kv_consumers = KvEventConsumers::start(&config, &metrics, &shutdown_tx);
     let exact_inventories =
-        if config.snapshot_route_mode == mini_dynamo::config::SnapshotRouteMode::Shadow {
+        if config.snapshot_route_mode == ramjet::config::SnapshotRouteMode::Shadow {
             snapshot_consumers.inventories()
         } else {
             kv_consumers
                 .inventories()
                 .iter()
                 .cloned()
-                .map(mini_dynamo::exact_route_inventory::ExactRouteInventory::direct)
+                .map(ramjet::exact_route_inventory::ExactRouteInventory::direct)
                 .collect()
         };
     let proxy = Proxy::new_with_exact_inventories(
@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
         routing,
         exact_inventories,
     )
-    .context("initialize mini-dynamo proxy")?;
+    .context("initialize ramjet proxy")?;
     let machineview_settings =
         machineview::Settings::from_env().context("invalid machineview configuration")?;
     let machineview = machineview::MachineView::start(
@@ -208,7 +208,7 @@ fn log_startup(config: &Config) {
         idle_drain_cooldown_seconds = config.idle_drain.cooldown.as_secs(),
         idle_drain_grace_seconds = config.idle_drain.drain_grace.as_secs(),
         idle_drain_interval_seconds = config.idle_drain_interval_seconds,
-        "mini-dynamo up: API :8000, metrics :9090"
+        "ramjet up: API :8000, metrics :9090"
     );
 }
 

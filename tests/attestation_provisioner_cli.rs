@@ -7,7 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use mini_dynamo::{
+use ramjet::{
     companion_attestation::{load_authenticated_engine_incarnation, load_companion_digest_secret},
     snapshot_secret_file::SnapshotSecretFilePolicy,
 };
@@ -35,7 +35,7 @@ impl Drop for TestDirectory {
 
 #[test]
 fn command_line_rejects_all_content_arguments() {
-    let output = Command::new(env!("CARGO_BIN_EXE_mini-dynamo-attestation-provisioner"))
+    let output = Command::new(env!("CARGO_BIN_EXE_ramjet-attestation-provisioner"))
         .arg("secret-or-identity-content")
         .output()
         .unwrap();
@@ -51,7 +51,7 @@ fn command_line_rejects_all_content_arguments() {
 
 #[test]
 fn missing_environment_is_content_free() {
-    let output = Command::new(env!("CARGO_BIN_EXE_mini-dynamo-attestation-provisioner"))
+    let output = Command::new(env!("CARGO_BIN_EXE_ramjet-attestation-provisioner"))
         .env_clear()
         .output()
         .unwrap();
@@ -119,7 +119,7 @@ fn fresh_explicit_metadata_provisions_authenticated_output_silently() {
     fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o600)).unwrap();
 
     for _ in 0..2 {
-        let output = Command::new(env!("CARGO_BIN_EXE_mini-dynamo-attestation-provisioner"))
+        let output = Command::new(env!("CARGO_BIN_EXE_ramjet-attestation-provisioner"))
             .env_clear()
             .env("RJ_SNAPSHOT_ENGINE_METADATA_PATH", &metadata_path)
             .env("RJ_SNAPSHOT_DIGEST_SECRET_PATH", &secret_path)

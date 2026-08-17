@@ -451,7 +451,7 @@ mod tests {
     fn configured() -> HashMap<&'static str, &'static str> {
         HashMap::from([
             ("RJ_SNAPSHOT_COMPANION_MODE", "serve"),
-            ("RJ_SNAPSHOT_SOCKET_PATH", "/run/mini-dynamo/snapshot.sock"),
+            ("RJ_SNAPSHOT_SOCKET_PATH", "/run/ramjet/snapshot.sock"),
             ("RJ_SNAPSHOT_COMPANION_UID", "12001"),
             ("RJ_SNAPSHOT_CLIENT_UID", "12002"),
             ("RJ_SNAPSHOT_SECRET_PATH", "/run/secrets/snapshot-session"),
@@ -618,7 +618,7 @@ mod tests {
         let config = load(&values).unwrap();
         let debug = format!("{config:?}");
         for forbidden in [
-            "/run/mini-dynamo/snapshot.sock",
+            "/run/ramjet/snapshot.sock",
             "/run/secrets/snapshot-session",
             "engine-a",
             "private-topic",

@@ -890,7 +890,7 @@ mod tests {
         if mode == SnapshotCompanionMode::Serve {
             values.extend([
                 ("RJ_SNAPSHOT_COMPANION_MODE", "serve"),
-                ("RJ_SNAPSHOT_SOCKET_PATH", "/run/mini-dynamo/snapshot.sock"),
+                ("RJ_SNAPSHOT_SOCKET_PATH", "/run/ramjet/snapshot.sock"),
                 ("RJ_SNAPSHOT_COMPANION_UID", "12001"),
                 ("RJ_SNAPSHOT_CLIENT_UID", "12002"),
                 ("RJ_SNAPSHOT_SECRET_PATH", "/run/secrets/snapshot-session"),
@@ -1027,7 +1027,7 @@ mod tests {
             )
         );
         for forbidden in [
-            "/run/mini-dynamo/snapshot.sock",
+            "/run/ramjet/snapshot.sock",
             "/run/secrets/snapshot-session",
             "tcp://a:5557",
             "snapshot-session",

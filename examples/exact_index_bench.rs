@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use mini_dynamo::{
+use ramjet::{
     exact_index::{ExactIndexLimits, ExactKvIndex, SharedExactKvInventory},
     kv_wire::{BlockRemoved, BlockStored, ExternalBlockHash, KvEvent},
 };

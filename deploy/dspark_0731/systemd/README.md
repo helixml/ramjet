@@ -9,7 +9,7 @@ prerequisite for ever applying `docker-compose.snapshot-lb.yaml`.
 `/run` is tmpfs. Every socket parent, attestation file, and session/digest
 secret the companion owns is destroyed on reboot, and nothing recreated them.
 After the 2026-08-14 12:10 UTC reboot the LB could not be *created* — runc
-failed the mount request for `/run/mini-dynamo-snapshot-attestation-a`, exit
+failed the mount request for `/run/ramjet-snapshot-attestation-a`, exit
 127. A create-time failure is not a process exit, so `restart: unless-stopped`
 never retried and `RestartCount` stayed `0`. Production served nothing for
 ~50 minutes and nothing alerted (#159).
@@ -18,8 +18,8 @@ never retried and `RestartCount` stayed `0`. Production served nothing for
 
 | File | Role |
 | --- | --- |
-| `tmpfiles.d/mini-dynamo-snapshot.conf` | Directory parents only, with the companion's own ownership/setgid/mode policy. Applied by `systemd-tmpfiles-setup.service`, long before `docker.service`. |
-| `mini-dynamo-snapshot-authority.service` | `oneshot` running `setup_snapshot_production_host.py`, then its read-only `--check`. Ordered `Before=docker.service`. |
+| `tmpfiles.d/ramjet-snapshot.conf` | Directory parents only, with the companion's own ownership/setgid/mode policy. Applied by `systemd-tmpfiles-setup.service`, long before `docker.service`. |
+| `ramjet-snapshot-authority.service` | `oneshot` running `setup_snapshot_production_host.py`, then its read-only `--check`. Ordered `Before=docker.service`. |
 
 The split is deliberate: a tmpfiles fragment must never invent secret material,
 and the provisioner must never be the thing standing between a reboot and a
@@ -44,15 +44,15 @@ safety property wins and the ordering is expressed with `Wants=`.
 
 ```bash
 install -D -m 0755 deploy/dspark_0731/setup_snapshot_production_host.py \
-  /usr/local/lib/mini-dynamo/setup_snapshot_production_host.py
-install -D -m 0644 deploy/dspark_0731/systemd/tmpfiles.d/mini-dynamo-snapshot.conf \
-  /etc/tmpfiles.d/mini-dynamo-snapshot.conf
-install -D -m 0644 deploy/dspark_0731/systemd/mini-dynamo-snapshot-authority.service \
-  /etc/systemd/system/mini-dynamo-snapshot-authority.service
+  /usr/local/lib/ramjet/setup_snapshot_production_host.py
+install -D -m 0644 deploy/dspark_0731/systemd/tmpfiles.d/ramjet-snapshot.conf \
+  /etc/tmpfiles.d/ramjet-snapshot.conf
+install -D -m 0644 deploy/dspark_0731/systemd/ramjet-snapshot-authority.service \
+  /etc/systemd/system/ramjet-snapshot-authority.service
 
-systemd-tmpfiles --create /etc/tmpfiles.d/mini-dynamo-snapshot.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/ramjet-snapshot.conf
 systemctl daemon-reload
-systemctl enable --now mini-dynamo-snapshot-authority.service
+systemctl enable --now ramjet-snapshot-authority.service
 ```
 
 ## Verify the acceptance condition
@@ -61,7 +61,7 @@ Simulated `/run` teardown must recover without manual steps:
 
 ```bash
 systemctl stop docker
-rm -rf /run/mini-dynamo-snapshot-* /run/secrets/mini-dynamo-snapshot-*
+rm -rf /run/ramjet-snapshot-* /run/secrets/ramjet-snapshot-*
 systemctl restart systemd-tmpfiles-setup.service
 systemctl restart docker            # pulls in the authority unit first
 setup_snapshot_production_host.py --check

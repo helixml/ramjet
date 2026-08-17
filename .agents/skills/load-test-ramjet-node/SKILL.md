@@ -132,7 +132,7 @@ not reconcile, or the guard journal did not finish with `status=passed`.
 
 - For direct B tests, first single-home ramjet on A and verify A health.
   Keep B out of every HTTP and KV endpoint list until qualification passes.
-- Hold `/run/lock/mini-dynamo-node06-deployment.lock` across every deployment
+- Hold `/run/lock/ramjet-node06-deployment.lock` across every deployment
   inspect/mutate/verify interval. Recreate only the named service; never run an
   unscoped Compose update.
 - Capture the baseline image IDs, rendered service hashes, starts, restart

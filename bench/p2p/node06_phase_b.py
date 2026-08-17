@@ -42,8 +42,8 @@ EXPECTED_DRIVER = "595.84"
 CONTROL_CONTAINER = "dspark-0731"
 TARGET_CONTAINER = "dspark-0731-b"
 LB_CONTAINER = "ds4-loadbalancer"
-HARNESS_OWNER_LABEL = "org.helixml.mini-dynamo.p2p-phase-b-owner"
-DEPLOYMENT_LOCK = pathlib.Path("/run/lock/mini-dynamo-node06-deployment.lock")
+HARNESS_OWNER_LABEL = "org.helixml.ramjet.p2p-phase-b-owner"
+DEPLOYMENT_LOCK = pathlib.Path("/run/lock/ramjet-node06-deployment.lock")
 COMPOSE_DIR = pathlib.Path("/home/luke/inference/dspark_0731")
 COMPOSE_FILE = COMPOSE_DIR / "docker-compose.yaml"
 PROFILE_ACK = "I_ACKNOWLEDGE_NODE06_PRODUCTION_RISK"
@@ -816,7 +816,7 @@ def container_base(
         "--name",
         name,
         "--label",
-        "org.helixml.mini-dynamo.scope=phase-b-offline",
+        "org.helixml.ramjet.scope=phase-b-offline",
         "--network",
         "none",
         "--ipc",
@@ -1056,7 +1056,7 @@ def active_run(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
 def active_run_locked(args: argparse.Namespace, state: Preflight) -> pathlib.Path:
     if os.geteuid() != 0:
         raise GateError("active mode must run as root for immutable tool ownership")
-    result = pathlib.Path(tempfile.mkdtemp(prefix="mini-dynamo-p2p-phase-b.", dir="/tmp"))
+    result = pathlib.Path(tempfile.mkdtemp(prefix="ramjet-p2p-phase-b.", dir="/tmp"))
     result.chmod(0o700)
     print(f"private active result directory: {result}", file=sys.stderr)
     tools = validate_and_stage_tools(
@@ -1268,7 +1268,7 @@ def parser() -> argparse.ArgumentParser:
     mode.add_argument("--run-full-prerequisite", action="store_true")
     result.add_argument("--acknowledge-production-risk")
     result.add_argument(
-        "--tools-dir", type=pathlib.Path, default=pathlib.Path("/tmp/mini-dynamo-p2p-tools")
+        "--tools-dir", type=pathlib.Path, default=pathlib.Path("/tmp/ramjet-p2p-tools")
     )
     result.add_argument("--expected-tools-manifest-sha256")
     result.add_argument("--quiet-seconds", type=int, default=MIN_QUIET_SECONDS)

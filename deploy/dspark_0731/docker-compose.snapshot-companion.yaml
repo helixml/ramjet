@@ -34,7 +34,7 @@ x-snapshot-companion-production: &snapshot-companion-production
     - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700
   environment: &snapshot-companion-environment
     RJ_SNAPSHOT_COMPANION_MODE: serve
-    RJ_SNAPSHOT_SOCKET_PATH: /run/mini-dynamo-snapshot/companion.sock
+    RJ_SNAPSHOT_SOCKET_PATH: /run/ramjet-snapshot/companion.sock
     RJ_SNAPSHOT_CLIENT_UID: "12002"
     RJ_SNAPSHOT_SECRET_PATH: /run/secrets/snapshot-session
     RJ_SNAPSHOT_SECRET_OWNER_UID: "0"
@@ -61,7 +61,7 @@ x-snapshot-companion-production: &snapshot-companion-production
 x-snapshot-attestation-provisioner: &snapshot-attestation-provisioner
   profiles: [snapshot-attestation]
   image: ${SNAPSHOT_COMPANION_IMAGE:-ghcr.io/helixml/mini-dynamo:companion-rust-979ff7b@sha256:5cc99e33308d4cd707c0fa77629b830870ec27d05b7381320a3d948132f476f2}
-  entrypoint: ["/mini-dynamo-attestation-provisioner"]
+  entrypoint: ["/ramjet-attestation-provisioner"]
   restart: "no"
   user: "0:12000"
   network_mode: none
@@ -95,46 +95,46 @@ services:
       RJ_SNAPSHOT_COMPANION_UID: "12001"
       RJ_SNAPSHOT_LIVE_ENDPOINTS: tcp://dspark-0731:5557
       RJ_SNAPSHOT_REPLAY_ENDPOINTS: tcp://dspark-0731:5558
-      RJ_SNAPSHOT_METRICS_SOCKET_PATH: /run/mini-dynamo-metrics/metrics.sock
+      RJ_SNAPSHOT_METRICS_SOCKET_PATH: /run/ramjet-metrics/metrics.sock
       RJ_SNAPSHOT_METRICS_GROUP_GID: "12004"
     volumes:
       - type: bind
-        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/mini-dynamo-snapshot-a.invalid}
-        target: /run/mini-dynamo-snapshot
+        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/ramjet-snapshot-a.invalid}
+        target: /run/ramjet-snapshot
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_METRICS_DIR_A:-/run/mini-dynamo-snapshot-metrics-a.invalid}
-        target: /run/mini-dynamo-metrics
+        source: ${SNAPSHOT_METRICS_DIR_A:-/run/ramjet-snapshot-metrics-a.invalid}
+        target: /run/ramjet-metrics
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-session-a.invalid}
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/ramjet-snapshot-session-a.invalid}
         target: /run/secrets/snapshot-session
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_DIGEST_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-digest-a.invalid}
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_A:-/run/secrets/ramjet-snapshot-digest-a.invalid}
         target: /run/secrets/snapshot-digest
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_ATTESTATION_DIR_A:-/run/mini-dynamo-snapshot-attestation-a.invalid}
+        source: ${SNAPSHOT_ATTESTATION_DIR_A:-/run/ramjet-snapshot-attestation-a.invalid}
         target: /run/attestation
         read_only: true
         bind:
           create_host_path: false
     healthcheck:
-      test: ["CMD", "/mini-dynamo-snapshot-companion", "healthcheck", "/run/mini-dynamo-snapshot/companion.sock"]
+      test: ["CMD", "/ramjet-snapshot-companion", "healthcheck", "/run/ramjet-snapshot/companion.sock"]
       interval: 5s
       timeout: 2s
       retries: 3
       start_period: 10s
     labels:
-      org.helixml.mini-dynamo.engine: engine-a
-      org.helixml.mini-dynamo.role: snapshot-companion
+      org.helixml.ramjet.engine: engine-a
+      org.helixml.ramjet.role: snapshot-companion
 
   snapshot-companion-b:
     <<: *snapshot-companion-production
@@ -146,46 +146,46 @@ services:
       RJ_SNAPSHOT_COMPANION_UID: "12003"
       RJ_SNAPSHOT_LIVE_ENDPOINTS: tcp://dspark-0731-b:5557
       RJ_SNAPSHOT_REPLAY_ENDPOINTS: tcp://dspark-0731-b:5558
-      RJ_SNAPSHOT_METRICS_SOCKET_PATH: /run/mini-dynamo-metrics/metrics.sock
+      RJ_SNAPSHOT_METRICS_SOCKET_PATH: /run/ramjet-metrics/metrics.sock
       RJ_SNAPSHOT_METRICS_GROUP_GID: "12005"
     volumes:
       - type: bind
-        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/mini-dynamo-snapshot-b.invalid}
-        target: /run/mini-dynamo-snapshot
+        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/ramjet-snapshot-b.invalid}
+        target: /run/ramjet-snapshot
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_METRICS_DIR_B:-/run/mini-dynamo-snapshot-metrics-b.invalid}
-        target: /run/mini-dynamo-metrics
+        source: ${SNAPSHOT_METRICS_DIR_B:-/run/ramjet-snapshot-metrics-b.invalid}
+        target: /run/ramjet-metrics
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-session-b.invalid}
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/ramjet-snapshot-session-b.invalid}
         target: /run/secrets/snapshot-session
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_DIGEST_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-digest-b.invalid}
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_B:-/run/secrets/ramjet-snapshot-digest-b.invalid}
         target: /run/secrets/snapshot-digest
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_ATTESTATION_DIR_B:-/run/mini-dynamo-snapshot-attestation-b.invalid}
+        source: ${SNAPSHOT_ATTESTATION_DIR_B:-/run/ramjet-snapshot-attestation-b.invalid}
         target: /run/attestation
         read_only: true
         bind:
           create_host_path: false
     healthcheck:
-      test: ["CMD", "/mini-dynamo-snapshot-companion", "healthcheck", "/run/mini-dynamo-snapshot/companion.sock"]
+      test: ["CMD", "/ramjet-snapshot-companion", "healthcheck", "/run/ramjet-snapshot/companion.sock"]
       interval: 5s
       timeout: 2s
       retries: 3
       start_period: 10s
     labels:
-      org.helixml.mini-dynamo.engine: engine-b
-      org.helixml.mini-dynamo.role: snapshot-companion
+      org.helixml.ramjet.engine: engine-b
+      org.helixml.ramjet.role: snapshot-companion
 
   snapshot-attestation-a:
     <<: *snapshot-attestation-provisioner
@@ -194,25 +194,25 @@ services:
       <<: *snapshot-attestation-environment
     volumes:
       - type: bind
-        source: ${SNAPSHOT_ENGINE_METADATA_FILE_A:-/run/mini-dynamo-engine-metadata-a.invalid}
+        source: ${SNAPSHOT_ENGINE_METADATA_FILE_A:-/run/ramjet-engine-metadata-a.invalid}
         target: /run/metadata/engine.json
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_DIGEST_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-digest-a.invalid}
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_A:-/run/secrets/ramjet-snapshot-digest-a.invalid}
         target: /run/secrets/snapshot-digest
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_ATTESTATION_DIR_A:-/run/mini-dynamo-snapshot-attestation-a.invalid}
+        source: ${SNAPSHOT_ATTESTATION_DIR_A:-/run/ramjet-snapshot-attestation-a.invalid}
         target: /run/attestation
         bind:
           create_host_path: false
     labels:
-      org.helixml.mini-dynamo.engine: engine-a
-      org.helixml.mini-dynamo.role: attestation-provisioner
+      org.helixml.ramjet.engine: engine-a
+      org.helixml.ramjet.role: attestation-provisioner
 
   snapshot-attestation-b:
     <<: *snapshot-attestation-provisioner
@@ -221,22 +221,22 @@ services:
       <<: *snapshot-attestation-environment
     volumes:
       - type: bind
-        source: ${SNAPSHOT_ENGINE_METADATA_FILE_B:-/run/mini-dynamo-engine-metadata-b.invalid}
+        source: ${SNAPSHOT_ENGINE_METADATA_FILE_B:-/run/ramjet-engine-metadata-b.invalid}
         target: /run/metadata/engine.json
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_DIGEST_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-digest-b.invalid}
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_B:-/run/secrets/ramjet-snapshot-digest-b.invalid}
         target: /run/secrets/snapshot-digest
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_ATTESTATION_DIR_B:-/run/mini-dynamo-snapshot-attestation-b.invalid}
+        source: ${SNAPSHOT_ATTESTATION_DIR_B:-/run/ramjet-snapshot-attestation-b.invalid}
         target: /run/attestation
         bind:
           create_host_path: false
     labels:
-      org.helixml.mini-dynamo.engine: engine-b
-      org.helixml.mini-dynamo.role: attestation-provisioner
+      org.helixml.ramjet.engine: engine-b
+      org.helixml.ramjet.role: attestation-provisioner

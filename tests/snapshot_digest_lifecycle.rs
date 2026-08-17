@@ -1,4 +1,4 @@
-use mini_dynamo::{
+use ramjet::{
     block_digest::BlockDigester,
     digest_index::{DigestIndexLimits, SnapshotGroupKey},
     kv_snapshot::{
@@ -115,8 +115,8 @@ fn partial_scope_and_wrong_digest_secret_fail_before_private_state_escapes() {
 }
 
 fn prepare(
-    authenticated: mini_dynamo::snapshot_session::AuthenticatedSnapshot,
-) -> Result<mini_dynamo::snapshot_bootstrap::PreparedSnapshotGeneration, SnapshotBootstrapError> {
+    authenticated: ramjet::snapshot_session::AuthenticatedSnapshot,
+) -> Result<ramjet::snapshot_bootstrap::PreparedSnapshotGeneration, SnapshotBootstrapError> {
     let watermark = authenticated.snapshot_watermark();
     prepare_authenticated_snapshot(
         authenticated,
@@ -140,7 +140,7 @@ fn authenticate(
     snapshot_frame: &[u8],
     outer_watermark: u64,
     key_id: &[u8; 32],
-) -> mini_dynamo::snapshot_session::AuthenticatedSnapshot {
+) -> ramjet::snapshot_session::AuthenticatedSnapshot {
     let secret = SnapshotSessionSecret::new(SESSION_SECRET);
     let response = encode_authenticated_snapshot(
         snapshot_frame,

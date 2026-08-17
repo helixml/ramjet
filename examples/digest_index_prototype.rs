@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 
-use mini_dynamo::kv_wire::{BlockRemoved, BlockStored, ExternalBlockHash};
+use ramjet::kv_wire::{BlockRemoved, BlockStored, ExternalBlockHash};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 

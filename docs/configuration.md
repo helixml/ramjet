@@ -67,7 +67,7 @@ resolving across the rename.
 | `RJ_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
 | `RJ_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary. |
 | `RJ_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
-| `RUST_LOG` | `info` | Standard tracing filter, for example `mini_dynamo=debug`. |
+| `RUST_LOG` | `info` | Standard tracing filter, for example `ramjet=debug`. |
 
 `GET /health` returns opaque replica ordinals, serving health, DSpark
 reliability state, inflight work, load units, and index size. It returns `200 ok` when every replica is healthy,
@@ -402,7 +402,7 @@ snapshot permissions or expose its sockets over TCP.
 
 ## Snapshot companion variables
 
-The separate `mini-dynamo-snapshot-companion` binary is experimental and
+The separate `ramjet-snapshot-companion` binary is experimental and
 defaults to `off`, where it needs no files, engine, or listener. Serve mode is
 one companion per engine and should be configured through the repository's
 validated Compose overlay.
@@ -451,7 +451,7 @@ metrics group.
 
 ## Attestation provisioner variables
 
-`mini-dynamo-attestation-provisioner` accepts no arguments and is silent on
+`ramjet-attestation-provisioner` accepts no arguments and is silent on
 success. It requires all settings below except the age override.
 
 | Variable | Default | Description |

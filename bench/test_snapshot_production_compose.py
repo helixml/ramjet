@@ -58,8 +58,8 @@ class SnapshotProductionComposeTest(unittest.TestCase):
         document["services"]["ds4-loadbalancer"].setdefault("volumes", []).append(
             {
                 "type": "bind",
-                "source": "/run/mini-dynamo-not-provisioned",
-                "target": "/run/mini-dynamo-not-provisioned",
+                "source": "/run/ramjet-not-provisioned",
+                "target": "/run/ramjet-not-provisioned",
                 "read_only": True,
                 "bind": {"create_host_path": False},
             }
@@ -175,7 +175,7 @@ class SnapshotProductionComposeTest(unittest.TestCase):
             candidate = pathlib.Path(directory) / "Caddyfile"
             candidate.write_text(
                 original.replace(
-                    "/run/mini-dynamo-snapshot-metrics-a/metrics.sock",
+                    "/run/ramjet-snapshot-metrics-a/metrics.sock",
                     "/run/secrets/snapshot-session-a",
                 ),
                 encoding="utf-8",
@@ -186,7 +186,7 @@ class SnapshotProductionComposeTest(unittest.TestCase):
             candidate.write_text(
                 original
                 + "\nhandle /metrics/extra {\n"
-                + "\treverse_proxy unix//run/mini-dynamo-snapshot-b/companion.sock\n"
+                + "\treverse_proxy unix//run/ramjet-snapshot-b/companion.sock\n"
                 + "}\n",
                 encoding="utf-8",
             )

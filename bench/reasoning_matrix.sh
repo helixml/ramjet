@@ -8,7 +8,7 @@ model=${2:?usage: reasoning_matrix.sh BASE MODEL LABEL [ENGINE_CONTAINER ...]}
 label=${3:?usage: reasoning_matrix.sh BASE MODEL LABEL [ENGINE_CONTAINER ...]}
 shift 3
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-metadata=$(mktemp /tmp/mini-dynamo-reasoning-metadata.XXXXXX.json)
+metadata=$(mktemp /tmp/ramjet-reasoning-metadata.XXXXXX.json)
 trap 'rm -f "$metadata"' EXIT
 matrix_started_ms=$(date +%s%3N)
 

@@ -50,8 +50,8 @@ def service_base(engine, role, uid, command, health, volumes):
         "volumes": volumes,
         "healthcheck": {"test": health},
         "labels": {
-            "org.helixml.mini-dynamo.engine": engine,
-            "org.helixml.mini-dynamo.role": role,
+            "org.helixml.ramjet.engine": engine,
+            "org.helixml.ramjet.role": role,
         },
     }
 
@@ -86,7 +86,7 @@ def valid_document():
             ],
             [
                 "CMD",
-                "/mini-dynamo-snapshot-companion",
+                "/ramjet-snapshot-companion",
                 "healthcheck",
                 domain["socket"],
             ],
@@ -103,7 +103,7 @@ def valid_document():
             ],
             [
                 "CMD",
-                "/mini-dynamo",
+                "/ramjet",
                 "snapshot-client-healthcheck",
                 domain["socket"],
             ],

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mirror the canonical rtx6000pro Grafana dashboards into the infra repository.
 
-mini-dynamo owns the dashboard JSON; the infra repository only carries the
+ramjet owns the dashboard JSON; the infra repository only carries the
 ConfigMap that Flux reconciles into the monitoring namespace. This script
 rewrites exactly the keys this directory owns and leaves every other dashboard
 in that ConfigMap byte-identical.

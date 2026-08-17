@@ -2,7 +2,7 @@
 """Create a cache state invisible to request-derived approximate routing.
 
 Each attempt warms a fresh long prompt directly on one engine, then sends the
-same request through mini-dynamo. The script stops when the proxy selects a
+same request through ramjet. The script stops when the proxy selects a
 different engine. It never prints the prompt or token IDs.
 
 Usage: forced_exact_miss.py PROXY_BASE WARM_ENGINE_BASE MODEL [ATTEMPTS]

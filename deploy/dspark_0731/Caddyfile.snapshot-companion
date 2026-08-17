@@ -4,10 +4,10 @@
 
 handle /metrics/snapshot/0 {
 	rewrite * /metrics
-	reverse_proxy unix//run/mini-dynamo-snapshot-metrics-a/metrics.sock
+	reverse_proxy unix//run/ramjet-snapshot-metrics-a/metrics.sock
 }
 
 handle /metrics/snapshot/1 {
 	rewrite * /metrics
-	reverse_proxy unix//run/mini-dynamo-snapshot-metrics-b/metrics.sock
+	reverse_proxy unix//run/ramjet-snapshot-metrics-b/metrics.sock
 }

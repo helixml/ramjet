@@ -223,7 +223,7 @@ def metrics_listener_base(metrics_url):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("base", help="mini-dynamo API base URL")
+    parser.add_argument("base", help="ramjet API base URL")
     parser.add_argument("model")
     parser.add_argument("--apps", type=int, default=52)
     parser.add_argument("--sessions", type=int, default=1)

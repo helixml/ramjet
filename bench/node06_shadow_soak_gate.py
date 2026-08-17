@@ -609,7 +609,7 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
     def freeze_artifacts(self, baseline):
         self.plan()
         directory = pathlib.Path(
-            tempfile.mkdtemp(prefix=".mini-dynamo-shadow-soak-", dir=self.directory)
+            tempfile.mkdtemp(prefix=".ramjet-shadow-soak-", dir=self.directory)
         )
         os.chmod(directory, 0o700)
         sources = (
@@ -1087,7 +1087,7 @@ def parser():
         default=None,
     )
     result.add_argument("--companion-metrics-socket", action="append", default=None)
-    result.add_argument("--lock-file", default="/run/lock/mini-dynamo-node06-deployment.lock")
+    result.add_argument("--lock-file", default="/run/lock/ramjet-node06-deployment.lock")
     result.add_argument("--profile-timeout-seconds", type=float, default=60)
     result.add_argument("--workload-timeout-seconds", type=float, default=1500)
     result.add_argument("--stability-seconds", type=float, default=1)
@@ -1121,8 +1121,8 @@ def validate_args(args):
         ]
     if args.companion_metrics_socket is None:
         args.companion_metrics_socket = [
-            "/run/mini-dynamo-snapshot-metrics-a/metrics.sock",
-            "/run/mini-dynamo-snapshot-metrics-b/metrics.sock",
+            "/run/ramjet-snapshot-metrics-a/metrics.sock",
+            "/run/ramjet-snapshot-metrics-b/metrics.sock",
         ]
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", args.compose_project_name):
         raise recovery.GateError("invalid_arguments", "Compose project name is invalid")

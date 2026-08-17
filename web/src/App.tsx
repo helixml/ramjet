@@ -651,7 +651,7 @@ export default function App() {
       ) : null}
 
       <footer className="text-faint-foreground pb-4 pt-2 text-[11px]">
-        Metrics are sampled and stored locally by the mini-dynamo load balancer —
+        Metrics are sampled and stored locally by the ramjet load balancer —
         no Prometheus or Grafana required.
       </footer>
     </div>

@@ -50,7 +50,7 @@ class DashboardSourceTest(unittest.TestCase):
         self.assertEqual(self.raw, sync.canonical_json(DASHBOARD))
 
     def test_identity_is_the_minidynamo_naming(self) -> None:
-        self.assertEqual(self.document["title"], "MiniDynamo rtx6000pro")
+        self.assertEqual(self.document["title"], "Ramjet rtx6000pro")
         self.assertEqual(self.document["uid"], "minidynamo-rtx6000pro")
 
     def test_no_retired_identity_survives(self) -> None:

@@ -1010,7 +1010,7 @@ async def _internal_request(
             "root_path": base_scope.get("root_path", ""),
             "headers": headers,
             "client": ("127.0.0.1", 0),
-            "server": ("mini-dynamo.internal", 80),
+            "server": ("ramjet.internal", 80),
         }
     )
     app_task = asyncio.create_task(app(scope, receive, send))

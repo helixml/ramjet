@@ -962,7 +962,7 @@ mod tests {
         fn new() -> Self {
             let sequence = DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "mini-dynamo-reconnect-{}-{sequence}",
+                "ramjet-reconnect-{}-{sequence}",
                 std::process::id()
             ));
             fs::create_dir(&path).unwrap();

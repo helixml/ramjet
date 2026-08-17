@@ -1,6 +1,6 @@
 use std::{future::pending, sync::Arc, time::Duration};
 
-use mini_dynamo::{
+use ramjet::{
     block_digest::BlockDigester,
     digest_index::{DigestIndexLimits, DigestKvIndex, SnapshotGroupKey},
     kv_snapshot::{

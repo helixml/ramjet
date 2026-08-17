@@ -10,7 +10,7 @@ if [ -z "$KEY" ]; then
   KEY=$(grep -o "Bearer [A-Za-z0-9_-]*" /etc/caddy/Caddyfile | head -1 | cut -d" " -f2)
 fi
 SYS=$(python3 -c "print('You are coding agent for CONC-$SALT. ' + 'Follow the runbook carefully and cite file paths. ' * 1800)")
-WORK=$(mktemp -d /tmp/mini-dynamo-sameapp.XXXXXX)
+WORK=$(mktemp -d /tmp/ramjet-sameapp.XXXXXX)
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 start=$(date +%s.%N)

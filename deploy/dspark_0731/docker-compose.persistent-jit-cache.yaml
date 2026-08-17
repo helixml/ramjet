@@ -9,7 +9,7 @@ services:
     image: voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b
     volumes:
       - type: bind
-        source: /prod/mini-dynamo/jit-cache/vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8/engine-a
+        source: /prod/ramjet/jit-cache/vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8/engine-a
         target: /cache/jit
         read_only: false
         bind:
@@ -19,7 +19,7 @@ services:
     image: voipmonitor/vllm@sha256:820181fbbc975cd5291c411cda9771d58fecee1636d916f508f47230df20592b
     volumes:
       - type: bind
-        source: /prod/mini-dynamo/jit-cache/vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8/engine-b
+        source: /prod/ramjet/jit-cache/vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8/engine-b
         target: /cache/jit
         read_only: false
         bind:

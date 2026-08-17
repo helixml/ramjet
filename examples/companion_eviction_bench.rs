@@ -10,7 +10,7 @@
 use std::{hint::black_box, time::Instant};
 
 use bytes::Bytes;
-use mini_dynamo::{
+use ramjet::{
     companion_index_source::{CompanionIndexSource, CompanionIndexSourceConfig},
     digest_index::DigestIndexLimits,
     kv_snapshot::{

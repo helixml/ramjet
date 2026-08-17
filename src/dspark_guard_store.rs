@@ -414,7 +414,7 @@ impl DsparkGuardStore {
         getrandom::fill(&mut random).map_err(|_| DsparkGuardStoreError::PublishFailed)?;
         let temporary_path = self
             .parent
-            .join(format!(".mini-dynamo-dspark-guard-{}.tmp", hex(&random)));
+            .join(format!(".ramjet-dspark-guard-{}.tmp", hex(&random)));
         let mut cleanup = TemporaryOutput::new(temporary_path.clone());
         let mut file = OpenOptions::new()
             .write(true)

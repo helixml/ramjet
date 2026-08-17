@@ -131,7 +131,7 @@ def create_guard_capability(
         raise GuardError("inherited guard capability is unavailable")
     try:
         descriptor = os.memfd_create(
-            "mini-dynamo-gpu-guard",
+            "ramjet-gpu-guard",
             os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
         )
         payload = secrets.token_bytes(CAPABILITY_BYTES)

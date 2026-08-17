@@ -7,8 +7,8 @@ services:
   ds4-loadbalancer:
     volumes:
       - type: bind
-        source: ${DSPARK_GUARD_STATE_DIR:-/run/mini-dynamo-dspark-guard.invalid}
-        target: /run/mini-dynamo-dspark-guard
+        source: ${DSPARK_GUARD_STATE_DIR:-/run/ramjet-dspark-guard.invalid}
+        target: /run/ramjet-dspark-guard
         read_only: false
         bind:
           create_host_path: false
@@ -19,6 +19,6 @@ services:
       RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS: "3"
       RJ_DSPARK_GUARD_MIN_PROPOSED_TOKENS: "256"
       RJ_DSPARK_GUARD_EXPECTED_POSITIONS: "5"
-      RJ_DSPARK_GUARD_STATE_PATH: /run/mini-dynamo-dspark-guard/state.json
+      RJ_DSPARK_GUARD_STATE_PATH: /run/ramjet-dspark-guard/state.json
       RJ_DSPARK_GUARD_STATE_OWNER_UID: "0"
       RJ_DSPARK_GUARD_STATE_GROUP_GID: "0"

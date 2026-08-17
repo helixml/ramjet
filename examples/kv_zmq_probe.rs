@@ -1,6 +1,6 @@
 use std::{env, time::Duration};
 
-use mini_dynamo::{
+use ramjet::{
     kv_transport::{KvTransportConfig, ZmqKvEventSource},
     kv_wire::{KvEvent, KvWireLimits},
 };

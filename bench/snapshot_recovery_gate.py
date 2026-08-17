@@ -40,18 +40,18 @@ LB_CONTAINER = "ds4-loadbalancer"
 ENGINE_CONTAINERS = ("dspark-0731", "dspark-0731-b")
 COMPANION_CONTAINERS = ("snapshot-companion-a", "snapshot-companion-b")
 AUTHORITY_ENV = {
-    "SNAPSHOT_RUNTIME_DIR_A": "/run/mini-dynamo-snapshot-a",
-    "SNAPSHOT_RUNTIME_DIR_B": "/run/mini-dynamo-snapshot-b",
-    "SNAPSHOT_METRICS_DIR_A": "/run/mini-dynamo-snapshot-metrics-a",
-    "SNAPSHOT_METRICS_DIR_B": "/run/mini-dynamo-snapshot-metrics-b",
-    "SNAPSHOT_SESSION_SECRET_FILE_A": "/run/secrets/mini-dynamo-snapshot-session-a",
-    "SNAPSHOT_SESSION_SECRET_FILE_B": "/run/secrets/mini-dynamo-snapshot-session-b",
-    "SNAPSHOT_DIGEST_SECRET_FILE_A": "/run/secrets/mini-dynamo-snapshot-digest-a",
-    "SNAPSHOT_DIGEST_SECRET_FILE_B": "/run/secrets/mini-dynamo-snapshot-digest-b",
-    "SNAPSHOT_ATTESTATION_DIR_A": "/run/mini-dynamo-snapshot-attestation-a",
-    "SNAPSHOT_ATTESTATION_DIR_B": "/run/mini-dynamo-snapshot-attestation-b",
-    "SNAPSHOT_ENGINE_METADATA_FILE_A": "/run/mini-dynamo-engine-metadata-a.json",
-    "SNAPSHOT_ENGINE_METADATA_FILE_B": "/run/mini-dynamo-engine-metadata-b.json",
+    "SNAPSHOT_RUNTIME_DIR_A": "/run/ramjet-snapshot-a",
+    "SNAPSHOT_RUNTIME_DIR_B": "/run/ramjet-snapshot-b",
+    "SNAPSHOT_METRICS_DIR_A": "/run/ramjet-snapshot-metrics-a",
+    "SNAPSHOT_METRICS_DIR_B": "/run/ramjet-snapshot-metrics-b",
+    "SNAPSHOT_SESSION_SECRET_FILE_A": "/run/secrets/ramjet-snapshot-session-a",
+    "SNAPSHOT_SESSION_SECRET_FILE_B": "/run/secrets/ramjet-snapshot-session-b",
+    "SNAPSHOT_DIGEST_SECRET_FILE_A": "/run/secrets/ramjet-snapshot-digest-a",
+    "SNAPSHOT_DIGEST_SECRET_FILE_B": "/run/secrets/ramjet-snapshot-digest-b",
+    "SNAPSHOT_ATTESTATION_DIR_A": "/run/ramjet-snapshot-attestation-a",
+    "SNAPSHOT_ATTESTATION_DIR_B": "/run/ramjet-snapshot-attestation-b",
+    "SNAPSHOT_ENGINE_METADATA_FILE_A": "/run/ramjet-engine-metadata-a.json",
+    "SNAPSHOT_ENGINE_METADATA_FILE_B": "/run/ramjet-engine-metadata-b.json",
 }
 METRIC_LINE = re.compile(
     r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+"
@@ -910,7 +910,7 @@ def parser():
     root.add_argument("--metrics-url", default="http://127.0.0.1:8007/metrics")
     root.add_argument("--health-url", default="http://127.0.0.1:8006/health")
     root.add_argument(
-        "--lock-file", default="/run/lock/mini-dynamo-node06-deployment.lock"
+        "--lock-file", default="/run/lock/ramjet-node06-deployment.lock"
     )
     root.add_argument("--output", type=pathlib.Path, required=True)
     root.add_argument("--apply", action="store_true")
@@ -929,8 +929,8 @@ def parser():
 def validate_args(args):
     if args.companion_metrics_socket is None:
         args.companion_metrics_socket = [
-            "/run/mini-dynamo-snapshot-metrics-a/metrics.sock",
-            "/run/mini-dynamo-snapshot-metrics-b/metrics.sock",
+            "/run/ramjet-snapshot-metrics-a/metrics.sock",
+            "/run/ramjet-snapshot-metrics-b/metrics.sock",
         ]
     if len(args.companion_metrics_socket) != 2 or len(
         set(args.companion_metrics_socket)

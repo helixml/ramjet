@@ -3,8 +3,8 @@
 # container (issue #158). /run is tmpfs; everything the companion needs there
 # is gone after a reboot, and Docker starts `unless-stopped` containers as soon
 # as docker.service starts.
-Description=mini-dynamo snapshot companion host authority
-Documentation=https://github.com/helixml/mini-dynamo/issues/158
+Description=ramjet snapshot companion host authority
+Documentation=https://github.com/helixml/ramjet/issues/158
 
 # The directory parents come from tmpfiles.d; this unit only adds identities
 # and secret material on top of them.
@@ -30,11 +30,11 @@ RemainAfterExit=yes
 #
 # The default mode deliberately does NOT touch Caddy group membership.
 # --configure-caddy is an explicit operator action and must never be added here.
-ExecStart=/usr/local/lib/mini-dynamo/setup_snapshot_production_host.py
+ExecStart=/usr/local/lib/ramjet/setup_snapshot_production_host.py
 
 # Verify the result rather than trusting the exit code alone. --check is
 # read-only and re-asserts ownership, modes, setgid bits, and group separation.
-ExecStartPost=/usr/local/lib/mini-dynamo/setup_snapshot_production_host.py --check
+ExecStartPost=/usr/local/lib/ramjet/setup_snapshot_production_host.py --check
 
 # Secrets are derived and written by the helper; keep them out of the journal.
 # Failures are reported as closed, non-secret-bearing reasons by design.

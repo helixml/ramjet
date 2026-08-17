@@ -30,7 +30,7 @@ steps:
     image: rust:1.95-bookworm
     pull: if-not-exists
     commands:
-      - export CARGO_TARGET_DIR=/tmp/mini-dynamo-clippy-target
+      - export CARGO_TARGET_DIR=/tmp/ramjet-clippy-target
       - rustup component add rustfmt clippy
       - cargo fmt --check
       - cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -44,7 +44,7 @@ steps:
     image: rust:1.95-bookworm
     pull: if-not-exists
     commands:
-      - export CARGO_TARGET_DIR=/tmp/mini-dynamo-test-target
+      - export CARGO_TARGET_DIR=/tmp/ramjet-test-target
       - cargo test --locked
     volumes:
       - name: cargo-registry
@@ -110,7 +110,7 @@ steps:
         mkdir -p /kaniko/.docker
         printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" >/kaniko/.docker/config.json
         exec /kaniko/executor --context . --dockerfile Dockerfile.deps \
-          --destination ghcr.io/helixml/ramjet:rust-deps-sha256-6b57bfd22e6777aab1238078c03fd331847bdfb906d14d71f382b9c299373e92 \
+          --destination ghcr.io/helixml/ramjet:rust-deps-sha256-55c309403e68e35c6edff986357d452bae09d2c95d7f3deefaad1ffd3033d091 \
           --cache=true --cache-repo=ghcr.io/helixml/ramjet-build-cache \
           --cache-ttl=336h --snapshot-mode=redo --reproducible
     when:
@@ -251,7 +251,7 @@ steps:
     image: rust:1.95-bookworm
     pull: if-not-exists
     commands:
-      - export CARGO_TARGET_DIR=/tmp/mini-dynamo-release-clippy-target
+      - export CARGO_TARGET_DIR=/tmp/ramjet-release-clippy-target
       - rustup component add rustfmt clippy
       - cargo fmt --check
       - cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -265,7 +265,7 @@ steps:
     image: rust:1.95-bookworm
     pull: if-not-exists
     commands:
-      - export CARGO_TARGET_DIR=/tmp/mini-dynamo-release-test-target
+      - export CARGO_TARGET_DIR=/tmp/ramjet-release-test-target
       - cargo test --locked
     volumes:
       - name: release-cargo-registry

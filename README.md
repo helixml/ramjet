@@ -133,7 +133,7 @@ exact-placement canaries, and session-affinity shadow telemetry remain opt-in
 research surfaces. The session path cannot change placement. These paths fail
 closed and are not dependencies of ordinary serving.
 
-> **Naming:** the project was renamed from mini-dynamo to ramjet. Settings now
+> **Naming:** the project was renamed from ramjet to ramjet. Settings now
 > use the `RJ_*` prefix and responses carry `X-Ramjet-*` headers; the retired
 > `MD_*` prefix is refused at startup rather than silently ignored, so a stale
 > overlay fails loudly instead of running a differently tuned proxy. The

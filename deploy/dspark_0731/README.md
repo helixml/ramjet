@@ -73,8 +73,8 @@ scp deploy/dspark_0731/docker-compose.persistent-jit-cache.yaml \
   deploy/dspark_0731/validate-persistent-jit-cache-host.sh \
   node06:/home/luke/inference/dspark_0731/
 ssh node06 'install -d -o root -g root -m 0700 \
-  /prod/mini-dynamo/jit-cache/vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8/engine-a \
-  /prod/mini-dynamo/jit-cache/vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8/engine-b \
+  /prod/ramjet/jit-cache/vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8/engine-a \
+  /prod/ramjet/jit-cache/vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8/engine-b \
   && cd /home/luke/inference/dspark_0731 \
   && ./validate-persistent-jit-cache-host.sh \
   && docker compose -f docker-compose.yaml \
@@ -250,7 +250,7 @@ without starting anything:
 sudo python3 deploy/dspark_0731/setup_dspark_guard_host.py
 sudo python3 deploy/dspark_0731/setup_dspark_guard_host.py --check
 python3 deploy/dspark_0731/validate-dspark-guard-compose.py
-DSPARK_GUARD_STATE_DIR=/run/mini-dynamo-dspark-guard \
+DSPARK_GUARD_STATE_DIR=/run/ramjet-dspark-guard \
   docker compose -f deploy/dspark_0731/docker-compose.yaml \
     -f deploy/dspark_0731/docker-compose.compatibility-identity.yaml \
     -f deploy/dspark_0731/docker-compose.dspark-guard-quarantine.yaml \
@@ -318,10 +318,10 @@ B's uses `12003`. Only the numeric GID `12000` is common; fixture directories
 are also per-engine and read-only.
 
 ```bash
-SNAPSHOT_RUNTIME_DIR_A=/run/mini-dynamo-snapshot-offline-a \
-SNAPSHOT_RUNTIME_DIR_B=/run/mini-dynamo-snapshot-offline-b \
-SNAPSHOT_SESSION_SECRET_FILE_A=/run/secrets/mini-dynamo-snapshot-session-a \
-SNAPSHOT_SESSION_SECRET_FILE_B=/run/secrets/mini-dynamo-snapshot-session-b \
+SNAPSHOT_RUNTIME_DIR_A=/run/ramjet-snapshot-offline-a \
+SNAPSHOT_RUNTIME_DIR_B=/run/ramjet-snapshot-offline-b \
+SNAPSHOT_SESSION_SECRET_FILE_A=/run/secrets/ramjet-snapshot-session-a \
+SNAPSHOT_SESSION_SECRET_FILE_B=/run/secrets/ramjet-snapshot-session-b \
   deploy/dspark_0731/validate-snapshot-companion-host.sh
 
 python3 deploy/dspark_0731/validate-snapshot-companion-compose.py
@@ -353,7 +353,7 @@ node06.
 
 ## Offline engine-incarnation provisioning
 
-`mini-dynamo-attestation-provisioner` closes the host attestation-writing
+`ramjet-attestation-provisioner` closes the host attestation-writing
 boundary without receiving Docker access. It is a one-shot binary: first an
 independently privileged capture step writes the existing schema-v1
 `node06_engine_metadata.sh` result, then the provisioner reads only that
@@ -364,7 +364,7 @@ Build it on the development host. Do not compile it on node06 while the engines
 are resident:
 
 ```bash
-cargo build --release --locked --bin mini-dynamo-attestation-provisioner
+cargo build --release --locked --bin ramjet-attestation-provisioner
 ```
 
 The future per-engine service-manager unit should run the equivalent of the
@@ -374,14 +374,14 @@ required isolated authority domains, not production Compose wiring:
 ```bash
 # Privileged capture owner; output is mode 0600 and is never mounted in the LB.
 bench/node06_engine_metadata.sh \
-  /run/mini-dynamo-snapshot-a/engine-metadata.json dspark-0731
+  /run/ramjet-snapshot-a/engine-metadata.json dspark-0731
 
-RJ_SNAPSHOT_ENGINE_METADATA_PATH=/run/mini-dynamo-snapshot-a/engine-metadata.json \
-RJ_SNAPSHOT_DIGEST_SECRET_PATH=/run/secrets/mini-dynamo-snapshot-digest-a \
-RJ_SNAPSHOT_ATTESTATION_PATH=/run/secrets/mini-dynamo-snapshot-attestation-a \
+RJ_SNAPSHOT_ENGINE_METADATA_PATH=/run/ramjet-snapshot-a/engine-metadata.json \
+RJ_SNAPSHOT_DIGEST_SECRET_PATH=/run/secrets/ramjet-snapshot-digest-a \
+RJ_SNAPSHOT_ATTESTATION_PATH=/run/secrets/ramjet-snapshot-attestation-a \
 RJ_SNAPSHOT_SECRET_OWNER_UID=0 \
 RJ_SNAPSHOT_SECRET_GROUP_GID=12000 \
-  /usr/local/libexec/mini-dynamo-attestation-provisioner
+  /usr/local/libexec/ramjet-attestation-provisioner
 ```
 
 The default capture freshness limit is 30 seconds and can be reduced or raised
@@ -452,8 +452,8 @@ Two of its checks exist specifically to prevent a #156 recurrence:
   mounts on a volatile filesystem and no changed runtime identity. A reboot
   that wipes `/run` therefore cannot stop the LB from being created.
 - **Boot authority** — once the LB overlay *is* applied, every `/run` mount it
-  adds must have a parent in `systemd/tmpfiles.d/mini-dynamo-snapshot.conf`,
-  and `mini-dynamo-snapshot-authority.service` must be ordered
+  adds must have a parent in `systemd/tmpfiles.d/ramjet-snapshot.conf`,
+  and `ramjet-snapshot-authority.service` must be ordered
   `Before=docker.service` while being pulled in by `WantedBy=`, never
   `RequiredBy=`. Ordering is guaranteed; a provisioner failure must leave the
   companions down without ever blocking the serving path.
@@ -469,18 +469,18 @@ gate before starting either companion:
 sudo python3 deploy/dspark_0731/setup_snapshot_production_host.py
 sudo python3 deploy/dspark_0731/setup_snapshot_production_host.py --check
 
-SNAPSHOT_RUNTIME_DIR_A=/run/mini-dynamo-snapshot-a \
-SNAPSHOT_RUNTIME_DIR_B=/run/mini-dynamo-snapshot-b \
-SNAPSHOT_METRICS_DIR_A=/run/mini-dynamo-snapshot-metrics-a \
-SNAPSHOT_METRICS_DIR_B=/run/mini-dynamo-snapshot-metrics-b \
-SNAPSHOT_SESSION_SECRET_FILE_A=/run/secrets/mini-dynamo-snapshot-session-a \
-SNAPSHOT_SESSION_SECRET_FILE_B=/run/secrets/mini-dynamo-snapshot-session-b \
-SNAPSHOT_DIGEST_SECRET_FILE_A=/run/secrets/mini-dynamo-snapshot-digest-a \
-SNAPSHOT_DIGEST_SECRET_FILE_B=/run/secrets/mini-dynamo-snapshot-digest-b \
-SNAPSHOT_ATTESTATION_DIR_A=/run/mini-dynamo-snapshot-attestation-a \
-SNAPSHOT_ATTESTATION_DIR_B=/run/mini-dynamo-snapshot-attestation-b \
-SNAPSHOT_ENGINE_METADATA_FILE_A=/run/mini-dynamo-engine-metadata-a.json \
-SNAPSHOT_ENGINE_METADATA_FILE_B=/run/mini-dynamo-engine-metadata-b.json \
+SNAPSHOT_RUNTIME_DIR_A=/run/ramjet-snapshot-a \
+SNAPSHOT_RUNTIME_DIR_B=/run/ramjet-snapshot-b \
+SNAPSHOT_METRICS_DIR_A=/run/ramjet-snapshot-metrics-a \
+SNAPSHOT_METRICS_DIR_B=/run/ramjet-snapshot-metrics-b \
+SNAPSHOT_SESSION_SECRET_FILE_A=/run/secrets/ramjet-snapshot-session-a \
+SNAPSHOT_SESSION_SECRET_FILE_B=/run/secrets/ramjet-snapshot-session-b \
+SNAPSHOT_DIGEST_SECRET_FILE_A=/run/secrets/ramjet-snapshot-digest-a \
+SNAPSHOT_DIGEST_SECRET_FILE_B=/run/secrets/ramjet-snapshot-digest-b \
+SNAPSHOT_ATTESTATION_DIR_A=/run/ramjet-snapshot-attestation-a \
+SNAPSHOT_ATTESTATION_DIR_B=/run/ramjet-snapshot-attestation-b \
+SNAPSHOT_ENGINE_METADATA_FILE_A=/run/ramjet-engine-metadata-a.json \
+SNAPSHOT_ENGINE_METADATA_FILE_B=/run/ramjet-engine-metadata-b.json \
   deploy/dspark_0731/validate-snapshot-production-host.sh
 ```
 
@@ -576,7 +576,7 @@ ssh node06 'cd /home/luke/inference/dspark_0731 && \
     --output /tmp/snapshot-recovery-$(date +%s).json'
 ```
 
-Apply mode owns `/run/lock/mini-dynamo-node06-deployment.lock` for the complete
+Apply mode owns `/run/lock/ramjet-node06-deployment.lock` for the complete
 inspect/mutate/measure/rollback interval. It defaults to five LB-only shadow
 recreates, requires both LB snapshot inventories authoritative on every pass,
 checks that engine identities and restart counts never move, and applies the

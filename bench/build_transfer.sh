@@ -17,7 +17,7 @@ TRANSFER=${2:-}
   exit 2
 }
 
-BUILDER=${RAMJET_BUILDER:-mini-dynamo-publisher}
+BUILDER=${RAMJET_BUILDER:-ramjet-publisher}
 REPOSITORY=${RAMJET_IMAGE_REPOSITORY:-ghcr.io/helixml/ds4-loadbalancer}
 NODE=${RAMJET_NODE:-node06}
 IMAGE="$REPOSITORY:$TAG"

@@ -676,7 +676,7 @@ fn publish_atomic(
     let mut random = [0_u8; 16];
     getrandom::fill(&mut random)
         .map_err(|_| CompanionAttestationProvisionerError::PublishFailed)?;
-    let temporary_name = format!(".mini-dynamo-attestation-{}.tmp", hex(&random));
+    let temporary_name = format!(".ramjet-attestation-{}.tmp", hex(&random));
     let temporary_path = state.parent.join(temporary_name);
     let mut cleanup = TemporaryOutput::new(temporary_path.clone());
     let mut file = OpenOptions::new()

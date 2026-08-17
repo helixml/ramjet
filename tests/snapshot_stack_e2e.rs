@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use mini_dynamo::{
+use ramjet::{
     block_digest::BlockDigester,
     digest_index::{DigestIndexLimits, DigestKvIndex, SnapshotGroupKey},
     kv_snapshot::{
@@ -66,7 +66,7 @@ impl TestDirectory {
     fn new() -> Self {
         let sequence = DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "mini-dynamo-snapshot-e2e-{:x}-{sequence:x}",
+            "ramjet-snapshot-e2e-{:x}-{sequence:x}",
             std::process::id()
         ));
         fs::create_dir(&root).unwrap();
@@ -237,7 +237,7 @@ impl SnapshotProducerSource for CapturedSource {
 struct CompanionRun {
     shutdown: watch::Sender<bool>,
     task: JoinHandle<
-        Result<SnapshotSupervisorReport, mini_dynamo::snapshot_supervisor::SnapshotSupervisorError>,
+        Result<SnapshotSupervisorReport, ramjet::snapshot_supervisor::SnapshotSupervisorError>,
     >,
 }
 
@@ -292,7 +292,7 @@ async fn run_supervisor(
     guard: PublishedSocketPath,
     producer: Arc<SnapshotProducer>,
     shutdown: watch::Receiver<bool>,
-) -> Result<SnapshotSupervisorReport, mini_dynamo::snapshot_supervisor::SnapshotSupervisorError> {
+) -> Result<SnapshotSupervisorReport, ramjet::snapshot_supervisor::SnapshotSupervisorError> {
     let report = supervise_snapshot_sessions(
         listener,
         SnapshotSupervisorConfig::new(Duration::from_secs(30)).unwrap(),

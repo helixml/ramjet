@@ -25,10 +25,10 @@ mkdir -p -- "$output_dir"
   exit 2
 }
 
-build_root=$(mktemp -d "${TMPDIR:-/tmp}/mini-dynamo-p2p-build.XXXXXX")
+build_root=$(mktemp -d "${TMPDIR:-/tmp}/ramjet-p2p-build.XXXXXX")
 cleanup() {
   case $build_root in
-    */mini-dynamo-p2p-build.*) rm -rf -- "$build_root" ;;
+    */ramjet-p2p-build.*) rm -rf -- "$build_root" ;;
     *) echo "refusing to clean unexpected build path" >&2 ;;
   esac
 }

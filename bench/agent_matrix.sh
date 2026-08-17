@@ -20,7 +20,7 @@ if [[ ${AGENT_REQUIRE_RECONCILED_SPECULATION:-0} == 1 ]]; then
   fi
   metrics_args+=(--require-reconciled-speculation)
 fi
-metadata=$(mktemp /tmp/mini-dynamo-agent-metadata.XXXXXX.json)
+metadata=$(mktemp /tmp/ramjet-agent-metadata.XXXXXX.json)
 trap 'rm -f "$metadata"' EXIT
 matrix_started_ms=$(date +%s%3N)
 

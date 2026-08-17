@@ -439,7 +439,7 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
         for path, raw_path in [
             ("/v1/chat/completions", None),
             (middleware_module.IDENTITY_PATH + "/", None),
-            (middleware_module.IDENTITY_PATH, b"/v1/mini-dynamo/%69dentity"),
+            (middleware_module.IDENTITY_PATH, b"/v1/ramjet/%69dentity"),
         ]:
             messages = self.invoke(middleware, path, raw_path=raw_path)
             self.assertEqual(messages[0]["status"], 204)
