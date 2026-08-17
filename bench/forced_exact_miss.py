@@ -55,7 +55,7 @@ def chat(base, payload, session_id=None):
         headers=headers,
     )
     with urllib.request.urlopen(request, timeout=300) as response:
-        route = response.headers.get("X-Mini-Dynamo-Upstream")
+        route = response.headers.get("X-Ramjet-Upstream")
         body = json.load(response)
         usage = body.get("usage") or {}
         cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)

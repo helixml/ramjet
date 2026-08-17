@@ -36,7 +36,7 @@ impl Drop for TestDirectory {
 fn companion(arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mini-dynamo-snapshot-companion"))
         .args(arguments)
-        .env_remove("MD_SNAPSHOT_COMPANION_MODE")
+        .env_remove("RJ_SNAPSHOT_COMPANION_MODE")
         .output()
         .unwrap()
 }

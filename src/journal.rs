@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn start_record_is_privacy_bounded() {
         let config = Config::from_lookup(|key| {
-            (key == "MD_UPSTREAM")
+            (key == "RJ_UPSTREAM")
                 .then(|| "http://secret-engine-a:8000,http://secret-engine-b:8000".to_owned())
         })
         .unwrap();

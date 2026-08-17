@@ -159,8 +159,8 @@ npm run dev                       # then /ui/?mock=1 for backend-free UI work
 
 Machine view is observation-only: it must never influence routing, upstream
 health, `/health`, or request handling, and it publishes on the loopback
-metrics listener only. Engine scraping reuses `MD_UPSTREAM`; host/GPU/energy
-telemetry appears only when `MD_MACHINEVIEW_AGENT_URL` points at the
+metrics listener only. Engine scraping reuses `RJ_UPSTREAM`; host/GPU/energy
+telemetry appears only when `RJ_MACHINEVIEW_AGENT_URL` points at the
 loopback host agent. The UI bundle is built in the Dockerfile's `ui` stage
 (`web/**` is an lb-image input in `bench/drone_publish_plan.sh`); a `web/`
 edit re-runs npm but must not invalidate the Rust build layer. See
@@ -389,9 +389,9 @@ secret, and authenticated incarnation file before any TCP bind, ZMQ connect, or
 UDS publication. Invalid attestation refreshes immediately remove authority;
 logs and metrics expose only closed reason labels. The container publishes no
 metrics port: loopback inside a bridge container is not host-scrapable. For
-production, select `MD_SNAPSHOT_METRICS_SOCKET_PATH` and its dedicated
-non-root `MD_SNAPSHOT_METRICS_GROUP_GID`; setting that socket together with
-`MD_SNAPSHOT_METRICS_BIND` is an error. The metrics parent must be a distinct
+production, select `RJ_SNAPSHOT_METRICS_SOCKET_PATH` and its dedicated
+non-root `RJ_SNAPSHOT_METRICS_GROUP_GID`; setting that socket together with
+`RJ_SNAPSHOT_METRICS_BIND` is an error. The metrics parent must be a distinct
 companion-owned, symlink-free, non-writable setgid directory whose group is
 different from the snapshot/session parent group. The publisher verifies that
 both authority directories are setgid and group-traversable, that the mode-0660
@@ -434,10 +434,10 @@ parking late costs watt-minutes. An unhealthy replica never counts toward the
 warm floor, the floor is clamped to at least one, and `drain` mode is rejected
 outright below two upstreams. Keep the drain flag separate from health in the
 router: `upstream_up` must keep reporting reachability so a parked replica is
-never confused with a failing one. Qualify with `MD_IDLE_DRAIN_MODE=observe`
+never confused with a failing one. Qualify with `RJ_IDLE_DRAIN_MODE=observe`
 against real traffic before enforcing; observe advances the state machine and
 publishes intent but fences nothing and never reports `safe_to_stop`. The drain
-knobs are expressed in seconds (`MD_IDLE_DRAIN_IDLE_AFTER_SECONDS`,
+knobs are expressed in seconds (`RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS`,
 `_COOLDOWN_SECONDS`, `_GRACE_SECONDS`, `_INTERVAL_SECONDS`) rather than the
 `_MS` spelling used elsewhere; there is deliberately no millisecond alias, so a
 stale `_MS` variable is inert rather than a thousand-fold misconfiguration.
@@ -463,15 +463,15 @@ optional incarnation. Any unavailable, changed, closed, or skipped authority
 revision must revoke actor state before dropping the active session; do not
 replace it with a value-only watch that can coalesce an invalid interval.
 
-LB consumption is separately gated by `MD_SNAPSHOT_ROUTE_MODE=shadow`. Keep
+LB consumption is separately gated by `RJ_SNAPSHOT_ROUTE_MODE=shadow`. Keep
 its per-upstream socket, companion UID, session secret, digest secret,
 attestation, and group lists at exact upstream cardinality and preflight all
-authorities before spawning any reconnect task. Direct `MD_KV_EVENT_MODE`
+authorities before spawning any reconnect task. Direct `RJ_KV_EVENT_MODE`
 authority and snapshot authority must remain mutually exclusive. Snapshot
 inventory is shadow-only until the recorded comparison gate is met: never let
 this mode select placement, affect upstream health, or make `/health` fail.
 The initial attestation is still preflighted before any task starts. Once
-running, `MD_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS` reloads it through the
+running, `RJ_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS` reloads it through the
 same hardened file/MAC policy. Same identity is a no-op; invalid authority
 suppresses reconnects, and a valid atomic rotation reconnects with the fresh
 expected identity without restarting the stateless LB.
@@ -527,7 +527,7 @@ starts with the workload, not the guard, so cool-start waiting does not consume
 it.
 
 The moratorium is lifted **per run**, not globally. An authorized run names a
-reviewed window in `MINI_DYNAMO_NODE06_AUTHORIZATION`
+reviewed window in `RAMJET_NODE06_AUTHORIZATION`
 (`supervised-2026-08-14`) and inherits that window's bounds; an unnamed or
 unknown window still fails closed, so a stale environment cannot become
 standing permission. AC repair has still **not** been confirmed.
@@ -561,7 +561,7 @@ cargo test --locked proxy::tests::observe_mode_polls
 python3 -m unittest bench.test_dspark_guard_host bench.test_dspark_guard_compose
 ```
 
-`MD_DSPARK_GUARD_MODE` stays `off` in the canonical deployment until cooling
+`RJ_DSPARK_GUARD_MODE` stays `off` in the canonical deployment until cooling
 is repaired. Re-entry starts with one TP4 pair in `observe`; require the exact
 r34 K5 series shape and a clean false-positive interval before dual-pair
 observe. Never skip directly to `quarantine`: enforcement additionally requires
@@ -1221,8 +1221,8 @@ attributable. Run matched direct cells on A and B concurrently only after both
 are warm; keep cache/LB capacity cells serial because cross-traffic
 contaminates their residency result.
 
-When single-homing the LB, reduce `MD_KV_EVENT_LIVE_ENDPOINTS` and
-`MD_KV_EVENT_REPLAY_ENDPOINTS` to the same cardinality as `MD_UPSTREAM` in
+When single-homing the LB, reduce `RJ_KV_EVENT_LIVE_ENDPOINTS` and
+`RJ_KV_EVENT_REPLAY_ENDPOINTS` to the same cardinality as `RJ_UPSTREAM` in
 the same recreate. Render candidate engine argv with `DRY_RUN=1` before a GPU
 roll, persist a runtime-versioned JIT cache, and discard every performance
 interval containing an inference-time JIT marker. Correctness gates precede
@@ -1275,7 +1275,7 @@ production: enable the journal, capture real traffic, replay counterfactuals.
 
 ```bash
 # enable (LB env; stdout JSONL, privacy-bounded: no prompts/fingerprints/hosts)
-ssh node06 'cd /home/luke/inference/dspark_0731 &&   MD_ROUTE_JOURNAL=true LB_IMAGE=<current tag> docker compose up -d ds4-loadbalancer'
+ssh node06 'cd /home/luke/inference/dspark_0731 &&   RJ_ROUTE_JOURNAL=true LB_IMAGE=<current tag> docker compose up -d ds4-loadbalancer'
 
 # capture + replay a policy sweep locally
 ssh node06 'docker logs ds4-loadbalancer 2>&1' > /tmp/trace.log

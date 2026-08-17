@@ -201,9 +201,9 @@ middleware, compatibility manifest, and serving-runtime manifest beside the
 operational Compose and set these three uncommitted `.env` paths:
 
 ```text
-MINI_DYNAMO_SERVING_IDENTITY_MIDDLEWARE_SOURCE=./engine_identity_middleware.py
-MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SOURCE=./deepseek-v4-r34.json
-MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SOURCE=./deepseek-v4-r34-serving-runtime.json
+RAMJET_SERVING_IDENTITY_MIDDLEWARE_SOURCE=./engine_identity_middleware.py
+RAMJET_SERVING_IDENTITY_MANIFEST_SOURCE=./deepseek-v4-r34.json
+RAMJET_SERVING_RUNTIME_MANIFEST_SOURCE=./deepseek-v4-r34-serving-runtime.json
 ```
 
 After transfer, compare every operational byte stream with its local source and
@@ -280,7 +280,7 @@ production on the peer, and recreate only the candidate engine. Test the direct
 endpoint with the existing engine bearer, then run the deterministic agent
 smoke and performance scout. Roll the second engine only after the candidate is
 clean. The identity-only profile must keep
-`MD_UPSTREAM_ADMISSION_MODE=http`; only the separately rendered durable guard
+`RJ_UPSTREAM_ADMISSION_MODE=http`; only the separately rendered durable guard
 profile may request compatibility admission after all its prerequisites pass.
 The middleware verifies the live vLLM distribution, configured model
 name/context, and tokenizer bytes. It still re-publishes the manifest's model
@@ -338,8 +338,8 @@ production wiring exist.
 
 The standalone companion also supports a metrics-only Unix endpoint, but this
 offline Compose fixture deliberately does not enable it yet. Production-shaped
-wiring must set exactly `MD_SNAPSHOT_METRICS_SOCKET_PATH` and
-`MD_SNAPSHOT_METRICS_GROUP_GID` (not `MD_SNAPSHOT_METRICS_BIND`), mount a
+wiring must set exactly `RJ_SNAPSHOT_METRICS_SOCKET_PATH` and
+`RJ_SNAPSHOT_METRICS_GROUP_GID` (not `RJ_SNAPSHOT_METRICS_BIND`), mount a
 different companion-owned parent from the snapshot socket, and prepare it as a
 symlink-free setgid directory that is not writable by group or other. The
 metrics group must differ from GID `12000`; only the scraper/Caddy identity may
@@ -376,16 +376,16 @@ required isolated authority domains, not production Compose wiring:
 bench/node06_engine_metadata.sh \
   /run/mini-dynamo-snapshot-a/engine-metadata.json dspark-0731
 
-MD_SNAPSHOT_ENGINE_METADATA_PATH=/run/mini-dynamo-snapshot-a/engine-metadata.json \
-MD_SNAPSHOT_DIGEST_SECRET_PATH=/run/secrets/mini-dynamo-snapshot-digest-a \
-MD_SNAPSHOT_ATTESTATION_PATH=/run/secrets/mini-dynamo-snapshot-attestation-a \
-MD_SNAPSHOT_SECRET_OWNER_UID=0 \
-MD_SNAPSHOT_SECRET_GROUP_GID=12000 \
+RJ_SNAPSHOT_ENGINE_METADATA_PATH=/run/mini-dynamo-snapshot-a/engine-metadata.json \
+RJ_SNAPSHOT_DIGEST_SECRET_PATH=/run/secrets/mini-dynamo-snapshot-digest-a \
+RJ_SNAPSHOT_ATTESTATION_PATH=/run/secrets/mini-dynamo-snapshot-attestation-a \
+RJ_SNAPSHOT_SECRET_OWNER_UID=0 \
+RJ_SNAPSHOT_SECRET_GROUP_GID=12000 \
   /usr/local/libexec/mini-dynamo-attestation-provisioner
 ```
 
 The default capture freshness limit is 30 seconds and can be reduced or raised
-to at most five minutes with `MD_SNAPSHOT_ATTESTATION_MAX_AGE_MS`. The metadata
+to at most five minutes with `RJ_SNAPSHOT_ATTESTATION_MAX_AGE_MS`. The metadata
 must be an owner-only, singly linked, regular mode-`0600` file below trusted
 ancestors. If it carries a qualification receipt, the receipt must be verified
 and have `qualified` status. The provisioner canonicalizes an allow-listed
@@ -423,7 +423,7 @@ create-time failure rather than a process exit, `restart: unless-stopped`
 never retries it. That is exactly the ~50-minute #156 outage.
 
 Snapshot routing defaults to `off` even with both overlays; only an explicit
-`MD_SNAPSHOT_ROUTE_MODE=shadow` enables both the exact-router gate and
+`RJ_SNAPSHOT_ROUTE_MODE=shadow` enables both the exact-router gate and
 snapshot authority in lockstep so the inventories can be consumed, and the
 pinned LB also enforces that compact inventories cannot select placement.
 
@@ -542,7 +542,7 @@ The overlay is an admission artifact, not a production enablement. Do not copy
 the Caddy snippet or start either profile until current images are repinned and
 both the setup helper's `--check` and the host validator pass on node06. The
 first rollout
-must keep `MD_SNAPSHOT_ROUTE_MODE=off` (which also forces the exact-router
+must keep `RJ_SNAPSHOT_ROUTE_MODE=off` (which also forces the exact-router
 gate off); enable `shadow` only after both
 companions are ready, then preserve ordinary approximate serving throughout.
 

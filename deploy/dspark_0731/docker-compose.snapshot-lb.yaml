@@ -22,7 +22,7 @@
 #     --profile snapshot-companion config --quiet
 #
 # The companion overlay on its own runs companions without touching the LB.
-# Snapshot routing stays off unless MD_SNAPSHOT_ROUTE_MODE=shadow is explicit.
+# Snapshot routing stays off unless RJ_SNAPSHOT_ROUTE_MODE=shadow is explicit.
 
 services:
   ds4-loadbalancer:
@@ -32,22 +32,22 @@ services:
     user: "12002:12000"
     environment:
       # Raw vLLM event consumers and companion snapshots are mutually exclusive.
-      MD_KV_EVENT_MODE: "off"
+      RJ_KV_EVENT_MODE: "off"
       # One operator control keeps the router gate and its sole exact authority
       # in lockstep: off-mode startup is valid, and shadow can never be enabled
       # without the companion inventory that supplies it.
-      MD_EXACT_ROUTE_MODE: ${MD_SNAPSHOT_ROUTE_MODE:-off}
-      MD_SNAPSHOT_ROUTE_MODE: ${MD_SNAPSHOT_ROUTE_MODE:-off}
-      MD_SNAPSHOT_ROUTE_SOCKET_PATHS: /run/mini-dynamo-snapshot-a/companion.sock,/run/mini-dynamo-snapshot-b/companion.sock
-      MD_SNAPSHOT_ROUTE_COMPANION_UIDS: "12001,12003"
-      MD_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS: /run/secrets/snapshot-session-a,/run/secrets/snapshot-session-b
-      MD_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS: /run/secrets/snapshot-digest-a,/run/secrets/snapshot-digest-b
-      MD_SNAPSHOT_ROUTE_ATTESTATION_PATHS: /run/attestation-a/engine.json,/run/attestation-b/engine.json
-      MD_SNAPSHOT_ROUTE_GROUPS: "0:0,0:0"
-      MD_SNAPSHOT_ROUTE_SECRET_OWNER_UID: "0"
-      MD_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS: "30000"
-      MD_SNAPSHOT_ROUTE_RECONNECT_MIN_MS: "250"
-      MD_SNAPSHOT_ROUTE_RECONNECT_MAX_MS: "5000"
+      RJ_EXACT_ROUTE_MODE: ${RJ_SNAPSHOT_ROUTE_MODE:-off}
+      RJ_SNAPSHOT_ROUTE_MODE: ${RJ_SNAPSHOT_ROUTE_MODE:-off}
+      RJ_SNAPSHOT_ROUTE_SOCKET_PATHS: /run/mini-dynamo-snapshot-a/companion.sock,/run/mini-dynamo-snapshot-b/companion.sock
+      RJ_SNAPSHOT_ROUTE_COMPANION_UIDS: "12001,12003"
+      RJ_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS: /run/secrets/snapshot-session-a,/run/secrets/snapshot-session-b
+      RJ_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS: /run/secrets/snapshot-digest-a,/run/secrets/snapshot-digest-b
+      RJ_SNAPSHOT_ROUTE_ATTESTATION_PATHS: /run/attestation-a/engine.json,/run/attestation-b/engine.json
+      RJ_SNAPSHOT_ROUTE_GROUPS: "0:0,0:0"
+      RJ_SNAPSHOT_ROUTE_SECRET_OWNER_UID: "0"
+      RJ_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS: "30000"
+      RJ_SNAPSHOT_ROUTE_RECONNECT_MIN_MS: "250"
+      RJ_SNAPSHOT_ROUTE_RECONNECT_MAX_MS: "5000"
     volumes:
       - type: bind
         source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/mini-dynamo-snapshot-a.invalid}

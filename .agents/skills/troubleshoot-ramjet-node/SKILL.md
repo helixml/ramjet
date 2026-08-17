@@ -73,7 +73,7 @@ Healthy control-plane reads do not authorize inference traffic.
 Use a synthetic prompt and obtain the bearer token without printing it. First
 query `/v1/models`, then send a deterministic request with at most eight output
 tokens. Confirm HTTP success, response usage, and
-`X-Mini-Dynamo-Upstream`. Run one request at a time before any concurrency
+`X-Ramjet-Upstream`. Run one request at a time before any concurrency
 test.
 
 If basic requests pass, choose only the focused test that matches the symptom:

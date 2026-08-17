@@ -889,13 +889,13 @@ mod tests {
         let mut values = HashMap::new();
         if mode == SnapshotCompanionMode::Serve {
             values.extend([
-                ("MD_SNAPSHOT_COMPANION_MODE", "serve"),
-                ("MD_SNAPSHOT_SOCKET_PATH", "/run/mini-dynamo/snapshot.sock"),
-                ("MD_SNAPSHOT_COMPANION_UID", "12001"),
-                ("MD_SNAPSHOT_CLIENT_UID", "12002"),
-                ("MD_SNAPSHOT_SECRET_PATH", "/run/secrets/snapshot-session"),
-                ("MD_SNAPSHOT_LIVE_ENDPOINTS", "tcp://a:5557,tcp://b:5557"),
-                ("MD_SNAPSHOT_REPLAY_ENDPOINTS", "tcp://a:5558,tcp://b:5558"),
+                ("RJ_SNAPSHOT_COMPANION_MODE", "serve"),
+                ("RJ_SNAPSHOT_SOCKET_PATH", "/run/mini-dynamo/snapshot.sock"),
+                ("RJ_SNAPSHOT_COMPANION_UID", "12001"),
+                ("RJ_SNAPSHOT_CLIENT_UID", "12002"),
+                ("RJ_SNAPSHOT_SECRET_PATH", "/run/secrets/snapshot-session"),
+                ("RJ_SNAPSHOT_LIVE_ENDPOINTS", "tcp://a:5557,tcp://b:5557"),
+                ("RJ_SNAPSHOT_REPLAY_ENDPOINTS", "tcp://a:5558,tcp://b:5558"),
             ]);
         }
         SnapshotCompanionConfig::from_lookup(|key| values.get(key).map(ToString::to_string))

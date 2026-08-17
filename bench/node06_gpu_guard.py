@@ -147,13 +147,13 @@ def create_guard_capability(
             os.close(descriptor)
         raise GuardError("inherited guard capability is unavailable") from None
     environment = {
-        "MINI_DYNAMO_GPU_GUARD_ACTIVE": "1",
-        "MINI_DYNAMO_GPU_GUARD_EXPECTED_GPUS": str(expected_gpus),
-        "MINI_DYNAMO_GPU_GUARD_ABORT_C": str(abort_c),
-        "MINI_DYNAMO_GPU_GUARD_RUN_ID": run_id,
-        "MINI_DYNAMO_GPU_GUARD_PARENT_PID": str(parent_pid or os.getpid()),
-        "MINI_DYNAMO_GPU_GUARD_CAPABILITY_FD": str(descriptor),
-        "MINI_DYNAMO_GPU_GUARD_CAPABILITY_SHA256": hashlib.sha256(
+        "RAMJET_GPU_GUARD_ACTIVE": "1",
+        "RAMJET_GPU_GUARD_EXPECTED_GPUS": str(expected_gpus),
+        "RAMJET_GPU_GUARD_ABORT_C": str(abort_c),
+        "RAMJET_GPU_GUARD_RUN_ID": run_id,
+        "RAMJET_GPU_GUARD_PARENT_PID": str(parent_pid or os.getpid()),
+        "RAMJET_GPU_GUARD_CAPABILITY_FD": str(descriptor),
+        "RAMJET_GPU_GUARD_CAPABILITY_SHA256": hashlib.sha256(
             payload
         ).hexdigest(),
     }
@@ -164,14 +164,14 @@ def validate_inherited_guard(
     expected_gpus: int = 8, maximum_abort_c: float = MAX_ABORT_C
 ) -> dict[str, object]:
     try:
-        active = os.environ["MINI_DYNAMO_GPU_GUARD_ACTIVE"]
-        gpu_count = int(os.environ["MINI_DYNAMO_GPU_GUARD_EXPECTED_GPUS"])
-        abort_c = float(os.environ["MINI_DYNAMO_GPU_GUARD_ABORT_C"])
-        run_id = os.environ["MINI_DYNAMO_GPU_GUARD_RUN_ID"]
-        parent_pid = int(os.environ["MINI_DYNAMO_GPU_GUARD_PARENT_PID"])
-        descriptor = int(os.environ["MINI_DYNAMO_GPU_GUARD_CAPABILITY_FD"])
+        active = os.environ["RAMJET_GPU_GUARD_ACTIVE"]
+        gpu_count = int(os.environ["RAMJET_GPU_GUARD_EXPECTED_GPUS"])
+        abort_c = float(os.environ["RAMJET_GPU_GUARD_ABORT_C"])
+        run_id = os.environ["RAMJET_GPU_GUARD_RUN_ID"]
+        parent_pid = int(os.environ["RAMJET_GPU_GUARD_PARENT_PID"])
+        descriptor = int(os.environ["RAMJET_GPU_GUARD_CAPABILITY_FD"])
         expected_digest = os.environ[
-            "MINI_DYNAMO_GPU_GUARD_CAPABILITY_SHA256"
+            "RAMJET_GPU_GUARD_CAPABILITY_SHA256"
         ]
     except (KeyError, ValueError) as error:
         raise GuardError("inherited GPU guard capability is invalid") from error
@@ -826,13 +826,13 @@ def exec_shim(command: list[str]) -> int:
     contract = validate_inherited_guard()
     try:
         workload_grace = float(
-            os.environ["MINI_DYNAMO_GPU_GUARD_WORKLOAD_GRACE_SECONDS"]
+            os.environ["RAMJET_GPU_GUARD_WORKLOAD_GRACE_SECONDS"]
         )
         owner_grace = float(
-            os.environ["MINI_DYNAMO_GPU_GUARD_TERMINATION_GRACE_SECONDS"]
+            os.environ["RAMJET_GPU_GUARD_TERMINATION_GRACE_SECONDS"]
         )
         preserve_owner = (
-            os.environ["MINI_DYNAMO_GPU_GUARD_PRESERVE_ROLLBACK_OWNER"] == "1"
+            os.environ["RAMJET_GPU_GUARD_PRESERVE_ROLLBACK_OWNER"] == "1"
         )
     except (KeyError, ValueError) as error:
         raise GuardError("inherited GPU guard shutdown policy is invalid") from error
@@ -840,7 +840,7 @@ def exec_shim(command: list[str]) -> int:
         raise GuardError("inherited GPU guard shutdown policy is invalid")
     try:
         launch_descriptor = int(
-            os.environ["MINI_DYNAMO_GPU_GUARD_LAUNCH_FD"]
+            os.environ["RAMJET_GPU_GUARD_LAUNCH_FD"]
         )
         launch_info = os.fstat(launch_descriptor)
         if not stat.S_ISFIFO(launch_info.st_mode):
@@ -1107,16 +1107,16 @@ def run_guard(
             )
             child_environment.update(capability.environment)
             launch_read_descriptor, launch_write_descriptor = os.pipe2(os.O_CLOEXEC)
-            child_environment["MINI_DYNAMO_GPU_GUARD_LAUNCH_FD"] = str(
+            child_environment["RAMJET_GPU_GUARD_LAUNCH_FD"] = str(
                 launch_read_descriptor
             )
-            child_environment["MINI_DYNAMO_GPU_GUARD_WORKLOAD_GRACE_SECONDS"] = str(
+            child_environment["RAMJET_GPU_GUARD_WORKLOAD_GRACE_SECONDS"] = str(
                 args.workload_grace_seconds
             )
             child_environment[
-                "MINI_DYNAMO_GPU_GUARD_TERMINATION_GRACE_SECONDS"
+                "RAMJET_GPU_GUARD_TERMINATION_GRACE_SECONDS"
             ] = str(args.termination_grace_seconds)
-            child_environment["MINI_DYNAMO_GPU_GUARD_PRESERVE_ROLLBACK_OWNER"] = (
+            child_environment["RAMJET_GPU_GUARD_PRESERVE_ROLLBACK_OWNER"] = (
                 "1" if args.preserve_rollback_owner else "0"
             )
             previous_subreaper = set_child_subreaper(True)

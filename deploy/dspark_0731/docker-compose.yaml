@@ -40,79 +40,79 @@ services:
       # Read-only tokenizer artifact for the opt-in Rust local-shadow mode.
       - ${MODEL_DIR:-/prod/models/DeepSeek-V4-Flash-0731}/tokenizer.json:/models/tokenizer.json:ro
     environment:
-      MD_UPSTREAM: ${MD_UPSTREAM:-http://dspark-0731:8000,http://dspark-0731-b:8000}
-      MD_UPSTREAM_TOKEN: ${VLLM_API_KEY:-dspark-local}
-      MD_ADVERTISE_CTX_MARGIN: ${MD_ADVERTISE_CTX_MARGIN:-131072}
-      MD_ROUTE_ALPHA: ${MD_ROUTE_ALPHA:-4}
-      MD_ROUTE_LOAD_UNIT_BYTES: ${MD_ROUTE_LOAD_UNIT_BYTES:-32768}
-      MD_ROUTE_MAX_LOAD_UNITS: ${MD_ROUTE_MAX_LOAD_UNITS:-8}
-      MD_ROUTE_MAX_PREFIX_BYTES: ${MD_ROUTE_MAX_PREFIX_BYTES:-2097152}
-      MD_ROUTE_MAX_OVERLAP_BLOCKS: ${MD_ROUTE_MAX_OVERLAP_BLOCKS:-32}
+      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://dspark-0731:8000,http://dspark-0731-b:8000}
+      RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:-dspark-local}
+      RJ_ADVERTISE_CTX_MARGIN: ${RJ_ADVERTISE_CTX_MARGIN:-131072}
+      RJ_ROUTE_ALPHA: ${RJ_ROUTE_ALPHA:-4}
+      RJ_ROUTE_LOAD_UNIT_BYTES: ${RJ_ROUTE_LOAD_UNIT_BYTES:-32768}
+      RJ_ROUTE_MAX_LOAD_UNITS: ${RJ_ROUTE_MAX_LOAD_UNITS:-8}
+      RJ_ROUTE_MAX_PREFIX_BYTES: ${RJ_ROUTE_MAX_PREFIX_BYTES:-2097152}
+      RJ_ROUTE_MAX_OVERLAP_BLOCKS: ${RJ_ROUTE_MAX_OVERLAP_BLOCKS:-32}
       # Privacy-bounded decision snapshots for offline alpha/cap replay.
-      MD_ROUTE_JOURNAL: ${MD_ROUTE_JOURNAL:-true}
+      RJ_ROUTE_JOURNAL: ${RJ_ROUTE_JOURNAL:-true}
       # Exact tokenization is telemetry-only until the KV-event index is fenced.
-      MD_TOKENIZER_MODE: ${MD_TOKENIZER_MODE:-local-shadow}
-      MD_TOKENIZER_PATH: ${MD_TOKENIZER_PATH:-/models/tokenizer.json}
+      RJ_TOKENIZER_MODE: ${RJ_TOKENIZER_MODE:-local-shadow}
+      RJ_TOKENIZER_PATH: ${RJ_TOKENIZER_PATH:-/models/tokenizer.json}
       # Versioned local-renderer admission: update only with a fresh golden run.
-      MD_TOKENIZER_PROFILE: ${MD_TOKENIZER_PROFILE:-deepseek-v4-r34}
-      MD_TOKENIZER_SHA256: ${MD_TOKENIZER_SHA256:-8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf}
-      MD_TOKENIZER_MIN_BYTES: ${MD_TOKENIZER_MIN_BYTES:-32768}
-      MD_TOKENIZER_MAX_BYTES: ${MD_TOKENIZER_MAX_BYTES:-2097152}
-      MD_TOKENIZER_WORKERS: ${MD_TOKENIZER_WORKERS:-1}
-      MD_TOKENIZER_QUEUE_CAPACITY: ${MD_TOKENIZER_QUEUE_CAPACITY:-8}
-      MD_TOKENIZER_TIMEOUT_MS: ${MD_TOKENIZER_TIMEOUT_MS:-2000}
+      RJ_TOKENIZER_PROFILE: ${RJ_TOKENIZER_PROFILE:-deepseek-v4-r34}
+      RJ_TOKENIZER_SHA256: ${RJ_TOKENIZER_SHA256:-8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf}
+      RJ_TOKENIZER_MIN_BYTES: ${RJ_TOKENIZER_MIN_BYTES:-32768}
+      RJ_TOKENIZER_MAX_BYTES: ${RJ_TOKENIZER_MAX_BYTES:-2097152}
+      RJ_TOKENIZER_WORKERS: ${RJ_TOKENIZER_WORKERS:-1}
+      RJ_TOKENIZER_QUEUE_CAPACITY: ${RJ_TOKENIZER_QUEUE_CAPACITY:-8}
+      RJ_TOKENIZER_TIMEOUT_MS: ${RJ_TOKENIZER_TIMEOUT_MS:-2000}
       # Pre-route exact IDs and KV lookup remain counterfactual-only. The
       # manifest is embedded in the immutable LB image and SHA-pinned here.
-      MD_EXACT_ROUTE_MODE: ${MD_EXACT_ROUTE_MODE:-shadow}
-      MD_EXACT_ROUTE_MANIFEST_PATH: ${MD_EXACT_ROUTE_MANIFEST_PATH:-/compat/deepseek-v4-r34.json}
-      MD_EXACT_ROUTE_MANIFEST_SHA256: ${MD_EXACT_ROUTE_MANIFEST_SHA256:-4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa}
+      RJ_EXACT_ROUTE_MODE: ${RJ_EXACT_ROUTE_MODE:-shadow}
+      RJ_EXACT_ROUTE_MANIFEST_PATH: ${RJ_EXACT_ROUTE_MANIFEST_PATH:-/compat/deepseek-v4-r34.json}
+      RJ_EXACT_ROUTE_MANIFEST_SHA256: ${RJ_EXACT_ROUTE_MANIFEST_SHA256:-4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa}
       # Optional serving admission stays permissive until separately qualified.
-      MD_UPSTREAM_ADMISSION_MODE: ${MD_UPSTREAM_ADMISSION_MODE:-http}
-      MD_UPSTREAM_ADMISSION_TIMEOUT_MS: ${MD_UPSTREAM_ADMISSION_TIMEOUT_MS:-5000}
+      RJ_UPSTREAM_ADMISSION_MODE: ${RJ_UPSTREAM_ADMISSION_MODE:-http}
+      RJ_UPSTREAM_ADMISSION_TIMEOUT_MS: ${RJ_UPSTREAM_ADMISSION_TIMEOUT_MS:-5000}
       # DSpark degeneration detection stays off until cooling repair and a
       # one-TP4 observe-mode qualification. Quarantine additionally requires
       # compatibility admission plus the separate durable-state overlay; only
       # a changed attested EngineCore set can durably rearm.
-      MD_DSPARK_GUARD_MODE: ${MD_DSPARK_GUARD_MODE:-off}
-      MD_DSPARK_GUARD_INTERVAL_MS: ${MD_DSPARK_GUARD_INTERVAL_MS:-5000}
-      MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS: ${MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS:-3}
-      MD_DSPARK_GUARD_MIN_PROPOSED_TOKENS: ${MD_DSPARK_GUARD_MIN_PROPOSED_TOKENS:-256}
-      MD_DSPARK_GUARD_EXPECTED_POSITIONS: ${MD_DSPARK_GUARD_EXPECTED_POSITIONS:-5}
-      MD_EXACT_ROUTE_WORKERS: ${MD_EXACT_ROUTE_WORKERS:-8}
-      MD_EXACT_ROUTE_TIMEOUT_MS: ${MD_EXACT_ROUTE_TIMEOUT_MS:-250}
+      RJ_DSPARK_GUARD_MODE: ${RJ_DSPARK_GUARD_MODE:-off}
+      RJ_DSPARK_GUARD_INTERVAL_MS: ${RJ_DSPARK_GUARD_INTERVAL_MS:-5000}
+      RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS: ${RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS:-3}
+      RJ_DSPARK_GUARD_MIN_PROPOSED_TOKENS: ${RJ_DSPARK_GUARD_MIN_PROPOSED_TOKENS:-256}
+      RJ_DSPARK_GUARD_EXPECTED_POSITIONS: ${RJ_DSPARK_GUARD_EXPECTED_POSITIONS:-5}
+      RJ_EXACT_ROUTE_WORKERS: ${RJ_EXACT_ROUTE_WORKERS:-8}
+      RJ_EXACT_ROUTE_TIMEOUT_MS: ${RJ_EXACT_ROUTE_TIMEOUT_MS:-250}
       # Placement stays disabled by default. A nonzero percentage additionally
       # requires a secret in the uncommitted node .env and one X-Session-ID.
-      MD_EXACT_ROUTE_CANARY_BPS: ${MD_EXACT_ROUTE_CANARY_BPS:-0}
-      MD_EXACT_ROUTE_CANARY_KEY: ${MD_EXACT_ROUTE_CANARY_KEY:-}
+      RJ_EXACT_ROUTE_CANARY_BPS: ${RJ_EXACT_ROUTE_CANARY_BPS:-0}
+      RJ_EXACT_ROUTE_CANARY_KEY: ${RJ_EXACT_ROUTE_CANARY_KEY:-}
       # Stateless primary/secondary session assignment is observation-only.
       # The independent key stays in the uncommitted node .env when enabled.
-      MD_SESSION_AFFINITY_MODE: ${MD_SESSION_AFFINITY_MODE:-off}
-      MD_SESSION_AFFINITY_KEY: ${MD_SESSION_AFFINITY_KEY:-}
-      MD_SESSION_AFFINITY_BONUS_BLOCKS: ${MD_SESSION_AFFINITY_BONUS_BLOCKS:-4}
-      MD_SESSION_AFFINITY_MAX_LOAD_DELTA: ${MD_SESSION_AFFINITY_MAX_LOAD_DELTA:-0}
+      RJ_SESSION_AFFINITY_MODE: ${RJ_SESSION_AFFINITY_MODE:-off}
+      RJ_SESSION_AFFINITY_KEY: ${RJ_SESSION_AFFINITY_KEY:-}
+      RJ_SESSION_AFFINITY_BONUS_BLOCKS: ${RJ_SESSION_AFFINITY_BONUS_BLOCKS:-4}
+      RJ_SESSION_AFFINITY_MAX_LOAD_DELTA: ${RJ_SESSION_AFFINITY_MAX_LOAD_DELTA:-0}
       # One-shot served-request qualification. Marked capture requires the
       # authenticated snapshot-shadow overlay; the later comparison loop is
       # in-memory and does not dispatch additional inference.
-      MD_SHADOW_SOAK_MODE: ${MD_SHADOW_SOAK_MODE:-off}
-      MD_SHADOW_SOAK_SOURCE_TARGET: ${MD_SHADOW_SOAK_SOURCE_TARGET:-104}
-      MD_SHADOW_SOAK_COMPARISON_TARGET: ${MD_SHADOW_SOAK_COMPARISON_TARGET:-100000}
-      MD_SHADOW_SOAK_ATTEMPT_LIMIT: ${MD_SHADOW_SOAK_ATTEMPT_LIMIT:-110000}
-      MD_SHADOW_SOAK_MAX_TOKEN_BYTES: ${MD_SHADOW_SOAK_MAX_TOKEN_BYTES:-100663296}
-      MD_SHADOW_SOAK_TIMEOUT_MS: ${MD_SHADOW_SOAK_TIMEOUT_MS:-300000}
+      RJ_SHADOW_SOAK_MODE: ${RJ_SHADOW_SOAK_MODE:-off}
+      RJ_SHADOW_SOAK_SOURCE_TARGET: ${RJ_SHADOW_SOAK_SOURCE_TARGET:-104}
+      RJ_SHADOW_SOAK_COMPARISON_TARGET: ${RJ_SHADOW_SOAK_COMPARISON_TARGET:-100000}
+      RJ_SHADOW_SOAK_ATTEMPT_LIMIT: ${RJ_SHADOW_SOAK_ATTEMPT_LIMIT:-110000}
+      RJ_SHADOW_SOAK_MAX_TOKEN_BYTES: ${RJ_SHADOW_SOAK_MAX_TOKEN_BYTES:-100663296}
+      RJ_SHADOW_SOAK_TIMEOUT_MS: ${RJ_SHADOW_SOAK_TIMEOUT_MS:-300000}
       # Native KV inventory remains observation-only. Shadow mode and the
       # matching per-engine r34 publishers are now the qualified defaults.
-      MD_KV_EVENT_MODE: ${MD_KV_EVENT_MODE:-shadow}
-      MD_KV_EVENT_LIVE_ENDPOINTS: ${MD_KV_EVENT_LIVE_ENDPOINTS:-tcp://dspark-0731:5557,tcp://dspark-0731-b:5557}
-      MD_KV_EVENT_REPLAY_ENDPOINTS: ${MD_KV_EVENT_REPLAY_ENDPOINTS:-tcp://dspark-0731:5558,tcp://dspark-0731-b:5558}
-      MD_KV_EVENT_TOPIC: "${MD_KV_EVENT_TOPIC:-}"
+      RJ_KV_EVENT_MODE: ${RJ_KV_EVENT_MODE:-shadow}
+      RJ_KV_EVENT_LIVE_ENDPOINTS: ${RJ_KV_EVENT_LIVE_ENDPOINTS:-tcp://dspark-0731:5557,tcp://dspark-0731-b:5557}
+      RJ_KV_EVENT_REPLAY_ENDPOINTS: ${RJ_KV_EVENT_REPLAY_ENDPOINTS:-tcp://dspark-0731:5558,tcp://dspark-0731-b:5558}
+      RJ_KV_EVENT_TOPIC: "${RJ_KV_EVENT_TOPIC:-}"
       # The publisher retains 10K scheduler steps, but near-retention replay
       # can stall its synchronous publisher for minutes. Claim only the tested
       # 8K recovery envelope; older generations remain fenced/observe-only.
-      MD_KV_EVENT_REPLAY_LIMIT: ${MD_KV_EVENT_REPLAY_LIMIT:-8192}
-      MD_KV_EVENT_REPLAY_TAIL_LIMIT: ${MD_KV_EVENT_REPLAY_TAIL_LIMIT:-64}
+      RJ_KV_EVENT_REPLAY_LIMIT: ${RJ_KV_EVENT_REPLAY_LIMIT:-8192}
+      RJ_KV_EVENT_REPLAY_TAIL_LIMIT: ${RJ_KV_EVENT_REPLAY_TAIL_LIMIT:-64}
       # Valid in-envelope replay stays fail-closed at one total deadline;
       # snapshot/tree-dump recovery replaces replay for older generations.
-      MD_KV_EVENT_TIMEOUT_MS: ${MD_KV_EVENT_TIMEOUT_MS:-180000}
+      RJ_KV_EVENT_TIMEOUT_MS: ${RJ_KV_EVENT_TIMEOUT_MS:-180000}
 
   dspark-0731:
     image: ${IMAGE_A:-${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}}

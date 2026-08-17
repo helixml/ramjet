@@ -16,15 +16,15 @@ rendering* — turning an OpenAI request into token IDs the engine would produce
 | Snapshot companion, digest index | No |
 | Prompt rendering, reasoning translation, attestation | **Yes** — `src/model/` |
 
-A model with no profile still works. Set `MD_TOKENIZER_MODE=off` and
-`MD_EXACT_ROUTE_MODE=off` and you get byte-fingerprint affinity routing, load
+A model with no profile still works. Set `RJ_TOKENIZER_MODE=off` and
+`RJ_EXACT_ROUTE_MODE=off` and you get byte-fingerprint affinity routing, load
 balancing, health, and metrics. A profile is what unlocks *attested local
 tokenization*, which is a telemetry and placement optimisation, not a
 requirement for serving.
 
 ## Choosing a profile
 
-`MD_TOKENIZER_PROFILE` selects one. Unknown values are rejected at startup
+`RJ_TOKENIZER_PROFILE` selects one. Unknown values are rejected at startup
 rather than silently falling back, so a typo cannot quietly disable
 attestation. Current profiles:
 
@@ -35,7 +35,7 @@ attestation. Current profiles:
 | `qwen3.8-2.4t-a95b` | Qwen/Qwen3.8-2.4T-A95B | text | HF chat template |
 
 Profiles using an HF chat template additionally require
-`MD_CHAT_TEMPLATE_PATH` and `MD_CHAT_TEMPLATE_SHA256`. The template is
+`RJ_CHAT_TEMPLATE_PATH` and `RJ_CHAT_TEMPLATE_SHA256`. The template is
 digest-pinned for the same reason the tokenizer is: editing it changes the
 token IDs the renderer produces, silently invalidating every cached placement
 decision derived from them. Setting one without the other is a startup error.
@@ -110,17 +110,22 @@ example of what to look at, not as universal constants.
 
 A sparse mixture-of-experts activates a fraction of its parameters per token; a
 dense model activates all of them. That difference dominates single-stream
-decode and barely shows up in aggregate throughput.
+decode, while full-box capacity also depends heavily on batching, speculation,
+and the concurrency at which each stack saturates.
 
 | | DeepSeek-V4-Flash (sparse MoE) | Qwen3.8-27B (dense) |
 |---|---|---|
 | per-stream decode @ c1 | 245.1 tok/s | 77, or 121 with MTP |
-| per-stream decode @ c8 | 107.5 tok/s | ~102 |
-| aggregate @ c8 | 556 tok/s | 817 |
+| best qualified full-box throughput | 1,891.2 tok/s | 7,890.9 tok/s |
+| measured shape | c24/max256 | c256/max256, MTP off |
 
 Neither is "better". Pick against the workload: a single interactive user feels
-the c1 column, a fleet of agents feels the aggregate column. Do not generalise
-from one to the other -- the aggregate figures completely hide the c1 gap.
+the c1 row, while a saturated fleet cares about the full-box row. The capacity
+figures are each model's best qualified point on the same two-TP4/eight-GPU
+topology, but they come from separate model-specific workloads and are not a
+matched head-to-head benchmark. DeepSeek's c24 result completed 72/72 requests;
+Qwen's c256 result uses deterministic 256-token outputs and disables MTP,
+which measured 12.5% slower once the box was saturated.
 
 Two consequences worth knowing before tuning:
 

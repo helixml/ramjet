@@ -285,9 +285,9 @@ impl fmt::Debug for SecretString {
 
 #[derive(Debug, Error, PartialEq)]
 pub enum ConfigError {
-    #[error("MD_UPSTREAM contains no upstreams")]
+    #[error("RJ_UPSTREAM contains no upstreams")]
     NoUpstreams,
-    #[error("invalid MD_UPSTREAM entry {0:?}")]
+    #[error("invalid RJ_UPSTREAM entry {0:?}")]
     InvalidUpstream(String),
     #[error("invalid {key}={value:?}: {reason}")]
     InvalidValue {
@@ -296,16 +296,24 @@ pub enum ConfigError {
         reason: &'static str,
     },
     #[error(
-        "legacy DS4_-prefixed settings are no longer read; rename them to MD_: {}",
+        "legacy {}-prefixed settings are no longer read; rename them to RJ_: {}",
+        legacy_prefix_list(),
         .0.join(", ")
     )]
     LegacyEnv(Vec<String>),
 }
 
-/// Fails startup when a retired `DS4_`-prefixed setting is still in the
-/// environment.
+/// Prefixes this binary once read and has since retired.
+const LEGACY_ENV_PREFIXES: [&str; 2] = ["DS4_", "MD_"];
+
+fn legacy_prefix_list() -> String {
+    LEGACY_ENV_PREFIXES.join("/")
+}
+
+/// Fails startup when a retired `DS4_`- or `MD_`-prefixed setting is still in
+/// the environment.
 ///
-/// The prefix change is a hard cut, so a stale variable in a compose overlay
+/// Each prefix change is a hard cut, so a stale variable in a compose overlay
 /// would otherwise be inert and the setting would silently revert to its
 /// default. Refusing to start converts that into an obvious failure.
 ///
@@ -314,7 +322,11 @@ pub enum ConfigError {
 /// Returns [`ConfigError::LegacyEnv`] listing every retired name found.
 pub fn reject_legacy_env(keys: impl Iterator<Item = String>) -> Result<(), ConfigError> {
     let mut legacy = keys
-        .filter(|key| key.starts_with("DS4_"))
+        .filter(|key| {
+            LEGACY_ENV_PREFIXES
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+        })
         .collect::<Vec<_>>();
     if legacy.is_empty() {
         return Ok(());
@@ -342,7 +354,7 @@ impl Config {
     #[allow(clippy::too_many_lines)]
     pub fn from_lookup(mut get: impl FnMut(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let raw_upstreams =
-            get("MD_UPSTREAM").unwrap_or_else(|| "http://ds4-flash:8000".to_owned());
+            get("RJ_UPSTREAM").unwrap_or_else(|| "http://ds4-flash:8000".to_owned());
         let upstreams = raw_upstreams
             .split(',')
             .filter_map(|raw| {
@@ -359,31 +371,31 @@ impl Config {
         if upstreams.is_empty() {
             return Err(ConfigError::NoUpstreams);
         }
-        let upstream_token = get("MD_UPSTREAM_TOKEN").filter(|value| !value.is_empty());
+        let upstream_token = get("RJ_UPSTREAM_TOKEN").filter(|value| !value.is_empty());
 
         let route_alpha = parse(
             &mut get,
-            "MD_ROUTE_ALPHA",
+            "RJ_ROUTE_ALPHA",
             4.0_f64,
             "a finite non-negative float",
         )?;
         if !route_alpha.is_finite() || route_alpha < 0.0 {
             return Err(invalid(
-                "MD_ROUTE_ALPHA",
+                "RJ_ROUTE_ALPHA",
                 route_alpha.to_string(),
                 "a finite non-negative float",
             ));
         }
-        let route_chunk_bytes = positive(&mut get, "MD_ROUTE_CHUNK_BYTES", 2_048)?;
-        let route_max_prefix_bytes = positive(&mut get, "MD_ROUTE_MAX_PREFIX_BYTES", 2 << 20)?;
-        let route_max_overlap_blocks = positive(&mut get, "MD_ROUTE_MAX_OVERLAP_BLOCKS", 32)?;
-        let route_index_capacity = positive(&mut get, "MD_ROUTE_INDEX_CAPACITY", 100_000)?;
-        let route_load_unit_bytes = positive(&mut get, "MD_ROUTE_LOAD_UNIT_BYTES", 32 << 10)?;
-        let route_max_load_units = positive(&mut get, "MD_ROUTE_MAX_LOAD_UNITS", 8)?;
-        let affinity = match get("MD_AFFINITY").as_deref().unwrap_or("prefix") {
+        let route_chunk_bytes = positive(&mut get, "RJ_ROUTE_CHUNK_BYTES", 2_048)?;
+        let route_max_prefix_bytes = positive(&mut get, "RJ_ROUTE_MAX_PREFIX_BYTES", 2 << 20)?;
+        let route_max_overlap_blocks = positive(&mut get, "RJ_ROUTE_MAX_OVERLAP_BLOCKS", 32)?;
+        let route_index_capacity = positive(&mut get, "RJ_ROUTE_INDEX_CAPACITY", 100_000)?;
+        let route_load_unit_bytes = positive(&mut get, "RJ_ROUTE_LOAD_UNIT_BYTES", 32 << 10)?;
+        let route_max_load_units = positive(&mut get, "RJ_ROUTE_MAX_LOAD_UNITS", 8)?;
+        let affinity = match get("RJ_AFFINITY").as_deref().unwrap_or("prefix") {
             "prefix" => Affinity::Prefix,
             "load" => Affinity::Load,
-            value => return Err(invalid("MD_AFFINITY", value.to_owned(), "prefix or load")),
+            value => return Err(invalid("RJ_AFFINITY", value.to_owned(), "prefix or load")),
         };
         let session_affinity = session_affinity_settings(
             &mut get,
@@ -407,33 +419,33 @@ impl Config {
         let dspark_guard_mode = dspark_guard_mode(&mut get, upstream_admission_mode)?;
         let dspark_guard_interval_ms = bounded_positive(
             &mut get,
-            "MD_DSPARK_GUARD_INTERVAL_MS",
+            "RJ_DSPARK_GUARD_INTERVAL_MS",
             5_000,
             MAX_DSPARK_GUARD_INTERVAL_MS,
         )?;
         if dspark_guard_interval_ms < MIN_DSPARK_GUARD_INTERVAL_MS {
             return Err(invalid(
-                "MD_DSPARK_GUARD_INTERVAL_MS",
+                "RJ_DSPARK_GUARD_INTERVAL_MS",
                 dspark_guard_interval_ms.to_string(),
                 "an integer from 1000 through 60000",
             ));
         }
         let dspark_guard_consecutive_windows = bounded_positive(
             &mut get,
-            "MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS",
+            "RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS",
             3,
             MAX_DSPARK_GUARD_CONSECUTIVE_WINDOWS,
         )?;
         if dspark_guard_consecutive_windows < 2 {
             return Err(invalid(
-                "MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS",
+                "RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS",
                 dspark_guard_consecutive_windows.to_string(),
                 "an integer from 2 through 12",
             ));
         }
         let dspark_guard_min_proposed_tokens = bounded_positive(
             &mut get,
-            "MD_DSPARK_GUARD_MIN_PROPOSED_TOKENS",
+            "RJ_DSPARK_GUARD_MIN_PROPOSED_TOKENS",
             256,
             MAX_DSPARK_GUARD_MIN_PROPOSED_TOKENS,
         )?;
@@ -441,63 +453,63 @@ impl Config {
             && dspark_guard_consecutive_windows < MIN_DSPARK_QUARANTINE_CONSECUTIVE_WINDOWS
         {
             return Err(invalid(
-                "MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS",
+                "RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS",
                 dspark_guard_consecutive_windows.to_string(),
-                "at least 3 when MD_DSPARK_GUARD_MODE=quarantine",
+                "at least 3 when RJ_DSPARK_GUARD_MODE=quarantine",
             ));
         }
         if dspark_guard_mode == DsparkGuardMode::Quarantine
             && dspark_guard_min_proposed_tokens < MIN_DSPARK_QUARANTINE_PROPOSED_TOKENS
         {
             return Err(invalid(
-                "MD_DSPARK_GUARD_MIN_PROPOSED_TOKENS",
+                "RJ_DSPARK_GUARD_MIN_PROPOSED_TOKENS",
                 dspark_guard_min_proposed_tokens.to_string(),
-                "at least 256 when MD_DSPARK_GUARD_MODE=quarantine",
+                "at least 256 when RJ_DSPARK_GUARD_MODE=quarantine",
             ));
         }
         let dspark_guard_expected_positions = bounded_positive(
             &mut get,
-            "MD_DSPARK_GUARD_EXPECTED_POSITIONS",
+            "RJ_DSPARK_GUARD_EXPECTED_POSITIONS",
             5,
             MAX_DSPARK_GUARD_EXPECTED_POSITIONS,
         )?;
         let raw_dspark_guard_state_path =
-            get("MD_DSPARK_GUARD_STATE_PATH").filter(|value| !value.is_empty());
+            get("RJ_DSPARK_GUARD_STATE_PATH").filter(|value| !value.is_empty());
         let dspark_guard_state_path = raw_dspark_guard_state_path
             .as_deref()
             .and_then(|value| normalized_absolute_path(value, MAX_SNAPSHOT_ROUTE_PATH_BYTES));
         if raw_dspark_guard_state_path.is_some() && dspark_guard_state_path.is_none() {
             return Err(invalid(
-                "MD_DSPARK_GUARD_STATE_PATH",
+                "RJ_DSPARK_GUARD_STATE_PATH",
                 "<redacted>".to_owned(),
                 "a normalized absolute path no longer than 4096 bytes",
             ));
         }
         if dspark_guard_mode == DsparkGuardMode::Quarantine && dspark_guard_state_path.is_none() {
             return Err(invalid(
-                "MD_DSPARK_GUARD_STATE_PATH",
+                "RJ_DSPARK_GUARD_STATE_PATH",
                 String::new(),
                 "an absolute pre-created state file in quarantine mode",
             ));
         }
         if dspark_guard_mode != DsparkGuardMode::Quarantine && dspark_guard_state_path.is_some() {
             return Err(invalid(
-                "MD_DSPARK_GUARD_STATE_PATH",
+                "RJ_DSPARK_GUARD_STATE_PATH",
                 "configured".to_owned(),
-                "unset unless MD_DSPARK_GUARD_MODE=quarantine",
+                "unset unless RJ_DSPARK_GUARD_MODE=quarantine",
             ));
         }
         let dspark_guard_state_owner_uid =
-            parse(&mut get, "MD_DSPARK_GUARD_STATE_OWNER_UID", 0_u32, "a UID")?;
+            parse(&mut get, "RJ_DSPARK_GUARD_STATE_OWNER_UID", 0_u32, "a UID")?;
         let dspark_guard_state_group_gid =
-            parse(&mut get, "MD_DSPARK_GUARD_STATE_GROUP_GID", 0_u32, "a GID")?;
+            parse(&mut get, "RJ_DSPARK_GUARD_STATE_GROUP_GID", 0_u32, "a GID")?;
         if snapshot_route.mode == SnapshotRouteMode::Shadow
             && exact_route.mode != ExactRouteMode::Shadow
         {
             return Err(invalid(
-                "MD_SNAPSHOT_ROUTE_MODE",
+                "RJ_SNAPSHOT_ROUTE_MODE",
                 "shadow".to_owned(),
-                "MD_EXACT_ROUTE_MODE=shadow",
+                "RJ_EXACT_ROUTE_MODE=shadow",
             ));
         }
         let shadow_soak = shadow_soak_settings(
@@ -515,7 +527,7 @@ impl Config {
             upstream_admission_mode,
             upstream_admission_timeout_ms: bounded_positive(
                 &mut get,
-                "MD_UPSTREAM_ADMISSION_TIMEOUT_MS",
+                "RJ_UPSTREAM_ADMISSION_TIMEOUT_MS",
                 5_000,
                 MAX_UPSTREAM_ADMISSION_TIMEOUT_MS,
             )?,
@@ -530,12 +542,12 @@ impl Config {
             idle_drain,
             idle_drain_interval_seconds: bounded_positive(
                 &mut get,
-                "MD_IDLE_DRAIN_INTERVAL_SECONDS",
+                "RJ_IDLE_DRAIN_INTERVAL_SECONDS",
                 15,
                 MAX_IDLE_DRAIN_INTERVAL_SECONDS,
             )?,
-            max_tokens_strip: parse(&mut get, "MD_MAX_TOKENS_STRIP", 100_000, "an integer")?,
-            advertise_ctx_margin: parse(&mut get, "MD_ADVERTISE_CTX_MARGIN", 16_384, "an integer")?,
+            max_tokens_strip: parse(&mut get, "RJ_MAX_TOKENS_STRIP", 100_000, "an integer")?,
+            advertise_ctx_margin: parse(&mut get, "RJ_ADVERTISE_CTX_MARGIN", 16_384, "an integer")?,
             route_alpha,
             route_chunk_bytes,
             route_max_prefix_bytes,
@@ -545,7 +557,7 @@ impl Config {
             route_max_load_units,
             route_phase_aware_load: parse(
                 &mut get,
-                "MD_ROUTE_PHASE_AWARE_LOAD",
+                "RJ_ROUTE_PHASE_AWARE_LOAD",
                 false,
                 "a boolean",
             )?,
@@ -554,7 +566,7 @@ impl Config {
             session_affinity_key: session_affinity.key,
             session_affinity_bonus_blocks: session_affinity.bonus_blocks,
             session_affinity_max_load_delta: session_affinity.max_load_delta,
-            route_journal: parse(&mut get, "MD_ROUTE_JOURNAL", false, "a boolean")?,
+            route_journal: parse(&mut get, "RJ_ROUTE_JOURNAL", false, "a boolean")?,
             tokenizer_mode: tokenizer.mode,
             tokenizer_path: tokenizer.path,
             tokenizer_sha256: tokenizer.sha256,
@@ -563,9 +575,9 @@ impl Config {
             chat_template_sha256: tokenizer.chat_template_sha256,
             tokenizer_min_bytes: tokenizer.min_bytes,
             tokenizer_max_bytes: tokenizer.max_bytes,
-            tokenizer_workers: positive(&mut get, "MD_TOKENIZER_WORKERS", 1)?,
-            tokenizer_queue_capacity: positive(&mut get, "MD_TOKENIZER_QUEUE_CAPACITY", 8)?,
-            tokenizer_timeout_ms: positive(&mut get, "MD_TOKENIZER_TIMEOUT_MS", 2_000)?,
+            tokenizer_workers: positive(&mut get, "RJ_TOKENIZER_WORKERS", 1)?,
+            tokenizer_queue_capacity: positive(&mut get, "RJ_TOKENIZER_QUEUE_CAPACITY", 8)?,
+            tokenizer_timeout_ms: positive(&mut get, "RJ_TOKENIZER_TIMEOUT_MS", 2_000)?,
             exact_route_mode: exact_route.mode,
             exact_route_manifest_path: exact_route.manifest_path,
             exact_route_manifest_sha256: exact_route.manifest_sha256,
@@ -605,13 +617,13 @@ fn dspark_guard_mode(
     get: &mut impl FnMut(&str) -> Option<String>,
     admission_mode: UpstreamAdmissionMode,
 ) -> Result<DsparkGuardMode, ConfigError> {
-    let mode = match get("MD_DSPARK_GUARD_MODE").as_deref().unwrap_or("off") {
+    let mode = match get("RJ_DSPARK_GUARD_MODE").as_deref().unwrap_or("off") {
         "off" => DsparkGuardMode::Off,
         "observe" => DsparkGuardMode::Observe,
         "quarantine" => DsparkGuardMode::Quarantine,
         value => {
             return Err(invalid(
-                "MD_DSPARK_GUARD_MODE",
+                "RJ_DSPARK_GUARD_MODE",
                 value.to_owned(),
                 "off, observe, or quarantine",
             ));
@@ -620,9 +632,9 @@ fn dspark_guard_mode(
     if mode == DsparkGuardMode::Quarantine && admission_mode != UpstreamAdmissionMode::Compatibility
     {
         return Err(invalid(
-            "MD_DSPARK_GUARD_MODE",
+            "RJ_DSPARK_GUARD_MODE",
             "quarantine".to_owned(),
-            "quarantine requires MD_UPSTREAM_ADMISSION_MODE=compatibility",
+            "quarantine requires RJ_UPSTREAM_ADMISSION_MODE=compatibility",
         ));
     }
     Ok(mode)
@@ -635,7 +647,7 @@ fn upstream_admission_mode(
     exact_route: &ExactRouteSettings,
     serving_runtime: &ServingRuntimeSettings,
 ) -> Result<UpstreamAdmissionMode, ConfigError> {
-    let mode = match get("MD_UPSTREAM_ADMISSION_MODE")
+    let mode = match get("RJ_UPSTREAM_ADMISSION_MODE")
         .as_deref()
         .unwrap_or("http")
     {
@@ -643,7 +655,7 @@ fn upstream_admission_mode(
         "compatibility" => UpstreamAdmissionMode::Compatibility,
         value => {
             return Err(invalid(
-                "MD_UPSTREAM_ADMISSION_MODE",
+                "RJ_UPSTREAM_ADMISSION_MODE",
                 value.to_owned(),
                 "http or compatibility",
             ));
@@ -652,28 +664,28 @@ fn upstream_admission_mode(
     if mode == UpstreamAdmissionMode::Compatibility {
         if upstream_count < 2 {
             return Err(invalid(
-                "MD_UPSTREAM_ADMISSION_MODE",
+                "RJ_UPSTREAM_ADMISSION_MODE",
                 "compatibility".to_owned(),
                 "compatibility admission requires at least two upstreams",
             ));
         }
         if tokenizer.mode != TokenizerMode::LocalShadow {
             return Err(invalid(
-                "MD_UPSTREAM_ADMISSION_MODE",
+                "RJ_UPSTREAM_ADMISSION_MODE",
                 "compatibility".to_owned(),
-                "compatibility admission requires MD_TOKENIZER_MODE=local-shadow",
+                "compatibility admission requires RJ_TOKENIZER_MODE=local-shadow",
             ));
         }
         if exact_route.manifest_path.is_none() || exact_route.manifest_sha256.is_none() {
             return Err(invalid(
-                "MD_UPSTREAM_ADMISSION_MODE",
+                "RJ_UPSTREAM_ADMISSION_MODE",
                 "compatibility".to_owned(),
                 "compatibility admission requires a path and SHA-pinned manifest",
             ));
         }
         if serving_runtime.manifest_path.is_none() || serving_runtime.manifest_sha256.is_none() {
             return Err(invalid(
-                "MD_UPSTREAM_ADMISSION_MODE",
+                "RJ_UPSTREAM_ADMISSION_MODE",
                 "compatibility".to_owned(),
                 "compatibility admission requires a path and SHA-pinned serving runtime manifest",
             ));
@@ -685,24 +697,24 @@ fn upstream_admission_mode(
 fn serving_runtime_settings(
     get: &mut impl FnMut(&str) -> Option<String>,
 ) -> Result<ServingRuntimeSettings, ConfigError> {
-    let manifest_path = get("MD_SERVING_RUNTIME_MANIFEST_PATH").filter(|value| !value.is_empty());
-    let manifest_sha256 = get("MD_SERVING_RUNTIME_MANIFEST_SHA256")
+    let manifest_path = get("RJ_SERVING_RUNTIME_MANIFEST_PATH").filter(|value| !value.is_empty());
+    let manifest_sha256 = get("RJ_SERVING_RUNTIME_MANIFEST_SHA256")
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
     if let Some(value) = &manifest_sha256
         && !valid_sha256(value)
     {
         return Err(invalid(
-            "MD_SERVING_RUNTIME_MANIFEST_SHA256",
+            "RJ_SERVING_RUNTIME_MANIFEST_SHA256",
             value.clone(),
             "a 64-character hexadecimal SHA-256",
         ));
     }
     if manifest_path.is_some() != manifest_sha256.is_some() {
         let key = if manifest_path.is_none() {
-            "MD_SERVING_RUNTIME_MANIFEST_PATH"
+            "RJ_SERVING_RUNTIME_MANIFEST_PATH"
         } else {
-            "MD_SERVING_RUNTIME_MANIFEST_SHA256"
+            "RJ_SERVING_RUNTIME_MANIFEST_SHA256"
         };
         return Err(invalid(
             key,
@@ -722,12 +734,12 @@ fn session_affinity_settings(
     max_overlap_blocks: usize,
     max_load_units: usize,
 ) -> Result<SessionAffinitySettings, ConfigError> {
-    let mode = match get("MD_SESSION_AFFINITY_MODE").as_deref().unwrap_or("off") {
+    let mode = match get("RJ_SESSION_AFFINITY_MODE").as_deref().unwrap_or("off") {
         "off" => SessionAffinityMode::Off,
         "shadow" => SessionAffinityMode::Shadow,
         value => {
             return Err(invalid(
-                "MD_SESSION_AFFINITY_MODE",
+                "RJ_SESSION_AFFINITY_MODE",
                 value.to_owned(),
                 "off or shadow",
             ));
@@ -735,12 +747,12 @@ fn session_affinity_settings(
     };
     if mode == SessionAffinityMode::Shadow && upstream_count < 2 {
         return Err(invalid(
-            "MD_SESSION_AFFINITY_MODE",
+            "RJ_SESSION_AFFINITY_MODE",
             "shadow".to_owned(),
             "shadow requires at least two upstreams",
         ));
     }
-    let key = get("MD_SESSION_AFFINITY_KEY")
+    let key = get("RJ_SESSION_AFFINITY_KEY")
         .filter(|value| !value.is_empty())
         .map(SecretString);
     if mode == SessionAffinityMode::Shadow
@@ -749,37 +761,37 @@ fn session_affinity_settings(
             .is_none_or(|key| !(32..=256).contains(&key.as_bytes().len()))
     {
         return Err(invalid(
-            "MD_SESSION_AFFINITY_KEY",
+            "RJ_SESSION_AFFINITY_KEY",
             "<redacted>".to_owned(),
             "a secret from 32 through 256 bytes in shadow mode",
         ));
     }
     if mode == SessionAffinityMode::Off && key.is_some() {
         return Err(invalid(
-            "MD_SESSION_AFFINITY_KEY",
+            "RJ_SESSION_AFFINITY_KEY",
             "<redacted>".to_owned(),
-            "unset unless MD_SESSION_AFFINITY_MODE=shadow",
+            "unset unless RJ_SESSION_AFFINITY_MODE=shadow",
         ));
     }
-    let bonus_blocks = positive(get, "MD_SESSION_AFFINITY_BONUS_BLOCKS", 4)?;
+    let bonus_blocks = positive(get, "RJ_SESSION_AFFINITY_BONUS_BLOCKS", 4)?;
     if bonus_blocks > max_overlap_blocks {
         return Err(invalid(
-            "MD_SESSION_AFFINITY_BONUS_BLOCKS",
+            "RJ_SESSION_AFFINITY_BONUS_BLOCKS",
             bonus_blocks.to_string(),
-            "no greater than MD_ROUTE_MAX_OVERLAP_BLOCKS",
+            "no greater than RJ_ROUTE_MAX_OVERLAP_BLOCKS",
         ));
     }
     let max_load_delta = parse(
         get,
-        "MD_SESSION_AFFINITY_MAX_LOAD_DELTA",
+        "RJ_SESSION_AFFINITY_MAX_LOAD_DELTA",
         0_usize,
         "a non-negative integer",
     )?;
     if max_load_delta > max_load_units {
         return Err(invalid(
-            "MD_SESSION_AFFINITY_MAX_LOAD_DELTA",
+            "RJ_SESSION_AFFINITY_MAX_LOAD_DELTA",
             max_load_delta.to_string(),
-            "no greater than MD_ROUTE_MAX_LOAD_UNITS",
+            "no greater than RJ_ROUTE_MAX_LOAD_UNITS",
         ));
     }
     Ok(SessionAffinitySettings {
@@ -797,27 +809,27 @@ fn exact_route_settings(
     snapshot_route: &SnapshotRouteSettings,
     affinity: Affinity,
 ) -> Result<ExactRouteSettings, ConfigError> {
-    let mode = match get("MD_EXACT_ROUTE_MODE").as_deref().unwrap_or("off") {
+    let mode = match get("RJ_EXACT_ROUTE_MODE").as_deref().unwrap_or("off") {
         "off" => ExactRouteMode::Off,
         "shadow" => ExactRouteMode::Shadow,
         "placement" => ExactRouteMode::Placement,
         value => {
             return Err(invalid(
-                "MD_EXACT_ROUTE_MODE",
+                "RJ_EXACT_ROUTE_MODE",
                 value.to_owned(),
                 "off, shadow, or placement",
             ));
         }
     };
-    let manifest_path = get("MD_EXACT_ROUTE_MANIFEST_PATH").filter(|value| !value.is_empty());
-    let manifest_sha256 = get("MD_EXACT_ROUTE_MANIFEST_SHA256")
+    let manifest_path = get("RJ_EXACT_ROUTE_MANIFEST_PATH").filter(|value| !value.is_empty());
+    let manifest_sha256 = get("RJ_EXACT_ROUTE_MANIFEST_SHA256")
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
     if let Some(value) = &manifest_sha256
         && !valid_sha256(value)
     {
         return Err(invalid(
-            "MD_EXACT_ROUTE_MANIFEST_SHA256",
+            "RJ_EXACT_ROUTE_MANIFEST_SHA256",
             value.clone(),
             "a 64-character hexadecimal SHA-256",
         ));
@@ -830,46 +842,46 @@ fn exact_route_settings(
         };
         if tokenizer.mode != TokenizerMode::LocalShadow {
             return Err(invalid(
-                "MD_EXACT_ROUTE_MODE",
+                "RJ_EXACT_ROUTE_MODE",
                 mode_label.to_owned(),
-                "exact routing requires MD_TOKENIZER_MODE=local-shadow",
+                "exact routing requires RJ_TOKENIZER_MODE=local-shadow",
             ));
         }
         let direct = kv_events.mode == KvEventMode::Shadow;
         let snapshot = snapshot_route.mode == SnapshotRouteMode::Shadow;
         if direct == snapshot {
             return Err(invalid(
-                "MD_EXACT_ROUTE_MODE",
+                "RJ_EXACT_ROUTE_MODE",
                 mode_label.to_owned(),
                 "exact routing requires exactly one of direct KV events or snapshot shadow",
             ));
         }
         if snapshot && mode != ExactRouteMode::Shadow {
             return Err(invalid(
-                "MD_EXACT_ROUTE_MODE",
+                "RJ_EXACT_ROUTE_MODE",
                 mode_label.to_owned(),
                 "snapshot inventory is observation-only and requires shadow mode",
             ));
         }
         if manifest_path.is_none() {
             return Err(invalid(
-                "MD_EXACT_ROUTE_MANIFEST_PATH",
+                "RJ_EXACT_ROUTE_MANIFEST_PATH",
                 String::new(),
                 "a compatibility manifest path when exact routing is enabled",
             ));
         }
         if manifest_sha256.is_none() {
             return Err(invalid(
-                "MD_EXACT_ROUTE_MANIFEST_SHA256",
+                "RJ_EXACT_ROUTE_MANIFEST_SHA256",
                 String::new(),
                 "the expected manifest SHA-256 when exact routing is enabled",
             ));
         }
         if mode == ExactRouteMode::Placement && affinity != Affinity::Prefix {
             return Err(invalid(
-                "MD_EXACT_ROUTE_MODE",
+                "RJ_EXACT_ROUTE_MODE",
                 "placement".to_owned(),
-                "placement requires MD_AFFINITY=prefix",
+                "placement requires RJ_AFFINITY=prefix",
             ));
         }
     }
@@ -878,12 +890,12 @@ fn exact_route_settings(
         mode,
         manifest_path,
         manifest_sha256,
-        workers: positive(get, "MD_EXACT_ROUTE_WORKERS", 4)?,
-        timeout_ms: positive(get, "MD_EXACT_ROUTE_TIMEOUT_MS", 250)?,
-        min_gain_tokens: positive(get, "MD_EXACT_ROUTE_MIN_GAIN_TOKENS", 8_192)?,
+        workers: positive(get, "RJ_EXACT_ROUTE_WORKERS", 4)?,
+        timeout_ms: positive(get, "RJ_EXACT_ROUTE_TIMEOUT_MS", 250)?,
+        min_gain_tokens: positive(get, "RJ_EXACT_ROUTE_MIN_GAIN_TOKENS", 8_192)?,
         max_load_delta: parse(
             get,
-            "MD_EXACT_ROUTE_MAX_LOAD_DELTA",
+            "RJ_EXACT_ROUTE_MAX_LOAD_DELTA",
             0_usize,
             "a non-negative integer",
         )?,
@@ -899,12 +911,12 @@ fn shadow_soak_settings(
     snapshot_route: &SnapshotRouteSettings,
     has_upstream_token: bool,
 ) -> Result<ShadowSoakSettings, ConfigError> {
-    let mode = match get("MD_SHADOW_SOAK_MODE").as_deref().unwrap_or("off") {
+    let mode = match get("RJ_SHADOW_SOAK_MODE").as_deref().unwrap_or("off") {
         "off" => ShadowSoakMode::Off,
         "capture" => ShadowSoakMode::Capture,
         value => {
             return Err(invalid(
-                "MD_SHADOW_SOAK_MODE",
+                "RJ_SHADOW_SOAK_MODE",
                 value.to_owned(),
                 "off or capture",
             ));
@@ -912,39 +924,39 @@ fn shadow_soak_settings(
     };
     let source_target = bounded_positive(
         get,
-        "MD_SHADOW_SOAK_SOURCE_TARGET",
+        "RJ_SHADOW_SOAK_SOURCE_TARGET",
         104,
         MAX_SHADOW_SOAK_SOURCES,
     )?;
     let comparison_target = bounded_positive(
         get,
-        "MD_SHADOW_SOAK_COMPARISON_TARGET",
+        "RJ_SHADOW_SOAK_COMPARISON_TARGET",
         100_000,
         MAX_SHADOW_SOAK_COMPARISONS,
     )?;
     let attempt_limit = bounded_positive(
         get,
-        "MD_SHADOW_SOAK_ATTEMPT_LIMIT",
+        "RJ_SHADOW_SOAK_ATTEMPT_LIMIT",
         110_000,
         MAX_SHADOW_SOAK_ATTEMPTS,
     )?;
     let max_token_bytes = bounded_positive(
         get,
-        "MD_SHADOW_SOAK_MAX_TOKEN_BYTES",
+        "RJ_SHADOW_SOAK_MAX_TOKEN_BYTES",
         96 << 20,
         MAX_SHADOW_SOAK_TOKEN_BYTES,
     )?;
     let timeout_ms = bounded_positive(
         get,
-        "MD_SHADOW_SOAK_TIMEOUT_MS",
+        "RJ_SHADOW_SOAK_TIMEOUT_MS",
         300_000,
         MAX_SHADOW_SOAK_TIMEOUT_MS,
     )?;
     if attempt_limit < comparison_target {
         return Err(invalid(
-            "MD_SHADOW_SOAK_ATTEMPT_LIMIT",
+            "RJ_SHADOW_SOAK_ATTEMPT_LIMIT",
             attempt_limit.to_string(),
-            "at least MD_SHADOW_SOAK_COMPARISON_TARGET",
+            "at least RJ_SHADOW_SOAK_COMPARISON_TARGET",
         ));
     }
     if mode == ShadowSoakMode::Capture {
@@ -953,16 +965,16 @@ fn shadow_soak_settings(
             || snapshot_route.mode != SnapshotRouteMode::Shadow
         {
             return Err(invalid(
-                "MD_SHADOW_SOAK_MODE",
+                "RJ_SHADOW_SOAK_MODE",
                 "capture".to_owned(),
                 "capture requires local tokenization and snapshot exact shadow",
             ));
         }
         if !has_upstream_token {
             return Err(invalid(
-                "MD_SHADOW_SOAK_MODE",
+                "RJ_SHADOW_SOAK_MODE",
                 "capture".to_owned(),
-                "capture requires MD_UPSTREAM_TOKEN authentication",
+                "capture requires RJ_UPSTREAM_TOKEN authentication",
             ));
         }
     }
@@ -981,12 +993,12 @@ fn snapshot_route_settings(
     get: &mut impl FnMut(&str) -> Option<String>,
     upstream_count: usize,
 ) -> Result<SnapshotRouteSettings, ConfigError> {
-    let mode = match get("MD_SNAPSHOT_ROUTE_MODE").as_deref().unwrap_or("off") {
+    let mode = match get("RJ_SNAPSHOT_ROUTE_MODE").as_deref().unwrap_or("off") {
         "off" => SnapshotRouteMode::Off,
         "shadow" => SnapshotRouteMode::Shadow,
         value => {
             return Err(invalid(
-                "MD_SNAPSHOT_ROUTE_MODE",
+                "RJ_SNAPSHOT_ROUTE_MODE",
                 value.to_owned(),
                 "off or shadow",
             ));
@@ -1005,42 +1017,42 @@ fn snapshot_route_settings(
     }
     let attestation_refresh_ms = bounded_positive(
         get,
-        "MD_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS",
+        "RJ_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS",
         1_000,
         MAX_SNAPSHOT_ROUTE_RECONNECT_MS,
     )?;
     let attempt_timeout_ms = bounded_positive(
         get,
-        "MD_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS",
+        "RJ_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS",
         30_000,
         MAX_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS,
     )?;
     let reconnect_min_ms = bounded_positive(
         get,
-        "MD_SNAPSHOT_ROUTE_RECONNECT_MIN_MS",
+        "RJ_SNAPSHOT_ROUTE_RECONNECT_MIN_MS",
         250,
         MAX_SNAPSHOT_ROUTE_RECONNECT_MS,
     )?;
     let reconnect_max_ms = bounded_positive(
         get,
-        "MD_SNAPSHOT_ROUTE_RECONNECT_MAX_MS",
+        "RJ_SNAPSHOT_ROUTE_RECONNECT_MAX_MS",
         5_000,
         MAX_SNAPSHOT_ROUTE_RECONNECT_MS,
     )?;
     if reconnect_min_ms > reconnect_max_ms {
         return Err(invalid(
-            "MD_SNAPSHOT_ROUTE_RECONNECT_MIN_MS",
+            "RJ_SNAPSHOT_ROUTE_RECONNECT_MIN_MS",
             reconnect_min_ms.to_string(),
-            "no greater than MD_SNAPSHOT_ROUTE_RECONNECT_MAX_MS",
+            "no greater than RJ_SNAPSHOT_ROUTE_RECONNECT_MAX_MS",
         ));
     }
-    let secret_owner_uid = parse(get, "MD_SNAPSHOT_ROUTE_SECRET_OWNER_UID", 0_u32, "a UID")?;
-    let sockets = value_list(get, "MD_SNAPSHOT_ROUTE_SOCKET_PATHS")?;
-    let companion_uids = parsed_list::<u32>(get, "MD_SNAPSHOT_ROUTE_COMPANION_UIDS", "UIDs")?;
-    let session_secrets = value_list(get, "MD_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS")?;
-    let digest_secrets = value_list(get, "MD_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS")?;
-    let attestations = value_list(get, "MD_SNAPSHOT_ROUTE_ATTESTATION_PATHS")?;
-    let groups = value_list(get, "MD_SNAPSHOT_ROUTE_GROUPS")?;
+    let secret_owner_uid = parse(get, "RJ_SNAPSHOT_ROUTE_SECRET_OWNER_UID", 0_u32, "a UID")?;
+    let sockets = value_list(get, "RJ_SNAPSHOT_ROUTE_SOCKET_PATHS")?;
+    let companion_uids = parsed_list::<u32>(get, "RJ_SNAPSHOT_ROUTE_COMPANION_UIDS", "UIDs")?;
+    let session_secrets = value_list(get, "RJ_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS")?;
+    let digest_secrets = value_list(get, "RJ_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS")?;
+    let attestations = value_list(get, "RJ_SNAPSHOT_ROUTE_ATTESTATION_PATHS")?;
+    let groups = value_list(get, "RJ_SNAPSHOT_ROUTE_GROUPS")?;
     let lengths = [
         sockets.len(),
         companion_uids.len(),
@@ -1051,14 +1063,14 @@ fn snapshot_route_settings(
     ];
     if lengths.iter().any(|length| *length != upstream_count) {
         return Err(invalid(
-            "MD_SNAPSHOT_ROUTE_SOCKET_PATHS",
+            "RJ_SNAPSHOT_ROUTE_SOCKET_PATHS",
             format!("list lengths {lengths:?}, {upstream_count} upstreams"),
             "one socket, UID, session secret, digest secret, attestation, and group per upstream",
         ));
     }
     if companion_uids.contains(&0) {
         return Err(invalid(
-            "MD_SNAPSHOT_ROUTE_COMPANION_UIDS",
+            "RJ_SNAPSHOT_ROUTE_COMPANION_UIDS",
             "<redacted>".to_owned(),
             "non-root UIDs",
         ));
@@ -1070,7 +1082,7 @@ fn snapshot_route_settings(
             normalized_absolute_path(&sockets[index], MAX_SNAPSHOT_ROUTE_SOCKET_PATH_BYTES)
                 .ok_or_else(|| {
                     invalid(
-                        "MD_SNAPSHOT_ROUTE_SOCKET_PATHS",
+                        "RJ_SNAPSHOT_ROUTE_SOCKET_PATHS",
                         "<redacted>".to_owned(),
                         "normalized absolute paths",
                     )
@@ -1079,7 +1091,7 @@ fn snapshot_route_settings(
             normalized_absolute_path(&session_secrets[index], MAX_SNAPSHOT_ROUTE_PATH_BYTES)
                 .ok_or_else(|| {
                     invalid(
-                        "MD_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS",
+                        "RJ_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS",
                         "<redacted>".to_owned(),
                         "normalized absolute paths",
                     )
@@ -1088,7 +1100,7 @@ fn snapshot_route_settings(
             normalized_absolute_path(&digest_secrets[index], MAX_SNAPSHOT_ROUTE_PATH_BYTES)
                 .ok_or_else(|| {
                     invalid(
-                        "MD_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS",
+                        "RJ_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS",
                         "<redacted>".to_owned(),
                         "normalized absolute paths",
                     )
@@ -1097,7 +1109,7 @@ fn snapshot_route_settings(
             normalized_absolute_path(&attestations[index], MAX_SNAPSHOT_ROUTE_PATH_BYTES)
                 .ok_or_else(|| {
                     invalid(
-                        "MD_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
+                        "RJ_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
                         "<redacted>".to_owned(),
                         "normalized absolute paths",
                     )
@@ -1107,7 +1119,7 @@ fn snapshot_route_settings(
             || digest_secret_path == attestation_path
         {
             return Err(invalid(
-                "MD_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
+                "RJ_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
                 "<redacted>".to_owned(),
                 "three distinct protected paths per upstream",
             ));
@@ -1122,7 +1134,7 @@ fn snapshot_route_settings(
         .any(|path| !unique_paths.insert(path.clone()))
         {
             return Err(invalid(
-                "MD_SNAPSHOT_ROUTE_SOCKET_PATHS",
+                "RJ_SNAPSHOT_ROUTE_SOCKET_PATHS",
                 "<redacted>".to_owned(),
                 "distinct authority paths across upstreams",
             ));
@@ -1155,25 +1167,25 @@ fn exact_canary_settings(
 ) -> Result<(usize, Option<SecretString>), ConfigError> {
     let canary_bps = parse(
         get,
-        "MD_EXACT_ROUTE_CANARY_BPS",
+        "RJ_EXACT_ROUTE_CANARY_BPS",
         0_usize,
         "an integer from 0 through 10000",
     )?;
     if canary_bps > 10_000 {
         return Err(invalid(
-            "MD_EXACT_ROUTE_CANARY_BPS",
+            "RJ_EXACT_ROUTE_CANARY_BPS",
             canary_bps.to_string(),
             "an integer from 0 through 10000",
         ));
     }
     if mode != ExactRouteMode::Placement && canary_bps != 0 {
         return Err(invalid(
-            "MD_EXACT_ROUTE_CANARY_BPS",
+            "RJ_EXACT_ROUTE_CANARY_BPS",
             canary_bps.to_string(),
-            "zero unless MD_EXACT_ROUTE_MODE=placement",
+            "zero unless RJ_EXACT_ROUTE_MODE=placement",
         ));
     }
-    let canary_key = get("MD_EXACT_ROUTE_CANARY_KEY")
+    let canary_key = get("RJ_EXACT_ROUTE_CANARY_KEY")
         .filter(|value| !value.is_empty())
         .map(SecretString);
     if mode == ExactRouteMode::Placement
@@ -1183,16 +1195,16 @@ fn exact_canary_settings(
             .is_none_or(|key| !(32..=256).contains(&key.as_bytes().len()))
     {
         return Err(invalid(
-            "MD_EXACT_ROUTE_CANARY_KEY",
+            "RJ_EXACT_ROUTE_CANARY_KEY",
             "<redacted>".to_owned(),
             "a secret from 32 through 256 bytes when placement canary is nonzero",
         ));
     }
     if mode != ExactRouteMode::Placement && canary_key.is_some() {
         return Err(invalid(
-            "MD_EXACT_ROUTE_CANARY_KEY",
+            "RJ_EXACT_ROUTE_CANARY_KEY",
             "<redacted>".to_owned(),
-            "unset unless MD_EXACT_ROUTE_MODE=placement",
+            "unset unless RJ_EXACT_ROUTE_MODE=placement",
         ));
     }
     Ok((canary_bps, canary_key))
@@ -1202,33 +1214,33 @@ fn kv_event_settings(
     get: &mut impl FnMut(&str) -> Option<String>,
     upstream_count: usize,
 ) -> Result<KvEventSettings, ConfigError> {
-    let mode = match get("MD_KV_EVENT_MODE").as_deref().unwrap_or("off") {
+    let mode = match get("RJ_KV_EVENT_MODE").as_deref().unwrap_or("off") {
         "off" => KvEventMode::Off,
         "shadow" => KvEventMode::Shadow,
         value => {
             return Err(invalid(
-                "MD_KV_EVENT_MODE",
+                "RJ_KV_EVENT_MODE",
                 value.to_owned(),
                 "off or shadow",
             ));
         }
     };
     let sources = kv_event_sources(get, mode, upstream_count)?;
-    let reconnect_min_ms = positive(get, "MD_KV_EVENT_RECONNECT_MIN_MS", 250)?;
-    let reconnect_max_ms = positive(get, "MD_KV_EVENT_RECONNECT_MAX_MS", 10_000)?;
+    let reconnect_min_ms = positive(get, "RJ_KV_EVENT_RECONNECT_MIN_MS", 250)?;
+    let reconnect_max_ms = positive(get, "RJ_KV_EVENT_RECONNECT_MAX_MS", 10_000)?;
     if reconnect_min_ms > reconnect_max_ms {
         return Err(invalid(
-            "MD_KV_EVENT_RECONNECT_MIN_MS",
+            "RJ_KV_EVENT_RECONNECT_MIN_MS",
             reconnect_min_ms.to_string(),
-            "no greater than MD_KV_EVENT_RECONNECT_MAX_MS",
+            "no greater than RJ_KV_EVENT_RECONNECT_MAX_MS",
         ));
     }
     Ok(KvEventSettings {
         mode,
         sources,
-        replay_limit: positive(get, "MD_KV_EVENT_REPLAY_LIMIT", 1_024)?,
-        replay_tail_limit: positive(get, "MD_KV_EVENT_REPLAY_TAIL_LIMIT", 64)?,
-        timeout_ms: positive(get, "MD_KV_EVENT_TIMEOUT_MS", 5_000)?,
+        replay_limit: positive(get, "RJ_KV_EVENT_REPLAY_LIMIT", 1_024)?,
+        replay_tail_limit: positive(get, "RJ_KV_EVENT_REPLAY_TAIL_LIMIT", 64)?,
+        timeout_ms: positive(get, "RJ_KV_EVENT_TIMEOUT_MS", 5_000)?,
         reconnect_min_ms,
         reconnect_max_ms,
     })
@@ -1242,11 +1254,11 @@ fn kv_event_sources(
     if mode == KvEventMode::Off {
         return Ok(Vec::new());
     }
-    let live = endpoint_list(get, "MD_KV_EVENT_LIVE_ENDPOINTS")?;
-    let replay = endpoint_list(get, "MD_KV_EVENT_REPLAY_ENDPOINTS")?;
+    let live = endpoint_list(get, "RJ_KV_EVENT_LIVE_ENDPOINTS")?;
+    let replay = endpoint_list(get, "RJ_KV_EVENT_REPLAY_ENDPOINTS")?;
     if live.len() != upstream_count || replay.len() != upstream_count {
         return Err(invalid(
-            "MD_KV_EVENT_LIVE_ENDPOINTS",
+            "RJ_KV_EVENT_LIVE_ENDPOINTS",
             format!(
                 "{} live, {} replay, {upstream_count} upstreams",
                 live.len(),
@@ -1255,10 +1267,10 @@ fn kv_event_sources(
             "one live and replay endpoint per upstream",
         ));
     }
-    let topic = get("MD_KV_EVENT_TOPIC").unwrap_or_default();
+    let topic = get("RJ_KV_EVENT_TOPIC").unwrap_or_default();
     if topic.len() > 256 {
         return Err(invalid(
-            "MD_KV_EVENT_TOPIC",
+            "RJ_KV_EVENT_TOPIC",
             "<oversized>".to_owned(),
             "at most 256 bytes",
         ));
@@ -1365,28 +1377,28 @@ fn normalized_absolute_path(raw: &str, max_bytes: usize) -> Option<PathBuf> {
 fn parse_group(raw: &str) -> Result<(u32, u32), ConfigError> {
     let Some((rank, index)) = raw.split_once(':') else {
         return Err(invalid(
-            "MD_SNAPSHOT_ROUTE_GROUPS",
+            "RJ_SNAPSHOT_ROUTE_GROUPS",
             raw.to_owned(),
             "rank:index pairs",
         ));
     };
     if index.contains(':') {
         return Err(invalid(
-            "MD_SNAPSHOT_ROUTE_GROUPS",
+            "RJ_SNAPSHOT_ROUTE_GROUPS",
             raw.to_owned(),
             "rank:index pairs",
         ));
     }
     let rank = rank.parse().map_err(|_| {
         invalid(
-            "MD_SNAPSHOT_ROUTE_GROUPS",
+            "RJ_SNAPSHOT_ROUTE_GROUPS",
             raw.to_owned(),
             "rank:index pairs",
         )
     })?;
     let index = index.parse().map_err(|_| {
         invalid(
-            "MD_SNAPSHOT_ROUTE_GROUPS",
+            "RJ_SNAPSHOT_ROUTE_GROUPS",
             raw.to_owned(),
             "rank:index pairs",
         )
@@ -1397,53 +1409,53 @@ fn parse_group(raw: &str) -> Result<(u32, u32), ConfigError> {
 fn tokenizer_settings(
     get: &mut impl FnMut(&str) -> Option<String>,
 ) -> Result<TokenizerSettings, ConfigError> {
-    let mode = match get("MD_TOKENIZER_MODE").as_deref().unwrap_or("off") {
+    let mode = match get("RJ_TOKENIZER_MODE").as_deref().unwrap_or("off") {
         "off" => TokenizerMode::Off,
         "remote-shadow" => TokenizerMode::RemoteShadow,
         "local-shadow" => TokenizerMode::LocalShadow,
         value => {
             return Err(invalid(
-                "MD_TOKENIZER_MODE",
+                "RJ_TOKENIZER_MODE",
                 value.to_owned(),
                 "off, remote-shadow, or local-shadow",
             ));
         }
     };
-    let path = get("MD_TOKENIZER_PATH").filter(|value| !value.is_empty());
-    let sha256 = get("MD_TOKENIZER_SHA256")
+    let path = get("RJ_TOKENIZER_PATH").filter(|value| !value.is_empty());
+    let sha256 = get("RJ_TOKENIZER_SHA256")
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
-    let requested = get("MD_TOKENIZER_PROFILE").unwrap_or_else(|| "deepseek-v4-r34".to_owned());
+    let requested = get("RJ_TOKENIZER_PROFILE").unwrap_or_else(|| "deepseek-v4-r34".to_owned());
     let Some(profile) = crate::model::profile_for(&requested) else {
         return Err(invalid(
-            "MD_TOKENIZER_PROFILE",
+            "RJ_TOKENIZER_PROFILE",
             requested,
             "a registered model profile label",
         ));
     };
     let profile = profile.label();
-    let chat_template_path = get("MD_CHAT_TEMPLATE_PATH").filter(|value| !value.is_empty());
-    let chat_template_sha256 = get("MD_CHAT_TEMPLATE_SHA256")
+    let chat_template_path = get("RJ_CHAT_TEMPLATE_PATH").filter(|value| !value.is_empty());
+    let chat_template_sha256 = get("RJ_CHAT_TEMPLATE_SHA256")
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
     if chat_template_path.is_some() != chat_template_sha256.is_some() {
         return Err(invalid(
-            "MD_CHAT_TEMPLATE_SHA256",
+            "RJ_CHAT_TEMPLATE_SHA256",
             String::new(),
-            "both MD_CHAT_TEMPLATE_PATH and MD_CHAT_TEMPLATE_SHA256, or neither",
+            "both RJ_CHAT_TEMPLATE_PATH and RJ_CHAT_TEMPLATE_SHA256, or neither",
         ));
     }
     if mode == TokenizerMode::LocalShadow {
         if path.is_none() {
             return Err(invalid(
-                "MD_TOKENIZER_PATH",
+                "RJ_TOKENIZER_PATH",
                 String::new(),
                 "a tokenizer.json path in local-shadow mode",
             ));
         }
         if sha256.is_none() {
             return Err(invalid(
-                "MD_TOKENIZER_SHA256",
+                "RJ_TOKENIZER_SHA256",
                 String::new(),
                 "the expected 64-character tokenizer SHA-256 in local-shadow mode",
             ));
@@ -1453,23 +1465,23 @@ fn tokenizer_settings(
         && !valid_sha256(value)
     {
         return Err(invalid(
-            "MD_TOKENIZER_SHA256",
+            "RJ_TOKENIZER_SHA256",
             value.clone(),
             "a 64-character hexadecimal SHA-256",
         ));
     }
     let min_bytes = parse(
         get,
-        "MD_TOKENIZER_MIN_BYTES",
+        "RJ_TOKENIZER_MIN_BYTES",
         32 << 10,
         "a non-negative integer",
     )?;
-    let max_bytes = positive(get, "MD_TOKENIZER_MAX_BYTES", 2 << 20)?;
+    let max_bytes = positive(get, "RJ_TOKENIZER_MAX_BYTES", 2 << 20)?;
     if min_bytes > max_bytes {
         return Err(invalid(
-            "MD_TOKENIZER_MIN_BYTES",
+            "RJ_TOKENIZER_MIN_BYTES",
             min_bytes.to_string(),
-            "no greater than MD_TOKENIZER_MAX_BYTES",
+            "no greater than RJ_TOKENIZER_MAX_BYTES",
         ));
     }
     Ok(TokenizerSettings {
@@ -1548,13 +1560,13 @@ fn idle_drain_settings(
     get: &mut impl FnMut(&str) -> Option<String>,
     upstreams: usize,
 ) -> Result<IdleDrainConfig, ConfigError> {
-    let mode = match get("MD_IDLE_DRAIN_MODE").as_deref().unwrap_or("off") {
+    let mode = match get("RJ_IDLE_DRAIN_MODE").as_deref().unwrap_or("off") {
         "off" => IdleDrainMode::Off,
         "observe" => IdleDrainMode::Observe,
         "drain" => IdleDrainMode::Drain,
         value => {
             return Err(invalid(
-                "MD_IDLE_DRAIN_MODE",
+                "RJ_IDLE_DRAIN_MODE",
                 value.to_owned(),
                 "off, observe, or drain",
             ));
@@ -1562,34 +1574,34 @@ fn idle_drain_settings(
     };
     if mode == IdleDrainMode::Drain && upstreams < 2 {
         return Err(invalid(
-            "MD_IDLE_DRAIN_MODE",
+            "RJ_IDLE_DRAIN_MODE",
             "drain".to_owned(),
-            "drain requires at least two MD_UPSTREAM replicas",
+            "drain requires at least two RJ_UPSTREAM replicas",
         ));
     }
 
     let idle_after_seconds = bounded_positive(
         get,
-        "MD_IDLE_DRAIN_IDLE_AFTER_SECONDS",
+        "RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS",
         900,
         MAX_IDLE_DRAIN_SECONDS,
     )?;
     if idle_after_seconds < MIN_IDLE_DRAIN_IDLE_AFTER_SECONDS {
         return Err(invalid(
-            "MD_IDLE_DRAIN_IDLE_AFTER_SECONDS",
+            "RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS",
             idle_after_seconds.to_string(),
             "at least 60; a shorter window parks engines between ordinary requests",
         ));
     }
     let cooldown_seconds = bounded_positive(
         get,
-        "MD_IDLE_DRAIN_COOLDOWN_SECONDS",
+        "RJ_IDLE_DRAIN_COOLDOWN_SECONDS",
         300,
         MAX_IDLE_DRAIN_SECONDS,
     )?;
     let drain_grace_seconds = bounded_positive(
         get,
-        "MD_IDLE_DRAIN_GRACE_SECONDS",
+        "RJ_IDLE_DRAIN_GRACE_SECONDS",
         30,
         MAX_IDLE_DRAIN_SECONDS,
     )?;
@@ -1597,12 +1609,12 @@ fn idle_drain_settings(
     // The warm floor may equal the fleet size, which simply disables parking.
     // It may never be zero: something must stay warm to answer the next
     // request, and that invariant is the whole reason this policy is safe.
-    let min_warm = positive(get, "MD_IDLE_DRAIN_MIN_WARM", 1)?;
+    let min_warm = positive(get, "RJ_IDLE_DRAIN_MIN_WARM", 1)?;
     if min_warm > upstreams {
         return Err(invalid(
-            "MD_IDLE_DRAIN_MIN_WARM",
+            "RJ_IDLE_DRAIN_MIN_WARM",
             min_warm.to_string(),
-            "at most the number of MD_UPSTREAM replicas",
+            "at most the number of RJ_UPSTREAM replicas",
         ));
     }
 
@@ -1627,7 +1639,7 @@ mod tests {
         // and its setting would silently revert to the default. Refusing to
         // start is the only way an operator finds out.
         let error = reject_legacy_env(
-            ["MD_UPSTREAM", "DS4_ROUTE_ALPHA", "PATH", "DS4_AFFINITY"]
+            ["RJ_UPSTREAM", "DS4_ROUTE_ALPHA", "PATH", "DS4_AFFINITY"]
                 .into_iter()
                 .map(str::to_owned),
         )
@@ -1635,23 +1647,54 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("DS4_AFFINITY"), "{message}");
         assert!(message.contains("DS4_ROUTE_ALPHA"), "{message}");
-        assert!(!message.contains("MD_UPSTREAM"), "{message}");
+        assert!(!message.contains("RJ_UPSTREAM"), "{message}");
+    }
+
+    #[test]
+    fn a_retired_md_setting_refuses_to_start() {
+        // MD_ retired the same way DS4_ did. A compose overlay that still sets
+        // MD_ROUTE_ALPHA would otherwise start a differently tuned proxy that
+        // looks healthy, which is the failure this whole check exists to stop.
+        let error = reject_legacy_env(
+            ["RJ_UPSTREAM", "MD_ROUTE_ALPHA", "PATH", "MD_UPSTREAM"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect_err("a legacy setting must fail startup");
+        let message = error.to_string();
+        assert!(message.contains("MD_ROUTE_ALPHA"), "{message}");
+        assert!(message.contains("MD_UPSTREAM"), "{message}");
+        assert!(message.contains("RJ_"), "{message}");
+        assert!(!message.contains("RJ_UPSTREAM"), "{message}");
+    }
+
+    #[test]
+    fn both_retired_prefixes_are_reported_together() {
+        let error = reject_legacy_env(
+            ["DS4_AFFINITY", "MD_AFFINITY"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect_err("a legacy setting must fail startup");
+        let message = error.to_string();
+        assert!(message.contains("DS4_AFFINITY"), "{message}");
+        assert!(message.contains("MD_AFFINITY"), "{message}");
     }
 
     #[test]
     fn an_environment_with_no_legacy_settings_starts() {
         reject_legacy_env(
-            ["MD_UPSTREAM", "PATH", "HOME"]
+            ["RJ_UPSTREAM", "PATH", "HOME"]
                 .into_iter()
                 .map(str::to_owned),
         )
-        .expect("only MD_ settings are present");
+        .expect("only RJ_ settings are present");
     }
 
     #[test]
     fn every_registered_model_profile_is_selectable() {
         for label in crate::model::profile_labels() {
-            let config = two_upstreams(&[("MD_TOKENIZER_PROFILE", label)])
+            let config = two_upstreams(&[("RJ_TOKENIZER_PROFILE", label)])
                 .unwrap_or_else(|error| panic!("profile {label} rejected: {error}"));
             assert_eq!(config.tokenizer_profile, label);
         }
@@ -1659,7 +1702,7 @@ mod tests {
 
     #[test]
     fn an_unregistered_profile_is_rejected() {
-        let error = two_upstreams(&[("MD_TOKENIZER_PROFILE", "llama-9")])
+        let error = two_upstreams(&[("RJ_TOKENIZER_PROFILE", "llama-9")])
             .expect_err("an unknown profile must not fall back to a default");
         assert!(error.to_string().contains("llama-9"), "{error}");
     }
@@ -1667,11 +1710,11 @@ mod tests {
     #[test]
     fn a_chat_template_needs_its_digest() {
         assert!(
-            two_upstreams(&[("MD_CHAT_TEMPLATE_PATH", "/tmp/tokenizer_config.json")]).is_err(),
+            two_upstreams(&[("RJ_CHAT_TEMPLATE_PATH", "/tmp/tokenizer_config.json")]).is_err(),
             "an unpinned chat template silently changes token IDs"
         );
         assert!(
-            two_upstreams(&[("MD_CHAT_TEMPLATE_SHA256", "abc")]).is_err(),
+            two_upstreams(&[("RJ_CHAT_TEMPLATE_SHA256", "abc")]).is_err(),
             "a digest with no template is a misconfiguration"
         );
     }
@@ -1679,7 +1722,7 @@ mod tests {
     fn two_upstreams(extra: &[(&'static str, &'static str)]) -> Result<Config, ConfigError> {
         let overrides: HashMap<&str, &str> = extra.iter().copied().collect();
         Config::from_lookup(|key| match key {
-            "MD_UPSTREAM" => Some("http://a:8000,http://b:8000".to_owned()),
+            "RJ_UPSTREAM" => Some("http://a:8000,http://b:8000".to_owned()),
             other => overrides.get(other).map(|value| (*value).to_owned()),
         })
     }
@@ -1690,13 +1733,13 @@ mod tests {
     #[test]
     fn idle_drain_reads_seconds_keys_and_ignores_millisecond_names() {
         let config = two_upstreams(&[
-            ("MD_IDLE_DRAIN_MODE", "drain"),
-            ("MD_IDLE_DRAIN_IDLE_AFTER_SECONDS", "1200"),
+            ("RJ_IDLE_DRAIN_MODE", "drain"),
+            ("RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS", "1200"),
             // Stale millisecond spellings must be ignored entirely.
-            ("MD_IDLE_DRAIN_IDLE_AFTER_MS", "1"),
-            ("MD_IDLE_DRAIN_COOLDOWN_MS", "1"),
-            ("MD_IDLE_DRAIN_GRACE_MS", "1"),
-            ("MD_IDLE_DRAIN_INTERVAL_MS", "1"),
+            ("RJ_IDLE_DRAIN_IDLE_AFTER_MS", "1"),
+            ("RJ_IDLE_DRAIN_COOLDOWN_MS", "1"),
+            ("RJ_IDLE_DRAIN_GRACE_MS", "1"),
+            ("RJ_IDLE_DRAIN_INTERVAL_MS", "1"),
         ])
         .unwrap();
         assert_eq!(config.idle_drain.idle_after, Duration::from_mins(20));
@@ -1718,15 +1761,15 @@ mod tests {
     #[test]
     fn idle_drain_rejects_draining_a_single_upstream_deployment() {
         let error = Config::from_lookup(|key| match key {
-            "MD_UPSTREAM" => Some("http://only:8000".to_owned()),
-            "MD_IDLE_DRAIN_MODE" => Some("drain".to_owned()),
+            "RJ_UPSTREAM" => Some("http://only:8000".to_owned()),
+            "RJ_IDLE_DRAIN_MODE" => Some("drain".to_owned()),
             _ => None,
         })
         .unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_IDLE_DRAIN_MODE",
+                key: "RJ_IDLE_DRAIN_MODE",
                 ..
             }
         ));
@@ -1736,8 +1779,8 @@ mod tests {
     fn idle_drain_observe_is_allowed_on_a_single_upstream() {
         // Observing cannot fence anything, so it is safe to qualify anywhere.
         let config = Config::from_lookup(|key| match key {
-            "MD_UPSTREAM" => Some("http://only:8000".to_owned()),
-            "MD_IDLE_DRAIN_MODE" => Some("observe".to_owned()),
+            "RJ_UPSTREAM" => Some("http://only:8000".to_owned()),
+            "RJ_IDLE_DRAIN_MODE" => Some("observe".to_owned()),
             _ => None,
         })
         .unwrap();
@@ -1746,11 +1789,11 @@ mod tests {
 
     #[test]
     fn idle_drain_rejects_an_unknown_mode() {
-        let error = two_upstreams(&[("MD_IDLE_DRAIN_MODE", "stop")]).unwrap_err();
+        let error = two_upstreams(&[("RJ_IDLE_DRAIN_MODE", "stop")]).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_IDLE_DRAIN_MODE",
+                key: "RJ_IDLE_DRAIN_MODE",
                 ..
             }
         ));
@@ -1759,14 +1802,14 @@ mod tests {
     #[test]
     fn idle_drain_rejects_a_window_short_enough_to_park_between_requests() {
         let error = two_upstreams(&[
-            ("MD_IDLE_DRAIN_MODE", "drain"),
-            ("MD_IDLE_DRAIN_IDLE_AFTER_SECONDS", "5"),
+            ("RJ_IDLE_DRAIN_MODE", "drain"),
+            ("RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS", "5"),
         ])
         .unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_IDLE_DRAIN_IDLE_AFTER_SECONDS",
+                key: "RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS",
                 ..
             }
         ));
@@ -1775,26 +1818,26 @@ mod tests {
     #[test]
     fn idle_drain_rejects_a_zero_or_oversized_warm_floor() {
         let zero = two_upstreams(&[
-            ("MD_IDLE_DRAIN_MODE", "drain"),
-            ("MD_IDLE_DRAIN_MIN_WARM", "0"),
+            ("RJ_IDLE_DRAIN_MODE", "drain"),
+            ("RJ_IDLE_DRAIN_MIN_WARM", "0"),
         ])
         .unwrap_err();
         assert!(matches!(
             zero,
             ConfigError::InvalidValue {
-                key: "MD_IDLE_DRAIN_MIN_WARM",
+                key: "RJ_IDLE_DRAIN_MIN_WARM",
                 ..
             }
         ));
         let oversized = two_upstreams(&[
-            ("MD_IDLE_DRAIN_MODE", "drain"),
-            ("MD_IDLE_DRAIN_MIN_WARM", "3"),
+            ("RJ_IDLE_DRAIN_MODE", "drain"),
+            ("RJ_IDLE_DRAIN_MIN_WARM", "3"),
         ])
         .unwrap_err();
         assert!(matches!(
             oversized,
             ConfigError::InvalidValue {
-                key: "MD_IDLE_DRAIN_MIN_WARM",
+                key: "RJ_IDLE_DRAIN_MIN_WARM",
                 ..
             }
         ));
@@ -1803,12 +1846,12 @@ mod tests {
     #[test]
     fn idle_drain_accepts_a_tuned_two_engine_policy() {
         let config = two_upstreams(&[
-            ("MD_IDLE_DRAIN_MODE", "drain"),
-            ("MD_IDLE_DRAIN_IDLE_AFTER_SECONDS", "600"),
-            ("MD_IDLE_DRAIN_COOLDOWN_SECONDS", "120"),
-            ("MD_IDLE_DRAIN_GRACE_SECONDS", "45"),
-            ("MD_IDLE_DRAIN_MIN_WARM", "1"),
-            ("MD_IDLE_DRAIN_INTERVAL_SECONDS", "30"),
+            ("RJ_IDLE_DRAIN_MODE", "drain"),
+            ("RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS", "600"),
+            ("RJ_IDLE_DRAIN_COOLDOWN_SECONDS", "120"),
+            ("RJ_IDLE_DRAIN_GRACE_SECONDS", "45"),
+            ("RJ_IDLE_DRAIN_MIN_WARM", "1"),
+            ("RJ_IDLE_DRAIN_INTERVAL_SECONDS", "30"),
         ])
         .unwrap();
         assert_eq!(config.idle_drain.mode, IdleDrainMode::Drain);
@@ -1822,14 +1865,14 @@ mod tests {
     fn idle_drain_rejects_an_evaluation_interval_outside_its_bounds() {
         for value in ["0", "600"] {
             let error = two_upstreams(&[
-                ("MD_IDLE_DRAIN_MODE", "drain"),
-                ("MD_IDLE_DRAIN_INTERVAL_SECONDS", value),
+                ("RJ_IDLE_DRAIN_MODE", "drain"),
+                ("RJ_IDLE_DRAIN_INTERVAL_SECONDS", value),
             ])
             .unwrap_err();
             assert!(matches!(
                 error,
                 ConfigError::InvalidValue {
-                    key: "MD_IDLE_DRAIN_INTERVAL_SECONDS",
+                    key: "RJ_IDLE_DRAIN_INTERVAL_SECONDS",
                     ..
                 }
             ));
@@ -1874,11 +1917,11 @@ mod tests {
         assert_eq!(config.tokenizer_timeout_ms, 2_000);
         assert_eq!(config.exact_route_mode, ExactRouteMode::Off);
 
-        let oversized = HashMap::from([("MD_UPSTREAM_ADMISSION_TIMEOUT_MS", "30001")]);
+        let oversized = HashMap::from([("RJ_UPSTREAM_ADMISSION_TIMEOUT_MS", "30001")]);
         assert!(matches!(
             Config::from_lookup(|key| oversized.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_UPSTREAM_ADMISSION_TIMEOUT_MS",
+                key: "RJ_UPSTREAM_ADMISSION_TIMEOUT_MS",
                 ..
             })
         ));
@@ -1917,14 +1960,14 @@ mod tests {
     #[test]
     fn session_affinity_is_separate_redacted_and_shadow_only() {
         let values = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1,http://b:1"),
-            ("MD_SESSION_AFFINITY_MODE", "shadow"),
+            ("RJ_UPSTREAM", "http://a:1,http://b:1"),
+            ("RJ_SESSION_AFFINITY_MODE", "shadow"),
             (
-                "MD_SESSION_AFFINITY_KEY",
+                "RJ_SESSION_AFFINITY_KEY",
                 "0123456789abcdef0123456789abcdef",
             ),
-            ("MD_SESSION_AFFINITY_BONUS_BLOCKS", "8"),
-            ("MD_SESSION_AFFINITY_MAX_LOAD_DELTA", "2"),
+            ("RJ_SESSION_AFFINITY_BONUS_BLOCKS", "8"),
+            ("RJ_SESSION_AFFINITY_MAX_LOAD_DELTA", "2"),
         ]);
         let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
         assert_eq!(config.session_affinity_mode, SessionAffinityMode::Shadow);
@@ -1936,93 +1979,93 @@ mod tests {
     #[test]
     fn session_affinity_rejects_unsafe_or_inapplicable_settings() {
         let mut values = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1,http://b:1"),
-            ("MD_SESSION_AFFINITY_MODE", "shadow"),
+            ("RJ_UPSTREAM", "http://a:1,http://b:1"),
+            ("RJ_SESSION_AFFINITY_MODE", "shadow"),
             (
-                "MD_SESSION_AFFINITY_KEY",
+                "RJ_SESSION_AFFINITY_KEY",
                 "0123456789abcdef0123456789abcdef",
             ),
-            ("MD_SESSION_AFFINITY_BONUS_BLOCKS", "8"),
-            ("MD_SESSION_AFFINITY_MAX_LOAD_DELTA", "2"),
+            ("RJ_SESSION_AFFINITY_BONUS_BLOCKS", "8"),
+            ("RJ_SESSION_AFFINITY_MAX_LOAD_DELTA", "2"),
         ]);
-        values.insert("MD_SESSION_AFFINITY_MODE", "off");
+        values.insert("RJ_SESSION_AFFINITY_MODE", "off");
         assert!(matches!(
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_SESSION_AFFINITY_KEY",
+                key: "RJ_SESSION_AFFINITY_KEY",
                 value,
                 ..
             }) if value == "<redacted>"
         ));
-        values.insert("MD_SESSION_AFFINITY_MODE", "shadow");
-        values.insert("MD_SESSION_AFFINITY_KEY", "short");
+        values.insert("RJ_SESSION_AFFINITY_MODE", "shadow");
+        values.insert("RJ_SESSION_AFFINITY_KEY", "short");
         assert!(matches!(
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_SESSION_AFFINITY_KEY",
+                key: "RJ_SESSION_AFFINITY_KEY",
                 value,
                 ..
             }) if value == "<redacted>"
         ));
         values.insert(
-            "MD_SESSION_AFFINITY_KEY",
+            "RJ_SESSION_AFFINITY_KEY",
             "0123456789abcdef0123456789abcdef",
         );
-        values.insert("MD_SESSION_AFFINITY_BONUS_BLOCKS", "33");
+        values.insert("RJ_SESSION_AFFINITY_BONUS_BLOCKS", "33");
         assert!(matches!(
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_SESSION_AFFINITY_BONUS_BLOCKS",
+                key: "RJ_SESSION_AFFINITY_BONUS_BLOCKS",
                 ..
             })
         ));
-        values.insert("MD_SESSION_AFFINITY_BONUS_BLOCKS", "8");
-        values.insert("MD_SESSION_AFFINITY_MAX_LOAD_DELTA", "9");
+        values.insert("RJ_SESSION_AFFINITY_BONUS_BLOCKS", "8");
+        values.insert("RJ_SESSION_AFFINITY_MAX_LOAD_DELTA", "9");
         assert!(matches!(
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_SESSION_AFFINITY_MAX_LOAD_DELTA",
+                key: "RJ_SESSION_AFFINITY_MAX_LOAD_DELTA",
                 ..
             })
         ));
 
         let single = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1"),
-            ("MD_SESSION_AFFINITY_MODE", "shadow"),
+            ("RJ_UPSTREAM", "http://a:1"),
+            ("RJ_SESSION_AFFINITY_MODE", "shadow"),
             (
-                "MD_SESSION_AFFINITY_KEY",
+                "RJ_SESSION_AFFINITY_KEY",
                 "0123456789abcdef0123456789abcdef",
             ),
         ]);
         assert!(matches!(
             Config::from_lookup(|key| single.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_SESSION_AFFINITY_MODE",
+                key: "RJ_SESSION_AFFINITY_MODE",
                 ..
             })
         ));
 
         let wrong_mode = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1,http://b:1"),
-            ("MD_SESSION_AFFINITY_MODE", "placement"),
+            ("RJ_UPSTREAM", "http://a:1,http://b:1"),
+            ("RJ_SESSION_AFFINITY_MODE", "placement"),
         ]);
         assert!(matches!(
             Config::from_lookup(|key| wrong_mode.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_SESSION_AFFINITY_MODE",
+                key: "RJ_SESSION_AFFINITY_MODE",
                 ..
             })
         ));
 
         let borrowed_canary_key = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1,http://b:1"),
-            ("MD_SESSION_AFFINITY_MODE", "shadow"),
-            ("MD_EXACT_ROUTE_CANARY_KEY", "not-a-session-affinity-key"),
+            ("RJ_UPSTREAM", "http://a:1,http://b:1"),
+            ("RJ_SESSION_AFFINITY_MODE", "shadow"),
+            ("RJ_EXACT_ROUTE_CANARY_KEY", "not-a-session-affinity-key"),
         ]);
         assert!(matches!(
             Config::from_lookup(|key| borrowed_canary_key.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_SESSION_AFFINITY_KEY",
+                key: "RJ_SESSION_AFFINITY_KEY",
                 value,
                 ..
             }) if value == "<redacted>"
@@ -2033,9 +2076,9 @@ mod tests {
     fn session_affinity_key_boundaries_are_exact() {
         for (length, valid) in [(31, false), (32, true), (256, true), (257, false)] {
             let boundary = HashMap::from([
-                ("MD_UPSTREAM".to_owned(), "http://a:1,http://b:1".to_owned()),
-                ("MD_SESSION_AFFINITY_MODE".to_owned(), "shadow".to_owned()),
-                ("MD_SESSION_AFFINITY_KEY".to_owned(), "x".repeat(length)),
+                ("RJ_UPSTREAM".to_owned(), "http://a:1,http://b:1".to_owned()),
+                ("RJ_SESSION_AFFINITY_MODE".to_owned(), "shadow".to_owned()),
+                ("RJ_SESSION_AFFINITY_KEY".to_owned(), "x".repeat(length)),
             ]);
             assert_eq!(
                 Config::from_lookup(|key| boundary.get(key).cloned()).is_ok(),
@@ -2048,15 +2091,15 @@ mod tests {
     #[test]
     fn validates_typed_environment() {
         let values = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1/, http://b:2"),
-            ("MD_ROUTE_ALPHA", "nan"),
+            ("RJ_UPSTREAM", "http://a:1/, http://b:2"),
+            ("RJ_ROUTE_ALPHA", "nan"),
         ]);
         let error =
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_ROUTE_ALPHA",
+                key: "RJ_ROUTE_ALPHA",
                 ..
             }
         ));
@@ -2065,30 +2108,30 @@ mod tests {
     #[test]
     fn snapshot_route_is_off_by_default_and_rejects_partial_cardinality() {
         let values = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1,http://b:2"),
-            ("MD_SNAPSHOT_ROUTE_MODE", "shadow"),
-            ("MD_SNAPSHOT_ROUTE_SOCKET_PATHS", "/run/a.sock,/run/b.sock"),
-            ("MD_SNAPSHOT_ROUTE_COMPANION_UIDS", "12001"),
+            ("RJ_UPSTREAM", "http://a:1,http://b:2"),
+            ("RJ_SNAPSHOT_ROUTE_MODE", "shadow"),
+            ("RJ_SNAPSHOT_ROUTE_SOCKET_PATHS", "/run/a.sock,/run/b.sock"),
+            ("RJ_SNAPSHOT_ROUTE_COMPANION_UIDS", "12001"),
             (
-                "MD_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS",
+                "RJ_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS",
                 "/run/a-session,/run/b-session",
             ),
             (
-                "MD_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS",
+                "RJ_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS",
                 "/run/a-digest,/run/b-digest",
             ),
             (
-                "MD_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
+                "RJ_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
                 "/run/a-attest,/run/b-attest",
             ),
-            ("MD_SNAPSHOT_ROUTE_GROUPS", "0:0,0:0"),
+            ("RJ_SNAPSHOT_ROUTE_GROUPS", "0:0,0:0"),
         ]);
         let error =
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_SNAPSHOT_ROUTE_SOCKET_PATHS",
+                key: "RJ_SNAPSHOT_ROUTE_SOCKET_PATHS",
                 ..
             }
         ));
@@ -2097,32 +2140,32 @@ mod tests {
     #[test]
     fn snapshot_route_requires_shadow_and_distinct_protected_paths() {
         let mut values = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1"),
-            ("MD_SNAPSHOT_ROUTE_MODE", "shadow"),
-            ("MD_SNAPSHOT_ROUTE_SOCKET_PATHS", "/run/a.sock"),
-            ("MD_SNAPSHOT_ROUTE_COMPANION_UIDS", "12001"),
-            ("MD_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS", "/run/session"),
-            ("MD_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS", "/run/digest"),
-            ("MD_SNAPSHOT_ROUTE_ATTESTATION_PATHS", "/run/attest"),
-            ("MD_SNAPSHOT_ROUTE_GROUPS", "0:0"),
+            ("RJ_UPSTREAM", "http://a:1"),
+            ("RJ_SNAPSHOT_ROUTE_MODE", "shadow"),
+            ("RJ_SNAPSHOT_ROUTE_SOCKET_PATHS", "/run/a.sock"),
+            ("RJ_SNAPSHOT_ROUTE_COMPANION_UIDS", "12001"),
+            ("RJ_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS", "/run/session"),
+            ("RJ_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS", "/run/digest"),
+            ("RJ_SNAPSHOT_ROUTE_ATTESTATION_PATHS", "/run/attest"),
+            ("RJ_SNAPSHOT_ROUTE_GROUPS", "0:0"),
         ]);
         let error =
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_SNAPSHOT_ROUTE_MODE",
+                key: "RJ_SNAPSHOT_ROUTE_MODE",
                 ..
             }
         ));
 
-        values.insert("MD_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS", "/run/session");
+        values.insert("RJ_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS", "/run/session");
         let error =
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
+                key: "RJ_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
                 ..
             }
         ));
@@ -2131,37 +2174,37 @@ mod tests {
     #[test]
     fn parses_snapshot_shadow_as_the_exclusive_observation_inventory() {
         let mut values = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1,http://b:2"),
-            ("MD_TOKENIZER_MODE", "local-shadow"),
-            ("MD_TOKENIZER_PATH", "/models/tokenizer.json"),
+            ("RJ_UPSTREAM", "http://a:1,http://b:2"),
+            ("RJ_TOKENIZER_MODE", "local-shadow"),
+            ("RJ_TOKENIZER_PATH", "/models/tokenizer.json"),
             (
-                "MD_TOKENIZER_SHA256",
+                "RJ_TOKENIZER_SHA256",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
-            ("MD_EXACT_ROUTE_MODE", "shadow"),
-            ("MD_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
+            ("RJ_EXACT_ROUTE_MODE", "shadow"),
+            ("RJ_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
             (
-                "MD_EXACT_ROUTE_MANIFEST_SHA256",
+                "RJ_EXACT_ROUTE_MANIFEST_SHA256",
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             ),
-            ("MD_SNAPSHOT_ROUTE_MODE", "shadow"),
-            ("MD_SNAPSHOT_ROUTE_SOCKET_PATHS", "/run/a.sock,/run/b.sock"),
-            ("MD_SNAPSHOT_ROUTE_COMPANION_UIDS", "12001,12002"),
+            ("RJ_SNAPSHOT_ROUTE_MODE", "shadow"),
+            ("RJ_SNAPSHOT_ROUTE_SOCKET_PATHS", "/run/a.sock,/run/b.sock"),
+            ("RJ_SNAPSHOT_ROUTE_COMPANION_UIDS", "12001,12002"),
             (
-                "MD_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS",
+                "RJ_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS",
                 "/run/a-session,/run/b-session",
             ),
             (
-                "MD_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS",
+                "RJ_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS",
                 "/run/a-digest,/run/b-digest",
             ),
             (
-                "MD_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
+                "RJ_SNAPSHOT_ROUTE_ATTESTATION_PATHS",
                 "/run/a-attest,/run/b-attest",
             ),
-            ("MD_SNAPSHOT_ROUTE_GROUPS", "0:0,1:2"),
-            ("MD_SNAPSHOT_ROUTE_SECRET_OWNER_UID", "12000"),
-            ("MD_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS", "250"),
+            ("RJ_SNAPSHOT_ROUTE_GROUPS", "0:0,1:2"),
+            ("RJ_SNAPSHOT_ROUTE_SECRET_OWNER_UID", "12000"),
+            ("RJ_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS", "250"),
         ]);
         let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
         assert_eq!(config.snapshot_route_sources.len(), 2);
@@ -2176,19 +2219,19 @@ mod tests {
             assert!(!debug.contains(protected));
         }
 
-        values.insert("MD_SHADOW_SOAK_MODE", "capture");
+        values.insert("RJ_SHADOW_SOAK_MODE", "capture");
         assert!(matches!(
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_SHADOW_SOAK_MODE",
+                key: "RJ_SHADOW_SOAK_MODE",
                 ..
             })
         ));
-        values.insert("MD_UPSTREAM_TOKEN", "private-token");
-        values.insert("MD_SHADOW_SOAK_SOURCE_TARGET", "104");
-        values.insert("MD_SHADOW_SOAK_COMPARISON_TARGET", "100000");
-        values.insert("MD_SHADOW_SOAK_ATTEMPT_LIMIT", "100001");
-        values.insert("MD_SHADOW_SOAK_MAX_TOKEN_BYTES", "100663296");
+        values.insert("RJ_UPSTREAM_TOKEN", "private-token");
+        values.insert("RJ_SHADOW_SOAK_SOURCE_TARGET", "104");
+        values.insert("RJ_SHADOW_SOAK_COMPARISON_TARGET", "100000");
+        values.insert("RJ_SHADOW_SOAK_ATTEMPT_LIMIT", "100001");
+        values.insert("RJ_SHADOW_SOAK_MAX_TOKEN_BYTES", "100663296");
         let soak = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
         assert_eq!(soak.shadow_soak_mode, ShadowSoakMode::Capture);
         assert_eq!(soak.shadow_soak_source_target, 104);
@@ -2196,23 +2239,23 @@ mod tests {
         assert_eq!(soak.shadow_soak_attempt_limit, 100_001);
         assert_eq!(soak.shadow_soak_max_token_bytes, 96 << 20);
         assert_eq!(soak.shadow_soak_timeout_ms, 300_000);
-        values.insert("MD_SHADOW_SOAK_ATTEMPT_LIMIT", "99999");
+        values.insert("RJ_SHADOW_SOAK_ATTEMPT_LIMIT", "99999");
         assert!(matches!(
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_SHADOW_SOAK_ATTEMPT_LIMIT",
+                key: "RJ_SHADOW_SOAK_ATTEMPT_LIMIT",
                 ..
             })
         ));
-        values.insert("MD_SHADOW_SOAK_ATTEMPT_LIMIT", "100001");
+        values.insert("RJ_SHADOW_SOAK_ATTEMPT_LIMIT", "100001");
 
-        values.insert("MD_KV_EVENT_MODE", "shadow");
-        values.insert("MD_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:1,tcp://b:1");
-        values.insert("MD_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:2,tcp://b:2");
+        values.insert("RJ_KV_EVENT_MODE", "shadow");
+        values.insert("RJ_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:1,tcp://b:1");
+        values.insert("RJ_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:2,tcp://b:2");
         assert!(matches!(
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_EXACT_ROUTE_MODE",
+                key: "RJ_EXACT_ROUTE_MODE",
                 ..
             })
         ));
@@ -2221,16 +2264,16 @@ mod tests {
     #[test]
     fn validates_tokenizer_bounds_and_mode() {
         let values = HashMap::from([
-            ("MD_TOKENIZER_MODE", "remote-shadow"),
-            ("MD_TOKENIZER_MIN_BYTES", "4096"),
-            ("MD_TOKENIZER_MAX_BYTES", "1024"),
+            ("RJ_TOKENIZER_MODE", "remote-shadow"),
+            ("RJ_TOKENIZER_MIN_BYTES", "4096"),
+            ("RJ_TOKENIZER_MAX_BYTES", "1024"),
         ]);
         let error =
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_TOKENIZER_MIN_BYTES",
+                key: "RJ_TOKENIZER_MIN_BYTES",
                 ..
             }
         ));
@@ -2238,13 +2281,13 @@ mod tests {
 
     #[test]
     fn local_tokenizer_requires_an_artifact_path() {
-        let values = HashMap::from([("MD_TOKENIZER_MODE", "local-shadow")]);
+        let values = HashMap::from([("RJ_TOKENIZER_MODE", "local-shadow")]);
         let error =
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_TOKENIZER_PATH",
+                key: "RJ_TOKENIZER_PATH",
                 ..
             }
         ));
@@ -2253,16 +2296,16 @@ mod tests {
     #[test]
     fn local_tokenizer_requires_a_valid_artifact_digest() {
         let values = HashMap::from([
-            ("MD_TOKENIZER_MODE", "local-shadow"),
-            ("MD_TOKENIZER_PATH", "/models/tokenizer.json"),
-            ("MD_TOKENIZER_SHA256", "not-a-digest"),
+            ("RJ_TOKENIZER_MODE", "local-shadow"),
+            ("RJ_TOKENIZER_PATH", "/models/tokenizer.json"),
+            ("RJ_TOKENIZER_SHA256", "not-a-digest"),
         ]);
         let error =
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_TOKENIZER_SHA256",
+                key: "RJ_TOKENIZER_SHA256",
                 ..
             }
         ));
@@ -2271,41 +2314,41 @@ mod tests {
     #[test]
     fn exact_route_shadow_requires_local_tokens_events_and_manifest() {
         let base = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1"),
-            ("MD_TOKENIZER_MODE", "local-shadow"),
-            ("MD_TOKENIZER_PATH", "/models/tokenizer.json"),
+            ("RJ_UPSTREAM", "http://a:1"),
+            ("RJ_TOKENIZER_MODE", "local-shadow"),
+            ("RJ_TOKENIZER_PATH", "/models/tokenizer.json"),
             (
-                "MD_TOKENIZER_SHA256",
+                "RJ_TOKENIZER_SHA256",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
-            ("MD_EXACT_ROUTE_MODE", "shadow"),
+            ("RJ_EXACT_ROUTE_MODE", "shadow"),
         ]);
         let error = Config::from_lookup(|key| base.get(key).map(ToString::to_string)).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_EXACT_ROUTE_MODE",
+                key: "RJ_EXACT_ROUTE_MODE",
                 ..
             }
         ));
 
         let mut values = base;
-        values.insert("MD_KV_EVENT_MODE", "shadow");
-        values.insert("MD_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557");
-        values.insert("MD_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558");
+        values.insert("RJ_KV_EVENT_MODE", "shadow");
+        values.insert("RJ_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557");
+        values.insert("RJ_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558");
         let error =
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_EXACT_ROUTE_MANIFEST_PATH",
+                key: "RJ_EXACT_ROUTE_MANIFEST_PATH",
                 ..
             }
         ));
 
-        values.insert("MD_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json");
+        values.insert("RJ_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json");
         values.insert(
-            "MD_EXACT_ROUTE_MANIFEST_SHA256",
+            "RJ_EXACT_ROUTE_MANIFEST_SHA256",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         );
         assert_eq!(
@@ -2318,35 +2361,35 @@ mod tests {
 
     #[test]
     fn compatibility_admission_is_explicit_and_requires_a_manifest() {
-        let disabled = HashMap::from([("MD_UPSTREAM_ADMISSION_MODE", "compatibility")]);
+        let disabled = HashMap::from([("RJ_UPSTREAM_ADMISSION_MODE", "compatibility")]);
         assert!(matches!(
             Config::from_lookup(|key| disabled.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_UPSTREAM_ADMISSION_MODE",
+                key: "RJ_UPSTREAM_ADMISSION_MODE",
                 ..
             })
         ));
 
         let values = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1,http://b:1"),
-            ("MD_UPSTREAM_ADMISSION_MODE", "compatibility"),
-            ("MD_TOKENIZER_MODE", "local-shadow"),
-            ("MD_TOKENIZER_PATH", "/models/tokenizer.json"),
+            ("RJ_UPSTREAM", "http://a:1,http://b:1"),
+            ("RJ_UPSTREAM_ADMISSION_MODE", "compatibility"),
+            ("RJ_TOKENIZER_MODE", "local-shadow"),
+            ("RJ_TOKENIZER_PATH", "/models/tokenizer.json"),
             (
-                "MD_TOKENIZER_SHA256",
+                "RJ_TOKENIZER_SHA256",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
-            ("MD_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
+            ("RJ_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
             (
-                "MD_EXACT_ROUTE_MANIFEST_SHA256",
+                "RJ_EXACT_ROUTE_MANIFEST_SHA256",
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             ),
             (
-                "MD_SERVING_RUNTIME_MANIFEST_PATH",
+                "RJ_SERVING_RUNTIME_MANIFEST_PATH",
                 "/compat/serving-runtime.json",
             ),
             (
-                "MD_SERVING_RUNTIME_MANIFEST_SHA256",
+                "RJ_SERVING_RUNTIME_MANIFEST_SHA256",
                 "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             ),
         ]);
@@ -2362,9 +2405,9 @@ mod tests {
         );
 
         let mut guarded = values.clone();
-        guarded.insert("MD_DSPARK_GUARD_MODE", "quarantine");
+        guarded.insert("RJ_DSPARK_GUARD_MODE", "quarantine");
         guarded.insert(
-            "MD_DSPARK_GUARD_STATE_PATH",
+            "RJ_DSPARK_GUARD_STATE_PATH",
             "/run/mini-dynamo-dspark-guard/state.json",
         );
         assert_eq!(
@@ -2374,17 +2417,17 @@ mod tests {
             DsparkGuardMode::Quarantine
         );
         let mut missing_guard_state = guarded.clone();
-        missing_guard_state.remove("MD_DSPARK_GUARD_STATE_PATH");
+        missing_guard_state.remove("RJ_DSPARK_GUARD_STATE_PATH");
         assert!(matches!(
             Config::from_lookup(|name| missing_guard_state.get(name).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_DSPARK_GUARD_STATE_PATH",
+                key: "RJ_DSPARK_GUARD_STATE_PATH",
                 ..
             })
         ));
         for (key, value) in [
-            ("MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS", "2"),
-            ("MD_DSPARK_GUARD_MIN_PROPOSED_TOKENS", "255"),
+            ("RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS", "2"),
+            ("RJ_DSPARK_GUARD_MIN_PROPOSED_TOKENS", "255"),
         ] {
             let mut unsafe_guard = guarded.clone();
             unsafe_guard.insert(key, value);
@@ -2395,21 +2438,21 @@ mod tests {
         }
 
         let mut missing_runtime = values.clone();
-        missing_runtime.remove("MD_SERVING_RUNTIME_MANIFEST_PATH");
-        missing_runtime.remove("MD_SERVING_RUNTIME_MANIFEST_SHA256");
+        missing_runtime.remove("RJ_SERVING_RUNTIME_MANIFEST_PATH");
+        missing_runtime.remove("RJ_SERVING_RUNTIME_MANIFEST_SHA256");
         assert!(matches!(
             Config::from_lookup(|key| missing_runtime.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_UPSTREAM_ADMISSION_MODE",
+                key: "RJ_UPSTREAM_ADMISSION_MODE",
                 ..
             })
         ));
 
-        let invalid = HashMap::from([("MD_UPSTREAM_ADMISSION_MODE", "permissive")]);
+        let invalid = HashMap::from([("RJ_UPSTREAM_ADMISSION_MODE", "permissive")]);
         assert!(matches!(
             Config::from_lookup(|key| invalid.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_UPSTREAM_ADMISSION_MODE",
+                key: "RJ_UPSTREAM_ADMISSION_MODE",
                 ..
             })
         ));
@@ -2418,11 +2461,11 @@ mod tests {
     #[test]
     fn dspark_guard_is_explicit_bounded_and_quarantine_requires_identity_admission() {
         let observe = HashMap::from([
-            ("MD_DSPARK_GUARD_MODE", "observe"),
-            ("MD_DSPARK_GUARD_INTERVAL_MS", "1000"),
-            ("MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS", "4"),
-            ("MD_DSPARK_GUARD_MIN_PROPOSED_TOKENS", "512"),
-            ("MD_DSPARK_GUARD_EXPECTED_POSITIONS", "5"),
+            ("RJ_DSPARK_GUARD_MODE", "observe"),
+            ("RJ_DSPARK_GUARD_INTERVAL_MS", "1000"),
+            ("RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS", "4"),
+            ("RJ_DSPARK_GUARD_MIN_PROPOSED_TOKENS", "512"),
+            ("RJ_DSPARK_GUARD_EXPECTED_POSITIONS", "5"),
         ]);
         let config = Config::from_lookup(|key| observe.get(key).map(ToString::to_string)).unwrap();
         assert_eq!(config.dspark_guard_mode, DsparkGuardMode::Observe);
@@ -2433,48 +2476,48 @@ mod tests {
 
         for path in ["relative/state.json", "/run/guard/../state.json"] {
             let values = HashMap::from([
-                ("MD_DSPARK_GUARD_MODE", "observe"),
-                ("MD_DSPARK_GUARD_STATE_PATH", path),
+                ("RJ_DSPARK_GUARD_MODE", "observe"),
+                ("RJ_DSPARK_GUARD_STATE_PATH", path),
             ]);
             assert!(matches!(
                 Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
                 Err(ConfigError::InvalidValue {
-                    key: "MD_DSPARK_GUARD_STATE_PATH",
+                    key: "RJ_DSPARK_GUARD_STATE_PATH",
                     ..
                 })
             ));
         }
         let observe_with_state = HashMap::from([
-            ("MD_DSPARK_GUARD_MODE", "observe"),
+            ("RJ_DSPARK_GUARD_MODE", "observe"),
             (
-                "MD_DSPARK_GUARD_STATE_PATH",
+                "RJ_DSPARK_GUARD_STATE_PATH",
                 "/run/mini-dynamo-dspark-guard/state.json",
             ),
         ]);
         assert!(matches!(
             Config::from_lookup(|key| observe_with_state.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_DSPARK_GUARD_STATE_PATH",
+                key: "RJ_DSPARK_GUARD_STATE_PATH",
                 ..
             })
         ));
 
-        let quarantine = HashMap::from([("MD_DSPARK_GUARD_MODE", "quarantine")]);
+        let quarantine = HashMap::from([("RJ_DSPARK_GUARD_MODE", "quarantine")]);
         assert!(matches!(
             Config::from_lookup(|key| quarantine.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_DSPARK_GUARD_MODE",
+                key: "RJ_DSPARK_GUARD_MODE",
                 ..
             })
         ));
 
         for (key, value) in [
-            ("MD_DSPARK_GUARD_INTERVAL_MS", "999"),
-            ("MD_DSPARK_GUARD_INTERVAL_MS", "60001"),
-            ("MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS", "1"),
-            ("MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS", "13"),
-            ("MD_DSPARK_GUARD_MIN_PROPOSED_TOKENS", "10000001"),
-            ("MD_DSPARK_GUARD_EXPECTED_POSITIONS", "17"),
+            ("RJ_DSPARK_GUARD_INTERVAL_MS", "999"),
+            ("RJ_DSPARK_GUARD_INTERVAL_MS", "60001"),
+            ("RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS", "1"),
+            ("RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS", "13"),
+            ("RJ_DSPARK_GUARD_MIN_PROPOSED_TOKENS", "10000001"),
+            ("RJ_DSPARK_GUARD_EXPECTED_POSITIONS", "17"),
         ] {
             let values = HashMap::from([(key, value)]);
             assert!(matches!(
@@ -2483,11 +2526,11 @@ mod tests {
             ));
         }
 
-        let invalid = HashMap::from([("MD_DSPARK_GUARD_MODE", "automatic")]);
+        let invalid = HashMap::from([("RJ_DSPARK_GUARD_MODE", "automatic")]);
         assert!(matches!(
             Config::from_lookup(|key| invalid.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_DSPARK_GUARD_MODE",
+                key: "RJ_DSPARK_GUARD_MODE",
                 ..
             })
         ));
@@ -2496,48 +2539,48 @@ mod tests {
     #[test]
     fn serving_runtime_pins_are_paired_valid_and_stageable_under_http() {
         let partial = HashMap::from([(
-            "MD_SERVING_RUNTIME_MANIFEST_PATH",
+            "RJ_SERVING_RUNTIME_MANIFEST_PATH",
             "/compat/serving-runtime.json",
         )]);
         assert!(matches!(
             Config::from_lookup(|key| partial.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_SERVING_RUNTIME_MANIFEST_SHA256",
+                key: "RJ_SERVING_RUNTIME_MANIFEST_SHA256",
                 ..
             })
         ));
         let reverse_partial = HashMap::from([(
-            "MD_SERVING_RUNTIME_MANIFEST_SHA256",
+            "RJ_SERVING_RUNTIME_MANIFEST_SHA256",
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         )]);
         assert!(matches!(
             Config::from_lookup(|key| reverse_partial.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_SERVING_RUNTIME_MANIFEST_PATH",
+                key: "RJ_SERVING_RUNTIME_MANIFEST_PATH",
                 ..
             })
         ));
         let invalid_sha = HashMap::from([
             (
-                "MD_SERVING_RUNTIME_MANIFEST_PATH",
+                "RJ_SERVING_RUNTIME_MANIFEST_PATH",
                 "/compat/serving-runtime.json",
             ),
-            ("MD_SERVING_RUNTIME_MANIFEST_SHA256", "not-a-digest"),
+            ("RJ_SERVING_RUNTIME_MANIFEST_SHA256", "not-a-digest"),
         ]);
         assert!(matches!(
             Config::from_lookup(|key| invalid_sha.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_SERVING_RUNTIME_MANIFEST_SHA256",
+                key: "RJ_SERVING_RUNTIME_MANIFEST_SHA256",
                 ..
             })
         ));
         let staged = HashMap::from([
             (
-                "MD_SERVING_RUNTIME_MANIFEST_PATH",
+                "RJ_SERVING_RUNTIME_MANIFEST_PATH",
                 "/compat/serving-runtime.json",
             ),
             (
-                "MD_SERVING_RUNTIME_MANIFEST_SHA256",
+                "RJ_SERVING_RUNTIME_MANIFEST_SHA256",
                 "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             ),
         ]);
@@ -2552,32 +2595,32 @@ mod tests {
     #[test]
     fn exact_route_placement_is_explicit_and_parses_conservative_gates() {
         let values = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1,http://b:1"),
-            ("MD_TOKENIZER_MODE", "local-shadow"),
-            ("MD_TOKENIZER_PATH", "/models/tokenizer.json"),
+            ("RJ_UPSTREAM", "http://a:1,http://b:1"),
+            ("RJ_TOKENIZER_MODE", "local-shadow"),
+            ("RJ_TOKENIZER_PATH", "/models/tokenizer.json"),
             (
-                "MD_TOKENIZER_SHA256",
+                "RJ_TOKENIZER_SHA256",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
-            ("MD_KV_EVENT_MODE", "shadow"),
-            ("MD_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557,tcp://b:5557"),
-            ("MD_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558,tcp://b:5558"),
-            ("MD_EXACT_ROUTE_MODE", "placement"),
-            ("MD_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
+            ("RJ_KV_EVENT_MODE", "shadow"),
+            ("RJ_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557,tcp://b:5557"),
+            ("RJ_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558,tcp://b:5558"),
+            ("RJ_EXACT_ROUTE_MODE", "placement"),
+            ("RJ_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
             (
-                "MD_EXACT_ROUTE_MANIFEST_SHA256",
+                "RJ_EXACT_ROUTE_MANIFEST_SHA256",
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             ),
-            ("MD_EXACT_ROUTE_MIN_GAIN_TOKENS", "16384"),
-            ("MD_EXACT_ROUTE_MAX_LOAD_DELTA", "1"),
-            ("MD_EXACT_ROUTE_CANARY_BPS", "250"),
+            ("RJ_EXACT_ROUTE_MIN_GAIN_TOKENS", "16384"),
+            ("RJ_EXACT_ROUTE_MAX_LOAD_DELTA", "1"),
+            ("RJ_EXACT_ROUTE_CANARY_BPS", "250"),
             (
-                "MD_EXACT_ROUTE_CANARY_KEY",
+                "RJ_EXACT_ROUTE_CANARY_KEY",
                 "0123456789abcdef0123456789abcdef",
             ),
-            ("MD_SESSION_AFFINITY_MODE", "shadow"),
+            ("RJ_SESSION_AFFINITY_MODE", "shadow"),
             (
-                "MD_SESSION_AFFINITY_KEY",
+                "RJ_SESSION_AFFINITY_KEY",
                 "fedcba9876543210fedcba9876543210",
             ),
         ]);
@@ -2610,61 +2653,61 @@ mod tests {
     #[test]
     fn exact_route_placement_requires_a_bounded_explicit_canary() {
         let mut values = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1"),
-            ("MD_TOKENIZER_MODE", "local-shadow"),
-            ("MD_TOKENIZER_PATH", "/models/tokenizer.json"),
+            ("RJ_UPSTREAM", "http://a:1"),
+            ("RJ_TOKENIZER_MODE", "local-shadow"),
+            ("RJ_TOKENIZER_PATH", "/models/tokenizer.json"),
             (
-                "MD_TOKENIZER_SHA256",
+                "RJ_TOKENIZER_SHA256",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
-            ("MD_KV_EVENT_MODE", "shadow"),
-            ("MD_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557"),
-            ("MD_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558"),
-            ("MD_EXACT_ROUTE_MODE", "placement"),
-            ("MD_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
+            ("RJ_KV_EVENT_MODE", "shadow"),
+            ("RJ_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557"),
+            ("RJ_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558"),
+            ("RJ_EXACT_ROUTE_MODE", "placement"),
+            ("RJ_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
             (
-                "MD_EXACT_ROUTE_MANIFEST_SHA256",
+                "RJ_EXACT_ROUTE_MANIFEST_SHA256",
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             ),
         ]);
         let disabled = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
         assert_eq!(disabled.exact_route_canary_bps, 0);
         assert!(disabled.exact_route_canary_key.is_none());
-        values.insert("MD_EXACT_ROUTE_CANARY_BPS", "10001");
+        values.insert("RJ_EXACT_ROUTE_CANARY_BPS", "10001");
         assert!(matches!(
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_EXACT_ROUTE_CANARY_BPS",
+                key: "RJ_EXACT_ROUTE_CANARY_BPS",
                 ..
             })
         ));
-        values.insert("MD_EXACT_ROUTE_CANARY_BPS", "100");
+        values.insert("RJ_EXACT_ROUTE_CANARY_BPS", "100");
         assert!(matches!(
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_EXACT_ROUTE_CANARY_KEY",
+                key: "RJ_EXACT_ROUTE_CANARY_KEY",
                 value,
                 ..
             }) if value == "<redacted>"
         ));
-        values.insert("MD_EXACT_ROUTE_CANARY_KEY", "too-short");
+        values.insert("RJ_EXACT_ROUTE_CANARY_KEY", "too-short");
         assert!(matches!(
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_EXACT_ROUTE_CANARY_KEY",
+                key: "RJ_EXACT_ROUTE_CANARY_KEY",
                 value,
                 ..
             }) if value == "<redacted>"
         ));
-        values.insert("MD_EXACT_ROUTE_CANARY_KEY", "x".repeat(32).leak());
+        values.insert("RJ_EXACT_ROUTE_CANARY_KEY", "x".repeat(32).leak());
         assert!(Config::from_lookup(|key| values.get(key).map(ToString::to_string)).is_ok());
-        values.insert("MD_EXACT_ROUTE_CANARY_KEY", "x".repeat(256).leak());
+        values.insert("RJ_EXACT_ROUTE_CANARY_KEY", "x".repeat(256).leak());
         assert!(Config::from_lookup(|key| values.get(key).map(ToString::to_string)).is_ok());
-        values.insert("MD_EXACT_ROUTE_CANARY_KEY", "x".repeat(257).leak());
+        values.insert("RJ_EXACT_ROUTE_CANARY_KEY", "x".repeat(257).leak());
         assert!(matches!(
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
             Err(ConfigError::InvalidValue {
-                key: "MD_EXACT_ROUTE_CANARY_KEY",
+                key: "RJ_EXACT_ROUTE_CANARY_KEY",
                 ..
             })
         ));
@@ -2673,17 +2716,17 @@ mod tests {
     #[test]
     fn shadow_kv_events_require_one_endpoint_pair_per_upstream() {
         let values = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1,http://b:2"),
-            ("MD_KV_EVENT_MODE", "shadow"),
-            ("MD_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557"),
-            ("MD_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558,tcp://b:5558"),
+            ("RJ_UPSTREAM", "http://a:1,http://b:2"),
+            ("RJ_KV_EVENT_MODE", "shadow"),
+            ("RJ_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557"),
+            ("RJ_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558,tcp://b:5558"),
         ]);
         let error =
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_KV_EVENT_LIVE_ENDPOINTS",
+                key: "RJ_KV_EVENT_LIVE_ENDPOINTS",
                 ..
             }
         ));
@@ -2692,13 +2735,13 @@ mod tests {
     #[test]
     fn parses_typed_kv_event_shadow_sources() {
         let values = HashMap::from([
-            ("MD_UPSTREAM", "http://a:1,http://b:2"),
-            ("MD_KV_EVENT_MODE", "shadow"),
-            ("MD_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557, tcp://b:5557"),
-            ("MD_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558,tcp://b:5558"),
-            ("MD_KV_EVENT_TOPIC", "kv"),
-            ("MD_KV_EVENT_RECONNECT_MIN_MS", "100"),
-            ("MD_KV_EVENT_RECONNECT_MAX_MS", "200"),
+            ("RJ_UPSTREAM", "http://a:1,http://b:2"),
+            ("RJ_KV_EVENT_MODE", "shadow"),
+            ("RJ_KV_EVENT_LIVE_ENDPOINTS", "tcp://a:5557, tcp://b:5557"),
+            ("RJ_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558,tcp://b:5558"),
+            ("RJ_KV_EVENT_TOPIC", "kv"),
+            ("RJ_KV_EVENT_RECONNECT_MIN_MS", "100"),
+            ("RJ_KV_EVENT_RECONNECT_MAX_MS", "200"),
         ]);
         let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
         assert_eq!(config.kv_event_mode, KvEventMode::Shadow);
@@ -2711,22 +2754,22 @@ mod tests {
     #[test]
     fn rejects_non_tcp_kv_event_endpoints_and_inverted_backoff() {
         let bad_endpoint = HashMap::from([
-            ("MD_KV_EVENT_MODE", "shadow"),
-            ("MD_KV_EVENT_LIVE_ENDPOINTS", "ipc:///tmp/events"),
-            ("MD_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558"),
+            ("RJ_KV_EVENT_MODE", "shadow"),
+            ("RJ_KV_EVENT_LIVE_ENDPOINTS", "ipc:///tmp/events"),
+            ("RJ_KV_EVENT_REPLAY_ENDPOINTS", "tcp://a:5558"),
         ]);
         assert!(Config::from_lookup(|key| bad_endpoint.get(key).map(ToString::to_string)).is_err());
 
         let bad_backoff = HashMap::from([
-            ("MD_KV_EVENT_RECONNECT_MIN_MS", "200"),
-            ("MD_KV_EVENT_RECONNECT_MAX_MS", "100"),
+            ("RJ_KV_EVENT_RECONNECT_MIN_MS", "200"),
+            ("RJ_KV_EVENT_RECONNECT_MAX_MS", "100"),
         ]);
         let error =
             Config::from_lookup(|key| bad_backoff.get(key).map(ToString::to_string)).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MD_KV_EVENT_RECONNECT_MIN_MS",
+                key: "RJ_KV_EVENT_RECONNECT_MIN_MS",
                 ..
             }
         ));

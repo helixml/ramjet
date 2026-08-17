@@ -223,7 +223,7 @@ export function GpuGrid({
     return (
       <Card>
         <CardContent className="text-faint-foreground py-8 text-center text-xs">
-          no GPU telemetry — point MD_MACHINEVIEW_AGENT_URL at a running
+          no GPU telemetry — point RJ_MACHINEVIEW_AGENT_URL at a running
           bench/machineview_agent.py
         </CardContent>
       </Card>

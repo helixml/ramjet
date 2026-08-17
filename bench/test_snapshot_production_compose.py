@@ -95,22 +95,22 @@ class SnapshotProductionComposeTest(unittest.TestCase):
         full = validator.render(companion=True, attestation=True, route_mode="shadow")
         validator.validate_documents(companion, full, route_mode="shadow")
         environment = companion["services"]["ds4-loadbalancer"]["environment"]
-        self.assertEqual(environment["MD_EXACT_ROUTE_MODE"], "shadow")
-        self.assertEqual(environment["MD_SNAPSHOT_ROUTE_MODE"], "shadow")
-        self.assertEqual(environment["MD_KV_EVENT_MODE"], "off")
+        self.assertEqual(environment["RJ_EXACT_ROUTE_MODE"], "shadow")
+        self.assertEqual(environment["RJ_SNAPSHOT_ROUTE_MODE"], "shadow")
+        self.assertEqual(environment["RJ_KV_EVENT_MODE"], "off")
 
     def test_off_render_disables_router_and_snapshot_exact_modes_together(self):
         environment = self.companion["services"]["ds4-loadbalancer"]["environment"]
-        self.assertEqual(environment["MD_EXACT_ROUTE_MODE"], "off")
-        self.assertEqual(environment["MD_SNAPSHOT_ROUTE_MODE"], "off")
-        self.assertEqual(environment["MD_KV_EVENT_MODE"], "off")
+        self.assertEqual(environment["RJ_EXACT_ROUTE_MODE"], "off")
+        self.assertEqual(environment["RJ_SNAPSHOT_ROUTE_MODE"], "off")
+        self.assertEqual(environment["RJ_KV_EVENT_MODE"], "off")
 
     def test_router_and_snapshot_exact_modes_cannot_diverge(self):
         document = validator.render(companion=True, attestation=False)
         document["services"]["ds4-loadbalancer"]["environment"][
-            "MD_EXACT_ROUTE_MODE"
+            "RJ_EXACT_ROUTE_MODE"
         ] = "shadow"
-        with self.assertRaisesRegex(validator.ValidationError, "MD_EXACT_ROUTE_MODE"):
+        with self.assertRaisesRegex(validator.ValidationError, "RJ_EXACT_ROUTE_MODE"):
             validator.validate_documents(document, self.full)
 
     def test_companion_profile_does_not_run_privileged_provisioners(self):
@@ -131,13 +131,13 @@ class SnapshotProductionComposeTest(unittest.TestCase):
     def test_tcp_metrics_and_session_group_are_rejected(self):
         document = validator.render(companion=True, attestation=False)
         service = document["services"]["snapshot-companion-a"]
-        service["environment"]["MD_SNAPSHOT_METRICS_BIND"] = "127.0.0.1:9091"
+        service["environment"]["RJ_SNAPSHOT_METRICS_BIND"] = "127.0.0.1:9091"
         with self.assertRaisesRegex(validator.ValidationError, "TCP metrics"):
             validator.validate_documents(document, self.full)
 
         document = validator.render(companion=True, attestation=False)
         service = document["services"]["snapshot-companion-a"]
-        service["environment"]["MD_SNAPSHOT_METRICS_GROUP_GID"] = validator.SESSION_GID
+        service["environment"]["RJ_SNAPSHOT_METRICS_GROUP_GID"] = validator.SESSION_GID
         with self.assertRaises(validator.ValidationError):
             validator.validate_documents(document, self.full)
 
@@ -164,9 +164,9 @@ class SnapshotProductionComposeTest(unittest.TestCase):
     def test_raw_kv_and_snapshot_authority_cannot_coexist(self):
         document = validator.render(companion=True, attestation=False)
         document["services"]["ds4-loadbalancer"]["environment"][
-            "MD_KV_EVENT_MODE"
+            "RJ_KV_EVENT_MODE"
         ] = "shadow"
-        with self.assertRaisesRegex(validator.ValidationError, "MD_KV_EVENT_MODE"):
+        with self.assertRaisesRegex(validator.ValidationError, "RJ_KV_EVENT_MODE"):
             validator.validate_documents(document, self.full)
 
     def test_caddy_can_only_reach_metrics_sockets(self):

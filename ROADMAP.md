@@ -386,7 +386,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
 - ✅ Size-weighted cold-prefill reservation: 32KB/request load units keep
   short decoders off the prefill engine; measured +23% aggregate decode and
   -39% median decoder TTFT in the 33.6k-prefill + 8-decoder workload.
-- ✅ Explicit affinity toggle (`MD_AFFINITY=prefix|load`) for policy A/B tests
+- ✅ Explicit affinity toggle (`RJ_AFFINITY=prefix|load`) for policy A/B tests
   and engines without reusable prefix state.
 - ✅ Health-aware failover, authenticated probes, `/v1/models` context-margin
   rewrite, request shims (max_tokens / content-parts / reasoning_effort).
@@ -669,7 +669,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   A late-divergence replay improved from 4/8 to 8/8 correct placements; live
   259K requests now expose 760 blocks instead of 128.
 - ✅ **Per-request route correlation.** rc4 returns opaque
-  `X-Mini-Dynamo-Upstream: 0|1`; `concurrent_sameapp.sh` attributes its own
+  `X-Ramjet-Upstream: 0|1`; `concurrent_sameapp.sh` attributes its own
   responses and fails on missing routes/errors. Ten trials completed 120/120
   with exact splits no worse than 5/7, invalidating contaminated metric deltas.
   Python code, mixed, and context benchmarks now report the same exact route
@@ -997,7 +997,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   opt-in. Twelve mock/in-memory policy tests cover first-run/idempotent behavior,
   collisions, unsafe paths and outputs, secret reuse, and Caddy isolation.
   The LB can now select one snapshot consumer per upstream behind the typed
-  `MD_SNAPSHOT_ROUTE_MODE=shadow` gate. Startup validates every protected
+  `RJ_SNAPSHOT_ROUTE_MODE=shadow` gate. Startup validates every protected
   authority and exact upstream cardinality before spawning reconnect owners;
   direct raw-event and compact snapshot authority are mutually exclusive.
   Snapshot inventory is injected only into the exact counterfactual scorer,

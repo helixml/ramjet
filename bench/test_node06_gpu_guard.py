@@ -468,7 +468,7 @@ class Node06GpuGuardTests(unittest.TestCase):
             self.assertEqual(json.loads(valid.stdout)["run_id"], "a" * 32)
 
             forged = environment.copy()
-            forged["MINI_DYNAMO_GPU_GUARD_CAPABILITY_FD"] = "999999"
+            forged["RAMJET_GPU_GUARD_CAPABILITY_FD"] = "999999"
             invalid = subprocess.run(
                 [sys.executable, "-c", script, module_dir],
                 env=forged,

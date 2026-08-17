@@ -180,8 +180,8 @@ class ServingIdentityMiddleware:
 def _load_identity() -> tuple[
     dict[str, Any], tuple[dict[str, Any], ...], dict[str, Any]
 ]:
-    path = os.environ["MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_PATH"]
-    expected = os.environ["MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SHA256"]
+    path = os.environ["RAMJET_SERVING_IDENTITY_MANIFEST_PATH"]
+    expected = os.environ["RAMJET_SERVING_IDENTITY_MANIFEST_SHA256"]
     if _HEX_SHA256.fullmatch(expected) is None:
         raise ValueError("invalid manifest digest")
     flags = os.O_RDONLY | os.O_CLOEXEC
@@ -246,8 +246,8 @@ def _load_identity() -> tuple[
 
 
 def _load_runtime_contract(compatibility_sha256: str) -> dict[str, Any]:
-    path = os.environ["MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_PATH"]
-    expected = os.environ["MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SHA256"]
+    path = os.environ["RAMJET_SERVING_RUNTIME_MANIFEST_PATH"]
+    expected = os.environ["RAMJET_SERVING_RUNTIME_MANIFEST_SHA256"]
     if _HEX_SHA256.fullmatch(expected) is None:
         raise ValueError("invalid runtime manifest digest")
     flags = os.O_RDONLY | os.O_CLOEXEC
@@ -560,7 +560,7 @@ def _golden_contract(value: Any, model: dict[str, Any]) -> tuple[dict[str, Any],
 
 
 def _load_token() -> bytes:
-    value = os.environ.get("MINI_DYNAMO_SERVING_IDENTITY_BEARER_TOKEN")
+    value = os.environ.get("RAMJET_SERVING_IDENTITY_BEARER_TOKEN")
     if value is None:
         value = os.environ.get("VLLM_API_KEY")
     if value is None:
@@ -573,7 +573,7 @@ def _load_token() -> bytes:
 
 def _load_verify_timeout() -> float:
     raw = os.environ.get(
-        "MINI_DYNAMO_SERVING_IDENTITY_VERIFY_TIMEOUT_MS",
+        "RAMJET_SERVING_IDENTITY_VERIFY_TIMEOUT_MS",
         str(DEFAULT_VERIFY_TIMEOUT_MS),
     )
     try:
@@ -599,7 +599,7 @@ def _verify_runtime(identity: dict[str, Any]) -> None:
         raise ValueError("model context unavailable") from exc
     if max_model_len != model["max_model_len"]:
         raise ValueError("model context mismatch")
-    tokenizer_path = os.environ["MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH"]
+    tokenizer_path = os.environ["RAMJET_SERVING_IDENTITY_TOKENIZER_PATH"]
     if _regular_file_sha256(tokenizer_path, MAX_TOKENIZER_BYTES) != tokenizer["sha256"]:
         raise ValueError("tokenizer digest mismatch")
 

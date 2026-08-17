@@ -23,9 +23,9 @@ ENTRYPOINT = [
     "/usr/local/bin/serve-ds4-flash.sh",
 ]
 SINGLE_HOME = {
-    "MD_UPSTREAM": "http://dspark-0731:8000",
-    "MD_KV_EVENT_LIVE_ENDPOINTS": "tcp://dspark-0731:5557",
-    "MD_KV_EVENT_REPLAY_ENDPOINTS": "tcp://dspark-0731:5558",
+    "RJ_UPSTREAM": "http://dspark-0731:8000",
+    "RJ_KV_EVENT_LIVE_ENDPOINTS": "tcp://dspark-0731:5557",
+    "RJ_KV_EVENT_REPLAY_ENDPOINTS": "tcp://dspark-0731:5558",
 }
 MATCHED_ENGINE_ENVIRONMENT = {
     "MODEL_PATH": "/workspace/model",

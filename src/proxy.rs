@@ -1291,7 +1291,7 @@ impl Proxy {
         builder
             .headers_mut()
             .expect("response headers")
-            .insert("x-mini-dynamo-upstream", upstream.into());
+            .insert("x-ramjet-upstream", upstream.into());
 
         let (sender, receiver) = mpsc::channel(STREAM_BUFFER_CHUNKS);
         let proxy = self.clone();
@@ -1522,7 +1522,7 @@ impl Proxy {
                 Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", "application/json")
-                    .header("x-mini-dynamo-upstream", upstream)
+                    .header("x-ramjet-upstream", upstream)
                     .body(Body::from(result))
                     .expect("valid model response")
             }
@@ -2354,9 +2354,7 @@ fn upstream_url(base: &Url, uri: &Uri) -> Url {
 fn filtered_headers(source: &HeaderMap) -> HeaderMap {
     let mut destination = HeaderMap::with_capacity(source.len());
     for (name, value) in source {
-        if !hop_header(name)
-            && !matches!(name.as_str(), "x-session-id" | "x-mini-dynamo-shadow-soak")
-        {
+        if !hop_header(name) && !matches!(name.as_str(), "x-session-id" | "x-ramjet-shadow-soak") {
             destination.append(name, value.clone());
         }
     }
@@ -2395,7 +2393,7 @@ fn hop_header(name: &HeaderName) -> bool {
             | "upgrade"
             | "content-length"
             | "host"
-            | "x-mini-dynamo-upstream"
+            | "x-ramjet-upstream"
     )
 }
 
@@ -2426,7 +2424,7 @@ fn shadow_soak_retryable_error(reason: &'static str) -> Response<Body> {
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .header("content-type", "application/json")
-        .header("x-mini-dynamo-shadow-soak-retry", reason)
+        .header("x-ramjet-shadow-soak-retry", reason)
         .body(Body::from(body.to_string()))
         .expect("valid shadow soak retry response")
 }
@@ -2445,7 +2443,7 @@ fn shadow_soak_capture_requested(
     headers: &HeaderMap,
     expected_token: Option<&str>,
 ) -> Result<bool, StatusCode> {
-    let mut values = headers.get_all("x-mini-dynamo-shadow-soak").iter();
+    let mut values = headers.get_all("x-ramjet-shadow-soak").iter();
     let Some(value) = values.next() else {
         return Ok(false);
     };
@@ -2593,7 +2591,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let config =
-            Config::from_lookup(|key| (key == "MD_UPSTREAM").then(|| joined.clone())).unwrap();
+            Config::from_lookup(|key| (key == "RJ_UPSTREAM").then(|| joined.clone())).unwrap();
         proxy_for_config(config, inventories)
     }
 
@@ -2604,8 +2602,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let config = Config::from_lookup(|key| match key {
-            "MD_UPSTREAM" => Some(joined.clone()),
-            "MD_UPSTREAM_TOKEN" => Some(token.to_owned()),
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_TOKEN" => Some(token.to_owned()),
             _ => None,
         })
         .unwrap();
@@ -2638,14 +2636,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let config = Config::from_lookup(|key| match key {
-            "MD_UPSTREAM" => Some(joined.clone()),
-            "MD_IDLE_DRAIN_MODE" => Some(mode.to_owned()),
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_IDLE_DRAIN_MODE" => Some(mode.to_owned()),
             // Shortest window the validator permits, so the injected clock
             // only has to step a little past it.
-            "MD_IDLE_DRAIN_IDLE_AFTER_SECONDS" | "MD_IDLE_DRAIN_COOLDOWN_SECONDS" => {
+            "RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS" | "RJ_IDLE_DRAIN_COOLDOWN_SECONDS" => {
                 Some("60".to_owned())
             }
-            "MD_IDLE_DRAIN_GRACE_SECONDS" => Some("1".to_owned()),
+            "RJ_IDLE_DRAIN_GRACE_SECONDS" => Some("1".to_owned()),
             _ => None,
         })
         .unwrap();
@@ -2875,8 +2873,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let mut config = Config::from_lookup(|key| match key {
-            "MD_UPSTREAM" => Some(joined.clone()),
-            "MD_DSPARK_GUARD_MODE" => Some("observe".to_owned()),
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_DSPARK_GUARD_MODE" => Some("observe".to_owned()),
             _ => None,
         })
         .unwrap();
@@ -3058,15 +3056,15 @@ mod tests {
         let mut source = HeaderMap::new();
         source.insert("authorization", "Bearer okay".parse().unwrap());
         source.insert("connection", "close".parse().unwrap());
-        source.insert("x-mini-dynamo-upstream", "secret".parse().unwrap());
+        source.insert("x-ramjet-upstream", "secret".parse().unwrap());
         source.insert("x-session-id", "private-session".parse().unwrap());
-        source.insert("x-mini-dynamo-shadow-soak", "capture".parse().unwrap());
+        source.insert("x-ramjet-shadow-soak", "capture".parse().unwrap());
         let result = filtered_headers(&source);
         assert!(result.contains_key("authorization"));
         assert!(!result.contains_key("connection"));
-        assert!(!result.contains_key("x-mini-dynamo-upstream"));
+        assert!(!result.contains_key("x-ramjet-upstream"));
         assert!(!result.contains_key("x-session-id"));
-        assert!(!result.contains_key("x-mini-dynamo-shadow-soak"));
+        assert!(!result.contains_key("x-ramjet-shadow-soak"));
     }
 
     #[tokio::test]
@@ -3119,12 +3117,12 @@ mod tests {
             shadow_soak_capture_requested(&headers, Some("secret")),
             Ok(false)
         );
-        headers.insert("x-mini-dynamo-shadow-soak", "wrong".parse().unwrap());
+        headers.insert("x-ramjet-shadow-soak", "wrong".parse().unwrap());
         assert_eq!(
             shadow_soak_capture_requested(&headers, Some("secret")),
             Err(StatusCode::BAD_REQUEST)
         );
-        headers.insert("x-mini-dynamo-shadow-soak", "capture".parse().unwrap());
+        headers.insert("x-ramjet-shadow-soak", "capture".parse().unwrap());
         assert_eq!(
             shadow_soak_capture_requested(&headers, Some("secret")),
             Err(StatusCode::UNAUTHORIZED)
@@ -3134,7 +3132,7 @@ mod tests {
             shadow_soak_capture_requested(&headers, Some("secret")),
             Ok(true)
         );
-        headers.append("x-mini-dynamo-shadow-soak", "capture".parse().unwrap());
+        headers.append("x-ramjet-shadow-soak", "capture".parse().unwrap());
         assert_eq!(
             shadow_soak_capture_requested(&headers, Some("secret")),
             Err(StatusCode::BAD_REQUEST)
@@ -3148,7 +3146,7 @@ mod tests {
         assert_eq!(
             retryable
                 .headers()
-                .get("x-mini-dynamo-shadow-soak-retry")
+                .get("x-ramjet-shadow-soak-retry")
                 .unwrap(),
             "tokenizer_unavailable"
         );
@@ -3156,7 +3154,7 @@ mod tests {
         assert!(
             ordinary
                 .headers()
-                .get("x-mini-dynamo-shadow-soak-retry")
+                .get("x-ramjet-shadow-soak-retry")
                 .is_none()
         );
     }
@@ -3167,7 +3165,7 @@ mod tests {
         let unauthorized = Request::builder()
             .method(Method::POST)
             .uri("/v1/chat/completions")
-            .header("x-mini-dynamo-shadow-soak", "capture")
+            .header("x-ramjet-shadow-soak", "capture")
             .body(Body::empty())
             .unwrap();
         assert_eq!(
@@ -3179,7 +3177,7 @@ mod tests {
             .method(Method::POST)
             .uri("/v1/chat/completions")
             .header("authorization", "Bearer secret")
-            .header("x-mini-dynamo-shadow-soak", "capture")
+            .header("x-ramjet-shadow-soak", "capture")
             .body(Body::empty())
             .unwrap();
         assert_eq!(proxy.serve(disabled).await.status(), StatusCode::NOT_FOUND);
@@ -3280,7 +3278,7 @@ mod tests {
             .unwrap();
         let response = proxy.serve(request).await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["x-mini-dynamo-upstream"], "0");
+        assert_eq!(response.headers()["x-ramjet-upstream"], "0");
         let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("prompt_tokens"));
         task.abort();
@@ -3391,10 +3389,10 @@ mod tests {
         let (url_b, task_b) = start_upstream(upstream(Arc::clone(&requests_b))).await;
         let joined = format!("{url_a},{url_b}");
         let values = HashMap::from([
-            ("MD_UPSTREAM", joined),
-            ("MD_SESSION_AFFINITY_MODE", "shadow".to_owned()),
+            ("RJ_UPSTREAM", joined),
+            ("RJ_SESSION_AFFINITY_MODE", "shadow".to_owned()),
             (
-                "MD_SESSION_AFFINITY_KEY",
+                "RJ_SESSION_AFFINITY_KEY",
                 "0123456789abcdef0123456789abcdef".to_owned(),
             ),
         ]);
@@ -3412,7 +3410,7 @@ mod tests {
             .unwrap();
         let response = proxy.serve(request).await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["x-mini-dynamo-upstream"], "1");
+        assert_eq!(response.headers()["x-ramjet-upstream"], "1");
         let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         assert_eq!(requests_a.load(Ordering::Relaxed), 0);
         assert_eq!(requests_b.load(Ordering::Relaxed), 1);
@@ -3454,9 +3452,9 @@ mod tests {
         let (url_b, task_b) = start_upstream(upstream()).await;
         let joined = format!("{url_a},{url_b}");
         let values = HashMap::from([
-            ("MD_UPSTREAM", joined),
-            ("MD_TOKENIZER_MODE", "remote-shadow".to_owned()),
-            ("MD_TOKENIZER_MIN_BYTES", "0".to_owned()),
+            ("RJ_UPSTREAM", joined),
+            ("RJ_TOKENIZER_MODE", "remote-shadow".to_owned()),
+            ("RJ_TOKENIZER_MIN_BYTES", "0".to_owned()),
         ]);
         let config = Config::from_lookup(|key| values.get(key).cloned()).unwrap();
         let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
@@ -3488,7 +3486,7 @@ mod tests {
             ))
             .unwrap();
         let response = proxy.serve(request).await;
-        assert_eq!(response.headers()["x-mini-dynamo-upstream"], "1");
+        assert_eq!(response.headers()["x-ramjet-upstream"], "1");
         let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
@@ -3532,7 +3530,7 @@ mod tests {
             .unwrap();
         let response = proxy.serve(request).await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["x-mini-dynamo-upstream"], "0");
+        assert_eq!(response.headers()["x-ramjet-upstream"], "0");
         assert_eq!(
             to_bytes(response.into_body(), 1024).await.unwrap(),
             Bytes::from_static(b"{\"ok\":true}")
@@ -3574,7 +3572,7 @@ mod tests {
                 .unwrap();
             let response = proxy.serve(request).await;
             assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(response.headers()["x-mini-dynamo-upstream"], "0");
+            assert_eq!(response.headers()["x-ramjet-upstream"], "0");
             let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         }
         assert_eq!(unhealthy_requests.load(Ordering::Relaxed), 0);
@@ -3655,7 +3653,7 @@ mod tests {
                 )
                 .await;
             assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(response.headers()["x-mini-dynamo-upstream"], "0");
+            assert_eq!(response.headers()["x-ramjet-upstream"], "0");
             let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         }
         assert_eq!(quarantined_requests.load(Ordering::Relaxed), 0);
@@ -4025,8 +4023,8 @@ mod tests {
         let (url, task) = start_upstream(upstream).await;
         let joined = url.to_string();
         let config = Config::from_lookup(|key| match key {
-            "MD_UPSTREAM" => Some(joined.clone()),
-            "MD_DSPARK_GUARD_MODE" => Some("observe".to_owned()),
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_DSPARK_GUARD_MODE" => Some("observe".to_owned()),
             _ => None,
         })
         .unwrap();
@@ -4086,7 +4084,7 @@ mod tests {
         let (url, task) = start_upstream(upstream).await;
         let joined = url.as_str().to_owned();
         let mut config =
-            Config::from_lookup(|key| (key == "MD_UPSTREAM").then(|| joined.clone())).unwrap();
+            Config::from_lookup(|key| (key == "RJ_UPSTREAM").then(|| joined.clone())).unwrap();
         // Config parsing requires a real manifest before this mode can be set.
         // Mutating the public structure here proves the proxy still fails closed
         // if an embedding constructs an inconsistent Config directly.
@@ -4181,7 +4179,7 @@ mod tests {
         let (url, task) = start_upstream(upstream).await;
         let joined = url.as_str().to_owned();
         let mut config =
-            Config::from_lookup(|key| (key == "MD_UPSTREAM").then(|| joined.clone())).unwrap();
+            Config::from_lookup(|key| (key == "RJ_UPSTREAM").then(|| joined.clone())).unwrap();
         config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
         let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
 
@@ -4274,7 +4272,7 @@ mod tests {
         let (url, task) = start_upstream(upstream).await;
         let joined = url.as_str().to_owned();
         let mut config =
-            Config::from_lookup(|key| (key == "MD_UPSTREAM").then(|| joined.clone())).unwrap();
+            Config::from_lookup(|key| (key == "RJ_UPSTREAM").then(|| joined.clone())).unwrap();
         config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
         let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
         proxy.probe(0).await;
@@ -4374,7 +4372,7 @@ mod tests {
         let (fast_url, fast_task) = start_upstream(fast).await;
         let joined = format!("{slow_url},{fast_url}");
         let mut config =
-            Config::from_lookup(|key| (key == "MD_UPSTREAM").then(|| joined.clone())).unwrap();
+            Config::from_lookup(|key| (key == "RJ_UPSTREAM").then(|| joined.clone())).unwrap();
         config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
         let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
 
@@ -4478,7 +4476,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let mut config =
-            Config::from_lookup(|key| (key == "MD_UPSTREAM").then(|| joined.clone())).unwrap();
+            Config::from_lookup(|key| (key == "RJ_UPSTREAM").then(|| joined.clone())).unwrap();
         config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
         let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
 
@@ -4718,7 +4716,7 @@ mod tests {
                 )
                 .await;
             assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(response.headers()["x-mini-dynamo-upstream"], "0");
+            assert_eq!(response.headers()["x-ramjet-upstream"], "0");
             let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         }
         assert_eq!(parked_requests.load(Ordering::Relaxed), 0);
@@ -4836,10 +4834,10 @@ mod tests {
         let (url, task) = start_upstream(upstream).await;
         let joined = url.as_str().to_owned();
         let config = Config::from_lookup(|key| match key {
-            "MD_UPSTREAM" => Some(joined.clone()),
-            "MD_ROUTE_PHASE_AWARE_LOAD" => Some("true".to_owned()),
-            "MD_ROUTE_LOAD_UNIT_BYTES" => Some("32".to_owned()),
-            "MD_ROUTE_MAX_LOAD_UNITS" => Some("4".to_owned()),
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_ROUTE_PHASE_AWARE_LOAD" => Some("true".to_owned()),
+            "RJ_ROUTE_LOAD_UNIT_BYTES" => Some("32".to_owned()),
+            "RJ_ROUTE_MAX_LOAD_UNITS" => Some("4".to_owned()),
             _ => None,
         })
         .unwrap();

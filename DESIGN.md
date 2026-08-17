@@ -61,25 +61,25 @@ the approximate chain-fingerprint index.
 
 Chain fingerprints over the canonicalized prompt prefix (prompt-affecting
 system, tool, message, reasoning, name, and tool-call fields;
-`MD_ROUTE_CHUNK_BYTES`=2048-byte blocks ≈ 512 tokens, up to
-`MD_ROUTE_MAX_PREFIX_BYTES`=2MB). Block *i*'s fingerprint hashes block
+`RJ_ROUTE_CHUNK_BYTES`=2048-byte blocks ≈ 512 tokens, up to
+`RJ_ROUTE_MAX_PREFIX_BYTES`=2MB). Block *i*'s fingerprint hashes block
 *i−1*'s fingerprint too, so depth-d match ⇒ whole d-block prefix matches —
 the same prefix-tree property engine radix caches key on, approximated
 without engine cooperation.
 
-Per upstream: LRU fingerprint index (`MD_ROUTE_INDEX_CAPACITY`=100k ≈
+Per upstream: LRU fingerprint index (`RJ_ROUTE_INDEX_CAPACITY`=100k ≈
 covers ~200MB of distinct prompt text) populated on every 2xx response.
 
 ```
-affinity(u) = min(overlapBlocks(u), MD_ROUTE_MAX_OVERLAP_BLOCKS)  # default 32
+affinity(u) = min(overlapBlocks(u), RJ_ROUTE_MAX_OVERLAP_BLOCKS)  # default 32
 score(u)    = affinity(u) − alpha × loadUnits(u)                    # alpha 4
 order    = healthy first, score desc, raw overlap desc, rotating tiebreak
 ```
 
 Every request costs at least one load unit. The estimate uses request-body
 bytes remaining after the chosen upstream's overlap, at one unit per
-`MD_ROUTE_LOAD_UNIT_BYTES` (32KB), capped at
-`MD_ROUTE_MAX_LOAD_UNITS` (8). A fully cached large prompt is therefore cheap;
+`RJ_ROUTE_LOAD_UNIT_BYTES` (32KB), capped at
+`RJ_ROUTE_MAX_LOAD_UNITS` (8). A fully cached large prompt is therefore cheap;
 a cold one still reserves the engine. Raw overlap is retained for observability
 and breaks exact score ties, while capped affinity ensures a multi-megabyte
 trunk can still yield whenever load has a strictly better score. This avoids
@@ -87,7 +87,7 @@ making the warm/cold choice at the precise decision boundary depend on round-
 robin rotation. The request-count metric
 remains a literal count; only placement uses weighted load.
 
-Experimental `MD_ROUTE_PHASE_AWARE_LOAD=true` releases the size-weighted
+Experimental `RJ_ROUTE_PHASE_AWARE_LOAD=true` releases the size-weighted
 portion of that reservation when a streaming response emits its first real
 generated token, while retaining one unit until completion or cancellation.
 This uses the protocol-visible prefill/decode boundary without introducing an
@@ -108,7 +108,7 @@ Emergent behaviors (tested inline in `src/router.rs`):
 - load spikes override affinity once `alpha×ΔloadUnits` exceeds bounded
   affinity;
 - unhealthy engines sort last but remain failover candidates;
-- `MD_AFFINITY=load` zeroes the overlap term for an explicit least-loaded
+- `RJ_AFFINITY=load` zeroes the overlap term for an explicit least-loaded
   baseline or engines without reusable prefix state. Do not infer this from
   linear attention alone: current vLLM implements fine-grained, copy-on-write
   recurrent-state prefix caching for Kimi K3's hybrid KDA/MLA stack.
@@ -120,7 +120,7 @@ Emergent behaviors (tested inline in `src/router.rs`):
 | strip `max_tokens`/`max_completion_tokens` ≥ 100k | Helix/Zed send full-context budgets; strict engines reject prompt+budget > ctx |
 | flatten content-parts arrays (incl. `{"type":"text"}` with no text) | Zed sends assistant history as parts; SGLang-class engines require strings |
 | drop unsupported `reasoning_effort` values | Preserve the current vLLM schema (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); reject client-only values that engines would 400 |
-| `/v1/models` context shrink (`MD_ADVERTISE_CTX_MARGIN`) | clients undercount rendered prompts; and a thread over the engine limit can't even run compaction — advertised window MUST be below the engine ceiling |
+| `/v1/models` context shrink (`RJ_ADVERTISE_CTX_MARGIN`) | clients undercount rendered prompts; and a thread over the engine limit can't even run compaction — advertised window MUST be below the engine ceiling |
 
 ## Metrics
 
@@ -137,7 +137,7 @@ Successful proxy responses and chat logs include an opaque upstream ordinal,
 allowing benchmark traffic to correlate exact route choices without exposing
 internal service names or subtracting production-wide counters.
 
-With `MD_ROUTE_JOURNAL=true`, the proxy also emits versioned start/finish
+With `RJ_ROUTE_JOURNAL=true`, the proxy also emits versioned start/finish
 JSONL for static counterfactual replay. It records request/response sizes,
 opaque upstream ordinals, route-state snapshots, status, timing, and aggregate
 usage. It deliberately excludes prompt text, request IDs, fingerprints,

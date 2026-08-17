@@ -20,15 +20,15 @@ TARGET = "/run/mini-dynamo-dspark-guard"
 STATE_PATH = f"{TARGET}/state.json"
 ENGINES = ("dspark-0731", "dspark-0731-b")
 EXPECTED_ENVIRONMENT = {
-    "MD_UPSTREAM_ADMISSION_MODE": "compatibility",
-    "MD_DSPARK_GUARD_MODE": "quarantine",
-    "MD_DSPARK_GUARD_INTERVAL_MS": "5000",
-    "MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS": "3",
-    "MD_DSPARK_GUARD_MIN_PROPOSED_TOKENS": "256",
-    "MD_DSPARK_GUARD_EXPECTED_POSITIONS": "5",
-    "MD_DSPARK_GUARD_STATE_PATH": STATE_PATH,
-    "MD_DSPARK_GUARD_STATE_OWNER_UID": "0",
-    "MD_DSPARK_GUARD_STATE_GROUP_GID": "0",
+    "RJ_UPSTREAM_ADMISSION_MODE": "compatibility",
+    "RJ_DSPARK_GUARD_MODE": "quarantine",
+    "RJ_DSPARK_GUARD_INTERVAL_MS": "5000",
+    "RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS": "3",
+    "RJ_DSPARK_GUARD_MIN_PROPOSED_TOKENS": "256",
+    "RJ_DSPARK_GUARD_EXPECTED_POSITIONS": "5",
+    "RJ_DSPARK_GUARD_STATE_PATH": STATE_PATH,
+    "RJ_DSPARK_GUARD_STATE_OWNER_UID": "0",
+    "RJ_DSPARK_GUARD_STATE_GROUP_GID": "0",
 }
 
 
@@ -77,9 +77,9 @@ def volume_by_target(service: dict[str, Any], target: str) -> dict[str, Any] | N
 def validate_disabled(document: dict[str, Any]) -> None:
     load_balancer = document["services"]["ds4-loadbalancer"]
     environment = load_balancer.get("environment", {})
-    if environment.get("MD_DSPARK_GUARD_MODE") != "off":
+    if environment.get("RJ_DSPARK_GUARD_MODE") != "off":
         fail("identity-only profile enables DSpark enforcement")
-    if environment.get("MD_UPSTREAM_ADMISSION_MODE") != "http":
+    if environment.get("RJ_UPSTREAM_ADMISSION_MODE") != "http":
         fail("identity-only profile enables compatibility admission")
     if volume_by_target(load_balancer, TARGET) is not None:
         fail("identity-only profile mounts DSpark guard authority")
