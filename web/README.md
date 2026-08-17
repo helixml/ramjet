@@ -22,11 +22,19 @@ ramjet LB               samples every MD_MACHINEVIEW_INTERVAL_MS:
   src/machineview.rs           - its own Prometheus registry (ds4proxy_*)
         │                      - each upstream's /metrics (vllm:*)
         │                      - the agent (host + GPUs + energy)
-        │                    stores a bounded in-memory ring (optionally
-        │                    persisted), serves JSON + this UI on :9090
+        │                    stores a bounded in-memory ring plus a long
+        │                    hourly token history (optionally persisted),
+        │                    serves JSON + this UI on :9090
         ▼
-/ui/  +  /api/machineview/{summary,series}
+/ui/  +  /api/machineview/{summary,series,tokens}
 ```
+
+Two stores, two time scales. The ring answers "what is the box doing now"
+at seconds of resolution and is bounded by `MD_MACHINEVIEW_RETENTION_SECONDS`
+(a day by default, a week at most). The token history answers "when does this
+box get used" from the same `ds4proxy_*` counters at one bucket an hour, so a
+month of it costs 720 small records — that is what the History tab's two
+heatmaps read.
 
 ## Development
 
@@ -63,8 +71,9 @@ VPN opens http://100.89.187.17:8007/ui/ directly.
 | `MD_MACHINEVIEW_MODE` | `on` | `off` disables sampling, API, and UI |
 | `MD_MACHINEVIEW_INTERVAL_MS` | `5000` | sampling cadence (1000–60000) |
 | `MD_MACHINEVIEW_RETENTION_SECONDS` | `86400` | ring retention (60–604800) |
+| `MD_MACHINEVIEW_TOKEN_HISTORY_DAYS` | `30` | hourly token-history retention (1–400) |
 | `MD_MACHINEVIEW_AGENT_URL` | unset | host agent `/sample` URL; without it there is no host/GPU/energy telemetry |
-| `MD_MACHINEVIEW_STATE_PATH` | unset | JSON snapshot path; restores history across LB restarts |
+| `MD_MACHINEVIEW_STATE_PATH` | unset | JSON snapshot path; restores both the ring and the token history across LB restarts |
 | `MD_MACHINEVIEW_UI_DIR` | `/ui` if present | static bundle directory |
 
 Engine (`vllm:*`) scraping needs no configuration — it reuses the configured
@@ -84,3 +93,26 @@ e.g. `MD_MACHINEVIEW_AGENT_URL=http://172.17.0.1:8016/sample`. It reports
 CPU busy share, load, memory/swap, per-mount usage, whole-disk I/O rates,
 physical-interface network rates, RAPL package watts, and one row per GPU
 from `nvidia-smi`. Rates need two scrapes, so the first sample returns nulls.
+
+## History tab — the two token heatmaps
+
+`Tokens by day` is a calendar (one column per week, one row per weekday) and
+`Tokens by hour` is a weekday × hour-of-day punchcard summed over the window.
+Both plot prompt + generated tokens on the same one-hue sequential ramp, and
+both are independent of the range picker, which drives every other card.
+
+Four things about them are deliberate:
+
+- **Buckets are stored in UTC and displayed in the viewer's local time.**
+  "When does this box get used" is a wall-clock question, so the grouping
+  happens in the browser; the stored series stays unambiguous.
+- **Shading is by quantile of the active cells, not linear.** Hourly token
+  volume is skewed enough that a linear ramp paints everything but the peak
+  in the lightest step. The exact numbers are one hover away and all of them
+  are in the table view.
+- **Idle and unknown are different colors.** A recorded hour with no traffic
+  is the muted step; an hour with no bucket at all — the LB was down, or the
+  history simply starts later — is an outline. They must not look the same.
+- **Restarts lose the in-flight interval, not the history.** The counters are
+  cumulative, so a restart re-baselines rather than logging a negative delta,
+  and with `MD_MACHINEVIEW_STATE_PATH` set the accumulated buckets survive.

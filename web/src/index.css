@@ -38,6 +38,20 @@
   --chart-8: hsl(0 70% 55%);
   --chart-1-soft: hsl(220 50% 72%);
 
+  /*
+   * Sequential ramp for magnitude grids (the token heatmaps): one hue,
+   * light→dark, five steps. Validated against this mode's card surface —
+   * monotone lightness, adjacent ΔL ≥ 0.06, single hue, and a lightest step
+   * that still clears 2:1 so the quietest active cell stays distinct from an
+   * empty one. --seq-empty is "no traffic", drawn as surface + hairline.
+   */
+  --seq-1: #86b6ef;
+  --seq-2: #5598e7;
+  --seq-3: #2a78d6;
+  --seq-4: #1c5cab;
+  --seq-5: #104281;
+  --seq-empty: transparent;
+
   --status-good: #0ca30c;
   --status-warning: #fab219;
   --status-serious: #ec835a;
@@ -69,6 +83,14 @@
     --chart-lightness: 55%;
     --chart-1-soft: hsl(220 50% 68%);
 
+    /* Dark flips the anchor: quiet recedes toward the surface, busy is
+     * bright. Same hue, same four ordinal checks against the dark card. */
+    --seq-1: #184f95;
+    --seq-2: #256abf;
+    --seq-3: #3987e5;
+    --seq-4: #6da7ec;
+    --seq-5: #b7d3f6;
+
     --delta-good-text: #0ca30c;
   }
 }
@@ -95,6 +117,14 @@
   --chart-saturation: 60%;
   --chart-lightness: 55%;
   --chart-1-soft: hsl(220 50% 68%);
+
+  /* Dark flips the anchor: quiet recedes toward the surface, busy is
+   * bright. Same hue, same four ordinal checks against the dark card. */
+  --seq-1: #184f95;
+  --seq-2: #256abf;
+  --seq-3: #3987e5;
+  --seq-4: #6da7ec;
+  --seq-5: #b7d3f6;
 
   --delta-good-text: #0ca30c;
 }
@@ -128,6 +158,12 @@
   --color-chart-7: var(--chart-7);
   --color-chart-8: var(--chart-8);
   --color-chart-1-soft: var(--chart-1-soft);
+
+  --color-seq-1: var(--seq-1);
+  --color-seq-2: var(--seq-2);
+  --color-seq-3: var(--seq-3);
+  --color-seq-4: var(--seq-4);
+  --color-seq-5: var(--seq-5);
 
   --color-status-good: var(--status-good);
   --color-status-warning: var(--status-warning);

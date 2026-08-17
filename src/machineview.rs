@@ -47,7 +47,13 @@ const DEFAULT_SERIES_POINTS: usize = 400;
 const MAX_SERIES_POINTS: usize = 2_000;
 const PERSIST_EVERY_TICKS: u64 = 60;
 const HISTOGRAM_WINDOW_MS: u64 = 120_000;
-const STATE_VERSION: u32 = 1;
+const HOUR_MS: u64 = 3_600_000;
+const MIN_TOKEN_HISTORY_DAYS: u64 = 1;
+const MAX_TOKEN_HISTORY_DAYS: u64 = 400;
+/// Version 1 files carry samples only; version 2 adds the token history and
+/// is still readable by, and readable from, a version 1 snapshot.
+const STATE_VERSION: u32 = 2;
+const MIN_STATE_VERSION: u32 = 1;
 /// Static assets must be small dashboard files; refuse to stream anything
 /// that plainly is not part of the built bundle.
 const MAX_STATIC_FILE_BYTES: u64 = 16 << 20;
@@ -63,6 +69,7 @@ pub struct Settings {
     pub mode: Mode,
     pub interval_ms: u64,
     pub retention_seconds: u64,
+    pub token_history_days: u64,
     pub agent_url: Option<Url>,
     pub state_path: Option<PathBuf>,
     pub ui_dir: Option<PathBuf>,
@@ -127,6 +134,16 @@ impl Settings {
             MIN_RETENTION_SECONDS,
             MAX_RETENTION_SECONDS,
         )?;
+        // The hourly token history is far cheaper per unit of time than the
+        // sample ring — 24 buckets a day — so it keeps its own, much longer
+        // retention instead of being bounded by `retention_seconds`.
+        let token_history_days = bounded(
+            &mut get,
+            "MD_MACHINEVIEW_TOKEN_HISTORY_DAYS",
+            30,
+            MIN_TOKEN_HISTORY_DAYS,
+            MAX_TOKEN_HISTORY_DAYS,
+        )?;
         let agent_url = match get("MD_MACHINEVIEW_AGENT_URL").filter(|value| !value.is_empty()) {
             None => None,
             Some(raw) => Some(Url::parse(&raw).ok().filter(Url::has_host).ok_or_else(|| {
@@ -158,6 +175,7 @@ impl Settings {
             mode,
             interval_ms,
             retention_seconds,
+            token_history_days,
             agent_url,
             state_path,
             ui_dir,
@@ -766,6 +784,165 @@ impl Store {
     }
 }
 
+// --- Token history ----------------------------------------------------------
+
+/// Cumulative token and request counters as read from the proxy's registry.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TokenCounters {
+    pub prompt: Option<f64>,
+    pub completion: Option<f64>,
+    pub cached: Option<f64>,
+    pub requests: Option<f64>,
+}
+
+/// Reads the cumulative counters the token history integrates.
+#[must_use]
+pub fn token_counters(map: &MetricMap) -> TokenCounters {
+    TokenCounters {
+        prompt: metric_sum(map, "ds4proxy_prompt_tokens_total"),
+        completion: metric_sum(map, "ds4proxy_completion_tokens_total"),
+        cached: metric_sum(map, "ds4proxy_cached_prompt_tokens_total"),
+        requests: metric_sum(map, "ds4proxy_requests_total"),
+    }
+}
+
+/// One wall-clock hour of counter deltas, keyed by its UTC hour start.
+///
+/// Buckets are UTC so the stored series is unambiguous; the dashboard groups
+/// them into local days and local hours in the browser.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TokenBucket {
+    pub t: u64,
+    pub prompt: f64,
+    pub completion: f64,
+    pub cached: f64,
+    pub requests: f64,
+}
+
+/// A long, cheap history of hourly token volume.
+///
+/// The sample ring answers "what is the box doing now" at seconds of
+/// resolution and costs megabytes per day; this answers "when does this box
+/// get used" at hours of resolution and costs 24 records per day, which is
+/// what makes a month of it affordable in the same process.
+pub struct TokenHistory {
+    buckets: VecDeque<TokenBucket>,
+    previous: TokenCounters,
+    retention_ms: u64,
+}
+
+/// A counter that went backwards means the exporting process restarted, so
+/// the missing interval is unknowable rather than negative; contribute
+/// nothing and re-baseline on the next observation.
+fn counter_delta(previous: Option<f64>, current: Option<f64>) -> f64 {
+    match (previous, current) {
+        (Some(previous), Some(current))
+            if previous.is_finite() && current.is_finite() && current >= previous =>
+        {
+            current - previous
+        }
+        _ => 0.0,
+    }
+}
+
+impl TokenHistory {
+    #[must_use]
+    pub fn new(retention_days: u64) -> Self {
+        Self {
+            buckets: VecDeque::new(),
+            previous: TokenCounters::default(),
+            retention_ms: retention_days.saturating_mul(86_400_000),
+        }
+    }
+
+    /// Folds one scrape of the cumulative counters into its wall-clock hour.
+    pub fn observe(&mut self, t_ms: u64, counters: TokenCounters) {
+        let hour = t_ms - t_ms % HOUR_MS;
+        // A backwards clock would corrupt the ordering the whole API relies
+        // on. Re-baseline instead, so the next forward sample is still a
+        // usable delta rather than a spike.
+        if self.buckets.back().is_some_and(|latest| latest.t > hour) {
+            self.previous = counters;
+            return;
+        }
+        let prompt = counter_delta(self.previous.prompt, counters.prompt);
+        let completion = counter_delta(self.previous.completion, counters.completion);
+        let cached = counter_delta(self.previous.cached, counters.cached);
+        let requests = counter_delta(self.previous.requests, counters.requests);
+        self.previous = counters;
+        if self.buckets.back().is_none_or(|latest| latest.t < hour) {
+            self.buckets.push_back(TokenBucket {
+                t: hour,
+                ..TokenBucket::default()
+            });
+        }
+        let Some(bucket) = self.buckets.back_mut() else {
+            return;
+        };
+        bucket.prompt += prompt;
+        bucket.completion += completion;
+        bucket.cached += cached;
+        bucket.requests += requests;
+        self.trim(hour);
+    }
+
+    fn trim(&mut self, now_ms: u64) {
+        while self
+            .buckets
+            .front()
+            .is_some_and(|front| now_ms.saturating_sub(front.t) > self.retention_ms)
+        {
+            self.buckets.pop_front();
+        }
+    }
+
+    /// Returns the buckets covering the trailing `days`, oldest first.
+    #[must_use]
+    pub fn query(&self, now_ms: u64, days: u64) -> Vec<TokenBucket> {
+        let window_ms = days.saturating_mul(86_400_000);
+        // The window starts at an hour boundary so the first bucket is whole.
+        let start = (now_ms.saturating_sub(window_ms) / HOUR_MS) * HOUR_MS;
+        self.buckets
+            .iter()
+            .filter(|bucket| bucket.t >= start)
+            .copied()
+            .collect()
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<TokenBucket> {
+        self.buckets.iter().copied().collect()
+    }
+
+    /// Restores persisted buckets, dropping anything outside retention.
+    ///
+    /// The counter baseline is deliberately *not* restored: the process that
+    /// produced those counters is gone, so the first scrape after a restart
+    /// only re-establishes it.
+    pub fn restore(&mut self, buckets: Vec<TokenBucket>, now_ms: u64) {
+        let mut restored: Vec<TokenBucket> = buckets
+            .into_iter()
+            .filter(|bucket| {
+                bucket.t <= now_ms && now_ms.saturating_sub(bucket.t) <= self.retention_ms
+            })
+            .collect();
+        restored.sort_by_key(|bucket| bucket.t);
+        restored.dedup_by_key(|bucket| bucket.t);
+        self.buckets = restored.into();
+        self.previous = TokenCounters::default();
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.buckets.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.buckets.is_empty()
+    }
+}
+
 fn mean(values: impl Iterator<Item = Option<f64>>) -> Option<f64> {
     let mut sum = 0.0;
     let mut count = 0usize;
@@ -1128,12 +1305,15 @@ fn sanitize_gpus(mut gpus: Vec<GpuSample>) -> Vec<GpuSample> {
 struct PersistedState {
     version: u32,
     samples: Vec<Sample>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tokens: Vec<TokenBucket>,
 }
 
-fn persist_state(path: &Path, samples: &[Sample]) -> std::io::Result<()> {
+fn persist_state(path: &Path, samples: &[Sample], tokens: &[TokenBucket]) -> std::io::Result<()> {
     let state = PersistedState {
         version: STATE_VERSION,
         samples: samples.to_vec(),
+        tokens: tokens.to_vec(),
     };
     let body =
         serde_json::to_vec(&state).map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -1144,10 +1324,11 @@ fn persist_state(path: &Path, samples: &[Sample]) -> std::io::Result<()> {
     std::fs::rename(&temporary, path)
 }
 
-fn load_state(path: &Path) -> Option<Vec<Sample>> {
+fn load_state(path: &Path) -> Option<(Vec<Sample>, Vec<TokenBucket>)> {
     let body = std::fs::read(path).ok()?;
     let state: PersistedState = serde_json::from_slice(&body).ok()?;
-    (state.version == STATE_VERSION).then_some(state.samples)
+    ((MIN_STATE_VERSION..=STATE_VERSION).contains(&state.version))
+        .then_some((state.samples, state.tokens))
 }
 
 // --- Runtime ----------------------------------------------------------------
@@ -1160,6 +1341,7 @@ pub struct MachineView {
 struct Shared {
     settings: Settings,
     store: Store,
+    tokens: Mutex<TokenHistory>,
     upstreams: Vec<Url>,
     hostname: Option<String>,
 }
@@ -1193,15 +1375,23 @@ impl MachineView {
             return None;
         }
         let store = Store::new(settings.retention_seconds);
+        let mut tokens = TokenHistory::new(settings.token_history_days);
         if let Some(path) = &settings.state_path
-            && let Some(samples) = load_state(path)
+            && let Some((samples, buckets)) = load_state(path)
         {
-            store.restore(samples, now_unix_ms());
-            tracing::info!(samples = store.len(), "machineview state restored");
+            let now = now_unix_ms();
+            store.restore(samples, now);
+            tokens.restore(buckets, now);
+            tracing::info!(
+                samples = store.len(),
+                token_hours = tokens.len(),
+                "machineview state restored"
+            );
         }
         let shared = Arc::new(Shared {
             settings: settings.clone(),
             store,
+            tokens: Mutex::new(tokens),
             upstreams: upstreams.clone(),
             hostname: read_hostname(),
         });
@@ -1225,8 +1415,10 @@ impl MachineView {
             let mut ticks: u64 = 0;
             loop {
                 let tick_started = tokio::time::Instant::now();
-                let sample = sampler.sample(now_unix_ms()).await;
+                let now = now_unix_ms();
+                let (sample, counters) = sampler.sample(now).await;
                 loop_shared.store.push(sample);
+                loop_shared.tokens.lock().observe(now, counters);
                 ticks += 1;
                 if ticks.is_multiple_of(PERSIST_EVERY_TICKS) {
                     persist_snapshot(&loop_shared).await;
@@ -1252,6 +1444,7 @@ impl MachineView {
         let mut router = Router::new()
             .route("/api/machineview/summary", get(summary_handler))
             .route("/api/machineview/series", get(series_handler))
+            .route("/api/machineview/tokens", get(tokens_handler))
             .with_state(self.shared.clone());
         if self.shared.settings.ui_dir.is_some() {
             let ui_state = self.shared.clone();
@@ -1306,7 +1499,8 @@ async fn persist_snapshot(shared: &Arc<Shared>) {
         return;
     };
     let samples = shared.store.snapshot();
-    let result = tokio::task::spawn_blocking(move || persist_state(&path, &samples)).await;
+    let tokens = shared.tokens.lock().snapshot();
+    let result = tokio::task::spawn_blocking(move || persist_state(&path, &samples, &tokens)).await;
     match result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::warn!(%error, "machineview state persist failed"),
@@ -1326,8 +1520,11 @@ struct Sampler {
 }
 
 impl Sampler {
-    async fn sample(&mut self, t_ms: u64) -> Sample {
+    /// Produces the ring sample plus the raw cumulative counters, which the
+    /// caller folds into the hourly token history.
+    async fn sample(&mut self, t_ms: u64) -> (Sample, TokenCounters) {
         let self_map = gather_registry(&self.registry);
+        let counters = token_counters(&self_map);
         let serving = build_serving_sample(&self_map, t_ms, &mut self.rates, &mut self.histograms);
 
         let scrape_timeout = Duration::from_secs(4);
@@ -1412,14 +1609,17 @@ impl Sampler {
             }
         };
 
-        Sample {
-            t: t_ms,
-            host,
-            gpus,
-            serving: Some(serving),
-            engines,
-            energy,
-        }
+        (
+            Sample {
+                t: t_ms,
+                host,
+                gpus,
+                serving: Some(serving),
+                engines,
+                energy,
+            },
+            counters,
+        )
     }
 }
 
@@ -1481,6 +1681,37 @@ async fn series_handler(
         now,
         range_seconds,
         points: shared.store.query(now, range_seconds, points),
+    };
+    json_response(&response)
+}
+
+#[derive(Deserialize)]
+struct TokensParams {
+    days: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct TokensResponse {
+    now: u64,
+    days: u64,
+    bucket_seconds: u64,
+    buckets: Vec<TokenBucket>,
+}
+
+async fn tokens_handler(
+    State(shared): State<Arc<Shared>>,
+    Query(params): Query<TokensParams>,
+) -> Response<Body> {
+    let now = now_unix_ms();
+    let days = params
+        .days
+        .unwrap_or(shared.settings.token_history_days)
+        .clamp(MIN_TOKEN_HISTORY_DAYS, shared.settings.token_history_days);
+    let response = TokensResponse {
+        now,
+        days,
+        bucket_seconds: HOUR_MS / 1_000,
+        buckets: shared.tokens.lock().query(now, days),
     };
     json_response(&response)
 }
@@ -1790,15 +2021,184 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let path = dir.join("state.json");
         let samples = vec![sample_at(1_000, 1.0), sample_at(2_000, 2.0)];
-        persist_state(&path, &samples).expect("persist");
-        let loaded = load_state(&path).expect("load");
+        let buckets = vec![TokenBucket {
+            t: 0,
+            prompt: 10.0,
+            completion: 2.0,
+            cached: 4.0,
+            requests: 1.0,
+        }];
+        persist_state(&path, &samples, &buckets).expect("persist");
+        let (loaded, loaded_tokens) = load_state(&path).expect("load");
         assert_eq!(loaded, samples);
+        assert_eq!(loaded_tokens, buckets);
         let store = Store::new(10);
         store.restore(loaded, 5_000);
         assert_eq!(store.len(), 2);
         store.restore(vec![sample_at(1_000, 1.0)], 500_000);
         assert_eq!(store.len(), 0, "stale samples dropped on restore");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn version_one_state_without_tokens_still_loads() {
+        let dir = std::env::temp_dir().join(format!(
+            "machineview-v1-{}-{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("state.json");
+        std::fs::write(&path, br#"{"version":1,"samples":[{"t":1000}]}"#).expect("write v1 state");
+        let (samples, tokens) = load_state(&path).expect("v1 state loads");
+        assert_eq!(samples.len(), 1);
+        assert!(tokens.is_empty());
+        std::fs::write(&path, br#"{"version":99,"samples":[]}"#).expect("write future state");
+        assert!(
+            load_state(&path).is_none(),
+            "a newer schema must be ignored, not misread"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn counters(prompt: f64, completion: f64, cached: f64, requests: f64) -> TokenCounters {
+        TokenCounters {
+            prompt: Some(prompt),
+            completion: Some(completion),
+            cached: Some(cached),
+            requests: Some(requests),
+        }
+    }
+
+    #[test]
+    fn token_history_accumulates_deltas_into_hour_buckets() {
+        let mut history = TokenHistory::new(30);
+        // The first observation only establishes the baseline: the counters
+        // already held whatever the process served before this scrape.
+        history.observe(HOUR_MS, counters(1_000.0, 100.0, 400.0, 5.0));
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.snapshot()[0].prompt, 0.0);
+
+        history.observe(HOUR_MS + 60_000, counters(1_500.0, 150.0, 600.0, 8.0));
+        history.observe(HOUR_MS + 120_000, counters(1_800.0, 170.0, 700.0, 10.0));
+        let first = history.snapshot()[0];
+        assert_eq!(first.t, HOUR_MS);
+        assert_eq!(first.prompt, 800.0);
+        assert_eq!(first.completion, 70.0);
+        assert_eq!(first.cached, 300.0);
+        assert_eq!(first.requests, 5.0);
+
+        // A later hour opens a new bucket without disturbing the closed one.
+        history.observe(2 * HOUR_MS + 1_000, counters(2_000.0, 180.0, 750.0, 11.0));
+        let buckets = history.snapshot();
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].prompt, 800.0);
+        assert_eq!(buckets[1].t, 2 * HOUR_MS);
+        assert_eq!(buckets[1].prompt, 200.0);
+    }
+
+    #[test]
+    fn token_history_treats_a_counter_reset_as_unknowable_not_negative() {
+        let mut history = TokenHistory::new(30);
+        history.observe(HOUR_MS, counters(1_000.0, 100.0, 0.0, 5.0));
+        history.observe(HOUR_MS + 10_000, counters(2_000.0, 200.0, 0.0, 9.0));
+        // The proxy restarted: counters are back at zero.
+        history.observe(HOUR_MS + 20_000, counters(0.0, 0.0, 0.0, 0.0));
+        history.observe(HOUR_MS + 30_000, counters(300.0, 30.0, 0.0, 2.0));
+        let bucket = history.snapshot()[0];
+        assert_eq!(
+            bucket.prompt, 1_300.0,
+            "the reset contributes nothing and the next delta is measured from zero"
+        );
+        assert_eq!(bucket.requests, 6.0);
+        assert!(bucket.prompt >= 0.0);
+    }
+
+    #[test]
+    fn token_history_ignores_absent_counters_and_backwards_clocks() {
+        let mut history = TokenHistory::new(30);
+        history.observe(2 * HOUR_MS, counters(100.0, 10.0, 0.0, 1.0));
+        history.observe(2 * HOUR_MS + 5_000, TokenCounters::default());
+        history.observe(2 * HOUR_MS + 10_000, counters(500.0, 50.0, 0.0, 4.0));
+        assert_eq!(
+            history.snapshot()[0].prompt,
+            0.0,
+            "a scrape that lost the metric must not be read as a delta"
+        );
+        // A clock jump backwards must not push an out-of-order bucket.
+        history.observe(HOUR_MS, counters(900.0, 90.0, 0.0, 7.0));
+        let buckets = history.snapshot();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].t, 2 * HOUR_MS);
+    }
+
+    #[test]
+    fn token_history_trims_by_retention_and_queries_a_window() {
+        let mut history = TokenHistory::new(1);
+        for hour in 0..30u64 {
+            history.observe(hour * HOUR_MS, counters(hour as f64 * 100.0, 0.0, 0.0, 0.0));
+        }
+        let buckets = history.snapshot();
+        assert!(
+            buckets.len() <= 25,
+            "one day of retention keeps at most 25 hour boundaries, got {}",
+            buckets.len()
+        );
+        assert_eq!(buckets.last().expect("a bucket").t, 29 * HOUR_MS);
+        let window = history.query(29 * HOUR_MS, 1);
+        assert!(window.iter().all(|bucket| bucket.t >= 5 * HOUR_MS));
+    }
+
+    #[test]
+    fn token_history_restore_drops_stale_buckets_and_the_counter_baseline() {
+        let mut history = TokenHistory::new(1);
+        let now = 100 * HOUR_MS;
+        history.restore(
+            vec![
+                TokenBucket {
+                    t: 2 * HOUR_MS,
+                    prompt: 1.0,
+                    ..TokenBucket::default()
+                },
+                TokenBucket {
+                    t: now,
+                    prompt: 7.0,
+                    ..TokenBucket::default()
+                },
+                TokenBucket {
+                    t: now + HOUR_MS,
+                    prompt: 9.0,
+                    ..TokenBucket::default()
+                },
+            ],
+            now,
+        );
+        let buckets = history.snapshot();
+        assert_eq!(buckets.len(), 1, "stale and future buckets are dropped");
+        assert_eq!(buckets[0].prompt, 7.0);
+        // The restored history came from a process whose counters are gone;
+        // the first scrape after restart must only re-baseline.
+        history.observe(now + 60_000, counters(50_000.0, 5_000.0, 0.0, 400.0));
+        assert_eq!(history.snapshot()[0].prompt, 7.0);
+        history.observe(now + 120_000, counters(50_100.0, 5_010.0, 0.0, 401.0));
+        assert_eq!(history.snapshot()[0].prompt, 107.0);
+    }
+
+    #[test]
+    fn token_counters_read_the_proxy_registry_shapes() {
+        let map = parse_prometheus_text(concat!(
+            "ds4proxy_prompt_tokens_total 1234\n",
+            "ds4proxy_completion_tokens_total 56\n",
+            "ds4proxy_cached_prompt_tokens_total 789\n",
+            "ds4proxy_requests_total{route=\"chat\"} 3\n",
+            "ds4proxy_requests_total{route=\"completions\"} 4\n",
+        ));
+        let counters = token_counters(&map);
+        assert_eq!(counters.prompt, Some(1234.0));
+        assert_eq!(counters.completion, Some(56.0));
+        assert_eq!(counters.cached, Some(789.0));
+        assert_eq!(counters.requests, Some(7.0), "labelled series are summed");
+        assert_eq!(token_counters(&MetricMap::new()), TokenCounters::default());
     }
 
     #[test]

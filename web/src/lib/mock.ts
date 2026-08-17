@@ -5,7 +5,7 @@
 // two vLLM engines, bursty agent traffic with quiet windows, and energy
 // that integrates from power draw.
 
-import type { Sample, Series, Summary } from "./api"
+import type { Sample, Series, Summary, TokenBucket, TokenHistory } from "./api"
 
 const START = Date.now() - 24 * 3600 * 1000
 const STEP_MS = 30_000
@@ -162,6 +162,53 @@ export function mockSummary(): Summary {
     retention_seconds: 86400,
     upstreams: UPSTREAMS,
     latest: all[all.length - 1] ?? null,
+  }
+}
+
+const HOUR_MS = 3_600_000
+
+/**
+ * A month of hourly token volume with the shape the heatmaps exist to show:
+ * office hours on weekdays, a quiet weekend, one dead day (an outage), and a
+ * short window before the history starts so the "no data" cell is exercised.
+ */
+function buildTokenBuckets(days: number): TokenBucket[] {
+  const random = prng(20260817)
+  const now = Date.now()
+  const first = Math.floor((now - days * 24 * HOUR_MS) / HOUR_MS) * HOUR_MS
+  const buckets: TokenBucket[] = []
+  for (let t = first; t <= now; t += HOUR_MS) {
+    const date = new Date(t)
+    const hour = date.getHours()
+    const weekday = date.getDay()
+    const dayIndex = Math.floor((t - first) / (24 * HOUR_MS))
+    if (dayIndex === 3) continue // an outage day: no buckets at all
+    const weekend = weekday === 0 || weekday === 6
+    const office = Math.max(0, Math.sin(((hour - 7) / 15) * Math.PI))
+    const intensity = office * (weekend ? 0.25 : 1) * (0.6 + random() * 0.8)
+    if (intensity < 0.05) {
+      buckets.push({ t, prompt: 0, completion: 0, cached: 0, requests: 0 })
+      continue
+    }
+    const requests = Math.round(intensity * 40 + random() * 6)
+    const prompt = requests * (14_000 + random() * 40_000)
+    buckets.push({
+      t,
+      prompt,
+      completion: requests * (300 + random() * 700),
+      cached: prompt * (0.45 + random() * 0.45),
+      requests,
+    })
+  }
+  return buckets
+}
+
+export function mockTokens(days: number): TokenHistory {
+  return {
+    now: Date.now(),
+    days,
+    bucket_seconds: 3600,
+    buckets: buildTokenBuckets(days),
   }
 }
 

@@ -1,9 +1,12 @@
 import { useMemo, useState } from "react"
 import { useDashboardData } from "@/hooks/useDashboardData"
+import { useTokenHistory } from "@/hooks/useTokenHistory"
 import { TopBar } from "@/components/TopBar"
 import { RangePicker } from "@/components/RangePicker"
 import { StatTile } from "@/components/StatTile"
 import { ChartCard, type ChartCardProps } from "@/components/ChartCard"
+import { HeatmapCard, buildScale } from "@/components/Heatmap"
+import { dayGrid, hourGrid, totals } from "@/lib/tokens"
 import { GpuGrid } from "@/components/GpuGrid"
 import { Meter } from "@/components/Meter"
 import { TabBar, useTabs, type TabDef } from "@/components/Tabs"
@@ -86,7 +89,11 @@ const TABS: TabDef[] = [
   { id: "serving", label: "Serving" },
   { id: "gpus", label: "GPUs" },
   { id: "system", label: "System" },
+  { id: "history", label: "History" },
 ]
+
+/** Days of hourly history requested; the LB clamps to its own retention. */
+const HISTORY_DAYS = 30
 
 function ChartGrid({ cards, loading }: { cards: ChartCardProps[]; loading?: boolean }) {
   return (
@@ -102,6 +109,7 @@ export default function App() {
   const [rangeSeconds, setRangeSeconds] = useState(3600)
   const { active: tab, select: selectTab } = useTabs(TABS, "overview")
   const { summary, series, error, mock } = useDashboardData(rangeSeconds)
+  const { tokens, error: tokensError } = useTokenHistory(HISTORY_DAYS)
   const loading = summary == null && error == null
   const points = useMemo(() => series?.points ?? [], [series])
   const rows = useMemo(() => points.map(toRow), [points])
@@ -346,6 +354,29 @@ export default function App() {
     })),
   }
 
+  // Token history is its own, much longer series: hourly buckets kept for a
+  // month, independent of the range picker that drives every other card.
+  const tokenBuckets = useMemo(() => tokens?.buckets ?? [], [tokens])
+  const tokenTotals = useMemo(() => totals(tokenBuckets), [tokenBuckets])
+  const tokenDays = useMemo(
+    () => dayGrid(tokenBuckets, tokens?.now ?? Date.now()),
+    [tokenBuckets, tokens?.now],
+  )
+  const tokenHours = useMemo(() => hourGrid(tokenBuckets), [tokenBuckets])
+  const dayScale = useMemo(
+    () => buildScale(tokenDays.cells.map((cell) => cell.value)),
+    [tokenDays],
+  )
+  const hourScale = useMemo(
+    () => buildScale(tokenHours.cells.map((cell) => cell.value)),
+    [tokenHours],
+  )
+  const historyLoading = tokens == null && tokensError == null
+  const historyWindow = tokens?.days ?? HISTORY_DAYS
+  const historySummary = `${fmtCount(tokenTotals.total)} tokens · ${fmtCount(
+    tokenTotals.requests,
+  )} requests over ${historyWindow} days`
+
   const storageCard = (
     <Card aria-busy={loading || undefined}>
       <CardHeader>
@@ -541,6 +572,53 @@ export default function App() {
               <ChartCard key={card.title} {...card} loading={loading} />
             ))}
             {storageCard}
+          </div>
+        </div>
+      ) : null}
+
+      {tab === "history" ? (
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-muted-foreground text-xs">{historySummary}</span>
+            {tokensError ? (
+              <span className="text-xs" style={{ color: "var(--status-critical)" }}>
+                ⚠ {tokensError}
+              </span>
+            ) : (
+              <span className="text-faint-foreground text-[11px]">
+                hourly buckets, your local time — independent of the range above
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+            <HeatmapCard
+              title="Tokens by day"
+              description="prompt + generated per day, one column per week"
+              rowLabels={tokenDays.rowLabels}
+              columnLabels={tokenDays.columnLabels}
+              cells={tokenDays.cells}
+              scale={dayScale}
+              format={(value) => fmtCount(value)}
+              unit="tokens"
+              cellRole="that day"
+              cellMaxPx={34}
+              align="center"
+              loading={historyLoading}
+            />
+            <div className="xl:col-span-2">
+              <HeatmapCard
+                title="Tokens by hour"
+                description={`weekday × hour of day, summed over ${historyWindow} days`}
+                rowLabels={tokenHours.rowLabels}
+                columnLabels={tokenHours.columnLabels}
+                cells={tokenHours.cells}
+                scale={hourScale}
+                format={(value) => fmtCount(value)}
+                unit="tokens"
+                cellRole="in that hour"
+                loading={historyLoading}
+              />
+            </div>
           </div>
         </div>
       ) : null}
