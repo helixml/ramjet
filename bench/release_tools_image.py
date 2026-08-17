@@ -13,7 +13,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DOCKERFILE = pathlib.Path("Dockerfile.release-tools")
 KEY_FILE = pathlib.Path(".docker/release-tools-key")
-REPOSITORY = "ghcr.io/helixml/mini-dynamo"
+REPOSITORY = "ghcr.io/helixml/ramjet"
 PUBLISHED_DIGEST = "sha256:1d0d9c383119f43b832008d2b2866c43472175bf0d814d27032b677e30dcac43"
 
 
@@ -48,9 +48,9 @@ def update_references(root: pathlib.Path = ROOT) -> str:
     path = root / ".drone.yml"
     reference = image_reference(key)
     text = path.read_text()
-    destination_pattern = r"(?m)(--destination )ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]+(?:@sha256:[0-9a-f]+)?"
+    destination_pattern = r"(?m)(--destination )ghcr\.io/helixml/ramjet:release-tools-sha256-[0-9a-f]+(?:@sha256:[0-9a-f]+)?"
     updated, destinations = re.subn(destination_pattern, rf"\g<1>{reference}", text)
-    consumer_pattern = r"(?m)(image: )ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]+(?:@sha256:[0-9a-f]+)?"
+    consumer_pattern = r"(?m)(image: )ghcr\.io/helixml/ramjet:release-tools-sha256-[0-9a-f]+(?:@sha256:[0-9a-f]+)?"
     updated, consumers = re.subn(
         consumer_pattern, rf"\g<1>{reference}@{PUBLISHED_DIGEST}", updated
     )

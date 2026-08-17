@@ -28,12 +28,12 @@ printf '%s' "$GHCR_TOKEN" | crane auth login ghcr.io -u "$GHCR_USERNAME" --passw
 
 case "$kind" in
   lb)
-    source="ghcr.io/helixml/mini-dynamo:rust-$short"
-    destination="ghcr.io/helixml/mini-dynamo:$tag"
+    source="ghcr.io/helixml/ramjet:rust-$short"
+    destination="ghcr.io/helixml/ramjet:$tag"
     ;;
   companion)
-    source="ghcr.io/helixml/mini-dynamo:companion-rust-$short"
-    destination="ghcr.io/helixml/mini-dynamo:companion-$tag"
+    source="ghcr.io/helixml/ramjet:companion-rust-$short"
+    destination="ghcr.io/helixml/ramjet:companion-$tag"
     ;;
 esac
 

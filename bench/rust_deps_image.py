@@ -18,7 +18,7 @@ INPUTS = (
     pathlib.Path("Dockerfile.deps"),
 )
 KEY_FILE = pathlib.Path(".docker/rust-deps-key")
-REPOSITORY = "ghcr.io/helixml/mini-dynamo"
+REPOSITORY = "ghcr.io/helixml/ramjet"
 
 
 def dependency_key(root: pathlib.Path = ROOT) -> str:

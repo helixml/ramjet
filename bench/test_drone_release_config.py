@@ -47,7 +47,7 @@ class DroneReleaseConfigTest(unittest.TestCase):
             body = section.group(1)
             self.assertRegex(
                 body,
-                r"image: ghcr\.io/helixml/mini-dynamo:release-tools-sha256-[0-9a-f]{64}@sha256:[0-9a-f]{64}",
+                r"image: ghcr\.io/helixml/ramjet:release-tools-sha256-[0-9a-f]{64}@sha256:[0-9a-f]{64}",
             )
             self.assertIn(f"sh bench/drone_release_publish.sh {kind}", body)
             self.assertNotIn("drone-docker", body)
@@ -58,10 +58,10 @@ class DroneReleaseConfigTest(unittest.TestCase):
             self.assertNotIn("edge", body)
 
         script = (ROOT / "bench" / "drone_registry_promote.sh").read_text()
-        self.assertIn('source="ghcr.io/helixml/mini-dynamo:rust-$short"', script)
-        self.assertIn('source="ghcr.io/helixml/mini-dynamo:companion-rust-$short"', script)
-        self.assertIn('destination="ghcr.io/helixml/mini-dynamo:$tag"', script)
-        self.assertIn('destination="ghcr.io/helixml/mini-dynamo:companion-$tag"', script)
+        self.assertIn('source="ghcr.io/helixml/ramjet:rust-$short"', script)
+        self.assertIn('source="ghcr.io/helixml/ramjet:companion-rust-$short"', script)
+        self.assertIn('destination="ghcr.io/helixml/ramjet:$tag"', script)
+        self.assertIn('destination="ghcr.io/helixml/ramjet:companion-$tag"', script)
         self.assertIn('crane copy "$source" "$destination"', script)
         self.assertIn('[ "$source_digest" = "$destination_digest" ]', script)
         self.assertIn('release_publish=idempotent kind=$kind', script)

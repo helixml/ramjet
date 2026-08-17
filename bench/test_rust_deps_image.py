@@ -37,10 +37,10 @@ class RustDepsImageTest(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(relative.as_posix().encode())
             (root / "Dockerfile").write_text(
-                "ARG RUST_DEPS_IMAGE=ghcr.io/helixml/mini-dynamo:rust-deps-sha256-deadbeef\n"
+                "ARG RUST_DEPS_IMAGE=ghcr.io/helixml/ramjet:rust-deps-sha256-deadbeef\n"
             )
             (root / "Dockerfile.companion").write_text(
-                "ARG RUST_DEPS_IMAGE=ghcr.io/helixml/mini-dynamo:rust-deps-sha256-deadbeef\n"
+                "ARG RUST_DEPS_IMAGE=ghcr.io/helixml/ramjet:rust-deps-sha256-deadbeef\n"
             )
             (root / ".drone.yml").write_text(
                 "--destination ghcr.io/example:rust-deps-sha256-deadbeef\n"
