@@ -1,0 +1,4 @@
+interface:
+  display_name: "Optimize a ramjet node"
+  short_description: "Plan and measure GPU serving optimization safely"
+  default_prompt: "Use $optimize-ramjet-node to check operational admission, analyze existing evidence, and run only permitted tuning work."

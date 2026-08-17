@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deploy ramjet"
+  short_description: "Deploy ramjet safely with Docker Compose"
+  default_prompt: "Use $deploy-ramjet to deploy ramjet on this GPU node with Docker Compose."

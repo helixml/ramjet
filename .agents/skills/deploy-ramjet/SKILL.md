@@ -1,9 +1,9 @@
 ---
-name: deploy-mini-dynamo
-description: Deploy or upgrade mini-dynamo and OpenAI-compatible GPU engines on a Linux node with Docker Compose. Use for first-time node setup, creating a Compose stack, validating GPU/container prerequisites, promoting an immutable image, performing an LB-only rollout, or planning a rollback.
+name: deploy-ramjet
+description: Deploy or upgrade ramjet and OpenAI-compatible GPU engines on a Linux node with Docker Compose. Use for first-time node setup, creating a Compose stack, validating GPU/container prerequisites, promoting an immutable image, performing an LB-only rollout, or planning a rollback.
 ---
 
-# Deploy mini-dynamo
+# Deploy ramjet
 
 For node06, the 2026-08-14 cooling/AC moratorium permits planning and GPU-free
 image/manifest/Compose validation only. Do not mutate its deployment, send a
@@ -19,7 +19,7 @@ reference node06 topology.
 
 1. Read `docs/configuration.md`. For the full DeepSeek-V4 stack, also read
    `deploy/dspark_0731/README.md` and its Compose file.
-2. Determine whether the user wants only mini-dynamo in front of existing
+2. Determine whether the user wants only ramjet in front of existing
    engines or the complete two-engine stack.
 3. Inspect the node before changing it:
 
@@ -52,7 +52,7 @@ GPU-enumeration container before starting a model server.
 - Pin production images by immutable digest. Do not introduce `latest`.
 - Keep credentials in an uncommitted `.env` or secret store and set its mode to
   `0600`. Never print token values or persist them in command history.
-- For existing engines, mini-dynamo normally needs only `MD_UPSTREAM`; add
+- For existing engines, ramjet normally needs only `MD_UPSTREAM`; add
   `MD_UPSTREAM_TOKEN` only when the engines require it. Leave tokenizer, KV
   event, exact route, and snapshot route modes off unless the requested stack
   includes every documented authority and validator.
@@ -83,7 +83,7 @@ flag during a resident engine restart.
 ## Deploy and verify
 
 Use the exact Compose project and explicitly name services. For an LB-only
-change, recreate only mini-dynamo; do not restart engines or discard their KV
+change, recreate only ramjet; do not restart engines or discard their KV
 caches. On node06, hold the repository-documented deployment lock for the
 complete inspect/mutate/verify interval.
 

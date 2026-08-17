@@ -1,4 +1,0 @@
-interface:
-  display_name: "Load-test mini-dynamo Node"
-  short_description: "Admit or safely plan GPU inference load tests"
-  default_prompt: "Use $load-test-mini-dynamo-node to check operational admission; if node06's moratorium is active, perform GPU-free planning and validation only."

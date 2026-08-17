@@ -1,6 +1,6 @@
 # Serving a model
 
-mini-dynamo is a KV-cache-aware load balancer for vLLM. Most of it does not
+ramjet is a KV-cache-aware load balancer for vLLM. Most of it does not
 know or care which model is behind it: routing, health, metrics, the decision
 journal, and the KV-event index are all model-neutral. Only *local request
 rendering* — turning an OpenAI request into token IDs the engine would produce
@@ -137,7 +137,7 @@ Two consequences worth knowing before tuning:
 
 ### Shard count is a cache decision, not just a parallelism decision
 
-This is the part that is easy to miss. mini-dynamo routes on prefix overlap, so
+This is the part that is easy to miss. ramjet routes on prefix overlap, so
 the number of engines determines how many distinct system prompts can each own
 a warm engine. N engines partition M apps N ways.
 

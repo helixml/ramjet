@@ -1,9 +1,9 @@
 ---
-name: load-test-mini-dynamo-node
-description: Execute guarded, reproducible load tests against a mini-dynamo GPU inference deployment, especially the node06 8x RTX PRO 6000 stack. Use when asked to benchmark TPS, TTFT, TPOT, concurrency, long context, cache locality, agent/tool correctness, full-box capacity, or an engine candidate under load, and when comparing two serving configurations without disrupting production.
+name: load-test-ramjet-node
+description: Execute guarded, reproducible load tests against a ramjet GPU inference deployment, especially the node06 8x RTX PRO 6000 stack. Use when asked to benchmark TPS, TTFT, TPOT, concurrency, long context, cache locality, agent/tool correctness, full-box capacity, or an engine candidate under load, and when comparing two serving configurations without disrupting production.
 ---
 
-# Load-test a mini-dynamo node
+# Load-test a ramjet node
 
 ## Current node06 moratorium
 
@@ -54,7 +54,7 @@ bash bench/capture_node06.sh node06
 After the current moratorium is explicitly lifted for a supervised run, inspect
 all GPU temperatures, reported
 slowdown/shutdown thresholds, power, utilization, memory, topology, container
-identity/restarts, mini-dynamo upstream health, driver throttling, and available
+identity/restarts, ramjet upstream health, driver throttling, and available
 BMC/facility cooling evidence. The watchdog's 78C ceiling is an operational
 abort policy, not proof that the chassis is safe. Stop before load if telemetry
 is missing, identities are ambiguous, cooling is unverified, a GPU is already
@@ -130,7 +130,7 @@ not reconcile, or the guard journal did not finish with `status=passed`.
 
 ## Preserve serving availability
 
-- For direct B tests, first single-home mini-dynamo on A and verify A health.
+- For direct B tests, first single-home ramjet on A and verify A health.
   Keep B out of every HTTP and KV endpoint list until qualification passes.
 - Hold `/run/lock/mini-dynamo-node06-deployment.lock` across every deployment
   inspect/mutate/verify interval. Recreate only the named service; never run an

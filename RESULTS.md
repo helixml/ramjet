@@ -1,4 +1,4 @@
-# mini-dynamo benchmark results (2026-08-13)
+# ramjet benchmark results (2026-08-13)
 
 Hardware: node06, 2× vLLM+DSpark TP4 instances (DeepSeek-V4-Flash-0731),
 8× RTX PRO 6000. Baseline = `ds4-loadbalancer:1.0.1` (static 4KB-key hash
@@ -8,7 +8,7 @@ Method: `bench/locality_bench.sh` + a concurrent-same-app harness.
 ## Current node06 production snapshot
 
 The historical router study below remains reproducible, but the production
-stack has since advanced to the mini-dynamo v0.1.0 Rust candidate and r34
+stack has since advanced to the ramjet v0.1.0 Rust candidate and r34
 engines with fixed K5,
 A16 MoE kernels, NCCL PCIe P2P enabled, max-seqs 16, a 4,096 configured
 (4,032 effective) scheduler quantum, automatic KV sizing, and NUMA-local CPU
@@ -105,7 +105,7 @@ r23 removes the replay-recovery blocker without changing request placement.
 The node06 vLLM publisher streams retained replay synchronously from one
 ROUTER thread. A framing-only pure-Rust ZMTP client handled small tails but
 could stall before the end marker on a large response; the same full 1,292-
-batch, 29.9MB response drained through libzmq in 77ms. mini-dynamo therefore
+batch, 29.9MB response drained through libzmq in 77ms. ramjet therefore
 keeps async Rust for live SUB events and confines libzmq replay to a deadline-
 bounded blocking worker with fresh identities and drain-through-validation.
 An isolated start restored 1,293/1,684 batches on the two engines concurrently;
@@ -165,13 +165,13 @@ sequential:
 | Router | cache-hit % | cold prefills |
 |---|---|---|
 | hash 1.0.1 | 82.9% | 3 (1/app) |
-| mini-dynamo rc1 | 82.9% | 3 (1/app) |
+| ramjet rc1 | 82.9% | 3 (1/app) |
 
 **Honest finding:** the 1.0.1 hash router *already* co-locates same-app
 sessions — its key is `marshal(messages[:2])` truncated to 4KB, and a big
 system prompt fills those 4KB, so all sessions of an app hash identically.
 At 2 instances with a KV pool that holds every template, steady-state cache
-locality is already near-optimal; mini-dynamo matches it. No credit claimed.
+locality is already near-optimal; ramjet matches it. No credit claimed.
 
 ## Concurrent same-app load — WIN (1.57× throughput)
 
@@ -181,11 +181,11 @@ one app" shape):
 | Router | upstream split | wall | aggregate |
 |---|---|---|---|
 | hash 1.0.1 | **12 / 0** (sibling idle) | 7.5 s | 298 tok/s |
-| mini-dynamo rc1 | **4 / 8** | 4.5 s | **469 tok/s** |
+| ramjet rc1 | **4 / 8** | 4.5 s | **469 tok/s** |
 
 The exact truncation that gives the hash router free co-location makes it
 **load-blind**: identical keys pin every concurrent session to one instance.
-mini-dynamo keeps affinity until `alpha·inflight` exceeds prefix overlap,
+ramjet keeps affinity until `alpha·inflight` exceeds prefix overlap,
 then spreads — 1.57× aggregate, 40% lower wall clock, no cache-locality loss.
 The 4/8 (not 6/6) split is correct: it prefers the warm instance early and
 spreads only under pressure. Higher `alpha` spreads more aggressively.

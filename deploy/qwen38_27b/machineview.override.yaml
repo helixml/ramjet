@@ -1,4 +1,4 @@
-# Canonical source: helixml/mini-dynamo/deploy/qwen38_27b/machineview.override.yaml
+# Canonical source: helixml/ramjet/deploy/qwen38_27b/machineview.override.yaml
 #
 # node06 publishes the observation-only machine view on its Tailscale address.
 # The host agent remains loopback-only; the LB reaches it through this Compose

@@ -110,7 +110,7 @@ class DroneReleaseTest(unittest.TestCase):
             "case \"${1-}\" in\n"
             "  auth) exit 0 ;;\n"
             "  config) printf '%s\\n' '{\"config\":{\"Labels\":{"
-            f"\"org.opencontainers.image.source\":\"https://github.com/helixml/mini-dynamo\","
+            f"\"org.opencontainers.image.source\":\"https://github.com/helixml/ramjet\","
             f"\"org.opencontainers.image.version\":\"1.2.0-alpha.1\","
             f"\"org.opencontainers.image.revision\":\"{sha}\"}}}}' ;;\n"
             "  digest)\n"

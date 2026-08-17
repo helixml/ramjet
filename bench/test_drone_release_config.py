@@ -87,7 +87,7 @@ class DroneReleaseConfigTest(unittest.TestCase):
         for name in ("Dockerfile", "Dockerfile.companion"):
             dockerfile = (ROOT / name).read_text()
             self.assertIn(
-                'org.opencontainers.image.source="https://github.com/helixml/mini-dynamo"',
+                'org.opencontainers.image.source="https://github.com/helixml/ramjet"',
                 dockerfile,
             )
             self.assertIn('org.opencontainers.image.version="0.1.0"', dockerfile)

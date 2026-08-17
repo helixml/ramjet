@@ -41,7 +41,7 @@ source_digest=$(crane digest "$source" 2>/dev/null) || fail source_digest
 config=$(crane config "$source" 2>/dev/null) || fail source_missing
 compact=$(printf '%s' "$config" | tr -d '[:space:]')
 printf '%s' "$compact" | grep -Fq \
-  "\"org.opencontainers.image.source\":\"https://github.com/helixml/mini-dynamo\"" \
+  "\"org.opencontainers.image.source\":\"https://github.com/helixml/ramjet\"" \
   || fail source_label_mismatch
 printf '%s' "$compact" | grep -Fq \
   "\"org.opencontainers.image.version\":\"$version\"" \

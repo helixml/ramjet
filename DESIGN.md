@@ -1,4 +1,4 @@
-# mini-dynamo — design & roadmap
+# ramjet — design & roadmap
 
 A single-binary, KV-cache-locality-aware load balancer for OpenAI-compatible
 inference engines (vLLM, SGLang, ds4, …). Grew out of the node06 DeepSeek
@@ -12,7 +12,7 @@ Serving agent fleets means: huge prompts resent every turn, engines whose
 prefix caches make those prompts nearly free — *if* requests land where the
 cache is — and harness clients that emit requests strict engines reject.
 Generic LBs (round-robin, least-conn) shred prefix caches; engine-specific
-routers lock you to one engine. mini-dynamo sits in front of any
+routers lock you to one engine. ramjet sits in front of any
 OpenAI-compatible engine and does three jobs:
 
 1. **Route for cache locality and load** (the router).
