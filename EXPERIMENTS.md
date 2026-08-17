@@ -1,5 +1,110 @@
 # node06 experiment journal
 
+## 2026-08-17 — 1 Hz WebSocket stream and dot heatmaps (LB-only)
+
+Second LB-only recreate of the day. The dashboard refreshed every five
+seconds because that is how often it scrapes engines and the host agent; the
+numbers that move fastest come from the proxy's own in-process registry and
+cost nothing to read. `/api/machineview/stream` now publishes those at 1 Hz
+(`MD_MACHINEVIEW_STREAM_INTERVAL_MS`, 200–10000) and pushes the full sample
+onto the same socket when it lands. The effect on real traffic is visible:
+per-second prompt spikes above 60K tok/s that the 5 s series had averaged
+away.
+
+The stream is bounded on purpose. Nothing is published while no client is
+connected and the rate tracker resets when the last one leaves, so an
+unwatched dashboard costs what it did before; at most 8 clients stream at
+once; a client too slow for the interval is dropped rather than served a
+backlog. Engine- and host-derived charts stay on the sampling interval,
+because a live frame carries no engine or host fields and interpolating them
+would be invention. The UI keeps polling underneath and reconnects with
+backoff, so no route, no upgrade, or a dropped socket degrades to the
+five-second dashboard.
+
+The heatmaps became dot matrices: area proportional to value over the same
+quantile-stepped color, and `Tokens by day` regridded to one column per date
+× one row per three-hour band.
+
+| | |
+|---|---|
+| candidate | `ghcr.io/helixml/ds4-loadbalancer:rust-livestream-4784993` (local build, image ID `sha256:e0cd047f…`) |
+| rollback | `ghcr.io/helixml/ds4-loadbalancer:rust-tokenheatmaps-89f7926` |
+| build / transfer | 62.8s (cold deps) then 7.3s / 4.2s |
+| healthy after | 2s; 4/4 upstreams, `/health` 200, `/ui/` 200, stream handshake 101 |
+| token history | 4 buckets before and after the recreate — persistence held |
+
+Verified before deploying by running the exact candidate image locally and
+driving the socket from a browser: `hello`, then `serving` frames 1002ms
+apart, with `sample` frames interleaved on the 5 s interval.
+
+Enabling axum's `ws` feature moved the dependency content key to
+`rust-deps-sha256-6b57bfd2`. That image was seeded locally
+(`docker build -f Dockerfile.deps`) because it is not published yet; note
+that the `docker-container` buildx builder cannot see the local daemon's
+image store, so this build had to go through the default builder.
+
+**Correction to the previous entry's gate claim.** The clippy run recorded
+there returned "Finished in 0.13s" from cache without linting. Run properly
+it found real violations (`float_cmp` in the new tests, unnested or-patterns,
+identical match arms), all fixed here. The shipped binary was unaffected —
+every finding was in test code or a style lint — but the earlier "clippy
+`-D warnings` green" statement was not evidence.
+
+**Both entries name `MD_*` settings because both images predate the prefix
+rename.** Merging this work to `main` rebased it onto the hard `MD_` → `RJ_`
+cut, so the settings are `RJ_MACHINEVIEW_TOKEN_HISTORY_DAYS` and
+`RJ_MACHINEVIEW_STREAM_INTERVAL_MS` from the merge commit onward. node06 is
+still running the pre-rename branch image against its pre-rename Compose,
+which is self-consistent; the first deploy of a post-merge image must move
+that deployment's whole environment in the same recreate, because the merged
+binary refuses to start when it finds a stale `MD_` key rather than silently
+reverting to defaults.
+
+## 2026-08-17 — machine-view token history and the History heatmaps (LB-only)
+
+Added a second, much cheaper store beside the machine-view sample ring:
+hourly deltas of the existing `ds4proxy_*` token and request counters, kept
+for 30 days (`MD_MACHINEVIEW_TOKEN_HISTORY_DAYS`) at 24 records a day and
+served from `/api/machineview/tokens`. The dashboard's new History tab draws
+it as a weeks-by-weekday calendar and a weekday-by-hour punchcard.
+
+The ring was the wrong store for this question. It is seconds-resolution and
+bounded to a day (a week at most), and node06's snapshot is already 84.7MB;
+a month of it is not affordable, while a month of hourly buckets is 720 small
+records. Counter resets are treated as unknowable rather than negative: a
+backwards counter contributes nothing and the next scrape re-baselines, so an
+LB restart loses only its in-flight interval. `MD_MACHINEVIEW_STATE_PATH` is
+already set on node06, so the accumulated buckets persist; the state schema
+moved to version 2 and still reads version 1 files (samples restore, history
+starts empty).
+
+**Deployment.** LB-only recreate of the live `qwen38_27b` project
+(base + `topology.8gpu-tp2.yaml` + `machineview.override.yaml`), under
+`/run/lock/mini-dynamo-node06-deployment.lock`, with an automatic baseline
+rollback trap. The rendered diff against the baseline was one line — the
+image — and the four TP2 engines were not touched.
+
+| | |
+|---|---|
+| candidate | `ghcr.io/helixml/ds4-loadbalancer:rust-tokenheatmaps-89f7926` (local build, image ID `sha256:807bfa82…`) |
+| rollback | `ghcr.io/helixml/ds4-loadbalancer:rust-machineview-1a48b70@sha256:2ceb9232…` |
+| build / transfer | 58.3s / 4.1s (15.5MB image) |
+| healthy after | 2s; 4/4 `ds4proxy_upstream_up`, `/health` 200, `/ui/` 200 |
+| restarts | 0; ring restored 17,276 samples, `token_hours=0` as expected |
+
+Two caveats. The candidate image exists only in node06's local image store —
+it is a development build, not a GHCR publish, so the pin above is not
+pullable until this merges and Drone publishes it; the rollback pin is. And
+`ds4proxy_cached_prompt_tokens_total` is 0 for every endpoint on this stack,
+because Qwen returns `prompt_tokens_details: null` (see the 2026-08-14 entry),
+so the heatmaps' "cached" line is structurally zero here rather than measured.
+
+The build also needed `--build-arg RUST_DEPS_IMAGE=…mini-dynamo:rust-deps-sha256-7da447…`.
+The rename commit changed Cargo.toml's `repository` field, which moves the
+content key to `rust-deps-sha256-9894f4b8`, and that image is not published
+yet. Only the URL changed, so the previous key's dependency graph is
+identical; the new key seeds itself on the next main build.
+
 ## 2026-08-14 — Qwen3.8-27B-FP8 replaces DeepSeek-V4-Flash on node06
 
 Brought the whole serving stack over to `Qwen/Qwen3.8-27B-FP8` (vision-language)

@@ -28,6 +28,8 @@ export default defineConfig(({ mode }) => {
       "/api": {
         target: proxyTarget,
         changeOrigin: true,
+        // /api/machineview/stream is a WebSocket upgrade.
+        ws: true,
       },
       "/metrics": {
         target: proxyTarget,

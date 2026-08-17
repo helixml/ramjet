@@ -1,9 +1,12 @@
 import { useMemo, useState } from "react"
 import { useDashboardData } from "@/hooks/useDashboardData"
+import { useTokenHistory } from "@/hooks/useTokenHistory"
 import { TopBar } from "@/components/TopBar"
 import { RangePicker } from "@/components/RangePicker"
 import { StatTile } from "@/components/StatTile"
 import { ChartCard, type ChartCardProps } from "@/components/ChartCard"
+import { HeatmapCard, buildScale } from "@/components/Heatmap"
+import { dayGrid, hourGrid, totals } from "@/lib/tokens"
 import { GpuGrid } from "@/components/GpuGrid"
 import { Meter } from "@/components/Meter"
 import { TabBar, useTabs, type TabDef } from "@/components/Tabs"
@@ -20,13 +23,35 @@ import {
   fmtWattHours,
   fmtWatts,
 } from "@/lib/format"
-import type { Sample } from "@/lib/api"
+import { useLiveStream } from "@/hooks/useLiveStream"
+import type { Sample, ServingSample } from "@/lib/api"
 
 type Row = { t: number } & Record<string, number | null>
 
+/**
+ * The load-balancer-derived half of a row. These are the keys the live
+ * stream can fill on its own, because they come from the proxy's own
+ * registry rather than from scraping engines or the host agent.
+ */
+function toServingRow(t: number, serving: ServingSample | undefined): Row {
+  const row: Row = { t }
+  row.gen_tps = serving?.gen_tps ?? null
+  row.prompt_tps = serving?.prompt_tps ?? null
+  row.cached_tps = serving?.cached_tps ?? null
+  row.ttft_p50 = serving?.ttft_p50_ms ?? null
+  row.ttft_p95 = serving?.ttft_p95_ms ?? null
+  row.tpot_p95 = serving?.tpot_p95_ms ?? null
+  row.inflight = serving?.inflight ?? null
+  row.hit_lb = serving?.cache_hit_pct ?? null
+  ;(serving?.upstreams ?? []).forEach((upstream, index) => {
+    row[`rps_${index}`] = upstream.requests_per_second
+  })
+  return row
+}
+
 /** Flattens one stored sample into chart-ready keys. */
 function toRow(sample: Sample): Row {
-  const row: Row = { t: sample.t }
+  const row: Row = toServingRow(sample.t, sample.serving)
   const host = sample.host
   row.cpu = host?.cpu_pct ?? null
   row.mem_used = host?.mem_used_bytes ?? null
@@ -40,25 +65,12 @@ function toRow(sample: Sample): Row {
   row.disk_util = host?.disk_util_pct ?? null
   row.iowait = host?.iowait_pct ?? null
   row.io_pressure = host?.io_pressure_pct ?? null
-  const serving = sample.serving
-  row.gen_tps = serving?.gen_tps ?? null
-  row.prompt_tps = serving?.prompt_tps ?? null
-  row.cached_tps = serving?.cached_tps ?? null
-  row.ttft_p50 = serving?.ttft_p50_ms ?? null
-  row.ttft_p95 = serving?.ttft_p95_ms ?? null
-  row.tpot_p95 = serving?.tpot_p95_ms ?? null
-  row.inflight = serving?.inflight ?? null
-  row.hit_lb = serving?.cache_hit_pct ?? null
   const engines = sample.engines ?? []
   engines.forEach((engine, index) => {
     row[`run_${index}`] = engine.running
     row[`wait_${index}`] = engine.waiting
     row[`kv_${index}`] = engine.kv_cache_pct
     row[`hit_${index}`] = engine.prefix_hit_pct
-  })
-  const upstreams = sample.serving?.upstreams ?? []
-  upstreams.forEach((upstream, index) => {
-    row[`rps_${index}`] = upstream.requests_per_second
   })
   const gpus = sample.gpus ?? []
   gpus.forEach((gpu) => {
@@ -86,7 +98,11 @@ const TABS: TabDef[] = [
   { id: "serving", label: "Serving" },
   { id: "gpus", label: "GPUs" },
   { id: "system", label: "System" },
+  { id: "history", label: "History" },
 ]
+
+/** Days of hourly history requested; the LB clamps to its own retention. */
+const HISTORY_DAYS = 30
 
 function ChartGrid({ cards, loading }: { cards: ChartCardProps[]; loading?: boolean }) {
   return (
@@ -102,10 +118,20 @@ export default function App() {
   const [rangeSeconds, setRangeSeconds] = useState(3600)
   const { active: tab, select: selectTab } = useTabs(TABS, "overview")
   const { summary, series, error, mock } = useDashboardData(rangeSeconds)
+  const { tokens, error: tokensError } = useTokenHistory(HISTORY_DAYS)
+  const live = useLiveStream()
   const loading = summary == null && error == null
   const points = useMemo(() => series?.points ?? [], [series])
   const rows = useMemo(() => points.map(toRow), [points])
-  const latest = summary?.latest ?? null
+  // Live frames replace the polled tail for load-balancer-derived series;
+  // engine and host series keep the sampled resolution they are scraped at.
+  const servingRows = useMemo(() => {
+    if (live.frames.length === 0) return rows
+    const liveRows = live.frames.map((frame) => toServingRow(frame.t, frame.serving))
+    const from = liveRows[0].t
+    return [...rows.filter((row) => row.t < from), ...liveRows]
+  }, [rows, live.frames])
+  const latest = summary?.latest ?? live.sample ?? null
 
   // Engine identity is positional and stable: slot 2 for A, 3 for B, …
   // (slot 1 stays the load balancer / aggregate color).
@@ -115,7 +141,9 @@ export default function App() {
     color: `var(--chart-${index + 2})`,
   }))
 
-  const latestServing = latest?.serving
+  // The newest live frame is a second old at most; the polled sample can
+  // be five.
+  const latestServing = live.frames.at(-1)?.serving ?? latest?.serving
   const latestHost = latest?.host
   const latestEngines = latest?.engines ?? []
   const kvAvg = latestEngines.length
@@ -140,6 +168,8 @@ export default function App() {
       : null
 
   const shared = { data: rows, rangeSeconds }
+  // Cards whose every series comes from the proxy's own registry.
+  const liveShared = { data: servingRows, rangeSeconds }
   const engineSeries = (prefix: string) =>
     engineDefs.map((engine) => ({
       key: `${prefix}_${engine.index}`,
@@ -149,7 +179,7 @@ export default function App() {
 
   const servingCards: ChartCardProps[] = [
     {
-      ...shared,
+      ...liveShared,
       title: "Token throughput",
       description: "tokens per second through the load balancer",
       format: (v) => fmtNum(v),
@@ -160,7 +190,7 @@ export default function App() {
       ],
     },
     {
-      ...shared,
+      ...liveShared,
       title: "Time to first token",
       description: "window quantiles over the request stream",
       format: (v) => fmtMs(v),
@@ -170,14 +200,14 @@ export default function App() {
       ],
     },
     {
-      ...shared,
+      ...liveShared,
       title: "Time per output token",
       description: "p95 decode interval after the first token",
       format: (v) => fmtMs(v),
       series: [{ key: "tpot_p95", label: "p95", color: "var(--chart-1)" }],
     },
     {
-      ...shared,
+      ...liveShared,
       title: "Requests in flight",
       format: (v) => fmtNum(v),
       series: [{ key: "inflight", label: "in flight", color: "var(--chart-1)" }],
@@ -218,7 +248,7 @@ export default function App() {
       ],
     },
     {
-      ...shared,
+      ...liveShared,
       title: "Request rate per upstream",
       description: "requests per second after routing",
       format: (v) => fmtNum(v, 1),
@@ -346,6 +376,29 @@ export default function App() {
     })),
   }
 
+  // Token history is its own, much longer series: hourly buckets kept for a
+  // month, independent of the range picker that drives every other card.
+  const tokenBuckets = useMemo(() => tokens?.buckets ?? [], [tokens])
+  const tokenTotals = useMemo(() => totals(tokenBuckets), [tokenBuckets])
+  const tokenDays = useMemo(
+    () => dayGrid(tokenBuckets, tokens?.now ?? Date.now()),
+    [tokenBuckets, tokens?.now],
+  )
+  const tokenHours = useMemo(() => hourGrid(tokenBuckets), [tokenBuckets])
+  const dayScale = useMemo(
+    () => buildScale(tokenDays.cells.map((cell) => cell.value)),
+    [tokenDays],
+  )
+  const hourScale = useMemo(
+    () => buildScale(tokenHours.cells.map((cell) => cell.value)),
+    [tokenHours],
+  )
+  const historyLoading = tokens == null && tokensError == null
+  const historyWindow = tokens?.days ?? HISTORY_DAYS
+  const historySummary = `${fmtCount(tokenTotals.total)} tokens · ${fmtCount(
+    tokenTotals.requests,
+  )} requests over ${historyWindow} days`
+
   const storageCard = (
     <Card aria-busy={loading || undefined}>
       <CardHeader>
@@ -427,7 +480,9 @@ export default function App() {
           </span>
         ) : (
           <span className="text-faint-foreground text-[11px]">
-            refreshes every 5 s · stored locally by the load balancer
+            {live.connected && live.intervalMs != null
+              ? `streaming every ${live.intervalMs / 1000} s · stored locally by the load balancer`
+              : "refreshes every 5 s · stored locally by the load balancer"}
           </span>
         )}
       </div>
@@ -436,19 +491,19 @@ export default function App() {
         <StatTile
           label="Gen tok/s"
           value={fmtNum(latestServing?.gen_tps)}
-          trend={trend(rows, "gen_tps")}
+          trend={trend(servingRows, "gen_tps")}
           loading={loading}
         />
         <StatTile
           label="TTFT p95"
           value={fmtMs(latestServing?.ttft_p95_ms)}
-          trend={trend(rows, "ttft_p95")}
+          trend={trend(servingRows, "ttft_p95")}
           loading={loading}
         />
         <StatTile
           label="In flight"
           value={fmtNum(latestServing?.inflight)}
-          trend={trend(rows, "inflight")}
+          trend={trend(servingRows, "inflight")}
           loading={loading}
         />
         <StatTile
@@ -465,7 +520,7 @@ export default function App() {
               : latestServing?.cache_hit_pct,
           )}
           detail={latestEngines.length ? "engine-reported" : undefined}
-          trend={trend(rows, latestEngines.length ? "hit_engines" : "hit_lb")}
+          trend={latestEngines.length ? trend(rows, "hit_engines") : trend(servingRows, "hit_lb")}
           loading={loading}
         />
         <StatTile
@@ -541,6 +596,52 @@ export default function App() {
               <ChartCard key={card.title} {...card} loading={loading} />
             ))}
             {storageCard}
+          </div>
+        </div>
+      ) : null}
+
+      {tab === "history" ? (
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-muted-foreground text-xs">{historySummary}</span>
+            {tokensError ? (
+              <span className="text-xs" style={{ color: "var(--status-critical)" }}>
+                ⚠ {tokensError}
+              </span>
+            ) : (
+              <span className="text-faint-foreground text-[11px]">
+                hourly buckets, your local time — independent of the range above
+              </span>
+            )}
+          </div>
+          <div className="flex flex-col gap-3">
+            <HeatmapCard
+              title="Tokens by day"
+              description="prompt + generated, one column per date and one row per three-hour band"
+              rowLabels={tokenDays.rowLabels}
+              columnLabels={tokenDays.columnLabels}
+              cells={tokenDays.cells}
+              scale={dayScale}
+              format={(value) => fmtCount(value)}
+              unit="tokens"
+              cellRole="in that window"
+              cellMaxPx={30}
+              rotateColumnLabels
+              loading={historyLoading}
+            />
+            <HeatmapCard
+              title="Tokens by hour"
+              description={`weekday × hour of day, summed over ${historyWindow} days`}
+              rowLabels={tokenHours.rowLabels}
+              columnLabels={tokenHours.columnLabels}
+              cells={tokenHours.cells}
+              scale={hourScale}
+              format={(value) => fmtCount(value)}
+              unit="tokens"
+              cellRole="in that hour"
+              cellMaxPx={34}
+              loading={historyLoading}
+            />
           </div>
         </div>
       ) : null}

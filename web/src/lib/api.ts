@@ -114,6 +114,43 @@ export interface Series {
   points: Sample[]
 }
 
+/** One UTC hour of token volume. Grouping into local days happens here. */
+export interface TokenBucket {
+  t: number
+  prompt: number
+  completion: number
+  cached: number
+  requests: number
+}
+
+export interface TokenHistory {
+  now: number
+  days: number
+  bucket_seconds: number
+  buckets: TokenBucket[]
+}
+
+/** Frames pushed over `/api/machineview/stream`, tagged by `kind`. */
+export type StreamFrame =
+  | {
+      kind: "hello"
+      now: number
+      hostname: string | null
+      interval_ms: number
+      stream_interval_ms: number
+      retention_seconds: number
+      upstreams: string[]
+    }
+  | { kind: "serving"; t: number; serving: ServingSample }
+  | { kind: "sample"; sample: Sample }
+
+/** Absolute stream URL for the page's own origin, http(s) → ws(s). */
+export function streamUrl(): string {
+  const url = new URL("/api/machineview/stream", window.location.href)
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+  return url.toString()
+}
+
 export function isMockMode(): boolean {
   if (import.meta.env.VITE_MOCK === "1") return true
   return new URLSearchParams(window.location.search).has("mock")
@@ -135,4 +172,8 @@ export function fetchSeries(rangeSeconds: number, points: number): Promise<Serie
   return getJson<Series>(
     `/api/machineview/series?range=${rangeSeconds}&points=${points}`,
   )
+}
+
+export function fetchTokens(days: number): Promise<TokenHistory> {
+  return getJson<TokenHistory>(`/api/machineview/tokens?days=${days}`)
 }
