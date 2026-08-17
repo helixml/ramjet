@@ -1,5 +1,47 @@
 # node06 experiment journal
 
+## 2026-08-17 — post-rename `rust-261bef8` rollout on node06 (LB-only)
+
+First deploy of a published post-rename image, and the first that had to move
+the deployment's environment with it. `main`'s `MD_` → `RJ_` cut is hard: the
+binary refuses to start on a stale `MD_` key rather than silently reverting a
+setting to its default, so the Compose files and the image are a pair in both
+directions.
+
+node06's three Compose files were replaced with the canonical `main` copies
+(they differed only in the prefix, the header comments, and the image
+directive; the engine service definitions were byte-identical). A
+`docker compose up --dry-run` before the mutation confirmed only
+`ds4-loadbalancer` would be recreated with all four TP2 engines left
+`Running`, and the rendered load-balancer service showed 0 `MD_` keys against
+19 `RJ_` keys.
+
+| | |
+|---|---|
+| candidate | `ghcr.io/helixml/ramjet:rust-261bef8@sha256:8bb4f9a1d8158e6d4eae1273e2d823df77d6836be12c62ef4cf80615660fb6a4` |
+| rollback | `ghcr.io/helixml/ds4-loadbalancer:rust-livestream-4784993` **together with** `.compose-backup/20260817-233235` |
+| healthy after | 2s; 4/4 upstreams, `/health` 200, `/ui/` 200, stream handshake 101 |
+| container env | 0 `MD_` keys, 19 `RJ_` keys |
+| token history | 7 buckets before and after; 32M tokens / 1,625 requests visible |
+| engines | all four untouched, still up since 2026-08-15T07:48Z, zero restarts |
+
+The rollback trap restored both files and the image as one unit, not the
+image alone; restoring only half would produce exactly the healthy-but-inert
+load balancer the hard cut exists to prevent.
+
+Afterwards the canonical `LB_IMAGE` default was promoted to this digest
+(PR #190). It had still named a pre-rename `mini-dynamo` image while the file
+set `RJ_` settings, which cannot work. With that synced, a bare
+`docker compose up -d` on node06 is now a no-op across all five containers —
+the box is a true mirror of `main` and the default pin resolves to exactly
+what is running.
+
+Drone PR build #447 failed on this one-line Compose change while every step
+of that pipeline passed locally, including the full `deployment-compose`
+command list; #448 on an unchanged tree was green. Recorded as contention
+with the concurrent `main` publish build (#446), consistent with the
+#260/#261 note above, not as a repository failure.
+
 ## 2026-08-17 — 1 Hz WebSocket stream and dot heatmaps (LB-only)
 
 Second LB-only recreate of the day. The dashboard refreshed every five
