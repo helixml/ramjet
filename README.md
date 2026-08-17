@@ -52,8 +52,7 @@ For existing engines, the upstream list is normally the only setting you need:
 ```yaml
 services:
   ramjet:
-    # Published under the project's former name; the image move is in progress.
-    image: ghcr.io/helixml/mini-dynamo:v0.1.0@sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1
+    image: ghcr.io/helixml/ramjet:v0.1.0@sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1
     restart: unless-stopped
     ports:
       - "8000:8000" # OpenAI API + /health
