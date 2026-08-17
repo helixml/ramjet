@@ -98,6 +98,8 @@ interface HeatmapProps {
   align?: "start" | "center"
   /** Stand long column labels on end so 30 dates fit without colliding. */
   rotateColumnLabels?: boolean
+  /** Tighter gaps and smaller labels, for a sidebar-width card. */
+  compact?: boolean
 }
 
 function Heatmap({
@@ -111,7 +113,10 @@ function Heatmap({
   cellMaxPx = 26,
   align = "start",
   rotateColumnLabels = false,
+  compact = false,
 }: HeatmapProps) {
+  const labelClass = compact ? "text-[9px]" : "text-[10px]"
+  const gapClass = compact ? "gap-px" : "gap-[2px]"
   const container = useRef<HTMLDivElement>(null)
   const [active, setActive] = useState<{
     cell: HeatmapCell
@@ -141,7 +146,7 @@ function Heatmap({
     <div ref={container} className="relative">
       <div
         role="grid"
-        className={`grid gap-[2px] ${align === "center" ? "justify-center" : "justify-start"}`}
+        className={`grid ${gapClass} ${align === "center" ? "justify-center" : "justify-start"}`}
         style={{
           gridTemplateColumns: `auto repeat(${columnLabels.length}, minmax(0, ${cellMaxPx}px))`,
         }}
@@ -153,8 +158,8 @@ function Heatmap({
             aria-hidden
             className={
               rotateColumnLabels
-                ? "text-faint-foreground flex h-11 items-end justify-center pb-1 text-[10px] whitespace-nowrap"
-                : "text-faint-foreground overflow-visible pb-1 text-[10px] whitespace-nowrap"
+                ? `text-faint-foreground flex ${compact ? "h-9" : "h-11"} items-end justify-center pb-1 ${labelClass} whitespace-nowrap`
+                : `text-faint-foreground overflow-visible pb-1 ${labelClass} whitespace-nowrap`
             }
             style={
               rotateColumnLabels
@@ -168,7 +173,7 @@ function Heatmap({
         {rowLabels.map((rowLabel, row) => (
           <div key={`row-${row}`} className="contents" role="row">
             <div
-              className="text-faint-foreground flex items-center pr-2 text-[10px] whitespace-nowrap"
+              className={`text-faint-foreground flex items-center ${compact ? "pr-1.5" : "pr-2"} ${labelClass} whitespace-nowrap`}
             >
               {rowLabel}
             </div>
@@ -193,7 +198,7 @@ function Heatmap({
                       : undefined
                   }
                   aria-hidden={cell ? undefined : true}
-                  className="flex aspect-square min-h-[7px] w-full items-center justify-center rounded-[3px] outline-offset-1 focus-visible:outline-2 focus-visible:outline-[var(--ring)]"
+                  className="flex aspect-square min-h-[6px] w-full items-center justify-center rounded-[3px] outline-offset-1 focus-visible:outline-2 focus-visible:outline-[var(--ring)]"
                   onMouseEnter={(event) => cell && show(cell, event.currentTarget)}
                   onFocus={(event) => cell && show(cell, event.currentTarget)}
                   onMouseLeave={() => setActive(null)}
@@ -256,7 +261,28 @@ function Heatmap({
   )
 }
 
-function ScaleLegend() {
+function ScaleLegend({ compact = false }: { compact?: boolean }) {
+  // The compact card keeps only the ramp: it is the key a reader actually
+  // needs, and the idle and no-data marks read for themselves beside it.
+  if (compact) {
+    return (
+      <div className="text-muted-foreground flex items-center gap-1 text-[10px]">
+        quiet
+        {RAMP.map((color, index) => {
+          const size = 2.5 + index * 1.75
+          return (
+            <span
+              key={color}
+              aria-hidden
+              className="rounded-full"
+              style={{ background: color, width: size, height: size }}
+            />
+          )
+        })}
+        busy
+      </div>
+    )
+  }
   return (
     <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
       <span className="flex items-center gap-1.5">
@@ -355,17 +381,23 @@ export function HeatmapCard({
 }: HeatmapCardProps) {
   const [table, setTable] = useState(false)
   const hasData = heatmap.cells.some((cell) => cell.value != null)
+  const compact = heatmap.compact ?? false
+  const emptyHeight = compact ? "h-[110px]" : "h-[150px]"
   return (
     <Card aria-busy={loading || undefined}>
-      <CardHeader className="flex-row items-start justify-between gap-2">
+      <CardHeader
+        className={`flex-row items-start justify-between gap-2 ${compact ? "px-3 pt-3" : ""}`}
+      >
         <div className="flex flex-col gap-1">
-          <CardTitle>{title}</CardTitle>
+          <CardTitle className={compact ? "text-xs" : undefined}>{title}</CardTitle>
           {loading ? (
             <Skeleton className="h-3 w-40" />
           ) : description ? (
-            <CardDescription>{description}</CardDescription>
+            <CardDescription className={compact ? "text-[11px]" : undefined}>
+              {description}
+            </CardDescription>
           ) : null}
-          {loading ? null : <ScaleLegend />}
+          {loading ? null : <ScaleLegend compact={compact} />}
         </div>
         <Button
           variant="ghost"
@@ -373,13 +405,14 @@ export function HeatmapCard({
           aria-label={table ? "Show chart" : "Show table"}
           onClick={() => setTable((current) => !current)}
           disabled={loading}
+          className={compact ? "size-7" : undefined}
         >
           {table ? <ChartArea /> : <Table2 />}
         </Button>
       </CardHeader>
-      <CardContent>
+      <CardContent className={compact ? "px-3 pb-3 pt-2" : undefined}>
         {loading ? (
-          <Skeleton className="h-[150px] w-full rounded-md" />
+          <Skeleton className={`${emptyHeight} w-full rounded-md`} />
         ) : hasData ? (
           table ? (
             <TableView cells={heatmap.cells} format={heatmap.format} />
@@ -387,7 +420,9 @@ export function HeatmapCard({
             <Heatmap {...heatmap} />
           )
         ) : (
-          <div className="text-faint-foreground flex h-[150px] items-center justify-center text-center text-xs">
+          <div
+            className={`text-faint-foreground flex ${emptyHeight} items-center justify-center text-center text-xs`}
+          >
             no token history yet — the load balancer records one bucket an hour
           </div>
         )}
