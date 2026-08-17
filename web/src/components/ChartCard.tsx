@@ -18,15 +18,18 @@ export interface ChartCardProps extends TimeChartProps {
   loading?: boolean
 }
 
-function ChartSkeleton({ height }: { height: number }) {
+function ChartSkeleton({ height }: { height?: number }) {
   return (
-    <div className="flex flex-col gap-3" aria-hidden>
+    <div className="flex flex-1 flex-col gap-3" aria-hidden>
       <div className="flex gap-2">
         <Skeleton className="h-2.5 w-12" />
         <Skeleton className="h-2.5 w-16" />
         <Skeleton className="h-2.5 w-10" />
       </div>
-      <Skeleton className="w-full rounded-md" style={{ height }} />
+      <Skeleton
+        className={`w-full rounded-md ${height == null ? "min-h-[240px] flex-1" : ""}`}
+        style={height == null ? undefined : { height }}
+      />
     </div>
   )
 }
@@ -124,8 +127,16 @@ export function ChartCard({ title, description, loading = false, ...chart }: Cha
   const hasData = chart.data.some((row) =>
     chart.series.some((def) => typeof row[def.key] === "number"),
   )
+  // A filling card takes its height from the grid row, so a neighbouring
+  // column of stacked cards and this one end level instead of one running
+  // past the other.
+  const fill = chart.height === "fill"
+  const placeholderHeight = typeof chart.height === "number" ? chart.height : fill ? undefined : 180
   return (
-    <Card aria-busy={loading || undefined}>
+    <Card
+      aria-busy={loading || undefined}
+      className={fill ? "flex h-full flex-col" : undefined}
+    >
       <CardHeader className="flex-row items-start justify-between gap-2">
         <div className="flex flex-col gap-1">
           <CardTitle>{title}</CardTitle>
@@ -146,9 +157,9 @@ export function ChartCard({ title, description, loading = false, ...chart }: Cha
           {table ? <ChartArea /> : <Table2 />}
         </Button>
       </CardHeader>
-      <CardContent>
+      <CardContent className={fill ? "flex min-h-0 flex-1 flex-col" : undefined}>
         {loading ? (
-          <ChartSkeleton height={chart.height ?? 180} />
+          <ChartSkeleton height={placeholderHeight} />
         ) : hasData ? (
           table ? (
             <TableView
@@ -162,8 +173,10 @@ export function ChartCard({ title, description, loading = false, ...chart }: Cha
           )
         ) : (
           <div
-            className="text-faint-foreground flex items-center justify-center text-xs"
-            style={{ height: chart.height ?? 180 }}
+            className={`text-faint-foreground flex items-center justify-center text-xs ${
+              fill ? "min-h-[240px] flex-1" : ""
+            }`}
+            style={placeholderHeight == null ? undefined : { height: placeholderHeight }}
           >
             no data in this window
           </div>
