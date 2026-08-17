@@ -95,7 +95,7 @@ def one_request(
     completion_tokens = 0
     upstream = None
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        upstream = response.headers.get("x-mini-dynamo-upstream")
+        upstream = response.headers.get("x-ramjet-upstream")
         for raw in response:
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data: "):

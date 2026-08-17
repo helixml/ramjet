@@ -18,7 +18,7 @@ tooltips, and a table-view twin behind the toggle in each card header.
 bench/machineview_agent.py   host agent (loopback): /proc, statvfs, RAPL, nvidia-smi
         │  GET /sample (JSON)
         ▼
-ramjet LB               samples every MD_MACHINEVIEW_INTERVAL_MS:
+ramjet LB               samples every RJ_MACHINEVIEW_INTERVAL_MS:
   src/machineview.rs           - its own Prometheus registry (ds4proxy_*)
         │                      - each upstream's /metrics (vllm:*)
         │                      - the agent (host + GPUs + energy)
@@ -60,15 +60,15 @@ VPN opens http://100.89.187.17:8007/ui/ directly.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MD_MACHINEVIEW_MODE` | `on` | `off` disables sampling, API, and UI |
-| `MD_MACHINEVIEW_INTERVAL_MS` | `5000` | sampling cadence (1000–60000) |
-| `MD_MACHINEVIEW_RETENTION_SECONDS` | `86400` | ring retention (60–604800) |
-| `MD_MACHINEVIEW_AGENT_URL` | unset | host agent `/sample` URL; without it there is no host/GPU/energy telemetry |
-| `MD_MACHINEVIEW_STATE_PATH` | unset | JSON snapshot path; restores history across LB restarts |
-| `MD_MACHINEVIEW_UI_DIR` | `/ui` if present | static bundle directory |
+| `RJ_MACHINEVIEW_MODE` | `on` | `off` disables sampling, API, and UI |
+| `RJ_MACHINEVIEW_INTERVAL_MS` | `5000` | sampling cadence (1000–60000) |
+| `RJ_MACHINEVIEW_RETENTION_SECONDS` | `86400` | ring retention (60–604800) |
+| `RJ_MACHINEVIEW_AGENT_URL` | unset | host agent `/sample` URL; without it there is no host/GPU/energy telemetry |
+| `RJ_MACHINEVIEW_STATE_PATH` | unset | JSON snapshot path; restores history across LB restarts |
+| `RJ_MACHINEVIEW_UI_DIR` | `/ui` if present | static bundle directory |
 
 Engine (`vllm:*`) scraping needs no configuration — it reuses the configured
-`MD_UPSTREAM` list. Without the agent the serving charts still work; the
+`RJ_UPSTREAM` list. Without the agent the serving charts still work; the
 machine/GPU sections show their empty states.
 
 ## Host agent
@@ -80,7 +80,7 @@ python3 bench/machineview_agent.py --port 8016 --mounts /,/home/luke
 ```
 
 On a Docker-bridge deployment the LB reaches it via the gateway address,
-e.g. `MD_MACHINEVIEW_AGENT_URL=http://172.17.0.1:8016/sample`. It reports
+e.g. `RJ_MACHINEVIEW_AGENT_URL=http://172.17.0.1:8016/sample`. It reports
 CPU busy share, load, memory/swap, per-mount usage, whole-disk I/O rates,
 physical-interface network rates, RAPL package watts, and one row per GPU
 from `nvidia-smi`. Rates need two scrapes, so the first sample returns nulls.

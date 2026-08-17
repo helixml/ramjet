@@ -102,12 +102,12 @@ impl Settings {
     ///
     /// Returns [`SettingsError`] when a value fails typed validation.
     pub fn from_lookup(mut get: impl FnMut(&str) -> Option<String>) -> Result<Self, SettingsError> {
-        let mode = match get("MD_MACHINEVIEW_MODE").as_deref().unwrap_or("on") {
+        let mode = match get("RJ_MACHINEVIEW_MODE").as_deref().unwrap_or("on") {
             "on" => Mode::On,
             "off" => Mode::Off,
             value => {
                 return Err(invalid(
-                    "MD_MACHINEVIEW_MODE",
+                    "RJ_MACHINEVIEW_MODE",
                     value.to_owned(),
                     "on or off",
                 ));
@@ -115,28 +115,28 @@ impl Settings {
         };
         let interval_ms = bounded(
             &mut get,
-            "MD_MACHINEVIEW_INTERVAL_MS",
+            "RJ_MACHINEVIEW_INTERVAL_MS",
             5_000,
             MIN_INTERVAL_MS,
             MAX_INTERVAL_MS,
         )?;
         let retention_seconds = bounded(
             &mut get,
-            "MD_MACHINEVIEW_RETENTION_SECONDS",
+            "RJ_MACHINEVIEW_RETENTION_SECONDS",
             86_400,
             MIN_RETENTION_SECONDS,
             MAX_RETENTION_SECONDS,
         )?;
-        let agent_url = match get("MD_MACHINEVIEW_AGENT_URL").filter(|value| !value.is_empty()) {
+        let agent_url = match get("RJ_MACHINEVIEW_AGENT_URL").filter(|value| !value.is_empty()) {
             None => None,
             Some(raw) => Some(Url::parse(&raw).ok().filter(Url::has_host).ok_or_else(|| {
-                invalid("MD_MACHINEVIEW_AGENT_URL", raw, "an absolute http(s) URL")
+                invalid("RJ_MACHINEVIEW_AGENT_URL", raw, "an absolute http(s) URL")
             })?),
         };
-        let state_path = get("MD_MACHINEVIEW_STATE_PATH")
+        let state_path = get("RJ_MACHINEVIEW_STATE_PATH")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
-        let ui_dir = match get("MD_MACHINEVIEW_UI_DIR") {
+        let ui_dir = match get("RJ_MACHINEVIEW_UI_DIR") {
             // An explicitly configured directory must exist; the default is
             // best-effort so binaries outside the container image still start.
             Some(raw) if !raw.is_empty() => {
@@ -145,7 +145,7 @@ impl Settings {
                     Some(path)
                 } else {
                     return Err(invalid(
-                        "MD_MACHINEVIEW_UI_DIR",
+                        "RJ_MACHINEVIEW_UI_DIR",
                         raw,
                         "an existing directory",
                     ));
@@ -1621,19 +1621,19 @@ mod tests {
     #[test]
     fn settings_reject_invalid_values() {
         let mode = Settings::from_lookup(|key| {
-            (key == "MD_MACHINEVIEW_MODE").then(|| "observe".to_owned())
+            (key == "RJ_MACHINEVIEW_MODE").then(|| "observe".to_owned())
         });
         assert!(mode.is_err());
         let interval = Settings::from_lookup(|key| {
-            (key == "MD_MACHINEVIEW_INTERVAL_MS").then(|| "10".to_owned())
+            (key == "RJ_MACHINEVIEW_INTERVAL_MS").then(|| "10".to_owned())
         });
         assert!(interval.is_err());
         let agent = Settings::from_lookup(|key| {
-            (key == "MD_MACHINEVIEW_AGENT_URL").then(|| "not a url".to_owned())
+            (key == "RJ_MACHINEVIEW_AGENT_URL").then(|| "not a url".to_owned())
         });
         assert!(agent.is_err());
         let ui = Settings::from_lookup(|key| {
-            (key == "MD_MACHINEVIEW_UI_DIR").then(|| "/definitely/not/a/real/dir".to_owned())
+            (key == "RJ_MACHINEVIEW_UI_DIR").then(|| "/definitely/not/a/real/dir".to_owned())
         });
         assert!(ui.is_err());
     }

@@ -16,15 +16,15 @@ rendering* — turning an OpenAI request into token IDs the engine would produce
 | Snapshot companion, digest index | No |
 | Prompt rendering, reasoning translation, attestation | **Yes** — `src/model/` |
 
-A model with no profile still works. Set `MD_TOKENIZER_MODE=off` and
-`MD_EXACT_ROUTE_MODE=off` and you get byte-fingerprint affinity routing, load
+A model with no profile still works. Set `RJ_TOKENIZER_MODE=off` and
+`RJ_EXACT_ROUTE_MODE=off` and you get byte-fingerprint affinity routing, load
 balancing, health, and metrics. A profile is what unlocks *attested local
 tokenization*, which is a telemetry and placement optimisation, not a
 requirement for serving.
 
 ## Choosing a profile
 
-`MD_TOKENIZER_PROFILE` selects one. Unknown values are rejected at startup
+`RJ_TOKENIZER_PROFILE` selects one. Unknown values are rejected at startup
 rather than silently falling back, so a typo cannot quietly disable
 attestation. Current profiles:
 
@@ -35,7 +35,7 @@ attestation. Current profiles:
 | `qwen3.8-2.4t-a95b` | Qwen/Qwen3.8-2.4T-A95B | text | HF chat template |
 
 Profiles using an HF chat template additionally require
-`MD_CHAT_TEMPLATE_PATH` and `MD_CHAT_TEMPLATE_SHA256`. The template is
+`RJ_CHAT_TEMPLATE_PATH` and `RJ_CHAT_TEMPLATE_SHA256`. The template is
 digest-pinned for the same reason the tokenizer is: editing it changes the
 token IDs the renderer produces, silently invalidating every cached placement
 decision derived from them. Setting one without the other is a startup error.

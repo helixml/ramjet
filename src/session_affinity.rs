@@ -380,10 +380,10 @@ mod tests {
 
     fn config() -> Config {
         let values = HashMap::from([
-            ("MD_UPSTREAM", "http://a:8000,http://b:8000,http://c:8000"),
-            ("MD_SESSION_AFFINITY_MODE", "shadow"),
+            ("RJ_UPSTREAM", "http://a:8000,http://b:8000,http://c:8000"),
+            ("RJ_SESSION_AFFINITY_MODE", "shadow"),
             (
-                "MD_SESSION_AFFINITY_KEY",
+                "RJ_SESSION_AFFINITY_KEY",
                 "0123456789abcdef0123456789abcdef",
             ),
         ]);

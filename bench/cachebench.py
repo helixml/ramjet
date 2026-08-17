@@ -397,7 +397,7 @@ def execute_request(
     route = None
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            route = response.headers.get("X-Mini-Dynamo-Upstream")
+            route = response.headers.get("X-Ramjet-Upstream")
             decoder = SSEDecoder(assembly)
             for line in response:
                 decoder.feed(line, time.perf_counter())
@@ -405,7 +405,7 @@ def execute_request(
     except urllib.error.HTTPError as error:
         error.read(4096)
         retry_reason = (
-            error.headers.get("X-Mini-Dynamo-Shadow-Soak-Retry")
+            error.headers.get("X-Ramjet-Shadow-Soak-Retry")
             if error.headers is not None
             else None
         )

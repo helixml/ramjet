@@ -72,7 +72,7 @@ class PersistentJitCacheComposeTest(unittest.TestCase):
 
         document = copy.deepcopy(self.enabled)
         document["services"]["ds4-loadbalancer"]["environment"][
-            "MD_MAX_BODY_BYTES"
+            "RJ_MAX_BODY_BYTES"
         ] = "1"
         with self.assertRaisesRegex(validator.ValidationError, "load balancer"):
             validator.validate_enabled(document, self.disabled)

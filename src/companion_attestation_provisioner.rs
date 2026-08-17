@@ -87,30 +87,30 @@ impl CompanionAttestationProvisionerConfig {
     pub fn from_lookup(
         mut get: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, CompanionAttestationProvisionerConfigError> {
-        let metadata_path = required_path(&mut get, "MD_SNAPSHOT_ENGINE_METADATA_PATH")?;
-        let digest_secret_path = required_path(&mut get, "MD_SNAPSHOT_DIGEST_SECRET_PATH")?;
-        let attestation_path = required_path(&mut get, "MD_SNAPSHOT_ATTESTATION_PATH")?;
+        let metadata_path = required_path(&mut get, "RJ_SNAPSHOT_ENGINE_METADATA_PATH")?;
+        let digest_secret_path = required_path(&mut get, "RJ_SNAPSHOT_DIGEST_SECRET_PATH")?;
+        let attestation_path = required_path(&mut get, "RJ_SNAPSHOT_ATTESTATION_PATH")?;
         if metadata_path == digest_secret_path
             || metadata_path == attestation_path
             || digest_secret_path == attestation_path
         {
             return Err(CompanionAttestationProvisionerConfigError::AliasedPaths);
         }
-        let owner_uid = required_u32(&mut get, "MD_SNAPSHOT_SECRET_OWNER_UID")?;
-        let group_gid = required_u32(&mut get, "MD_SNAPSHOT_SECRET_GROUP_GID")?;
-        let max_age_ms = get("MD_SNAPSHOT_ATTESTATION_MAX_AGE_MS")
+        let owner_uid = required_u32(&mut get, "RJ_SNAPSHOT_SECRET_OWNER_UID")?;
+        let group_gid = required_u32(&mut get, "RJ_SNAPSHOT_SECRET_GROUP_GID")?;
+        let max_age_ms = get("RJ_SNAPSHOT_ATTESTATION_MAX_AGE_MS")
             .as_deref()
             .map(str::parse::<u64>)
             .transpose()
             .map_err(
                 |_| CompanionAttestationProvisionerConfigError::InvalidSetting {
-                    key: "MD_SNAPSHOT_ATTESTATION_MAX_AGE_MS",
+                    key: "RJ_SNAPSHOT_ATTESTATION_MAX_AGE_MS",
                 },
             )?
             .unwrap_or(DEFAULT_METADATA_AGE_MS);
         if !(1..=MAX_METADATA_AGE_MS).contains(&max_age_ms) {
             return Err(CompanionAttestationProvisionerConfigError::InvalidSetting {
-                key: "MD_SNAPSHOT_ATTESTATION_MAX_AGE_MS",
+                key: "RJ_SNAPSHOT_ATTESTATION_MAX_AGE_MS",
             });
         }
         Ok(Self {
@@ -1171,20 +1171,20 @@ mod tests {
         let files = TestFiles::new();
         let mut values = HashMap::from([
             (
-                "MD_SNAPSHOT_ENGINE_METADATA_PATH",
+                "RJ_SNAPSHOT_ENGINE_METADATA_PATH",
                 files.metadata.to_string_lossy().into_owned(),
             ),
             (
-                "MD_SNAPSHOT_DIGEST_SECRET_PATH",
+                "RJ_SNAPSHOT_DIGEST_SECRET_PATH",
                 files.secret.to_string_lossy().into_owned(),
             ),
             (
-                "MD_SNAPSHOT_ATTESTATION_PATH",
+                "RJ_SNAPSHOT_ATTESTATION_PATH",
                 files.output.to_string_lossy().into_owned(),
             ),
-            ("MD_SNAPSHOT_SECRET_OWNER_UID", files.uid.to_string()),
-            ("MD_SNAPSHOT_SECRET_GROUP_GID", files.gid.to_string()),
-            ("MD_SNAPSHOT_ATTESTATION_MAX_AGE_MS", "25000".to_owned()),
+            ("RJ_SNAPSHOT_SECRET_OWNER_UID", files.uid.to_string()),
+            ("RJ_SNAPSHOT_SECRET_GROUP_GID", files.gid.to_string()),
+            ("RJ_SNAPSHOT_ATTESTATION_MAX_AGE_MS", "25000".to_owned()),
         ]);
         let config =
             CompanionAttestationProvisionerConfig::from_lookup(|key| values.get(key).cloned())
@@ -1193,7 +1193,7 @@ mod tests {
         assert!(!debug.contains(files.directory.to_str().unwrap()));
         assert!(debug.contains("[REDACTED]"));
         values.insert(
-            "MD_SNAPSHOT_ATTESTATION_PATH",
+            "RJ_SNAPSHOT_ATTESTATION_PATH",
             files.metadata.to_string_lossy().into_owned(),
         );
         assert_eq!(

@@ -75,8 +75,8 @@ services:
       - "8000:8000" # OpenAI API + /health
       - "9090:9090" # Prometheus
     environment:
-      MD_UPSTREAM: http://model-server-1:8000,http://model-server-2:8000
-      # MD_UPSTREAM_TOKEN: ${MODEL_SERVER_API_KEY} # if required
+      RJ_UPSTREAM: http://model-server-1:8000,http://model-server-2:8000
+      # RJ_UPSTREAM_TOKEN: ${MODEL_SERVER_API_KEY} # if required
 ```
 
 ```bash
@@ -122,7 +122,7 @@ deeper raw overlap.
   precommitted dirty marker keeps unresolved replicas fenced after an unclean
   LB exit or failed state mutation.
 - Stable `ds4proxy_*` Prometheus metrics on port `9090`.
-- Opaque `X-Mini-Dynamo-Upstream` route correlation without leaking hosts.
+- Opaque `X-Ramjet-Upstream` route correlation without leaking hosts.
 - Bounded memory, request sanitization, model metadata rewriting, and upstream
   cancellation when the client disappears.
 
@@ -131,10 +131,12 @@ exact-placement canaries, and session-affinity shadow telemetry remain opt-in
 research surfaces. The session path cannot change placement. These paths fail
 closed and are not dependencies of ordinary serving.
 
-> **Naming:** the project was renamed from mini-dynamo to ramjet. Wire and
-> operational identifiers deliberately keep their existing spelling so running
-> deployments and Grafana history stay valid: the `MD_*` environment prefix, the
-> `ds4proxy_*` metrics, and the `X-Mini-Dynamo-*` response headers are unchanged.
+> **Naming:** the project was renamed from mini-dynamo to ramjet. Settings now
+> use the `RJ_*` prefix and responses carry `X-Ramjet-*` headers; the retired
+> `MD_*` prefix is refused at startup rather than silently ignored, so a stale
+> overlay fails loudly instead of running a differently tuned proxy. The
+> `ds4proxy_*` metric names are deliberately unchanged so existing Grafana
+> history keeps resolving.
 
 ## Operate it
 

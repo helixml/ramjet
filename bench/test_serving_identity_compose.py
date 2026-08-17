@@ -30,14 +30,14 @@ class ServingIdentityComposeTest(unittest.TestCase):
     def test_overlay_cannot_enable_load_balancer_admission(self):
         document = validator.render(enabled=True)
         document["services"]["ds4-loadbalancer"]["environment"][
-            "MD_UPSTREAM_ADMISSION_MODE"
+            "RJ_UPSTREAM_ADMISSION_MODE"
         ] = "compatibility"
         with self.assertRaisesRegex(validator.ValidationError, "may not opt"):
             validator.validate_enabled(document)
 
         document = validator.render(enabled=True)
         document["services"]["ds4-loadbalancer"]["environment"][
-            "MD_DSPARK_GUARD_MODE"
+            "RJ_DSPARK_GUARD_MODE"
         ] = "quarantine"
         with self.assertRaisesRegex(validator.ValidationError, "DSpark enforcement"):
             validator.validate_enabled(document)
@@ -68,7 +68,7 @@ class ServingIdentityComposeTest(unittest.TestCase):
 
         document = validator.render(enabled=True)
         load_balancer = document["services"]["ds4-loadbalancer"]
-        load_balancer["environment"]["MD_SERVING_RUNTIME_MANIFEST_PATH"] = (
+        load_balancer["environment"]["RJ_SERVING_RUNTIME_MANIFEST_PATH"] = (
             "/compat/wrong.json"
         )
         with self.assertRaisesRegex(validator.ValidationError, "runtime target"):
@@ -76,7 +76,7 @@ class ServingIdentityComposeTest(unittest.TestCase):
 
         document = validator.render(enabled=True)
         load_balancer = document["services"]["ds4-loadbalancer"]
-        load_balancer["environment"]["MD_SERVING_RUNTIME_MANIFEST_SHA256"] = (
+        load_balancer["environment"]["RJ_SERVING_RUNTIME_MANIFEST_SHA256"] = (
             "0" * 64
         )
         with self.assertRaisesRegex(validator.ValidationError, "runtime pin"):
@@ -164,7 +164,7 @@ class ServingIdentityComposeTest(unittest.TestCase):
 
         document = validator.render(enabled=True)
         document["services"][validator.ENGINES[0]]["environment"][
-            "MD_SERVING_RUNTIME_MANIFEST_PATH"
+            "RJ_SERVING_RUNTIME_MANIFEST_PATH"
         ] = validator.ENGINE_RUNTIME_MANIFEST_TARGET
         with self.assertRaisesRegex(validator.ValidationError, "load balancer serving"):
             validator.validate_enabled(document)
@@ -172,7 +172,7 @@ class ServingIdentityComposeTest(unittest.TestCase):
     def test_base_compose_has_no_serving_runtime_authority(self):
         document = validator.render(enabled=False)
         document["services"]["ds4-loadbalancer"]["environment"][
-            "MD_SERVING_RUNTIME_MANIFEST_SHA256"
+            "RJ_SERVING_RUNTIME_MANIFEST_SHA256"
         ] = validator.RUNTIME_MANIFEST_SHA256
         with self.assertRaisesRegex(validator.ValidationError, "active in the base"):
             validator.validate_disabled(document)

@@ -49,7 +49,7 @@ for path in glob.glob(work + "/*.json"):
 for path in glob.glob(work + "/*.headers"):
     with open(path, errors="replace") as source:
         for line in source:
-            if line.lower().startswith("x-mini-dynamo-upstream:"):
+            if line.lower().startswith("x-ramjet-upstream:"):
                 route = line.split(":", 1)[1].strip()
                 routes[route] = routes.get(route, 0) + 1
 wall = float(os.environ["END"]) - float(os.environ["START"])

@@ -319,11 +319,11 @@ impl TokenizerObserver {
                 let path = config
                     .tokenizer_path
                     .as_deref()
-                    .context("MD_TOKENIZER_PATH is required in local-shadow mode")?;
+                    .context("RJ_TOKENIZER_PATH is required in local-shadow mode")?;
                 let expected_sha256 = config
                     .tokenizer_sha256
                     .as_deref()
-                    .context("MD_TOKENIZER_SHA256 is required in local-shadow mode")?;
+                    .context("RJ_TOKENIZER_SHA256 is required in local-shadow mode")?;
                 validate_tokenizer_sha256(path, expected_sha256)?;
                 let tokenizer = fastokens::Tokenizer::from_file(Path::new(path))
                     .map_err(|error| anyhow::anyhow!(error.to_string()))
@@ -344,15 +344,15 @@ impl TokenizerObserver {
                     let manifest_path = config
                         .exact_route_manifest_path
                         .as_deref()
-                        .context("MD_EXACT_ROUTE_MANIFEST_PATH is required")?;
+                        .context("RJ_EXACT_ROUTE_MANIFEST_PATH is required")?;
                     let manifest_sha256 = config
                         .exact_route_manifest_sha256
                         .as_deref()
-                        .context("MD_EXACT_ROUTE_MANIFEST_SHA256 is required")?;
+                        .context("RJ_EXACT_ROUTE_MANIFEST_SHA256 is required")?;
                     let tokenizer_sha256 = config
                         .tokenizer_sha256
                         .as_deref()
-                        .context("MD_TOKENIZER_SHA256 is required")?;
+                        .context("RJ_TOKENIZER_SHA256 is required")?;
                     let manifest = Arc::new(CompatibilityManifest::load(
                         Path::new(manifest_path),
                         manifest_sha256,
@@ -365,11 +365,11 @@ impl TokenizerObserver {
                             let path = config
                                 .serving_runtime_manifest_path
                                 .as_deref()
-                                .context("MD_SERVING_RUNTIME_MANIFEST_PATH is required")?;
+                                .context("RJ_SERVING_RUNTIME_MANIFEST_PATH is required")?;
                             let expected_sha256 = config
                                 .serving_runtime_manifest_sha256
                                 .as_deref()
-                                .context("MD_SERVING_RUNTIME_MANIFEST_SHA256 is required")?;
+                                .context("RJ_SERVING_RUNTIME_MANIFEST_SHA256 is required")?;
                             Some(Arc::new(ServingRuntimeManifest::load(
                                 Path::new(path),
                                 expected_sha256,
@@ -832,7 +832,7 @@ fn validate_tokenizer_sha256(path: &str, expected: &str) -> anyhow::Result<()> {
     let actual = sha256_hex(&bytes);
     anyhow::ensure!(
         actual == expected,
-        "tokenizer artifact SHA-256 does not match MD_TOKENIZER_SHA256"
+        "tokenizer artifact SHA-256 does not match RJ_TOKENIZER_SHA256"
     );
     Ok(())
 }
@@ -850,27 +850,27 @@ fn load_chat_template(
     if profile.formatter_source() != model::FormatterSource::HfChatTemplate {
         anyhow::ensure!(
             config.chat_template_path.is_none(),
-            "profile {} renders with a native formatter and must not set MD_CHAT_TEMPLATE_PATH",
+            "profile {} renders with a native formatter and must not set RJ_CHAT_TEMPLATE_PATH",
             profile.label()
         );
         return Ok(None);
     }
     let path = config.chat_template_path.as_deref().with_context(|| {
         format!(
-            "MD_CHAT_TEMPLATE_PATH is required by profile {}",
+            "RJ_CHAT_TEMPLATE_PATH is required by profile {}",
             profile.label()
         )
     })?;
     let expected = config.chat_template_sha256.as_deref().with_context(|| {
         format!(
-            "MD_CHAT_TEMPLATE_SHA256 is required by profile {}",
+            "RJ_CHAT_TEMPLATE_SHA256 is required by profile {}",
             profile.label()
         )
     })?;
     let bytes = std::fs::read(path).with_context(|| format!("read chat template {path}"))?;
     anyhow::ensure!(
         sha256_hex(&bytes) == expected,
-        "chat template SHA-256 does not match MD_CHAT_TEMPLATE_SHA256"
+        "chat template SHA-256 does not match RJ_CHAT_TEMPLATE_SHA256"
     );
     String::from_utf8(bytes)
         .context("chat template is not valid UTF-8")
@@ -1740,9 +1740,9 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let values = HashMap::from([
-            ("MD_UPSTREAM", url),
-            ("MD_TOKENIZER_MODE", "remote-shadow".to_owned()),
-            ("MD_TOKENIZER_MIN_BYTES", "0".to_owned()),
+            ("RJ_UPSTREAM", url),
+            ("RJ_TOKENIZER_MODE", "remote-shadow".to_owned()),
+            ("RJ_TOKENIZER_MIN_BYTES", "0".to_owned()),
         ]);
         let config = Config::from_lookup(|key| values.get(key).cloned()).unwrap();
         let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());

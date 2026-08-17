@@ -93,7 +93,7 @@ def stream_request(kind, prompt, max_tokens, output, key, first_event=None):
     prompt_tokens = cached_tokens = completion_tokens = 0
     try:
         with urllib.request.urlopen(request, timeout=900) as response:
-            route = response.headers.get("X-Mini-Dynamo-Upstream")
+            route = response.headers.get("X-Ramjet-Upstream")
             for raw in response:
                 line = raw.decode("utf-8", "ignore").strip()
                 if not line.startswith("data:"):

@@ -169,7 +169,7 @@ impl SingleEngineCompanionConfig {
         let metrics_endpoint = metrics_endpoint(&mut get, &snapshot)?;
         let attestation_refresh = parse_duration(
             &mut get,
-            "MD_SNAPSHOT_ATTESTATION_REFRESH_MS",
+            "RJ_SNAPSHOT_ATTESTATION_REFRESH_MS",
             1_000,
             50,
             60_000,
@@ -177,22 +177,22 @@ impl SingleEngineCompanionConfig {
         let owner = CompanionIndexOwnerConfig {
             replay_limit: u64::try_from(parse_usize(
                 &mut get,
-                "MD_SNAPSHOT_REPLAY_LIMIT",
+                "RJ_SNAPSHOT_REPLAY_LIMIT",
                 10_000,
                 1,
                 MAX_REPLAY_BATCHES,
             )?)
-            .map_err(|_| invalid("MD_SNAPSHOT_REPLAY_LIMIT", "a bounded batch count"))?,
+            .map_err(|_| invalid("RJ_SNAPSHOT_REPLAY_LIMIT", "a bounded batch count"))?,
             reconnect_min: parse_duration(
                 &mut get,
-                "MD_SNAPSHOT_RECONNECT_MIN_MS",
+                "RJ_SNAPSHOT_RECONNECT_MIN_MS",
                 250,
                 1,
                 60_000,
             )?,
             reconnect_max: parse_duration(
                 &mut get,
-                "MD_SNAPSHOT_RECONNECT_MAX_MS",
+                "RJ_SNAPSHOT_RECONNECT_MAX_MS",
                 5_000,
                 1,
                 60_000,
@@ -200,39 +200,39 @@ impl SingleEngineCompanionConfig {
         };
         if owner.reconnect_min > owner.reconnect_max {
             return Err(invalid(
-                "MD_SNAPSHOT_RECONNECT_MAX_MS",
+                "RJ_SNAPSHOT_RECONNECT_MAX_MS",
                 "at least the reconnect minimum",
             ));
         }
         if snapshot.sources.len() != 1 {
             return Err(invalid(
-                "MD_SNAPSHOT_LIVE_ENDPOINTS",
+                "RJ_SNAPSHOT_LIVE_ENDPOINTS",
                 "exactly one live/replay engine pair",
             ));
         }
         if snapshot.max_clients != MAX_ACTIVE_SNAPSHOT_CLIENTS {
             return Err(invalid(
-                "MD_SNAPSHOT_MAX_CLIENTS",
+                "RJ_SNAPSHOT_MAX_CLIENTS",
                 "exactly two active clients",
             ));
         }
-        let digest_secret_path = required_path(&mut get, "MD_SNAPSHOT_DIGEST_SECRET_PATH")?;
-        let attestation_path = required_path(&mut get, "MD_SNAPSHOT_ATTESTATION_PATH")?;
+        let digest_secret_path = required_path(&mut get, "RJ_SNAPSHOT_DIGEST_SECRET_PATH")?;
+        let attestation_path = required_path(&mut get, "RJ_SNAPSHOT_ATTESTATION_PATH")?;
         let session_path = snapshot
             .secret_path
             .as_ref()
-            .ok_or_else(|| invalid("MD_SNAPSHOT_SECRET_PATH", "a session secret path"))?;
+            .ok_or_else(|| invalid("RJ_SNAPSHOT_SECRET_PATH", "a session secret path"))?;
         if &digest_secret_path == session_path
             || attestation_path == digest_secret_path
             || &attestation_path == session_path
         {
             return Err(invalid(
-                "MD_SNAPSHOT_ATTESTATION_PATH",
+                "RJ_SNAPSHOT_ATTESTATION_PATH",
                 "three distinct protected file paths",
             ));
         }
-        let block_size = parse_usize(&mut get, "MD_SNAPSHOT_BLOCK_SIZE", 0, 1, MAX_BLOCK_SIZE)?;
-        let attention = match get("MD_SNAPSHOT_ATTENTION_KIND")
+        let block_size = parse_usize(&mut get, "RJ_SNAPSHOT_BLOCK_SIZE", 0, 1, MAX_BLOCK_SIZE)?;
+        let attention = match get("RJ_SNAPSHOT_ATTENTION_KIND")
             .as_deref()
             .unwrap_or("mla")
         {
@@ -241,7 +241,7 @@ impl SingleEngineCompanionConfig {
             "sink_full" => ConfigAttentionKind::SinkFull,
             _ => {
                 return Err(invalid(
-                    "MD_SNAPSHOT_ATTENTION_KIND",
+                    "RJ_SNAPSHOT_ATTENTION_KIND",
                     "full, mla, or sink_full",
                 ));
             }
@@ -253,23 +253,23 @@ impl SingleEngineCompanionConfig {
             topic: snapshot.event_topic.clone(),
             connect_timeout: parse_duration(
                 &mut get,
-                "MD_SNAPSHOT_CONNECT_TIMEOUT_MS",
+                "RJ_SNAPSHOT_CONNECT_TIMEOUT_MS",
                 2_000,
                 1,
                 60_000,
             )?,
             replay_timeout: parse_duration(
                 &mut get,
-                "MD_SNAPSHOT_REPLAY_TIMEOUT_MS",
+                "RJ_SNAPSHOT_REPLAY_TIMEOUT_MS",
                 30_000,
                 1,
                 900_000,
             )?,
             max_replay_batches: usize::try_from(owner.replay_limit)
-                .map_err(|_| invalid("MD_SNAPSHOT_REPLAY_LIMIT", "a bounded batch count"))?,
+                .map_err(|_| invalid("RJ_SNAPSHOT_REPLAY_LIMIT", "a bounded batch count"))?,
             max_replay_tail_batches: parse_usize(
                 &mut get,
-                "MD_SNAPSHOT_REPLAY_TAIL_LIMIT",
+                "RJ_SNAPSHOT_REPLAY_TAIL_LIMIT",
                 1_024,
                 0,
                 MAX_REPLAY_BATCHES,
@@ -280,8 +280,8 @@ impl SingleEngineCompanionConfig {
                 ..KvWireLimits::default()
             },
         };
-        let data_parallel_rank = parse_u32(&mut get, "MD_SNAPSHOT_DATA_PARALLEL_RANK", 0)?;
-        let group_idx = parse_u32(&mut get, "MD_SNAPSHOT_GROUP_INDEX", 0)?;
+        let data_parallel_rank = parse_u32(&mut get, "RJ_SNAPSHOT_DATA_PARALLEL_RANK", 0)?;
+        let group_idx = parse_u32(&mut get, "RJ_SNAPSHOT_GROUP_INDEX", 0)?;
         Ok(Self {
             snapshot,
             digest_secret_path: Some(digest_secret_path),
@@ -296,7 +296,7 @@ impl SingleEngineCompanionConfig {
                 attention_kind: attention.wire(),
                 disposition: GroupDisposition::Indexed,
                 block_size: u32::try_from(block_size)
-                    .map_err(|_| invalid("MD_SNAPSHOT_BLOCK_SIZE", "a bounded block size"))?,
+                    .map_err(|_| invalid("RJ_SNAPSHOT_BLOCK_SIZE", "a bounded block size"))?,
             }),
         })
     }
@@ -917,29 +917,29 @@ fn metrics_endpoint(
     get: &mut impl FnMut(&str) -> Option<String>,
     snapshot: &SnapshotCompanionConfig,
 ) -> Result<CompanionMetricsEndpoint, SingleEngineCompanionConfigError> {
-    let tcp = get("MD_SNAPSHOT_METRICS_BIND");
-    let unix = get("MD_SNAPSHOT_METRICS_SOCKET_PATH");
-    let group_gid = get("MD_SNAPSHOT_METRICS_GROUP_GID");
+    let tcp = get("RJ_SNAPSHOT_METRICS_BIND");
+    let unix = get("RJ_SNAPSHOT_METRICS_SOCKET_PATH");
+    let group_gid = get("RJ_SNAPSHOT_METRICS_GROUP_GID");
     if tcp.is_some() && unix.is_some() {
         return Err(invalid(
-            "MD_SNAPSHOT_METRICS_SOCKET_PATH",
+            "RJ_SNAPSHOT_METRICS_SOCKET_PATH",
             "exactly one TCP or Unix metrics endpoint",
         ));
     }
     if let Some(raw) = unix {
         let path = normalized_path(
             &raw,
-            "MD_SNAPSHOT_METRICS_SOCKET_PATH",
+            "RJ_SNAPSHOT_METRICS_SOCKET_PATH",
             MAX_METRICS_SOCKET_PATH_BYTES,
             "an absolute normalized Unix socket path",
         )?;
         let snapshot_path = snapshot
             .socket_path
             .as_deref()
-            .ok_or_else(|| invalid("MD_SNAPSHOT_SOCKET_PATH", "a snapshot socket path"))?;
+            .ok_or_else(|| invalid("RJ_SNAPSHOT_SOCKET_PATH", "a snapshot socket path"))?;
         if path.parent() == snapshot_path.parent() {
             return Err(invalid(
-                "MD_SNAPSHOT_METRICS_SOCKET_PATH",
+                "RJ_SNAPSHOT_METRICS_SOCKET_PATH",
                 "a parent distinct from the snapshot authority directory",
             ));
         }
@@ -947,20 +947,20 @@ fn metrics_endpoint(
             .as_deref()
             .ok_or_else(|| {
                 invalid(
-                    "MD_SNAPSHOT_METRICS_GROUP_GID",
+                    "RJ_SNAPSHOT_METRICS_GROUP_GID",
                     "a dedicated non-root metrics group",
                 )
             })?
             .parse::<u32>()
             .map_err(|_| {
                 invalid(
-                    "MD_SNAPSHOT_METRICS_GROUP_GID",
+                    "RJ_SNAPSHOT_METRICS_GROUP_GID",
                     "a dedicated non-root metrics group",
                 )
             })?;
         if group_gid == 0 {
             return Err(invalid(
-                "MD_SNAPSHOT_METRICS_GROUP_GID",
+                "RJ_SNAPSHOT_METRICS_GROUP_GID",
                 "a dedicated non-root metrics group",
             ));
         }
@@ -968,7 +968,7 @@ fn metrics_endpoint(
     } else {
         if group_gid.is_some() {
             return Err(invalid(
-                "MD_SNAPSHOT_METRICS_GROUP_GID",
+                "RJ_SNAPSHOT_METRICS_GROUP_GID",
                 "only with a Unix metrics endpoint",
             ));
         }
@@ -1002,10 +1002,10 @@ fn normalized_path(
 fn parse_loopback(raw: &str) -> Result<SocketAddr, SingleEngineCompanionConfigError> {
     let address = raw
         .parse::<SocketAddr>()
-        .map_err(|_| invalid("MD_SNAPSHOT_METRICS_BIND", "a loopback IP socket address"))?;
+        .map_err(|_| invalid("RJ_SNAPSHOT_METRICS_BIND", "a loopback IP socket address"))?;
     if !matches!(address.ip(), IpAddr::V4(_) | IpAddr::V6(_)) || !address.ip().is_loopback() {
         return Err(invalid(
-            "MD_SNAPSHOT_METRICS_BIND",
+            "RJ_SNAPSHOT_METRICS_BIND",
             "a loopback IP socket address",
         ));
     }
@@ -1151,39 +1151,39 @@ mod tests {
 
         fn values(&self) -> HashMap<&'static str, String> {
             HashMap::from([
-                ("MD_SNAPSHOT_COMPANION_MODE", "serve".to_owned()),
+                ("RJ_SNAPSHOT_COMPANION_MODE", "serve".to_owned()),
                 (
-                    "MD_SNAPSHOT_SOCKET_PATH",
+                    "RJ_SNAPSHOT_SOCKET_PATH",
                     self.socket.to_string_lossy().into_owned(),
                 ),
-                ("MD_SNAPSHOT_COMPANION_UID", self.companion_uid.to_string()),
-                ("MD_SNAPSHOT_CLIENT_UID", self.client_uid.to_string()),
+                ("RJ_SNAPSHOT_COMPANION_UID", self.companion_uid.to_string()),
+                ("RJ_SNAPSHOT_CLIENT_UID", self.client_uid.to_string()),
                 (
-                    "MD_SNAPSHOT_SECRET_PATH",
+                    "RJ_SNAPSHOT_SECRET_PATH",
                     self.session.to_string_lossy().into_owned(),
                 ),
-                ("MD_SNAPSHOT_SECRET_OWNER_UID", self.owner.to_string()),
+                ("RJ_SNAPSHOT_SECRET_OWNER_UID", self.owner.to_string()),
                 (
-                    "MD_SNAPSHOT_LIVE_ENDPOINTS",
+                    "RJ_SNAPSHOT_LIVE_ENDPOINTS",
                     "tcp://127.0.0.1:45171".to_owned(),
                 ),
                 (
-                    "MD_SNAPSHOT_REPLAY_ENDPOINTS",
+                    "RJ_SNAPSHOT_REPLAY_ENDPOINTS",
                     "tcp://127.0.0.1:45172".to_owned(),
                 ),
                 (
-                    "MD_SNAPSHOT_DIGEST_SECRET_PATH",
+                    "RJ_SNAPSHOT_DIGEST_SECRET_PATH",
                     self.digest.to_string_lossy().into_owned(),
                 ),
                 (
-                    "MD_SNAPSHOT_ATTESTATION_PATH",
+                    "RJ_SNAPSHOT_ATTESTATION_PATH",
                     self.attestation.to_string_lossy().into_owned(),
                 ),
-                ("MD_SNAPSHOT_BLOCK_SIZE", "64".to_owned()),
-                ("MD_SNAPSHOT_METRICS_BIND", "127.0.0.1:0".to_owned()),
-                ("MD_SNAPSHOT_RECONNECT_MIN_MS", "10".to_owned()),
-                ("MD_SNAPSHOT_RECONNECT_MAX_MS", "20".to_owned()),
-                ("MD_SNAPSHOT_ATTESTATION_REFRESH_MS", "50".to_owned()),
+                ("RJ_SNAPSHOT_BLOCK_SIZE", "64".to_owned()),
+                ("RJ_SNAPSHOT_METRICS_BIND", "127.0.0.1:0".to_owned()),
+                ("RJ_SNAPSHOT_RECONNECT_MIN_MS", "10".to_owned()),
+                ("RJ_SNAPSHOT_RECONNECT_MAX_MS", "20".to_owned()),
+                ("RJ_SNAPSHOT_ATTESTATION_REFRESH_MS", "50".to_owned()),
             ])
         }
     }
@@ -1212,8 +1212,8 @@ mod tests {
     fn off_is_the_default_and_requires_no_files_or_engine() {
         let config = SingleEngineCompanionConfig::from_lookup(|key| match key {
             // Standalone-only settings are not parsed while disabled.
-            "MD_SNAPSHOT_METRICS_BIND" => Some("not-an-address".to_owned()),
-            "MD_SNAPSHOT_RECONNECT_MIN_MS" => Some("not-a-duration".to_owned()),
+            "RJ_SNAPSHOT_METRICS_BIND" => Some("not-an-address".to_owned()),
+            "RJ_SNAPSHOT_RECONNECT_MIN_MS" => Some("not-a-duration".to_owned()),
             _ => None,
         })
         .unwrap();
@@ -1227,7 +1227,7 @@ mod tests {
     #[tokio::test]
     async fn off_runtime_has_no_listener_or_filesystem_side_effects() {
         let mut values = HashMap::new();
-        values.insert("MD_SNAPSHOT_METRICS_BIND", "127.0.0.1:1".to_owned());
+        values.insert("RJ_SNAPSHOT_METRICS_BIND", "127.0.0.1:1".to_owned());
         let config = load(&values);
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         assert_eq!(
@@ -1263,20 +1263,20 @@ mod tests {
         assert_eq!(config.snapshot.sources.len(), 1);
         assert_eq!(config.group.as_ref().unwrap().block_size, 64);
 
-        values.remove("MD_SNAPSHOT_BLOCK_SIZE");
+        values.remove("RJ_SNAPSHOT_BLOCK_SIZE");
         assert!(SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()).is_err());
         let mut values = files.values();
         values.insert(
-            "MD_SNAPSHOT_LIVE_ENDPOINTS",
+            "RJ_SNAPSHOT_LIVE_ENDPOINTS",
             "tcp://127.0.0.1:1,tcp://127.0.0.1:2".to_owned(),
         );
         values.insert(
-            "MD_SNAPSHOT_REPLAY_ENDPOINTS",
+            "RJ_SNAPSHOT_REPLAY_ENDPOINTS",
             "tcp://127.0.0.1:3,tcp://127.0.0.1:4".to_owned(),
         );
         assert!(SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()).is_err());
         let mut values = files.values();
-        values.insert("MD_SNAPSHOT_METRICS_BIND", "0.0.0.0:9091".to_owned());
+        values.insert("RJ_SNAPSHOT_METRICS_BIND", "0.0.0.0:9091".to_owned());
         assert!(SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()).is_err());
 
         let metrics_path = files
@@ -1284,12 +1284,12 @@ mod tests {
             .with_extension("metrics")
             .join("metrics.sock");
         let mut values = files.values();
-        values.remove("MD_SNAPSHOT_METRICS_BIND");
+        values.remove("RJ_SNAPSHOT_METRICS_BIND");
         values.insert(
-            "MD_SNAPSHOT_METRICS_SOCKET_PATH",
+            "RJ_SNAPSHOT_METRICS_SOCKET_PATH",
             metrics_path.to_string_lossy().into_owned(),
         );
-        values.insert("MD_SNAPSHOT_METRICS_GROUP_GID", "12004".to_owned());
+        values.insert("RJ_SNAPSHOT_METRICS_GROUP_GID", "12004".to_owned());
         assert!(matches!(
             load(&values).metrics_endpoint,
             CompanionMetricsEndpoint::Unix {
@@ -1298,43 +1298,43 @@ mod tests {
             }
         ));
 
-        values.remove("MD_SNAPSHOT_METRICS_GROUP_GID");
+        values.remove("RJ_SNAPSHOT_METRICS_GROUP_GID");
         assert!(matches!(
             SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()),
             Err(SingleEngineCompanionConfigError::Invalid {
-                key: "MD_SNAPSHOT_METRICS_GROUP_GID",
+                key: "RJ_SNAPSHOT_METRICS_GROUP_GID",
                 reason: "a dedicated non-root metrics group",
             })
         ));
-        values.insert("MD_SNAPSHOT_METRICS_GROUP_GID", "12004".to_owned());
-        values.insert("MD_SNAPSHOT_METRICS_BIND", "127.0.0.1:9091".to_owned());
+        values.insert("RJ_SNAPSHOT_METRICS_GROUP_GID", "12004".to_owned());
+        values.insert("RJ_SNAPSHOT_METRICS_BIND", "127.0.0.1:9091".to_owned());
         assert!(matches!(
             SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()),
             Err(SingleEngineCompanionConfigError::Invalid {
-                key: "MD_SNAPSHOT_METRICS_SOCKET_PATH",
+                key: "RJ_SNAPSHOT_METRICS_SOCKET_PATH",
                 reason: "exactly one TCP or Unix metrics endpoint",
             })
         ));
 
         let mut values = files.values();
-        values.remove("MD_SNAPSHOT_METRICS_BIND");
+        values.remove("RJ_SNAPSHOT_METRICS_BIND");
         values.insert(
-            "MD_SNAPSHOT_METRICS_SOCKET_PATH",
+            "RJ_SNAPSHOT_METRICS_SOCKET_PATH",
             files
                 .directory
                 .join("metrics.sock")
                 .to_string_lossy()
                 .into_owned(),
         );
-        values.insert("MD_SNAPSHOT_METRICS_GROUP_GID", "12004".to_owned());
+        values.insert("RJ_SNAPSHOT_METRICS_GROUP_GID", "12004".to_owned());
         assert!(SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()).is_err());
 
         let mut values = files.values();
-        values.insert("MD_SNAPSHOT_MAX_CLIENTS", "1".to_owned());
+        values.insert("RJ_SNAPSHOT_MAX_CLIENTS", "1".to_owned());
         assert!(matches!(
             SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()),
             Err(SingleEngineCompanionConfigError::Invalid {
-                key: "MD_SNAPSHOT_MAX_CLIENTS",
+                key: "RJ_SNAPSHOT_MAX_CLIENTS",
                 reason: "exactly two active clients",
             })
         ));
@@ -1520,12 +1520,12 @@ mod tests {
             .with_extension("metrics")
             .join("metrics.sock");
         let mut values = files.values();
-        values.remove("MD_SNAPSHOT_METRICS_BIND");
+        values.remove("RJ_SNAPSHOT_METRICS_BIND");
         values.insert(
-            "MD_SNAPSHOT_METRICS_SOCKET_PATH",
+            "RJ_SNAPSHOT_METRICS_SOCKET_PATH",
             metrics_path.to_string_lossy().into_owned(),
         );
-        values.insert("MD_SNAPSHOT_METRICS_GROUP_GID", "12004".to_owned());
+        values.insert("RJ_SNAPSHOT_METRICS_GROUP_GID", "12004".to_owned());
         let debug = format!("{:?}", load(&values));
         assert!(!debug.contains(metrics_path.to_string_lossy().as_ref()));
         assert!(!debug.contains("12004"));

@@ -383,7 +383,7 @@ ds4proxy_exact_route_projected_balance_total{endpoint="chat",outcome="would_bala
         ordinary = response(email.message.Message())
         self.assertFalse(ordinary["retryable"])
         marked_headers = email.message.Message()
-        marked_headers["X-Mini-Dynamo-Shadow-Soak-Retry"] = "tokenizer_unavailable"
+        marked_headers["X-Ramjet-Shadow-Soak-Retry"] = "tokenizer_unavailable"
         marked = response(marked_headers)
         self.assertTrue(marked["retryable"])
         self.assertEqual(marked["retry_reason"], "tokenizer_unavailable")

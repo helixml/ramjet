@@ -6,13 +6,13 @@ and snapshot routing are all disabled unless explicitly enabled.
 
 ## Start with the defaults
 
-If the engine is reachable as `http://ds4-flash:8000`, no `MD_*` variable is
+If the engine is reachable as `http://ds4-flash:8000`, no `RJ_*` variable is
 required. In most deployments, set only the upstream list:
 
 ```yaml
 environment:
-  MD_UPSTREAM: http://engine-a:8000,http://engine-b:8000
-  # MD_UPSTREAM_TOKEN: ${VLLM_API_KEY} # only for protected engines
+  RJ_UPSTREAM: http://engine-a:8000,http://engine-b:8000
+  # RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY} # only for protected engines
 ```
 
 The proxy listens on `0.0.0.0:8000`; Prometheus metrics listen on
@@ -20,32 +20,59 @@ The proxy listens on `0.0.0.0:8000`; Prometheus metrics listen on
 behavior. Keep secrets in an uncommitted mode-`0600` environment file or a
 secret manager.
 
+## The RJ_ prefix, and the retired ones
+
+Settings use `RJ_*`. Two earlier prefixes were retired, `DS4_` and then `MD_`,
+and neither is read any more.
+
+A retired variable is not ignored: startup fails and the error names every
+stale key it found. That is deliberate. Silently ignoring `MD_ROUTE_ALPHA`
+would start a proxy that is healthy, serving, and tuned differently from what
+the overlay asked for, which is far harder to notice than a container that
+refuses to boot.
+
+Two consequences worth planning for:
+
+- Rename every variable in the same change that ships the new image. A
+  half-updated Compose file fails fast, which is the intended behavior, but it
+  is still an outage if you discover it during a rolling restart.
+- **Rolling back to a pre-rename image needs the old names back.** An image
+  built before this cut reads `MD_*` only and will ignore `RJ_*` exactly the
+  way this version ignores `MD_*`. Keep the previous Compose revision beside
+  the previous image digest in the deployment journal, and roll both together.
+
+Responses carry `X-Ramjet-*` headers, renamed from `X-Mini-Dynamo-*` in the
+same change. Anything parsing them — route correlation, the shadow-soak
+runner, log pipelines — moves with it. The `ds4proxy_*` metric names are
+deliberately untouched so existing Grafana history and alert rules keep
+resolving across the rename.
+
 ## Router variables
 
 ### Upstreams and routing
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MD_UPSTREAM` | `http://ds4-flash:8000` | Comma-separated OpenAI-compatible engine URLs. |
-| `MD_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
-| `MD_AFFINITY` | `prefix` | `prefix` for locality/load scoring; `load` for the load-only baseline. |
-| `MD_ROUTE_ALPHA` | `4` | Non-negative load penalty in the routing score. |
-| `MD_ROUTE_CHUNK_BYTES` | `2048` | Bytes per approximate prefix fingerprint block. |
-| `MD_ROUTE_MAX_PREFIX_BYTES` | `2097152` | Maximum request prefix bytes fingerprinted. |
-| `MD_ROUTE_MAX_OVERLAP_BLOCKS` | `32` | Cap on affinity credit in fingerprint blocks. |
-| `MD_ROUTE_INDEX_CAPACITY` | `100000` | Maximum entries in the approximate locality index. |
-| `MD_ROUTE_LOAD_UNIT_BYTES` | `32768` | Request bytes represented by one reserved load unit. |
-| `MD_ROUTE_MAX_LOAD_UNITS` | `8` | Maximum size-weighted load reservation per request. |
-| `MD_ROUTE_PHASE_AWARE_LOAD` | `false` | Experimental: after the first generated token on a streaming response, reduce the request's size-weighted prefill reservation to one decode unit. |
-| `MD_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
-| `MD_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary. |
-| `MD_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
+| `RJ_UPSTREAM` | `http://ds4-flash:8000` | Comma-separated OpenAI-compatible engine URLs. |
+| `RJ_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
+| `RJ_AFFINITY` | `prefix` | `prefix` for locality/load scoring; `load` for the load-only baseline. |
+| `RJ_ROUTE_ALPHA` | `4` | Non-negative load penalty in the routing score. |
+| `RJ_ROUTE_CHUNK_BYTES` | `2048` | Bytes per approximate prefix fingerprint block. |
+| `RJ_ROUTE_MAX_PREFIX_BYTES` | `2097152` | Maximum request prefix bytes fingerprinted. |
+| `RJ_ROUTE_MAX_OVERLAP_BLOCKS` | `32` | Cap on affinity credit in fingerprint blocks. |
+| `RJ_ROUTE_INDEX_CAPACITY` | `100000` | Maximum entries in the approximate locality index. |
+| `RJ_ROUTE_LOAD_UNIT_BYTES` | `32768` | Request bytes represented by one reserved load unit. |
+| `RJ_ROUTE_MAX_LOAD_UNITS` | `8` | Maximum size-weighted load reservation per request. |
+| `RJ_ROUTE_PHASE_AWARE_LOAD` | `false` | Experimental: after the first generated token on a streaming response, reduce the request's size-weighted prefill reservation to one decode unit. |
+| `RJ_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
+| `RJ_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary. |
+| `RJ_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
 | `RUST_LOG` | `info` | Standard tracing filter, for example `mini_dynamo=debug`. |
 
 `GET /health` returns opaque replica ordinals, serving health, DSpark
 reliability state, inflight work, load units, and index size. It returns `200 ok` when every replica is healthy,
 `200 degraded` when at least one can serve, and `503 unhealthy` when none can
-serve. Successful proxied responses include `X-Mini-Dynamo-Upstream` with an
+serve. Successful proxied responses include `X-Ramjet-Upstream` with an
 opaque replica ordinal.
 
 Serving admission fails open. A readiness probe competes with request traffic
@@ -70,14 +97,14 @@ that from turning a busy stack into a total outage:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MD_DSPARK_GUARD_MODE` | `off` | `off`, telemetry-only `observe`, or enforcing `quarantine`. |
-| `MD_DSPARK_GUARD_INTERVAL_MS` | `5000` | Native engine `/metrics` polling interval, from 1–60 seconds. Missed ticks delay instead of bursting. Each request has a separate two-second timeout and 4MiB body cap. |
-| `MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS` | `3` | Consecutive qualifying zero-acceptance windows required, from 2 through 12. |
-| `MD_DSPARK_GUARD_MIN_PROPOSED_TOKENS` | `256` | Minimum proposed draft tokens in each qualifying window. |
-| `MD_DSPARK_GUARD_EXPECTED_POSITIONS` | `5` | Exact speculative positions required in every sample; use `5` for fixed K5. |
-| `MD_DSPARK_GUARD_STATE_PATH` | unset | Required only for `quarantine`: normalized absolute path to a pre-created mode-0600 durable state file in a protected mode-0700 directory. |
-| `MD_DSPARK_GUARD_STATE_OWNER_UID` | `0` | Required owner UID for the durable state file and directory. |
-| `MD_DSPARK_GUARD_STATE_GROUP_GID` | `0` | Required group GID for the durable state file and directory. |
+| `RJ_DSPARK_GUARD_MODE` | `off` | `off`, telemetry-only `observe`, or enforcing `quarantine`. |
+| `RJ_DSPARK_GUARD_INTERVAL_MS` | `5000` | Native engine `/metrics` polling interval, from 1–60 seconds. Missed ticks delay instead of bursting. Each request has a separate two-second timeout and 4MiB body cap. |
+| `RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS` | `3` | Consecutive qualifying zero-acceptance windows required, from 2 through 12. |
+| `RJ_DSPARK_GUARD_MIN_PROPOSED_TOKENS` | `256` | Minimum proposed draft tokens in each qualifying window. |
+| `RJ_DSPARK_GUARD_EXPECTED_POSITIONS` | `5` | Exact speculative positions required in every sample; use `5` for fixed K5. |
+| `RJ_DSPARK_GUARD_STATE_PATH` | unset | Required only for `quarantine`: normalized absolute path to a pre-created mode-0600 durable state file in a protected mode-0700 directory. |
+| `RJ_DSPARK_GUARD_STATE_OWNER_UID` | `0` | Required owner UID for the durable state file and directory. |
+| `RJ_DSPARK_GUARD_STATE_GROUP_GID` | `0` | Required group GID for the durable state file and directory. |
 
 The guard detects the production-shaped DSpark failure where an active engine
 continues proposing draft work but accepts exactly zero tokens at every K5
@@ -97,7 +124,7 @@ and a persistence failure itself fails closed. Re-admission first durably
 removes the record and then requires a different canonical SHA-256 commitment
 of the compatibility-attested EngineCore incarnation set. A frontend-only
 identity change cannot rearm it. Enforcing mode therefore requires
-`MD_UPSTREAM_ADMISSION_MODE=compatibility` and the protected state path. Raw
+`RJ_UPSTREAM_ADMISSION_MODE=compatibility` and the protected state path. Raw
 incarnations and upstream URLs are never stored. The bounded schema-v1 file
 also precommits a runtime-dirty marker. After an unclean LB exit or a failed
 store mutation, every replica without an existing record starts fenced and its
@@ -121,10 +148,10 @@ no process identity, metric payload, prompt, or completion content is exposed.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MD_SESSION_AFFINITY_MODE` | `off` | `off` or observation-only `shadow`; shadow never changes the served replica. |
-| `MD_SESSION_AFFINITY_KEY` | unset | Independent 32–256-byte HMAC key required in shadow mode. |
-| `MD_SESSION_AFFINITY_BONUS_BLOCKS` | `4` | Counterfactual cache-equivalent bonus, at most `MD_ROUTE_MAX_OVERLAP_BLOCKS`. |
-| `MD_SESSION_AFFINITY_MAX_LOAD_DELTA` | `0` | Maximum load above the least-loaded healthy replica admitted for a counterfactual affinity target. |
+| `RJ_SESSION_AFFINITY_MODE` | `off` | `off` or observation-only `shadow`; shadow never changes the served replica. |
+| `RJ_SESSION_AFFINITY_KEY` | unset | Independent 32–256-byte HMAC key required in shadow mode. |
+| `RJ_SESSION_AFFINITY_BONUS_BLOCKS` | `4` | Counterfactual cache-equivalent bonus, at most `RJ_ROUTE_MAX_OVERLAP_BLOCKS`. |
+| `RJ_SESSION_AFFINITY_MAX_LOAD_DELTA` | `0` | Maximum load above the least-loaded healthy replica admitted for a counterfactual affinity target. |
 
 For one bounded `X-Session-ID`, shadow mode uses keyed rendezvous hashing to
 derive a stable primary and secondary from the configured upstream ordinals.
@@ -148,17 +175,17 @@ exact-canary and snapshot secrets.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MD_TOKENIZER_MODE` | `off` | `off`, `remote-shadow`, or `local-shadow`; shadow modes never change the approximate decision alone. |
-| `MD_TOKENIZER_PATH` | unset | `tokenizer.json` path; required by `local-shadow`. |
-| `MD_TOKENIZER_SHA256` | unset | Expected 64-character artifact SHA-256; required by `local-shadow`. |
-| `MD_TOKENIZER_PROFILE` | `deepseek-v4-r34` | Prompt-renderer profile; one of the labels registered in `src/model/`. Unknown values are rejected at startup. See [models.md](models.md). |
-| `MD_CHAT_TEMPLATE_PATH` | unset | `tokenizer_config.json` supplying the Jinja chat template; required by template-driven profiles. |
-| `MD_CHAT_TEMPLATE_SHA256` | unset | Expected chat-template SHA-256. Required with, and only with, `MD_CHAT_TEMPLATE_PATH`. |
-| `MD_TOKENIZER_MIN_BYTES` | `32768` | Minimum request bytes admitted to shadow tokenization. |
-| `MD_TOKENIZER_MAX_BYTES` | `2097152` | Maximum request bytes admitted to shadow tokenization. |
-| `MD_TOKENIZER_WORKERS` | `1` | Bounded blocking workers for local tokenization. |
-| `MD_TOKENIZER_QUEUE_CAPACITY` | `8` | Non-blocking remote-shadow queue capacity. |
-| `MD_TOKENIZER_TIMEOUT_MS` | `2000` | Per-tokenization timeout. |
+| `RJ_TOKENIZER_MODE` | `off` | `off`, `remote-shadow`, or `local-shadow`; shadow modes never change the approximate decision alone. |
+| `RJ_TOKENIZER_PATH` | unset | `tokenizer.json` path; required by `local-shadow`. |
+| `RJ_TOKENIZER_SHA256` | unset | Expected 64-character artifact SHA-256; required by `local-shadow`. |
+| `RJ_TOKENIZER_PROFILE` | `deepseek-v4-r34` | Prompt-renderer profile; one of the labels registered in `src/model/`. Unknown values are rejected at startup. See [models.md](models.md). |
+| `RJ_CHAT_TEMPLATE_PATH` | unset | `tokenizer_config.json` supplying the Jinja chat template; required by template-driven profiles. |
+| `RJ_CHAT_TEMPLATE_SHA256` | unset | Expected chat-template SHA-256. Required with, and only with, `RJ_CHAT_TEMPLATE_PATH`. |
+| `RJ_TOKENIZER_MIN_BYTES` | `32768` | Minimum request bytes admitted to shadow tokenization. |
+| `RJ_TOKENIZER_MAX_BYTES` | `2097152` | Maximum request bytes admitted to shadow tokenization. |
+| `RJ_TOKENIZER_WORKERS` | `1` | Bounded blocking workers for local tokenization. |
+| `RJ_TOKENIZER_QUEUE_CAPACITY` | `8` | Non-blocking remote-shadow queue capacity. |
+| `RJ_TOKENIZER_TIMEOUT_MS` | `2000` | Per-tokenization timeout. |
 
 `remote-shadow` calls the selected engine's authenticated `/tokenize` endpoint
 after request completion. `local-shadow` compares bounded local token IDs with
@@ -169,23 +196,23 @@ logs, metrics, or journals.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MD_EXACT_ROUTE_MODE` | `off` | `off`, observation-only `shadow`, or canary `placement`. |
-| `MD_EXACT_ROUTE_MANIFEST_PATH` | unset | Compatibility manifest; required when exact routing is enabled. |
-| `MD_EXACT_ROUTE_MANIFEST_SHA256` | unset | Expected manifest SHA-256; required when exact routing is enabled. |
-| `MD_SERVING_RUNTIME_MANIFEST_PATH` | unset | Separate serving-runtime manifest linked to the compatibility-manifest digest; required by `compatibility` admission and safe to stage while admission remains `http`. |
-| `MD_SERVING_RUNTIME_MANIFEST_SHA256` | unset | Expected serving-runtime manifest SHA-256; must be configured together with its path. |
-| `MD_EXACT_ROUTE_WORKERS` | `4` | Bounded exact-index lookup workers. |
-| `MD_EXACT_ROUTE_TIMEOUT_MS` | `250` | Exact pre-route evaluation timeout. |
-| `MD_EXACT_ROUTE_MIN_GAIN_TOKENS` | `8192` | Minimum exact cached-token gain required to move a canary request. |
-| `MD_EXACT_ROUTE_MAX_LOAD_DELTA` | `0` | Maximum additional load allowed on an exact winner. |
-| `MD_EXACT_ROUTE_CANARY_BPS` | `0` | Stable placement cohort size in basis points, from `0` to `10000`. Zero is instant rollback. |
-| `MD_EXACT_ROUTE_CANARY_KEY` | unset | 32–256-byte HMAC key required when the placement cohort is nonzero. |
-| `MD_UPSTREAM_ADMISSION_MODE` | `http` | `http` admits a replica after `/v1/models`. `compatibility` additionally requires one atomic `/v1/mini-dynamo/identity` response to match the pinned manifest. |
-| `MD_UPSTREAM_ADMISSION_TIMEOUT_MS` | `5000` | Absolute timeout, at most 30 seconds, for the atomic serving-identity request. Independent of tokenization timeouts. |
+| `RJ_EXACT_ROUTE_MODE` | `off` | `off`, observation-only `shadow`, or canary `placement`. |
+| `RJ_EXACT_ROUTE_MANIFEST_PATH` | unset | Compatibility manifest; required when exact routing is enabled. |
+| `RJ_EXACT_ROUTE_MANIFEST_SHA256` | unset | Expected manifest SHA-256; required when exact routing is enabled. |
+| `RJ_SERVING_RUNTIME_MANIFEST_PATH` | unset | Separate serving-runtime manifest linked to the compatibility-manifest digest; required by `compatibility` admission and safe to stage while admission remains `http`. |
+| `RJ_SERVING_RUNTIME_MANIFEST_SHA256` | unset | Expected serving-runtime manifest SHA-256; must be configured together with its path. |
+| `RJ_EXACT_ROUTE_WORKERS` | `4` | Bounded exact-index lookup workers. |
+| `RJ_EXACT_ROUTE_TIMEOUT_MS` | `250` | Exact pre-route evaluation timeout. |
+| `RJ_EXACT_ROUTE_MIN_GAIN_TOKENS` | `8192` | Minimum exact cached-token gain required to move a canary request. |
+| `RJ_EXACT_ROUTE_MAX_LOAD_DELTA` | `0` | Maximum additional load allowed on an exact winner. |
+| `RJ_EXACT_ROUTE_CANARY_BPS` | `0` | Stable placement cohort size in basis points, from `0` to `10000`. Zero is instant rollback. |
+| `RJ_EXACT_ROUTE_CANARY_KEY` | unset | 32–256-byte HMAC key required when the placement cohort is nonzero. |
+| `RJ_UPSTREAM_ADMISSION_MODE` | `http` | `http` admits a replica after `/v1/models`. `compatibility` additionally requires one atomic `/v1/mini-dynamo/identity` response to match the pinned manifest. |
+| `RJ_UPSTREAM_ADMISSION_TIMEOUT_MS` | `5000` | Absolute timeout, at most 30 seconds, for the atomic serving-identity request. Independent of tokenization timeouts. |
 
-Exact routing requires `MD_TOKENIZER_MODE=local-shadow`, a pinned manifest,
+Exact routing requires `RJ_TOKENIZER_MODE=local-shadow`, a pinned manifest,
 and exactly one inventory source: direct KV events or snapshot companions.
-Placement additionally requires `MD_AFFINITY=prefix`; snapshot inventories are
+Placement additionally requires `RJ_AFFINITY=prefix`; snapshot inventories are
 shadow-only. Any timeout, attestation failure, event gap, revision change, or
 missing `X-Session-ID` preserves the approximate route.
 
@@ -193,7 +220,7 @@ When exact placement applies, admission reservations are recomputed from the
 exact warm-prefix overlap instead of the approximate block estimate that was
 derived before the inventory was consulted. A request whose prefix is already
 resident therefore reserves proportionally less capacity, bounded by the same
-`MD_ROUTE_LOAD_UNIT_BYTES` quantum and `MD_ROUTE_MAX_LOAD_UNITS` cap. The
+`RJ_ROUTE_LOAD_UNIT_BYTES` quantum and `RJ_ROUTE_MAX_LOAD_UNITS` cap. The
 recompute is atomic across healthy candidates and fails closed: if any healthy
 candidate lacks a trusted overlap, every original reservation is preserved. It
 never changes the selected replica for the request being recomputed — placement
@@ -204,11 +231,11 @@ becomes the next request's alpha-weighted load term. Steering warm work to an
 engine that now reports lower load is the intended effect, but it is a feedback
 loop, not a no-op.
 
-This applies only to `MD_EXACT_ROUTE_MODE=placement`, and there whether or not
+This applies only to `RJ_EXACT_ROUTE_MODE=placement`, and there whether or not
 the exact winner actually moves the request. `shadow` stays strictly
 observation-only: it never alters a reservation.
 
-The recompute can also *raise* a reservation, up to `MD_ROUTE_MAX_LOAD_UNITS`.
+The recompute can also *raise* a reservation, up to `RJ_ROUTE_MAX_LOAD_UNITS`.
 If the approximate prefix index is stale and the engine has actually evicted
 the prefix, exact overlap is zero and the request correctly reserves the cold
 cost the approximate estimate understated. Expect `ds4proxy_upstream_load_units`
@@ -216,7 +243,7 @@ to step up on the first placement rollout; watch the upstream-split panel and
 compare against the journal rather than assuming a regression.
 
 Compatibility admission is an independent serving gate. It requires
-`MD_TOKENIZER_MODE=local-shadow` plus the SHA-pinned manifest so local golden
+`RJ_TOKENIZER_MODE=local-shadow` plus the SHA-pinned manifest so local golden
 validation exists, the separately SHA-pinned serving-runtime manifest, and at
 least two upstreams. It does not enable exact routing. The schema-v2 runtime
 manifest binds the expected EngineCore cardinality, KV-event publisher
@@ -335,15 +362,15 @@ existing raw-residency shadow.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MD_KV_EVENT_MODE` | `off` | `off` or observation-only `shadow`. |
-| `MD_KV_EVENT_LIVE_ENDPOINTS` | unset | Comma-separated internal `tcp://host:port` endpoints, one per upstream. |
-| `MD_KV_EVENT_REPLAY_ENDPOINTS` | unset | Matching replay endpoints, one per upstream. |
-| `MD_KV_EVENT_TOPIC` | empty | Optional ZMQ topic, at most 256 bytes. |
-| `MD_KV_EVENT_REPLAY_LIMIT` | `1024` | Maximum replay batches accepted during recovery. |
-| `MD_KV_EVENT_REPLAY_TAIL_LIMIT` | `64` | Maximum bounded replay tail. |
-| `MD_KV_EVENT_TIMEOUT_MS` | `5000` | Connect/replay operation deadline. |
-| `MD_KV_EVENT_RECONNECT_MIN_MS` | `250` | Initial reconnect backoff. |
-| `MD_KV_EVENT_RECONNECT_MAX_MS` | `10000` | Maximum reconnect backoff. |
+| `RJ_KV_EVENT_MODE` | `off` | `off` or observation-only `shadow`. |
+| `RJ_KV_EVENT_LIVE_ENDPOINTS` | unset | Comma-separated internal `tcp://host:port` endpoints, one per upstream. |
+| `RJ_KV_EVENT_REPLAY_ENDPOINTS` | unset | Matching replay endpoints, one per upstream. |
+| `RJ_KV_EVENT_TOPIC` | empty | Optional ZMQ topic, at most 256 bytes. |
+| `RJ_KV_EVENT_REPLAY_LIMIT` | `1024` | Maximum replay batches accepted during recovery. |
+| `RJ_KV_EVENT_REPLAY_TAIL_LIMIT` | `64` | Maximum bounded replay tail. |
+| `RJ_KV_EVENT_TIMEOUT_MS` | `5000` | Connect/replay operation deadline. |
+| `RJ_KV_EVENT_RECONNECT_MIN_MS` | `250` | Initial reconnect backoff. |
+| `RJ_KV_EVENT_RECONNECT_MAX_MS` | `10000` | Maximum reconnect backoff. |
 
 Inventories start untrusted and fence on disconnect or invalid replay. Sparse
 vLLM scheduler sequence numbers are valid; duplicate, decreasing,
@@ -354,20 +381,20 @@ never enter logs, metrics, or journals.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MD_SNAPSHOT_ROUTE_MODE` | `off` | `off` or observation-only `shadow`. |
-| `MD_SNAPSHOT_ROUTE_SOCKET_PATHS` | unset | Unix socket path per upstream. |
-| `MD_SNAPSHOT_ROUTE_COMPANION_UIDS` | unset | Non-root companion UID per upstream. |
-| `MD_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS` | unset | Session secret path per upstream. |
-| `MD_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS` | unset | Digest secret path per upstream. |
-| `MD_SNAPSHOT_ROUTE_ATTESTATION_PATHS` | unset | Engine attestation path per upstream. |
-| `MD_SNAPSHOT_ROUTE_GROUPS` | unset | `data_parallel_rank:group_index` per upstream. |
-| `MD_SNAPSHOT_ROUTE_SECRET_OWNER_UID` | `0` | Expected owner of protected inputs. |
-| `MD_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS` | `1000` | Attestation refresh interval. |
-| `MD_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS` | `30000` | Absolute connection/snapshot attempt deadline. |
-| `MD_SNAPSHOT_ROUTE_RECONNECT_MIN_MS` | `250` | Initial reconnect backoff. |
-| `MD_SNAPSHOT_ROUTE_RECONNECT_MAX_MS` | `5000` | Maximum reconnect backoff. |
+| `RJ_SNAPSHOT_ROUTE_MODE` | `off` | `off` or observation-only `shadow`. |
+| `RJ_SNAPSHOT_ROUTE_SOCKET_PATHS` | unset | Unix socket path per upstream. |
+| `RJ_SNAPSHOT_ROUTE_COMPANION_UIDS` | unset | Non-root companion UID per upstream. |
+| `RJ_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS` | unset | Session secret path per upstream. |
+| `RJ_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS` | unset | Digest secret path per upstream. |
+| `RJ_SNAPSHOT_ROUTE_ATTESTATION_PATHS` | unset | Engine attestation path per upstream. |
+| `RJ_SNAPSHOT_ROUTE_GROUPS` | unset | `data_parallel_rank:group_index` per upstream. |
+| `RJ_SNAPSHOT_ROUTE_SECRET_OWNER_UID` | `0` | Expected owner of protected inputs. |
+| `RJ_SNAPSHOT_ROUTE_ATTESTATION_REFRESH_MS` | `1000` | Attestation refresh interval. |
+| `RJ_SNAPSHOT_ROUTE_ATTEMPT_TIMEOUT_MS` | `30000` | Absolute connection/snapshot attempt deadline. |
+| `RJ_SNAPSHOT_ROUTE_RECONNECT_MIN_MS` | `250` | Initial reconnect backoff. |
+| `RJ_SNAPSHOT_ROUTE_RECONNECT_MAX_MS` | `5000` | Maximum reconnect backoff. |
 
-All per-upstream lists must match `MD_UPSTREAM` in length. Socket, session
+All per-upstream lists must match `RJ_UPSTREAM` in length. Socket, session
 secret, digest secret, and attestation paths must be normalized, absolute, and
 distinct across every authority domain. Use the validated production overlay
 in [`deploy/dspark_0731`](../deploy/dspark_0731/README.md); do not improvise
@@ -382,41 +409,41 @@ validated Compose overlay.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MD_SNAPSHOT_COMPANION_MODE` | `off` | `off` or `serve`. |
-| `MD_SNAPSHOT_SOCKET_PATH` | unset | Required serve-mode Unix socket path. |
-| `MD_SNAPSHOT_COMPANION_UID` | unset | Required non-root process UID. |
-| `MD_SNAPSHOT_CLIENT_UID` | unset | Required, distinct non-root LB UID. |
-| `MD_SNAPSHOT_SECRET_PATH` | unset | Required 32-byte session secret path. |
-| `MD_SNAPSHOT_SECRET_OWNER_UID` | `0` | Expected owner of protected inputs. |
-| `MD_SNAPSHOT_LIVE_ENDPOINTS` | unset | Required live KV endpoint; standalone mode accepts exactly one. |
-| `MD_SNAPSHOT_REPLAY_ENDPOINTS` | unset | Matching replay endpoint. |
-| `MD_SNAPSHOT_EVENT_TOPIC` | empty | Optional ZMQ topic, at most 256 bytes. |
-| `MD_SNAPSHOT_MAX_CLIENTS` | `2` | Active authenticated clients; standalone serve mode requires `2`. |
-| `MD_SNAPSHOT_TAIL_QUEUE_CAPACITY` | `1024` | Maximum queued tail entries. |
-| `MD_SNAPSHOT_TAIL_QUEUE_MAX_BYTES` | `16777216` | Maximum queued tail payload bytes. |
-| `MD_SNAPSHOT_DEADLINE_MS` | `3000` | Snapshot-phase deadline. |
-| `MD_SNAPSHOT_TAIL_IDLE_DEADLINE_MS` | `30000` | Tail idle/write budget. |
-| `MD_SNAPSHOT_SHUTDOWN_DEADLINE_MS` | `5000` | Supervisor drain deadline. |
-| `MD_SNAPSHOT_MAX_FRAME_BYTES` | `33554432` | Maximum snapshot frame bytes. |
-| `MD_SNAPSHOT_MAX_TAIL_FRAME_BYTES` | `8392704` | Maximum tail frame bytes. |
-| `MD_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES` | `8388608` | Maximum decoded event-batch payload; must be smaller than a tail frame. |
-| `MD_SNAPSHOT_MAX_BATCH_EVENTS` | `4096` | Maximum events per decoded batch. |
-| `MD_SNAPSHOT_DIGEST_SECRET_PATH` | unset | Required, distinct digest secret path. |
-| `MD_SNAPSHOT_ATTESTATION_PATH` | unset | Required, distinct authenticated engine identity path. |
-| `MD_SNAPSHOT_ATTESTATION_REFRESH_MS` | `1000` | Engine identity refresh interval. |
-| `MD_SNAPSHOT_BLOCK_SIZE` | unset | Required engine KV block size. |
-| `MD_SNAPSHOT_ATTENTION_KIND` | `mla` | `full`, `mla`, or `sink_full`. |
-| `MD_SNAPSHOT_DATA_PARALLEL_RANK` | `0` | Group data-parallel rank. |
-| `MD_SNAPSHOT_GROUP_INDEX` | `0` | Group index. |
-| `MD_SNAPSHOT_CONNECT_TIMEOUT_MS` | `2000` | Engine KV-event connect timeout. |
-| `MD_SNAPSHOT_REPLAY_TIMEOUT_MS` | `30000` | Engine replay timeout. |
-| `MD_SNAPSHOT_REPLAY_LIMIT` | `10000` | Maximum replay batches. |
-| `MD_SNAPSHOT_REPLAY_TAIL_LIMIT` | `1024` | Maximum replay tail batches. |
-| `MD_SNAPSHOT_RECONNECT_MIN_MS` | `250` | Initial source reconnect backoff. |
-| `MD_SNAPSHOT_RECONNECT_MAX_MS` | `5000` | Maximum source reconnect backoff. |
-| `MD_SNAPSHOT_METRICS_BIND` | `127.0.0.1:9091` | Loopback-only TCP metrics address. |
-| `MD_SNAPSHOT_METRICS_SOCKET_PATH` | unset | Metrics-only Unix socket; mutually exclusive with `MD_SNAPSHOT_METRICS_BIND`. |
-| `MD_SNAPSHOT_METRICS_GROUP_GID` | unset | Required dedicated non-root group when using a metrics Unix socket. |
+| `RJ_SNAPSHOT_COMPANION_MODE` | `off` | `off` or `serve`. |
+| `RJ_SNAPSHOT_SOCKET_PATH` | unset | Required serve-mode Unix socket path. |
+| `RJ_SNAPSHOT_COMPANION_UID` | unset | Required non-root process UID. |
+| `RJ_SNAPSHOT_CLIENT_UID` | unset | Required, distinct non-root LB UID. |
+| `RJ_SNAPSHOT_SECRET_PATH` | unset | Required 32-byte session secret path. |
+| `RJ_SNAPSHOT_SECRET_OWNER_UID` | `0` | Expected owner of protected inputs. |
+| `RJ_SNAPSHOT_LIVE_ENDPOINTS` | unset | Required live KV endpoint; standalone mode accepts exactly one. |
+| `RJ_SNAPSHOT_REPLAY_ENDPOINTS` | unset | Matching replay endpoint. |
+| `RJ_SNAPSHOT_EVENT_TOPIC` | empty | Optional ZMQ topic, at most 256 bytes. |
+| `RJ_SNAPSHOT_MAX_CLIENTS` | `2` | Active authenticated clients; standalone serve mode requires `2`. |
+| `RJ_SNAPSHOT_TAIL_QUEUE_CAPACITY` | `1024` | Maximum queued tail entries. |
+| `RJ_SNAPSHOT_TAIL_QUEUE_MAX_BYTES` | `16777216` | Maximum queued tail payload bytes. |
+| `RJ_SNAPSHOT_DEADLINE_MS` | `3000` | Snapshot-phase deadline. |
+| `RJ_SNAPSHOT_TAIL_IDLE_DEADLINE_MS` | `30000` | Tail idle/write budget. |
+| `RJ_SNAPSHOT_SHUTDOWN_DEADLINE_MS` | `5000` | Supervisor drain deadline. |
+| `RJ_SNAPSHOT_MAX_FRAME_BYTES` | `33554432` | Maximum snapshot frame bytes. |
+| `RJ_SNAPSHOT_MAX_TAIL_FRAME_BYTES` | `8392704` | Maximum tail frame bytes. |
+| `RJ_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES` | `8388608` | Maximum decoded event-batch payload; must be smaller than a tail frame. |
+| `RJ_SNAPSHOT_MAX_BATCH_EVENTS` | `4096` | Maximum events per decoded batch. |
+| `RJ_SNAPSHOT_DIGEST_SECRET_PATH` | unset | Required, distinct digest secret path. |
+| `RJ_SNAPSHOT_ATTESTATION_PATH` | unset | Required, distinct authenticated engine identity path. |
+| `RJ_SNAPSHOT_ATTESTATION_REFRESH_MS` | `1000` | Engine identity refresh interval. |
+| `RJ_SNAPSHOT_BLOCK_SIZE` | unset | Required engine KV block size. |
+| `RJ_SNAPSHOT_ATTENTION_KIND` | `mla` | `full`, `mla`, or `sink_full`. |
+| `RJ_SNAPSHOT_DATA_PARALLEL_RANK` | `0` | Group data-parallel rank. |
+| `RJ_SNAPSHOT_GROUP_INDEX` | `0` | Group index. |
+| `RJ_SNAPSHOT_CONNECT_TIMEOUT_MS` | `2000` | Engine KV-event connect timeout. |
+| `RJ_SNAPSHOT_REPLAY_TIMEOUT_MS` | `30000` | Engine replay timeout. |
+| `RJ_SNAPSHOT_REPLAY_LIMIT` | `10000` | Maximum replay batches. |
+| `RJ_SNAPSHOT_REPLAY_TAIL_LIMIT` | `1024` | Maximum replay tail batches. |
+| `RJ_SNAPSHOT_RECONNECT_MIN_MS` | `250` | Initial source reconnect backoff. |
+| `RJ_SNAPSHOT_RECONNECT_MAX_MS` | `5000` | Maximum source reconnect backoff. |
+| `RJ_SNAPSHOT_METRICS_BIND` | `127.0.0.1:9091` | Loopback-only TCP metrics address. |
+| `RJ_SNAPSHOT_METRICS_SOCKET_PATH` | unset | Metrics-only Unix socket; mutually exclusive with `RJ_SNAPSHOT_METRICS_BIND`. |
+| `RJ_SNAPSHOT_METRICS_GROUP_GID` | unset | Required dedicated non-root group when using a metrics Unix socket. |
 
 The metrics Unix socket must use a separate, setgid authority directory and a
 group that is not the snapshot/session group. Scrapers may join only the
@@ -429,12 +456,12 @@ success. It requires all settings below except the age override.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MD_SNAPSHOT_ENGINE_METADATA_PATH` | required | Fresh, protected schema-v1 engine metadata input. |
-| `MD_SNAPSHOT_DIGEST_SECRET_PATH` | required | Digest secret used to authenticate the output. |
-| `MD_SNAPSHOT_ATTESTATION_PATH` | required | Atomically published attestation output. |
-| `MD_SNAPSHOT_SECRET_OWNER_UID` | required | Exact output/input owner UID. |
-| `MD_SNAPSHOT_SECRET_GROUP_GID` | required | Exact output group GID. |
-| `MD_SNAPSHOT_ATTESTATION_MAX_AGE_MS` | `30000` | Maximum metadata age; bounded to five minutes. |
+| `RJ_SNAPSHOT_ENGINE_METADATA_PATH` | required | Fresh, protected schema-v1 engine metadata input. |
+| `RJ_SNAPSHOT_DIGEST_SECRET_PATH` | required | Digest secret used to authenticate the output. |
+| `RJ_SNAPSHOT_ATTESTATION_PATH` | required | Atomically published attestation output. |
+| `RJ_SNAPSHOT_SECRET_OWNER_UID` | required | Exact output/input owner UID. |
+| `RJ_SNAPSHOT_SECRET_GROUP_GID` | required | Exact output group GID. |
+| `RJ_SNAPSHOT_ATTESTATION_MAX_AGE_MS` | `30000` | Maximum metadata age; bounded to five minutes. |
 
 ## Metrics and route journals
 
@@ -458,7 +485,7 @@ families are:
   effective-tokens-per-step gauges describe each valid window, while
   quarantine transitions use a separate fixed-reason counter.
 
-With `MD_ROUTE_JOURNAL=true`, replay bounded decision snapshots without
+With `RJ_ROUTE_JOURNAL=true`, replay bounded decision snapshots without
 changing live traffic:
 
 ```bash
