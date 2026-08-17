@@ -124,76 +124,76 @@ impl SnapshotCompanionConfig {
     pub fn from_lookup(
         mut get: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, SnapshotCompanionConfigError> {
-        let mode = match get("MD_SNAPSHOT_COMPANION_MODE")
+        let mode = match get("RJ_SNAPSHOT_COMPANION_MODE")
             .as_deref()
             .unwrap_or("off")
         {
             "off" => SnapshotCompanionMode::Off,
             "serve" => SnapshotCompanionMode::Serve,
-            _ => return Err(invalid("MD_SNAPSHOT_COMPANION_MODE", "off or serve")),
+            _ => return Err(invalid("RJ_SNAPSHOT_COMPANION_MODE", "off or serve")),
         };
 
-        let max_clients = bounded_usize(&mut get, "MD_SNAPSHOT_MAX_CLIENTS", 2, 1, MAX_CLIENTS)?;
+        let max_clients = bounded_usize(&mut get, "RJ_SNAPSHOT_MAX_CLIENTS", 2, 1, MAX_CLIENTS)?;
         let tail_queue_capacity = bounded_usize(
             &mut get,
-            "MD_SNAPSHOT_TAIL_QUEUE_CAPACITY",
+            "RJ_SNAPSHOT_TAIL_QUEUE_CAPACITY",
             1_024,
             1,
             MAX_QUEUE_CAPACITY,
         )?;
         let tail_queue_max_bytes = bounded_usize(
             &mut get,
-            "MD_SNAPSHOT_TAIL_QUEUE_MAX_BYTES",
+            "RJ_SNAPSHOT_TAIL_QUEUE_MAX_BYTES",
             16 * 1024 * 1024,
             1,
             MAX_QUEUE_BYTES,
         )?;
-        let snapshot_deadline = duration_ms(&mut get, "MD_SNAPSHOT_DEADLINE_MS", 3_000)?;
+        let snapshot_deadline = duration_ms(&mut get, "RJ_SNAPSHOT_DEADLINE_MS", 3_000)?;
         let tail_idle_deadline =
-            duration_ms(&mut get, "MD_SNAPSHOT_TAIL_IDLE_DEADLINE_MS", 30_000)?;
-        let shutdown_deadline = duration_ms(&mut get, "MD_SNAPSHOT_SHUTDOWN_DEADLINE_MS", 5_000)?;
+            duration_ms(&mut get, "RJ_SNAPSHOT_TAIL_IDLE_DEADLINE_MS", 30_000)?;
+        let shutdown_deadline = duration_ms(&mut get, "RJ_SNAPSHOT_SHUTDOWN_DEADLINE_MS", 5_000)?;
         let max_snapshot_frame_bytes = bounded_usize(
             &mut get,
-            "MD_SNAPSHOT_MAX_FRAME_BYTES",
+            "RJ_SNAPSHOT_MAX_FRAME_BYTES",
             MAX_SNAPSHOT_FRAME_BYTES,
             1,
             MAX_SNAPSHOT_FRAME_BYTES,
         )?;
         let max_tail_frame_bytes = bounded_usize(
             &mut get,
-            "MD_SNAPSHOT_MAX_TAIL_FRAME_BYTES",
+            "RJ_SNAPSHOT_MAX_TAIL_FRAME_BYTES",
             8 * 1024 * 1024 + 4 * 1024,
             1,
             MAX_TAIL_FRAME_BYTES,
         )?;
         let max_batch_payload_bytes = bounded_usize(
             &mut get,
-            "MD_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES",
+            "RJ_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES",
             8 * 1024 * 1024,
             1,
             MAX_BATCH_PAYLOAD_BYTES,
         )?;
         let max_batch_events = bounded_usize(
             &mut get,
-            "MD_SNAPSHOT_MAX_BATCH_EVENTS",
+            "RJ_SNAPSHOT_MAX_BATCH_EVENTS",
             MAX_BATCH_EVENTS,
             1,
             MAX_BATCH_EVENTS,
         )?;
         if max_batch_payload_bytes >= max_tail_frame_bytes {
             return Err(invalid(
-                "MD_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES",
+                "RJ_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES",
                 "a positive byte bound smaller than the tail frame bound",
             ));
         }
         if tail_queue_max_bytes < max_batch_payload_bytes {
             return Err(invalid(
-                "MD_SNAPSHOT_TAIL_QUEUE_MAX_BYTES",
+                "RJ_SNAPSHOT_TAIL_QUEUE_MAX_BYTES",
                 "a byte bound at least as large as one batch payload",
             ));
         }
         let secret_owner_uid =
-            parse_u32(&mut get, "MD_SNAPSHOT_SECRET_OWNER_UID", Some(0))?.unwrap_or(0);
+            parse_u32(&mut get, "RJ_SNAPSHOT_SECRET_OWNER_UID", Some(0))?.unwrap_or(0);
 
         if mode == SnapshotCompanionMode::Off {
             return Ok(Self {
@@ -219,35 +219,35 @@ impl SnapshotCompanionConfig {
         }
 
         let socket_path =
-            required_path(&mut get, "MD_SNAPSHOT_SOCKET_PATH", MAX_SOCKET_PATH_BYTES)?;
+            required_path(&mut get, "RJ_SNAPSHOT_SOCKET_PATH", MAX_SOCKET_PATH_BYTES)?;
         let secret_path =
-            required_path(&mut get, "MD_SNAPSHOT_SECRET_PATH", MAX_SECRET_PATH_BYTES)?;
+            required_path(&mut get, "RJ_SNAPSHOT_SECRET_PATH", MAX_SECRET_PATH_BYTES)?;
         if socket_path == secret_path {
             return Err(invalid(
-                "MD_SNAPSHOT_SECRET_PATH",
+                "RJ_SNAPSHOT_SECRET_PATH",
                 "an absolute normalized path distinct from the socket",
             ));
         }
-        let companion_uid = required_non_root_uid(&mut get, "MD_SNAPSHOT_COMPANION_UID")?;
-        let client_uid = required_non_root_uid(&mut get, "MD_SNAPSHOT_CLIENT_UID")?;
+        let companion_uid = required_non_root_uid(&mut get, "RJ_SNAPSHOT_COMPANION_UID")?;
+        let client_uid = required_non_root_uid(&mut get, "RJ_SNAPSHOT_CLIENT_UID")?;
         if companion_uid == client_uid {
             return Err(invalid(
-                "MD_SNAPSHOT_CLIENT_UID",
+                "RJ_SNAPSHOT_CLIENT_UID",
                 "a non-root UID distinct from the companion UID",
             ));
         }
 
-        let live = endpoint_list(&mut get, "MD_SNAPSHOT_LIVE_ENDPOINTS")?;
-        let replay = endpoint_list(&mut get, "MD_SNAPSHOT_REPLAY_ENDPOINTS")?;
+        let live = endpoint_list(&mut get, "RJ_SNAPSHOT_LIVE_ENDPOINTS")?;
+        let replay = endpoint_list(&mut get, "RJ_SNAPSHOT_REPLAY_ENDPOINTS")?;
         if live.is_empty() || live.len() > MAX_SOURCES || live.len() != replay.len() {
             return Err(invalid(
-                "MD_SNAPSHOT_LIVE_ENDPOINTS",
+                "RJ_SNAPSHOT_LIVE_ENDPOINTS",
                 "one or two live endpoints with one replay endpoint each",
             ));
         }
-        let event_topic = get("MD_SNAPSHOT_EVENT_TOPIC").unwrap_or_default();
+        let event_topic = get("RJ_SNAPSHOT_EVENT_TOPIC").unwrap_or_default();
         if event_topic.len() > MAX_TOPIC_BYTES {
-            return Err(invalid("MD_SNAPSHOT_EVENT_TOPIC", "at most 256 bytes"));
+            return Err(invalid("RJ_SNAPSHOT_EVENT_TOPIC", "at most 256 bytes"));
         }
         let sources = live
             .into_iter()
@@ -450,17 +450,17 @@ mod tests {
 
     fn configured() -> HashMap<&'static str, &'static str> {
         HashMap::from([
-            ("MD_SNAPSHOT_COMPANION_MODE", "serve"),
-            ("MD_SNAPSHOT_SOCKET_PATH", "/run/mini-dynamo/snapshot.sock"),
-            ("MD_SNAPSHOT_COMPANION_UID", "12001"),
-            ("MD_SNAPSHOT_CLIENT_UID", "12002"),
-            ("MD_SNAPSHOT_SECRET_PATH", "/run/secrets/snapshot-session"),
+            ("RJ_SNAPSHOT_COMPANION_MODE", "serve"),
+            ("RJ_SNAPSHOT_SOCKET_PATH", "/run/mini-dynamo/snapshot.sock"),
+            ("RJ_SNAPSHOT_COMPANION_UID", "12001"),
+            ("RJ_SNAPSHOT_CLIENT_UID", "12002"),
+            ("RJ_SNAPSHOT_SECRET_PATH", "/run/secrets/snapshot-session"),
             (
-                "MD_SNAPSHOT_LIVE_ENDPOINTS",
+                "RJ_SNAPSHOT_LIVE_ENDPOINTS",
                 "tcp://engine-a:5557,tcp://engine-b:5557",
             ),
             (
-                "MD_SNAPSHOT_REPLAY_ENDPOINTS",
+                "RJ_SNAPSHOT_REPLAY_ENDPOINTS",
                 "tcp://engine-a:5558,tcp://engine-b:5558",
             ),
         ])
@@ -507,11 +507,11 @@ mod tests {
     #[test]
     fn serve_mode_requires_paths_uids_and_endpoints() {
         for missing in [
-            "MD_SNAPSHOT_SOCKET_PATH",
-            "MD_SNAPSHOT_COMPANION_UID",
-            "MD_SNAPSHOT_CLIENT_UID",
-            "MD_SNAPSHOT_SECRET_PATH",
-            "MD_SNAPSHOT_LIVE_ENDPOINTS",
+            "RJ_SNAPSHOT_SOCKET_PATH",
+            "RJ_SNAPSHOT_COMPANION_UID",
+            "RJ_SNAPSHOT_CLIENT_UID",
+            "RJ_SNAPSHOT_SECRET_PATH",
+            "RJ_SNAPSHOT_LIVE_ENDPOINTS",
         ] {
             let mut values = configured();
             values.remove(missing);
@@ -528,14 +528,14 @@ mod tests {
             "/",
         ] {
             let mut values = configured();
-            values.insert("MD_SNAPSHOT_SOCKET_PATH", path);
+            values.insert("RJ_SNAPSHOT_SOCKET_PATH", path);
             let error = load(&values).unwrap_err();
             let rendered = error.to_string();
             assert!(!rendered.contains(path));
             assert!(matches!(
                 error,
                 SnapshotCompanionConfigError::Invalid {
-                    key: "MD_SNAPSHOT_SOCKET_PATH",
+                    key: "RJ_SNAPSHOT_SOCKET_PATH",
                     ..
                 }
             ));
@@ -544,7 +544,7 @@ mod tests {
         let too_long = format!("/run/{}.sock", "x".repeat(MAX_SOCKET_PATH_BYTES));
         let mut values = configured();
         values.insert(
-            "MD_SNAPSHOT_SOCKET_PATH",
+            "RJ_SNAPSHOT_SOCKET_PATH",
             Box::leak(too_long.into_boxed_str()),
         );
         assert!(load(&values).is_err());
@@ -553,9 +553,9 @@ mod tests {
     #[test]
     fn rejects_root_equal_or_malformed_uids() {
         for (key, value) in [
-            ("MD_SNAPSHOT_COMPANION_UID", "0"),
-            ("MD_SNAPSHOT_CLIENT_UID", "nope"),
-            ("MD_SNAPSHOT_CLIENT_UID", "12001"),
+            ("RJ_SNAPSHOT_COMPANION_UID", "0"),
+            ("RJ_SNAPSHOT_CLIENT_UID", "nope"),
+            ("RJ_SNAPSHOT_CLIENT_UID", "12001"),
         ] {
             let mut values = configured();
             values.insert(key, value);
@@ -566,18 +566,18 @@ mod tests {
     #[test]
     fn validates_client_queue_and_deadline_bounds_even_when_off() {
         for (key, value) in [
-            ("MD_SNAPSHOT_MAX_CLIENTS", "0"),
-            ("MD_SNAPSHOT_MAX_CLIENTS", "3"),
-            ("MD_SNAPSHOT_TAIL_QUEUE_CAPACITY", "0"),
-            ("MD_SNAPSHOT_TAIL_QUEUE_CAPACITY", "65537"),
-            ("MD_SNAPSHOT_TAIL_QUEUE_MAX_BYTES", "67108865"),
-            ("MD_SNAPSHOT_DEADLINE_MS", "0"),
-            ("MD_SNAPSHOT_TAIL_IDLE_DEADLINE_MS", "900001"),
-            ("MD_SNAPSHOT_SHUTDOWN_DEADLINE_MS", "invalid"),
-            ("MD_SNAPSHOT_MAX_FRAME_BYTES", "33554433"),
-            ("MD_SNAPSHOT_MAX_TAIL_FRAME_BYTES", "16777217"),
-            ("MD_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES", "16777217"),
-            ("MD_SNAPSHOT_MAX_BATCH_EVENTS", "4097"),
+            ("RJ_SNAPSHOT_MAX_CLIENTS", "0"),
+            ("RJ_SNAPSHOT_MAX_CLIENTS", "3"),
+            ("RJ_SNAPSHOT_TAIL_QUEUE_CAPACITY", "0"),
+            ("RJ_SNAPSHOT_TAIL_QUEUE_CAPACITY", "65537"),
+            ("RJ_SNAPSHOT_TAIL_QUEUE_MAX_BYTES", "67108865"),
+            ("RJ_SNAPSHOT_DEADLINE_MS", "0"),
+            ("RJ_SNAPSHOT_TAIL_IDLE_DEADLINE_MS", "900001"),
+            ("RJ_SNAPSHOT_SHUTDOWN_DEADLINE_MS", "invalid"),
+            ("RJ_SNAPSHOT_MAX_FRAME_BYTES", "33554433"),
+            ("RJ_SNAPSHOT_MAX_TAIL_FRAME_BYTES", "16777217"),
+            ("RJ_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES", "16777217"),
+            ("RJ_SNAPSHOT_MAX_BATCH_EVENTS", "4097"),
         ] {
             let values = HashMap::from([(key, value)]);
             assert!(load(&values).is_err(), "accepted {key}={value}");
@@ -587,12 +587,12 @@ mod tests {
     #[test]
     fn decoded_batch_must_fit_inside_authenticated_tail_frame() {
         let mut values = configured();
-        values.insert("MD_SNAPSHOT_MAX_TAIL_FRAME_BYTES", "1024");
-        values.insert("MD_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES", "1024");
+        values.insert("RJ_SNAPSHOT_MAX_TAIL_FRAME_BYTES", "1024");
+        values.insert("RJ_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES", "1024");
         assert!(matches!(
             load(&values),
             Err(SnapshotCompanionConfigError::Invalid {
-                key: "MD_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES",
+                key: "RJ_SNAPSHOT_MAX_BATCH_PAYLOAD_BYTES",
                 ..
             })
         ));
@@ -601,11 +601,11 @@ mod tests {
     #[test]
     fn one_max_batch_must_fit_inside_tail_queue_byte_budget() {
         let mut values = configured();
-        values.insert("MD_SNAPSHOT_TAIL_QUEUE_MAX_BYTES", "4194304");
+        values.insert("RJ_SNAPSHOT_TAIL_QUEUE_MAX_BYTES", "4194304");
         assert!(matches!(
             load(&values),
             Err(SnapshotCompanionConfigError::Invalid {
-                key: "MD_SNAPSHOT_TAIL_QUEUE_MAX_BYTES",
+                key: "RJ_SNAPSHOT_TAIL_QUEUE_MAX_BYTES",
                 ..
             })
         ));
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn debug_redacts_paths_uids_topics_and_endpoints() {
         let mut values = configured();
-        values.insert("MD_SNAPSHOT_EVENT_TOPIC", "private-topic");
+        values.insert("RJ_SNAPSHOT_EVENT_TOPIC", "private-topic");
         let config = load(&values).unwrap();
         let debug = format!("{config:?}");
         for forbidden in [
@@ -632,14 +632,14 @@ mod tests {
     #[test]
     fn endpoint_cardinality_and_shapes_are_exact() {
         for (key, value) in [
-            ("MD_SNAPSHOT_REPLAY_ENDPOINTS", "tcp://engine-a:5558"),
+            ("RJ_SNAPSHOT_REPLAY_ENDPOINTS", "tcp://engine-a:5558"),
             (
-                "MD_SNAPSHOT_LIVE_ENDPOINTS",
+                "RJ_SNAPSHOT_LIVE_ENDPOINTS",
                 "tcp://a:1,tcp://b:2,tcp://c:3",
             ),
-            ("MD_SNAPSHOT_LIVE_ENDPOINTS", "ipc:///tmp/events"),
+            ("RJ_SNAPSHOT_LIVE_ENDPOINTS", "ipc:///tmp/events"),
             (
-                "MD_SNAPSHOT_REPLAY_ENDPOINTS",
+                "RJ_SNAPSHOT_REPLAY_ENDPOINTS",
                 "tcp://user@engine-a:5558,tcp://engine-b:5558",
             ),
         ] {
@@ -651,7 +651,7 @@ mod tests {
         let oversized = format!("tcp://{}:5557", "a".repeat(MAX_ENDPOINT_BYTES));
         let mut values = configured();
         values.insert(
-            "MD_SNAPSHOT_LIVE_ENDPOINTS",
+            "RJ_SNAPSHOT_LIVE_ENDPOINTS",
             Box::leak(oversized.into_boxed_str()),
         );
         assert!(load(&values).is_err());

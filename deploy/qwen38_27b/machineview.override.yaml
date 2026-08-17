@@ -10,5 +10,5 @@ services:
     volumes:
       - /var/lib/mini-dynamo-machineview:/machineview
     environment:
-      MD_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
-      MD_MACHINEVIEW_STATE_PATH: /machineview/state.json
+      RJ_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
+      RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json

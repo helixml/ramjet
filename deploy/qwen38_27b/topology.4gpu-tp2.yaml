@@ -13,9 +13,9 @@
 services:
   ds4-loadbalancer:
     environment:
-      MD_UPSTREAM: ${MD_UPSTREAM:-http://qwen38-e0:8000,http://qwen38-e1:8000}
-      MD_KV_EVENT_LIVE_ENDPOINTS: ${MD_KV_EVENT_LIVE_ENDPOINTS:-tcp://qwen38-e0:5557,tcp://qwen38-e1:5557}
-      MD_KV_EVENT_REPLAY_ENDPOINTS: ${MD_KV_EVENT_REPLAY_ENDPOINTS:-tcp://qwen38-e0:5558,tcp://qwen38-e1:5558}
+      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://qwen38-e0:8000,http://qwen38-e1:8000}
+      RJ_KV_EVENT_LIVE_ENDPOINTS: ${RJ_KV_EVENT_LIVE_ENDPOINTS:-tcp://qwen38-e0:5557,tcp://qwen38-e1:5557}
+      RJ_KV_EVENT_REPLAY_ENDPOINTS: ${RJ_KV_EVENT_REPLAY_ENDPOINTS:-tcp://qwen38-e0:5558,tcp://qwen38-e1:5558}
   # The base file's fixed pair is parked so a stale container cannot
   # hold GPUs while this topology starts.
   qwen38-a:

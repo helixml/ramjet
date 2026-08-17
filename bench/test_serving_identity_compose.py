@@ -30,14 +30,14 @@ class ServingIdentityComposeTest(unittest.TestCase):
     def test_overlay_cannot_enable_load_balancer_admission(self):
         document = validator.render(enabled=True)
         document["services"]["ds4-loadbalancer"]["environment"][
-            "MD_UPSTREAM_ADMISSION_MODE"
+            "RJ_UPSTREAM_ADMISSION_MODE"
         ] = "compatibility"
         with self.assertRaisesRegex(validator.ValidationError, "may not opt"):
             validator.validate_enabled(document)
 
         document = validator.render(enabled=True)
         document["services"]["ds4-loadbalancer"]["environment"][
-            "MD_DSPARK_GUARD_MODE"
+            "RJ_DSPARK_GUARD_MODE"
         ] = "quarantine"
         with self.assertRaisesRegex(validator.ValidationError, "DSpark enforcement"):
             validator.validate_enabled(document)
@@ -45,7 +45,7 @@ class ServingIdentityComposeTest(unittest.TestCase):
     def test_manifest_pin_and_mount_are_independent_gates(self):
         document = validator.render(enabled=True)
         service = document["services"][validator.ENGINES[0]]
-        service["environment"]["MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SHA256"] = "0" * 64
+        service["environment"]["RAMJET_SERVING_IDENTITY_MANIFEST_SHA256"] = "0" * 64
         with self.assertRaisesRegex(validator.ValidationError, "manifest pin"):
             validator.validate_enabled(document)
 
@@ -61,14 +61,14 @@ class ServingIdentityComposeTest(unittest.TestCase):
         document = validator.render(enabled=True)
         engine = document["services"][validator.ENGINES[0]]
         engine["environment"][
-            "MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SHA256"
+            "RAMJET_SERVING_RUNTIME_MANIFEST_SHA256"
         ] = "0" * 64
         with self.assertRaisesRegex(validator.ValidationError, "runtime pin"):
             validator.validate_enabled(document)
 
         document = validator.render(enabled=True)
         load_balancer = document["services"]["ds4-loadbalancer"]
-        load_balancer["environment"]["MD_SERVING_RUNTIME_MANIFEST_PATH"] = (
+        load_balancer["environment"]["RJ_SERVING_RUNTIME_MANIFEST_PATH"] = (
             "/compat/wrong.json"
         )
         with self.assertRaisesRegex(validator.ValidationError, "runtime target"):
@@ -76,7 +76,7 @@ class ServingIdentityComposeTest(unittest.TestCase):
 
         document = validator.render(enabled=True)
         load_balancer = document["services"]["ds4-loadbalancer"]
-        load_balancer["environment"]["MD_SERVING_RUNTIME_MANIFEST_SHA256"] = (
+        load_balancer["environment"]["RJ_SERVING_RUNTIME_MANIFEST_SHA256"] = (
             "0" * 64
         )
         with self.assertRaisesRegex(validator.ValidationError, "runtime pin"):
@@ -157,14 +157,14 @@ class ServingIdentityComposeTest(unittest.TestCase):
     def test_lb_and_engine_runtime_authorities_cannot_be_cross_wired(self):
         document = validator.render(enabled=True)
         document["services"]["ds4-loadbalancer"]["environment"][
-            "MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_PATH"
+            "RAMJET_SERVING_RUNTIME_MANIFEST_PATH"
         ] = validator.LB_RUNTIME_MANIFEST_TARGET
         with self.assertRaisesRegex(validator.ValidationError, "engine serving"):
             validator.validate_enabled(document)
 
         document = validator.render(enabled=True)
         document["services"][validator.ENGINES[0]]["environment"][
-            "MD_SERVING_RUNTIME_MANIFEST_PATH"
+            "RJ_SERVING_RUNTIME_MANIFEST_PATH"
         ] = validator.ENGINE_RUNTIME_MANIFEST_TARGET
         with self.assertRaisesRegex(validator.ValidationError, "load balancer serving"):
             validator.validate_enabled(document)
@@ -172,7 +172,7 @@ class ServingIdentityComposeTest(unittest.TestCase):
     def test_base_compose_has_no_serving_runtime_authority(self):
         document = validator.render(enabled=False)
         document["services"]["ds4-loadbalancer"]["environment"][
-            "MD_SERVING_RUNTIME_MANIFEST_SHA256"
+            "RJ_SERVING_RUNTIME_MANIFEST_SHA256"
         ] = validator.RUNTIME_MANIFEST_SHA256
         with self.assertRaisesRegex(validator.ValidationError, "active in the base"):
             validator.validate_disabled(document)
@@ -195,7 +195,7 @@ class ServingIdentityComposeTest(unittest.TestCase):
         document = validator.render(enabled=True)
         service = document["services"][validator.ENGINES[0]]
         service["environment"][
-            "MINI_DYNAMO_SERVING_IDENTITY_VERIFY_TIMEOUT_MS"
+            "RAMJET_SERVING_IDENTITY_VERIFY_TIMEOUT_MS"
         ] = "5000"
         with self.assertRaisesRegex(validator.ValidationError, "timeout"):
             validator.validate_enabled(document)

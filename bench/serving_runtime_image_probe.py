@@ -452,7 +452,7 @@ def safe_environment(environment: Any) -> dict[str, str]:
     for key, value in environment.items():
         if not isinstance(key, str):
             raise ProbeError("rendered engine environment is invalid")
-        if key.startswith("MINI_DYNAMO_") or sensitive_environment_name(key):
+        if key.startswith("RAMJET_") or sensitive_environment_name(key):
             continue
         if key not in LAUNCH_ENVIRONMENT_KEYS:
             raise ProbeError("rendered engine environment has an unreviewed setting")

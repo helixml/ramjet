@@ -387,7 +387,7 @@ class NodeRuntime:
         return self._run("compose", argv, env=env, timeout=timeout)
 
     def _shadow_env(self):
-        return {**AUTHORITY_ENV, "MD_SNAPSHOT_ROUTE_MODE": "shadow"}
+        return {**AUTHORITY_ENV, "RJ_SNAPSHOT_ROUTE_MODE": "shadow"}
 
     @contextlib.contextmanager
     def lock(self, exclusive):

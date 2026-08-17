@@ -53,7 +53,7 @@ MORATORIUM_REASON = "cooling_ac_failure_2026_08_14"
 # of False would be standing permission for every future caller rather than for
 # the window it was granted for, so an authorized run instead names a reviewed
 # window in the environment and inherits that window's bounds.
-ENV_AUTHORIZATION = "MINI_DYNAMO_NODE06_AUTHORIZATION"
+ENV_AUTHORIZATION = "RAMJET_NODE06_AUTHORIZATION"
 
 
 class AuthorizedWindow:

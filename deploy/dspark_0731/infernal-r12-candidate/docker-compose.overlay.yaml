@@ -3,9 +3,9 @@
 services:
   ds4-loadbalancer:
     environment:
-      MD_UPSTREAM: http://dspark-0731:8000
-      MD_KV_EVENT_LIVE_ENDPOINTS: tcp://dspark-0731:5557
-      MD_KV_EVENT_REPLAY_ENDPOINTS: tcp://dspark-0731:5558
+      RJ_UPSTREAM: http://dspark-0731:8000
+      RJ_KV_EVENT_LIVE_ENDPOINTS: tcp://dspark-0731:5557
+      RJ_KV_EVENT_REPLAY_ENDPOINTS: tcp://dspark-0731:5558
 
   dspark-0731-b:
     image: voipmonitor/vllm:infernal-invocation-vllmdc2934e-b12xd48c62b-fi1ac6942-cu133-torch213-20260814-r12@sha256:7bb6994afe2b9b2307afb87f926ffe2fdc938254dc98f45692f836bc85654849

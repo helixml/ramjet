@@ -195,8 +195,8 @@ class NodeShadowRuntime(recovery.NodeRuntime):
     def _profile_env(self, image, soak_mode):
         env = {
             **recovery.AUTHORITY_ENV,
-            "MD_SNAPSHOT_ROUTE_MODE": "shadow",
-            "MD_SHADOW_SOAK_MODE": soak_mode,
+            "RJ_SNAPSHOT_ROUTE_MODE": "shadow",
+            "RJ_SHADOW_SOAK_MODE": soak_mode,
             "SNAPSHOT_LB_IMAGE": image,
             "COMPOSE_PROJECT_NAME": self.args.compose_project_name,
             "COMPOSE_ENV_FILES": str(
@@ -430,8 +430,8 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
             )
         admitted_env = {
             **recovery.AUTHORITY_ENV,
-            "MD_SNAPSHOT_ROUTE_MODE": "shadow",
-            "MD_SHADOW_SOAK_MODE": "off",
+            "RJ_SNAPSHOT_ROUTE_MODE": "shadow",
+            "RJ_SHADOW_SOAK_MODE": "off",
         }
         admitted = self.rendered_services(admitted_env)
         try:

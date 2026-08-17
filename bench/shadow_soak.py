@@ -294,7 +294,7 @@ def main(argv=None):
         ),
         args.apps,
         args.token,
-        {"X-Mini-Dynamo-Shadow-Soak": "capture"},
+        {"X-Ramjet-Shadow-Soak": "capture"},
     )
     expected_sources = args.apps * args.sessions * args.turns
     if (

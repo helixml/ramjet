@@ -69,7 +69,7 @@ pub enum FormatterSource {
 /// The model-specific half of local request rendering.
 pub trait ModelProfile: Send + Sync + 'static {
     /// Stable identifier. Must equal the compatibility manifest's
-    /// `renderer.profile` and the value accepted by `MD_TOKENIZER_PROFILE`.
+    /// `renderer.profile` and the value accepted by `RJ_TOKENIZER_PROFILE`.
     fn label(&self) -> &'static str;
 
     /// Human-facing model family, for logs and metrics only.
@@ -153,7 +153,7 @@ pub fn build_formatter(
         )?,
         FormatterSource::HfChatTemplate => {
             let raw = chat_template.with_context(|| {
-                format!("profile {} requires MD_CHAT_TEMPLATE_PATH", profile.label())
+                format!("profile {} requires RJ_CHAT_TEMPLATE_PATH", profile.label())
             })?;
             let config: ChatTemplate = serde_json::from_str(raw).with_context(|| {
                 format!(

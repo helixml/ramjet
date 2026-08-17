@@ -333,7 +333,7 @@ def runtime_digest(value: Any, expected: str, name: str) -> None:
 def validate_disabled(document: dict[str, Any]) -> None:
     load_balancer = document["services"]["ds4-loadbalancer"]
     lb_environment = load_balancer.get("environment", {})
-    if any(key.startswith("MD_SERVING_RUNTIME_") for key in lb_environment):
+    if any(key.startswith("RJ_SERVING_RUNTIME_") for key in lb_environment):
         fail("serving runtime is active in the base load balancer")
     if any(
         volume.get("target") == LB_RUNTIME_MANIFEST_TARGET
@@ -341,9 +341,9 @@ def validate_disabled(document: dict[str, Any]) -> None:
     ):
         fail("serving runtime mount is active in the base load balancer")
     if (
-        lb_environment.get("MD_EXACT_ROUTE_MANIFEST_PATH")
+        lb_environment.get("RJ_EXACT_ROUTE_MANIFEST_PATH")
         != LB_RENDERER_MANIFEST_TARGET
-        or lb_environment.get("MD_EXACT_ROUTE_MANIFEST_SHA256")
+        or lb_environment.get("RJ_EXACT_ROUTE_MANIFEST_SHA256")
         != MANIFEST_SHA256
     ):
         fail("base renderer manifest pin changed")
@@ -351,8 +351,8 @@ def validate_disabled(document: dict[str, Any]) -> None:
         service = document["services"][name]
         environment = service.get("environment", {})
         if any(
-            key.startswith("MINI_DYNAMO_SERVING_IDENTITY_")
-            or key.startswith("MINI_DYNAMO_SERVING_RUNTIME_")
+            key.startswith("RAMJET_SERVING_IDENTITY_")
+            or key.startswith("RAMJET_SERVING_RUNTIME_")
             for key in environment
         ):
             fail("serving identity is active in the base Compose")
@@ -395,28 +395,28 @@ def validate_enabled(
     expected_environment = runtime["process"]["environment"]
     load_balancer = document["services"]["ds4-loadbalancer"]
     lb_environment = load_balancer.get("environment", {})
-    if lb_environment.get("MD_UPSTREAM_ADMISSION_MODE") != "http":
+    if lb_environment.get("RJ_UPSTREAM_ADMISSION_MODE") != "http":
         fail("identity overlay may not opt the load balancer into admission")
-    if lb_environment.get("MD_DSPARK_GUARD_MODE") != "off":
+    if lb_environment.get("RJ_DSPARK_GUARD_MODE") != "off":
         fail("identity overlay may not opt the load balancer into DSpark enforcement")
     if (
-        lb_environment.get("MD_EXACT_ROUTE_MANIFEST_PATH")
+        lb_environment.get("RJ_EXACT_ROUTE_MANIFEST_PATH")
         != LB_RENDERER_MANIFEST_TARGET
-        or lb_environment.get("MD_EXACT_ROUTE_MANIFEST_SHA256")
+        or lb_environment.get("RJ_EXACT_ROUTE_MANIFEST_SHA256")
         != MANIFEST_SHA256
     ):
         fail("identity overlay changed the renderer manifest pin")
     if (
-        lb_environment.get("MD_SERVING_RUNTIME_MANIFEST_PATH")
+        lb_environment.get("RJ_SERVING_RUNTIME_MANIFEST_PATH")
         != LB_RUNTIME_MANIFEST_TARGET
     ):
         fail("load balancer serving runtime target changed")
     if (
-        lb_environment.get("MD_SERVING_RUNTIME_MANIFEST_SHA256")
+        lb_environment.get("RJ_SERVING_RUNTIME_MANIFEST_SHA256")
         != RUNTIME_MANIFEST_SHA256
     ):
         fail("load balancer serving runtime pin changed")
-    if any(key.startswith("MINI_DYNAMO_SERVING_RUNTIME_") for key in lb_environment):
+    if any(key.startswith("RAMJET_SERVING_RUNTIME_") for key in lb_environment):
         fail("load balancer uses engine serving runtime authority")
     validate_mount(
         load_balancer,
@@ -428,25 +428,25 @@ def validate_enabled(
         if service.get("image") != ENGINE_IMAGE:
             fail(f"{name} is not pinned to the manifest engine image")
         environment = service.get("environment", {})
-        if environment.get("MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_PATH") != MANIFEST_TARGET:
+        if environment.get("RAMJET_SERVING_IDENTITY_MANIFEST_PATH") != MANIFEST_TARGET:
             fail(f"{name} manifest target changed")
-        if environment.get("MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SHA256") != MANIFEST_SHA256:
+        if environment.get("RAMJET_SERVING_IDENTITY_MANIFEST_SHA256") != MANIFEST_SHA256:
             fail(f"{name} manifest pin changed")
         if (
-            environment.get("MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_PATH")
+            environment.get("RAMJET_SERVING_RUNTIME_MANIFEST_PATH")
             != ENGINE_RUNTIME_MANIFEST_TARGET
         ):
             fail(f"{name} serving runtime target changed")
         if (
-            environment.get("MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SHA256")
+            environment.get("RAMJET_SERVING_RUNTIME_MANIFEST_SHA256")
             != RUNTIME_MANIFEST_SHA256
         ):
             fail(f"{name} serving runtime pin changed")
-        if any(key.startswith("MD_SERVING_RUNTIME_") for key in environment):
+        if any(key.startswith("RJ_SERVING_RUNTIME_") for key in environment):
             fail(f"{name} uses load balancer serving runtime authority")
-        if environment.get("MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH") != "/workspace/model/tokenizer.json":
+        if environment.get("RAMJET_SERVING_IDENTITY_TOKENIZER_PATH") != "/workspace/model/tokenizer.json":
             fail(f"{name} tokenizer verification path changed")
-        if environment.get("MINI_DYNAMO_SERVING_IDENTITY_VERIFY_TIMEOUT_MS") != "4000":
+        if environment.get("RAMJET_SERVING_IDENTITY_VERIFY_TIMEOUT_MS") != "4000":
             fail(f"{name} live verification timeout changed")
         if not environment.get("VLLM_API_KEY"):
             fail(f"{name} has no endpoint bearer authority")

@@ -457,7 +457,7 @@ def execute_case(base, model, token, case, sampling, timeout, repetition=0):
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             first_response = time.perf_counter()
-            route = response.headers.get("X-Mini-Dynamo-Upstream")
+            route = response.headers.get("X-Ramjet-Upstream")
             if body["stream"]:
                 decoder = SSEDecoder(assembly)
                 for line in response:

@@ -241,19 +241,19 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
         runtime_raw = json.dumps(selected_runtime).encode()
         self.runtime_path.write_bytes(runtime_raw)
         environment = {
-            "MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_PATH": str(self.manifest_path),
-            "MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SHA256": digest
+            "RAMJET_SERVING_IDENTITY_MANIFEST_PATH": str(self.manifest_path),
+            "RAMJET_SERVING_IDENTITY_MANIFEST_SHA256": digest
             or compatibility_digest,
-            "MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_PATH": str(self.runtime_path),
-            "MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SHA256": runtime_digest
+            "RAMJET_SERVING_RUNTIME_MANIFEST_PATH": str(self.runtime_path),
+            "RAMJET_SERVING_RUNTIME_MANIFEST_SHA256": runtime_digest
             or hashlib.sha256(runtime_raw).hexdigest(),
             "VLLM_API_KEY": token,
             "SERVED_MODEL_NAME": "model",
             "MAX_MODEL_LEN": "4096",
-            "MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH": str(
+            "RAMJET_SERVING_IDENTITY_TOKENIZER_PATH": str(
                 self.tokenizer_path
             ),
-            "MINI_DYNAMO_SERVING_IDENTITY_VERIFY_TIMEOUT_MS": timeout_ms,
+            "RAMJET_SERVING_IDENTITY_VERIFY_TIMEOUT_MS": timeout_ms,
         }
 
         async def downstream(scope, receive, send):
@@ -657,17 +657,17 @@ class EngineIdentityMiddlewareTest(unittest.TestCase):
         ).encode()
         self.runtime_path.write_bytes(runtime_raw)
         base = {
-            "MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_PATH": str(self.manifest_path),
-            "MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SHA256": compatibility_digest,
-            "MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_PATH": str(self.runtime_path),
-            "MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SHA256": hashlib.sha256(
+            "RAMJET_SERVING_IDENTITY_MANIFEST_PATH": str(self.manifest_path),
+            "RAMJET_SERVING_IDENTITY_MANIFEST_SHA256": compatibility_digest,
+            "RAMJET_SERVING_RUNTIME_MANIFEST_PATH": str(self.runtime_path),
+            "RAMJET_SERVING_RUNTIME_MANIFEST_SHA256": hashlib.sha256(
                 runtime_raw
             ).hexdigest(),
-            "MINI_DYNAMO_SERVING_IDENTITY_TOKENIZER_PATH": str(self.tokenizer_path),
+            "RAMJET_SERVING_IDENTITY_TOKENIZER_PATH": str(self.tokenizer_path),
             "VLLM_API_KEY": "token",
             "SERVED_MODEL_NAME": "model",
             "MAX_MODEL_LEN": "4096",
-            "MINI_DYNAMO_SERVING_IDENTITY_VERIFY_TIMEOUT_MS": "4000",
+            "RAMJET_SERVING_IDENTITY_VERIFY_TIMEOUT_MS": "4000",
         }
 
         async def downstream(scope, receive, send):

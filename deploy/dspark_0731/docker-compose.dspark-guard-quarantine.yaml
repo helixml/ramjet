@@ -13,12 +13,12 @@ services:
         bind:
           create_host_path: false
     environment:
-      MD_UPSTREAM_ADMISSION_MODE: compatibility
-      MD_DSPARK_GUARD_MODE: quarantine
-      MD_DSPARK_GUARD_INTERVAL_MS: "5000"
-      MD_DSPARK_GUARD_CONSECUTIVE_WINDOWS: "3"
-      MD_DSPARK_GUARD_MIN_PROPOSED_TOKENS: "256"
-      MD_DSPARK_GUARD_EXPECTED_POSITIONS: "5"
-      MD_DSPARK_GUARD_STATE_PATH: /run/mini-dynamo-dspark-guard/state.json
-      MD_DSPARK_GUARD_STATE_OWNER_UID: "0"
-      MD_DSPARK_GUARD_STATE_GROUP_GID: "0"
+      RJ_UPSTREAM_ADMISSION_MODE: compatibility
+      RJ_DSPARK_GUARD_MODE: quarantine
+      RJ_DSPARK_GUARD_INTERVAL_MS: "5000"
+      RJ_DSPARK_GUARD_CONSECUTIVE_WINDOWS: "3"
+      RJ_DSPARK_GUARD_MIN_PROPOSED_TOKENS: "256"
+      RJ_DSPARK_GUARD_EXPECTED_POSITIONS: "5"
+      RJ_DSPARK_GUARD_STATE_PATH: /run/mini-dynamo-dspark-guard/state.json
+      RJ_DSPARK_GUARD_STATE_OWNER_UID: "0"
+      RJ_DSPARK_GUARD_STATE_GROUP_GID: "0"

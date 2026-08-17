@@ -19,18 +19,18 @@
 services:
   ds4-loadbalancer:
     environment:
-      MD_IDLE_DRAIN_MODE: observe
+      RJ_IDLE_DRAIN_MODE: observe
       # Quiet period before the fleet counts as idle. Deliberately long: the
       # cost of parking too eagerly is a five-minute cold start, and the cost
       # of parking too late is a few hundred watt-minutes.
-      MD_IDLE_DRAIN_IDLE_AFTER_SECONDS: "900"
+      RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS: "900"
       # Replicas that must always stay warm. Never set this to zero; the
       # binary clamps it to one regardless.
-      MD_IDLE_DRAIN_MIN_WARM: "1"
+      RJ_IDLE_DRAIN_MIN_WARM: "1"
       # Minimum spacing between drain transitions, so the policy cannot flap
       # across the idle threshold. Resuming always ignores this.
-      MD_IDLE_DRAIN_COOLDOWN_SECONDS: "300"
+      RJ_IDLE_DRAIN_COOLDOWN_SECONDS: "300"
       # Quiet time a fenced replica must accumulate before it is reported safe
       # to stop, covering requests already dispatched when the fence landed.
-      MD_IDLE_DRAIN_GRACE_SECONDS: "30"
-      MD_IDLE_DRAIN_INTERVAL_SECONDS: "15"
+      RJ_IDLE_DRAIN_GRACE_SECONDS: "30"
+      RJ_IDLE_DRAIN_INTERVAL_SECONDS: "15"

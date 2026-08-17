@@ -93,9 +93,9 @@ class RenderTests(unittest.TestCase):
         # footgun: the router would address engines that do not exist.
         text = render(8, 2)
         for key in (
-            "MD_UPSTREAM",
-            "MD_KV_EVENT_LIVE_ENDPOINTS",
-            "MD_KV_EVENT_REPLAY_ENDPOINTS",
+            "RJ_UPSTREAM",
+            "RJ_KV_EVENT_LIVE_ENDPOINTS",
+            "RJ_KV_EVENT_REPLAY_ENDPOINTS",
         ):
             line = next(l for l in text.splitlines() if l.strip().startswith(key))
             self.assertEqual(line.count("qwen38-e"), 4, key)

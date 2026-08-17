@@ -114,7 +114,7 @@ def request(prompt, max_tokens=MAX_OUTPUT_TOKENS):
     finish_reason = None
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
-            route = response.headers.get("X-Mini-Dynamo-Upstream")
+            route = response.headers.get("X-Ramjet-Upstream")
             for raw in response:
                 line = raw.decode("utf-8", "ignore").strip()
                 if not line.startswith("data:"):

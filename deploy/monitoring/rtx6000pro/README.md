@@ -44,7 +44,7 @@ Grafana already stores for that uid.
 ## Idle drain
 
 The idle-drain policy parks one engine during a quiet window to save idle
-power. It is **off** in the canonical deployment (`MD_IDLE_DRAIN_MODE` is
+power. It is **off** in the canonical deployment (`RJ_IDLE_DRAIN_MODE` is
 unset), and it exports nothing at all while off — so every panel below reads
 `idle-drain policy is off` rather than going blank.
 

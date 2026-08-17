@@ -43,29 +43,29 @@ services:
       - "127.0.0.1:8006:8000"
       - "127.0.0.1:8007:9090"
     environment:
-      MD_UPSTREAM: ${MD_UPSTREAM:-http://qwen38-a:8000,http://qwen38-b:8000}
-      MD_UPSTREAM_TOKEN: ${VLLM_API_KEY:-qwen-local}
-      MD_ADVERTISE_CTX_MARGIN: ${MD_ADVERTISE_CTX_MARGIN:-8192}
-      MD_ROUTE_ALPHA: ${MD_ROUTE_ALPHA:-4}
-      MD_ROUTE_LOAD_UNIT_BYTES: ${MD_ROUTE_LOAD_UNIT_BYTES:-32768}
-      MD_ROUTE_MAX_LOAD_UNITS: ${MD_ROUTE_MAX_LOAD_UNITS:-8}
-      MD_ROUTE_JOURNAL: ${MD_ROUTE_JOURNAL:-true}
+      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://qwen38-a:8000,http://qwen38-b:8000}
+      RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:-qwen-local}
+      RJ_ADVERTISE_CTX_MARGIN: ${RJ_ADVERTISE_CTX_MARGIN:-8192}
+      RJ_ROUTE_ALPHA: ${RJ_ROUTE_ALPHA:-4}
+      RJ_ROUTE_LOAD_UNIT_BYTES: ${RJ_ROUTE_LOAD_UNIT_BYTES:-32768}
+      RJ_ROUTE_MAX_LOAD_UNITS: ${RJ_ROUTE_MAX_LOAD_UNITS:-8}
+      RJ_ROUTE_JOURNAL: ${RJ_ROUTE_JOURNAL:-true}
       # Local attested tokenization stays off until a Qwen compatibility
       # manifest and chat-template digest are generated and reviewed. Byte
       # fingerprint routing needs neither and is unaffected by model identity.
-      MD_TOKENIZER_MODE: ${MD_TOKENIZER_MODE:-off}
-      MD_TOKENIZER_PROFILE: ${MD_TOKENIZER_PROFILE:-qwen3.8-27b}
-      MD_EXACT_ROUTE_MODE: ${MD_EXACT_ROUTE_MODE:-off}
-      MD_UPSTREAM_ADMISSION_MODE: ${MD_UPSTREAM_ADMISSION_MODE:-http}
+      RJ_TOKENIZER_MODE: ${RJ_TOKENIZER_MODE:-off}
+      RJ_TOKENIZER_PROFILE: ${RJ_TOKENIZER_PROFILE:-qwen3.8-27b}
+      RJ_EXACT_ROUTE_MODE: ${RJ_EXACT_ROUTE_MODE:-off}
+      RJ_UPSTREAM_ADMISSION_MODE: ${RJ_UPSTREAM_ADMISSION_MODE:-http}
       # Native KV inventory is observation-only. Whether a hybrid
       # linear-attention model emits usable events is the open question this
       # deployment exists to answer -- do not promote past shadow on a guess.
-      MD_KV_EVENT_MODE: ${MD_KV_EVENT_MODE:-shadow}
-      MD_KV_EVENT_LIVE_ENDPOINTS: ${MD_KV_EVENT_LIVE_ENDPOINTS:-tcp://qwen38-a:5557,tcp://qwen38-b:5557}
-      MD_KV_EVENT_REPLAY_ENDPOINTS: ${MD_KV_EVENT_REPLAY_ENDPOINTS:-tcp://qwen38-a:5558,tcp://qwen38-b:5558}
-      MD_KV_EVENT_TOPIC: "${MD_KV_EVENT_TOPIC:-}"
-      MD_KV_EVENT_REPLAY_LIMIT: ${MD_KV_EVENT_REPLAY_LIMIT:-8192}
-      MD_KV_EVENT_TIMEOUT_MS: ${MD_KV_EVENT_TIMEOUT_MS:-180000}
+      RJ_KV_EVENT_MODE: ${RJ_KV_EVENT_MODE:-shadow}
+      RJ_KV_EVENT_LIVE_ENDPOINTS: ${RJ_KV_EVENT_LIVE_ENDPOINTS:-tcp://qwen38-a:5557,tcp://qwen38-b:5557}
+      RJ_KV_EVENT_REPLAY_ENDPOINTS: ${RJ_KV_EVENT_REPLAY_ENDPOINTS:-tcp://qwen38-a:5558,tcp://qwen38-b:5558}
+      RJ_KV_EVENT_TOPIC: "${RJ_KV_EVENT_TOPIC:-}"
+      RJ_KV_EVENT_REPLAY_LIMIT: ${RJ_KV_EVENT_REPLAY_LIMIT:-8192}
+      RJ_KV_EVENT_TIMEOUT_MS: ${RJ_KV_EVENT_TIMEOUT_MS:-180000}
 
   qwen38-a: &engine
     image: ${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}

@@ -64,7 +64,7 @@ def stream_request(system, user, max_tokens, output, key, ready=None, stop=None)
     completion_tokens = 0
     try:
         with urllib.request.urlopen(request, timeout=900) as response:
-            route = response.headers.get("X-Mini-Dynamo-Upstream")
+            route = response.headers.get("X-Ramjet-Upstream")
             if ready is not None:
                 ready.set()
             for raw in response:
