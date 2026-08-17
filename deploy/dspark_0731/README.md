@@ -201,9 +201,9 @@ middleware, compatibility manifest, and serving-runtime manifest beside the
 operational Compose and set these three uncommitted `.env` paths:
 
 ```text
-MINI_DYNAMO_SERVING_IDENTITY_MIDDLEWARE_SOURCE=./engine_identity_middleware.py
-MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_SOURCE=./deepseek-v4-r34.json
-MINI_DYNAMO_SERVING_RUNTIME_MANIFEST_SOURCE=./deepseek-v4-r34-serving-runtime.json
+RAMJET_SERVING_IDENTITY_MIDDLEWARE_SOURCE=./engine_identity_middleware.py
+RAMJET_SERVING_IDENTITY_MANIFEST_SOURCE=./deepseek-v4-r34.json
+RAMJET_SERVING_RUNTIME_MANIFEST_SOURCE=./deepseek-v4-r34-serving-runtime.json
 ```
 
 After transfer, compare every operational byte stream with its local source and

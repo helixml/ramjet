@@ -17,9 +17,9 @@ TRANSFER=${2:-}
   exit 2
 }
 
-BUILDER=${MINI_DYNAMO_BUILDER:-mini-dynamo-publisher}
-REPOSITORY=${MINI_DYNAMO_IMAGE_REPOSITORY:-ghcr.io/helixml/ds4-loadbalancer}
-NODE=${MINI_DYNAMO_NODE:-node06}
+BUILDER=${RAMJET_BUILDER:-mini-dynamo-publisher}
+REPOSITORY=${RAMJET_IMAGE_REPOSITORY:-ghcr.io/helixml/ds4-loadbalancer}
+NODE=${RAMJET_NODE:-node06}
 IMAGE="$REPOSITORY:$TAG"
 
 docker buildx inspect "$BUILDER" >/dev/null 2>&1 || {

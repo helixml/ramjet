@@ -320,7 +320,7 @@ start does not consume the budget.
 The moratorium was lifted **per run, not globally**. A committed
 `MORATORIUM_ACTIVE = False` would have been standing permission for every
 future caller, and the module's own tests say so. Instead an authorized run
-names a reviewed window in `MINI_DYNAMO_NODE06_AUTHORIZATION`, and the window
+names a reviewed window in `RAMJET_NODE06_AUTHORIZATION`, and the window
 carries its own bounds (84C, 1500s). An unnamed or unknown window still fails
 closed.
 

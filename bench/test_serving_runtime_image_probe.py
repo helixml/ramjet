@@ -87,7 +87,7 @@ class ServingRuntimeImageProbeTest(unittest.TestCase):
                 "AWS_ACCESS_KEY_ID": "private",
                 "TLS_PRIVATE_KEY": "private",
                 "INTERNAL_BEARER": "private",
-                "MINI_DYNAMO_SERVING_IDENTITY_MANIFEST_PATH": "/private",
+                "RAMJET_SERVING_IDENTITY_MANIFEST_PATH": "/private",
             }
         )
         self.assertEqual(selected["MODE"], "test")
@@ -96,7 +96,7 @@ class ServingRuntimeImageProbeTest(unittest.TestCase):
         self.assertNotIn("AWS_ACCESS_KEY_ID", selected)
         self.assertNotIn("TLS_PRIVATE_KEY", selected)
         self.assertNotIn("INTERNAL_BEARER", selected)
-        self.assertFalse(any(key.startswith("MINI_DYNAMO_") for key in selected))
+        self.assertFalse(any(key.startswith("RAMJET_") for key in selected))
         self.assertNotIn("PATH", selected)
         with self.assertRaisesRegex(RuntimeError, "unreviewed"):
             safe_environment({"MODE": "test", "NEW_LAUNCH_SETTING": "1"})

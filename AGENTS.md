@@ -527,7 +527,7 @@ starts with the workload, not the guard, so cool-start waiting does not consume
 it.
 
 The moratorium is lifted **per run**, not globally. An authorized run names a
-reviewed window in `MINI_DYNAMO_NODE06_AUTHORIZATION`
+reviewed window in `RAMJET_NODE06_AUTHORIZATION`
 (`supervised-2026-08-14`) and inherits that window's bounds; an unnamed or
 unknown window still fails closed, so a stale environment cannot become
 standing permission. AC repair has still **not** been confirmed.
