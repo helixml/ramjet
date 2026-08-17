@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Loopback host-metrics agent for the mini-dynamo machine view.
+"""Loopback host-metrics agent for the ramjet machine view.
 
 The load balancer runs in a small distroless container and cannot see host
 CPU, disk, network, RAPL, or GPU state. This agent runs on the host (or in a

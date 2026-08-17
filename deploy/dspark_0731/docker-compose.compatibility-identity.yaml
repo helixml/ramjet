@@ -33,20 +33,20 @@ services:
           create_host_path: false
       - type: bind
         source: ${RAMJET_SERVING_IDENTITY_MANIFEST_SOURCE:-../../compat/deepseek-v4-r34.json}
-        target: /opt/mini-dynamo/compatibility.json
+        target: /opt/ramjet/compatibility.json
         read_only: true
         bind:
           create_host_path: false
       - type: bind
         source: ${RAMJET_SERVING_RUNTIME_MANIFEST_SOURCE:-../../compat/deepseek-v4-r34-serving-runtime.json}
-        target: /opt/mini-dynamo/serving-runtime.json
+        target: /opt/ramjet/serving-runtime.json
         read_only: true
         bind:
           create_host_path: false
     environment:
-      RAMJET_SERVING_IDENTITY_MANIFEST_PATH: /opt/mini-dynamo/compatibility.json
+      RAMJET_SERVING_IDENTITY_MANIFEST_PATH: /opt/ramjet/compatibility.json
       RAMJET_SERVING_IDENTITY_MANIFEST_SHA256: 4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa
-      RAMJET_SERVING_RUNTIME_MANIFEST_PATH: /opt/mini-dynamo/serving-runtime.json
+      RAMJET_SERVING_RUNTIME_MANIFEST_PATH: /opt/ramjet/serving-runtime.json
       RAMJET_SERVING_RUNTIME_MANIFEST_SHA256: 294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4
       RAMJET_SERVING_IDENTITY_TOKENIZER_PATH: /workspace/model/tokenizer.json
       RAMJET_SERVING_IDENTITY_VERIFY_TIMEOUT_MS: "4000"
@@ -63,20 +63,20 @@ services:
           create_host_path: false
       - type: bind
         source: ${RAMJET_SERVING_IDENTITY_MANIFEST_SOURCE:-../../compat/deepseek-v4-r34.json}
-        target: /opt/mini-dynamo/compatibility.json
+        target: /opt/ramjet/compatibility.json
         read_only: true
         bind:
           create_host_path: false
       - type: bind
         source: ${RAMJET_SERVING_RUNTIME_MANIFEST_SOURCE:-../../compat/deepseek-v4-r34-serving-runtime.json}
-        target: /opt/mini-dynamo/serving-runtime.json
+        target: /opt/ramjet/serving-runtime.json
         read_only: true
         bind:
           create_host_path: false
     environment:
-      RAMJET_SERVING_IDENTITY_MANIFEST_PATH: /opt/mini-dynamo/compatibility.json
+      RAMJET_SERVING_IDENTITY_MANIFEST_PATH: /opt/ramjet/compatibility.json
       RAMJET_SERVING_IDENTITY_MANIFEST_SHA256: 4ae2503554fa7089bc455e2ee89af0677c5cabec523d6b08d91a93d9ec9259aa
-      RAMJET_SERVING_RUNTIME_MANIFEST_PATH: /opt/mini-dynamo/serving-runtime.json
+      RAMJET_SERVING_RUNTIME_MANIFEST_PATH: /opt/ramjet/serving-runtime.json
       RAMJET_SERVING_RUNTIME_MANIFEST_SHA256: 294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4
       RAMJET_SERVING_IDENTITY_TOKENIZER_PATH: /workspace/model/tokenizer.json
       RAMJET_SERVING_IDENTITY_VERIFY_TIMEOUT_MS: "4000"

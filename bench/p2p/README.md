@@ -29,9 +29,9 @@ compiles inside the exact r34 image, exports two binaries plus a SHA-256
 manifest, and never contacts node06:
 
 ```bash
-mkdir -p "$HOME/.cache/mini-dynamo-p2p-tools"
-bench/p2p/build_tools.sh "$HOME/.cache/mini-dynamo-p2p-tools"
-scp -r "$HOME/.cache/mini-dynamo-p2p-tools" node06:/tmp/
+mkdir -p "$HOME/.cache/ramjet-p2p-tools"
+bench/p2p/build_tools.sh "$HOME/.cache/ramjet-p2p-tools"
+scp -r "$HOME/.cache/ramjet-p2p-tools" node06:/tmp/
 ```
 
 Record the manifest digest from the development host through a separate trusted
@@ -39,12 +39,12 @@ channel, then make the transferred tree root-owned and immutable. Do not copy a
 digest from node06's adjacent manifest and treat it as external evidence:
 
 ```bash
-sha256sum "$HOME/.cache/mini-dynamo-p2p-tools/manifest.json"
-ssh node06 'chown -R root:root /tmp/mini-dynamo-p2p-tools && \
-  chmod 0555 /tmp/mini-dynamo-p2p-tools \
-    /tmp/mini-dynamo-p2p-tools/nvbandwidth \
-    /tmp/mini-dynamo-p2p-tools/all_reduce_perf && \
-  chmod 0444 /tmp/mini-dynamo-p2p-tools/manifest.json'
+sha256sum "$HOME/.cache/ramjet-p2p-tools/manifest.json"
+ssh node06 'chown -R root:root /tmp/ramjet-p2p-tools && \
+  chmod 0555 /tmp/ramjet-p2p-tools \
+    /tmp/ramjet-p2p-tools/nvbandwidth \
+    /tmp/ramjet-p2p-tools/all_reduce_perf && \
+  chmod 0444 /tmp/ramjet-p2p-tools/manifest.json'
 ```
 
 Do not compile in a live engine container. Active mode accepts only a
@@ -110,7 +110,7 @@ Docker's `--gpus` flag uses a CSV parser and needs them to preserve a comma-
 separated device list as one field. The unit test locks this exact argv.
 
 The active interval holds
-`/run/lock/mini-dynamo-node06-deployment.lock`. Every node06 LB deployment tool
+`/run/lock/ramjet-node06-deployment.lock`. Every node06 LB deployment tool
 must take this same exclusive lock before recreating `ds4-loadbalancer`; the
 ownership fence remains mandatory even for cooperating writers. The single-home
 render carries a unique run label and exact Compose service hash. Immediately
@@ -120,7 +120,7 @@ untouched and invalidates the experiment, while any other unowned state fails
 CRITICAL for manual intervention.
 
 Results live under a newly created mode-0700
-`/tmp/mini-dynamo-p2p-phase-b.*` directory; each file is mode 0600. Treat the
+`/tmp/ramjet-p2p-phase-b.*` directory; each file is mode 0600. Treat the
 entire directory as sensitive: the immutable Compose baseline intentionally
 contains the full rendered LB environment so restoration does not depend on a
 mutable `.env`. Other artifacts contain topology/tool identities, counters, and

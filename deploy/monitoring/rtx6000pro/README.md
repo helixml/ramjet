@@ -1,4 +1,4 @@
-# Grafana — MiniDynamo rtx6000pro
+# Grafana — Ramjet rtx6000pro
 
 Canonical source for the serving dashboard of the 8× RTX PRO 6000 node
 (currently node06). This directory is the source of truth; the infra
@@ -7,7 +7,7 @@ repository only carries the mirrored ConfigMap that Flux reconciles.
 | | |
 |---|---|
 | dashboard | `minidynamo-rtx6000pro.json` |
-| title | `MiniDynamo rtx6000pro` |
+| title | `Ramjet rtx6000pro` |
 | uid | `minidynamo-rtx6000pro` |
 | ConfigMap | `bunker-dashboards` (key `minidynamo-rtx6000pro.json`) |
 | infra path | `clusters/bunker/monitoring/grafana-dashboards.yaml` |

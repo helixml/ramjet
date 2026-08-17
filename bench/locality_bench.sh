@@ -2,7 +2,7 @@
 # Cache-locality benchmark: APPS simulated apps (shared big system prompt) x
 # SESSIONS sessions x TURNS turns. Reports cached-token %, mean TTFB-ish
 # request wall time per turn, and the upstream split. Compare a static-hash
-# LB vs mini-dynamo's overlap router with identical traffic.
+# LB vs ramjet's overlap router with identical traffic.
 #   BENCH_TOKEN=<bearer> ./locality_bench.sh [base] [apps] [sessions] [turns]
 set -euo pipefail
 BASE="${1:-http://127.0.0.1:8006}"

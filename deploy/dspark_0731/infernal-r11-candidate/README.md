@@ -84,7 +84,7 @@ receipt validation, and dry-run Compose rendering.
 
 Do not start with a full-box matrix. Capture idle GPU/BMC/airflow evidence,
 then keep the load balancer single-homed on A and qualify r11 only on B. Hold
-`/run/lock/mini-dynamo-node06-deployment.lock` for every deployment mutation.
+`/run/lock/ramjet-node06-deployment.lock` for every deployment mutation.
 The first image pull is intentionally outside benchmark timing and happens
 once.
 

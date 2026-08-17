@@ -108,18 +108,18 @@ fail before any network call.
 Validate locally, then replay on the sovereign node with a fresh cache salt:
 
 ```bash
-install -d -m 0700 /run/user/$(id -u)/mini-dynamo-traces
+install -d -m 0700 /run/user/$(id -u)/ramjet-traces
 umask 077
-chmod 0600 /run/user/$(id -u)/mini-dynamo-traces/shape.jsonl
+chmod 0600 /run/user/$(id -u)/ramjet-traces/shape.jsonl
 python3 bench/agent_trace.py validate \
-  /run/user/$(id -u)/mini-dynamo-traces/shape.jsonl
+  /run/user/$(id -u)/ramjet-traces/shape.jsonl
 
 python3 bench/agent_trace.py run http://127.0.0.1:8006 deepseek-v4-flash \
-  /run/user/$(id -u)/mini-dynamo-traces/shape.jsonl \
+  /run/user/$(id -u)/ramjet-traces/shape.jsonl \
   --metadata-json /tmp/node06-agent-metadata.json \
   --salt "$(date +%s%N)" --concurrency 32 \
-  > /run/user/$(id -u)/mini-dynamo-traces/result.jsonl
-chmod 0600 /run/user/$(id -u)/mini-dynamo-traces/result.jsonl
+  > /run/user/$(id -u)/ramjet-traces/result.jsonl
+chmod 0600 /run/user/$(id -u)/ramjet-traces/result.jsonl
 ```
 
 Replay builds synthetic messages in memory. Same-group prefixes are nested;

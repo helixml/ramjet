@@ -14,31 +14,31 @@ from typing import Any
 HERE = pathlib.Path(__file__).resolve().parent
 OVERLAY = HERE / "docker-compose.snapshot-companion-offline.yaml"
 PROFILE = "snapshot-companion-offline"
-RESERVED_COMPANION_IMAGE = "snapshot-companion.invalid/mini-dynamo:not-built"
-RESERVED_CLIENT_IMAGE = "snapshot-lb.invalid/mini-dynamo:not-built"
+RESERVED_COMPANION_IMAGE = "snapshot-companion.invalid/ramjet:not-built"
+RESERVED_CLIENT_IMAGE = "snapshot-lb.invalid/ramjet:not-built"
 
 DOMAINS: dict[str, dict[str, Any]] = {
     "engine-a": {
         "companion": "snapshot-companion-offline-a",
         "client": "snapshot-lb-offline-a",
         "companion_uid": "12001",
-        "runtime_source": "/run/mini-dynamo-snapshot-offline-a",
-        "runtime_target": "/run/mini-dynamo-snapshot-a",
-        "secret_source": "/run/secrets/mini-dynamo-snapshot-session-a",
+        "runtime_source": "/run/ramjet-snapshot-offline-a",
+        "runtime_target": "/run/ramjet-snapshot-a",
+        "secret_source": "/run/secrets/ramjet-snapshot-session-a",
         "secret_target": "/run/secrets/snapshot-session-a",
-        "fixture_source": "/var/lib/mini-dynamo/snapshot-fixtures-a",
-        "socket": "/run/mini-dynamo-snapshot-a/companion-a.sock",
+        "fixture_source": "/var/lib/ramjet/snapshot-fixtures-a",
+        "socket": "/run/ramjet-snapshot-a/companion-a.sock",
     },
     "engine-b": {
         "companion": "snapshot-companion-offline-b",
         "client": "snapshot-lb-offline-b",
         "companion_uid": "12003",
-        "runtime_source": "/run/mini-dynamo-snapshot-offline-b",
-        "runtime_target": "/run/mini-dynamo-snapshot-b",
-        "secret_source": "/run/secrets/mini-dynamo-snapshot-session-b",
+        "runtime_source": "/run/ramjet-snapshot-offline-b",
+        "runtime_target": "/run/ramjet-snapshot-b",
+        "secret_source": "/run/secrets/ramjet-snapshot-session-b",
         "secret_target": "/run/secrets/snapshot-session-b",
-        "fixture_source": "/var/lib/mini-dynamo/snapshot-fixtures-b",
-        "socket": "/run/mini-dynamo-snapshot-b/companion-b.sock",
+        "fixture_source": "/var/lib/ramjet/snapshot-fixtures-b",
+        "socket": "/run/ramjet-snapshot-b/companion-b.sock",
     },
 }
 
@@ -246,13 +246,13 @@ def validate_domain(
 
     expected_companion_health = [
         "CMD",
-        "/mini-dynamo-snapshot-companion",
+        "/ramjet-snapshot-companion",
         "healthcheck",
         domain["socket"],
     ]
     expected_client_health = [
         "CMD",
-        "/mini-dynamo",
+        "/ramjet",
         "snapshot-client-healthcheck",
         domain["socket"],
     ]
@@ -266,9 +266,9 @@ def validate_domain(
         (client_name, client, "client"),
     ):
         labels = service.get("labels", {})
-        if labels.get("org.helixml.mini-dynamo.engine") != engine:
+        if labels.get("org.helixml.ramjet.engine") != engine:
             fail(f"{name} engine identity label changed")
-        if labels.get("org.helixml.mini-dynamo.role") != role:
+        if labels.get("org.helixml.ramjet.role") != role:
             fail(f"{name} role label changed")
 
 

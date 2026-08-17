@@ -18,8 +18,8 @@ OVERLAY = HERE / "docker-compose.snapshot-companion.yaml"
 LB_OVERLAY = HERE / "docker-compose.snapshot-lb.yaml"
 CADDY = HERE / "Caddyfile.snapshot-companion"
 SYSTEMD = HERE / "systemd"
-TMPFILES = SYSTEMD / "tmpfiles.d" / "mini-dynamo-snapshot.conf"
-AUTHORITY_UNIT = SYSTEMD / "mini-dynamo-snapshot-authority.service"
+TMPFILES = SYSTEMD / "tmpfiles.d" / "ramjet-snapshot.conf"
+AUTHORITY_UNIT = SYSTEMD / "ramjet-snapshot-authority.service"
 SERVING_SERVICE = "ds4-loadbalancer"
 COMPANION_PROFILE = "snapshot-companion"
 ATTESTATION_PROFILE = "snapshot-attestation"
@@ -41,17 +41,17 @@ DOMAINS: dict[str, dict[str, str]] = {
         "companion_uid": "12001",
         "metrics_gid": "12004",
         "engine": "dspark-0731",
-        "runtime_source": "/run/mini-dynamo-snapshot-a",
-        "metrics_source": "/run/mini-dynamo-snapshot-metrics-a",
-        "session_source": "/run/secrets/mini-dynamo-snapshot-session-a",
-        "digest_source": "/run/secrets/mini-dynamo-snapshot-digest-a",
-        "attestation_source": "/run/mini-dynamo-snapshot-attestation-a",
-        "metadata_source": "/run/mini-dynamo-engine-metadata-a.json",
-        "lb_runtime_target": "/run/mini-dynamo-snapshot-a",
+        "runtime_source": "/run/ramjet-snapshot-a",
+        "metrics_source": "/run/ramjet-snapshot-metrics-a",
+        "session_source": "/run/secrets/ramjet-snapshot-session-a",
+        "digest_source": "/run/secrets/ramjet-snapshot-digest-a",
+        "attestation_source": "/run/ramjet-snapshot-attestation-a",
+        "metadata_source": "/run/ramjet-engine-metadata-a.json",
+        "lb_runtime_target": "/run/ramjet-snapshot-a",
         "lb_session_target": "/run/secrets/snapshot-session-a",
         "lb_digest_target": "/run/secrets/snapshot-digest-a",
         "lb_attestation_target": "/run/attestation-a",
-        "caddy_path": "/run/mini-dynamo-snapshot-metrics-a/metrics.sock",
+        "caddy_path": "/run/ramjet-snapshot-metrics-a/metrics.sock",
     },
     "engine-b": {
         "companion": "snapshot-companion-b",
@@ -59,17 +59,17 @@ DOMAINS: dict[str, dict[str, str]] = {
         "companion_uid": "12003",
         "metrics_gid": "12005",
         "engine": "dspark-0731-b",
-        "runtime_source": "/run/mini-dynamo-snapshot-b",
-        "metrics_source": "/run/mini-dynamo-snapshot-metrics-b",
-        "session_source": "/run/secrets/mini-dynamo-snapshot-session-b",
-        "digest_source": "/run/secrets/mini-dynamo-snapshot-digest-b",
-        "attestation_source": "/run/mini-dynamo-snapshot-attestation-b",
-        "metadata_source": "/run/mini-dynamo-engine-metadata-b.json",
-        "lb_runtime_target": "/run/mini-dynamo-snapshot-b",
+        "runtime_source": "/run/ramjet-snapshot-b",
+        "metrics_source": "/run/ramjet-snapshot-metrics-b",
+        "session_source": "/run/secrets/ramjet-snapshot-session-b",
+        "digest_source": "/run/secrets/ramjet-snapshot-digest-b",
+        "attestation_source": "/run/ramjet-snapshot-attestation-b",
+        "metadata_source": "/run/ramjet-engine-metadata-b.json",
+        "lb_runtime_target": "/run/ramjet-snapshot-b",
         "lb_session_target": "/run/secrets/snapshot-session-b",
         "lb_digest_target": "/run/secrets/snapshot-digest-b",
         "lb_attestation_target": "/run/attestation-b",
-        "caddy_path": "/run/mini-dynamo-snapshot-metrics-b/metrics.sock",
+        "caddy_path": "/run/ramjet-snapshot-metrics-b/metrics.sock",
     },
 }
 
@@ -383,10 +383,10 @@ def validate_companion(engine: str, domain: dict[str, str], service: dict[str, A
             fail(f"{name} setting {key} changed")
     if environment.get("RJ_SNAPSHOT_METRICS_BIND") is not None:
         fail(f"{name} enables TCP metrics")
-    if environment.get("RJ_SNAPSHOT_METRICS_SOCKET_PATH") != "/run/mini-dynamo-metrics/metrics.sock":
+    if environment.get("RJ_SNAPSHOT_METRICS_SOCKET_PATH") != "/run/ramjet-metrics/metrics.sock":
         fail(f"{name} metrics UDS changed")
-    require_bind(service, "/run/mini-dynamo-snapshot", domain["runtime_source"], read_only=False)
-    require_bind(service, "/run/mini-dynamo-metrics", domain["metrics_source"], read_only=False)
+    require_bind(service, "/run/ramjet-snapshot", domain["runtime_source"], read_only=False)
+    require_bind(service, "/run/ramjet-metrics", domain["metrics_source"], read_only=False)
     require_bind(service, "/run/secrets/snapshot-session", domain["session_source"], read_only=True)
     require_bind(service, "/run/secrets/snapshot-digest", domain["digest_source"], read_only=True)
     require_bind(service, "/run/attestation", domain["attestation_source"], read_only=True)
@@ -394,14 +394,14 @@ def validate_companion(engine: str, domain: dict[str, str], service: dict[str, A
         fail(f"{name} has an unexpected authority mount")
     expected_health = [
         "CMD",
-        "/mini-dynamo-snapshot-companion",
+        "/ramjet-snapshot-companion",
         "healthcheck",
-        "/run/mini-dynamo-snapshot/companion.sock",
+        "/run/ramjet-snapshot/companion.sock",
     ]
     if service.get("healthcheck", {}).get("test") != expected_health:
         fail(f"{name} healthcheck changed")
     labels = service.get("labels", {})
-    if labels.get("org.helixml.mini-dynamo.engine") != engine:
+    if labels.get("org.helixml.ramjet.engine") != engine:
         fail(f"{name} engine label changed")
 
 
@@ -412,7 +412,7 @@ def validate_provisioner(engine: str, domain: dict[str, str], service: dict[str,
         fail(f"{name} is not explicitly profile-gated")
     if service.get("user") != f"0:{SESSION_GID}":
         fail(f"{name} identity changed")
-    if service.get("entrypoint") != ["/mini-dynamo-attestation-provisioner"]:
+    if service.get("entrypoint") != ["/ramjet-attestation-provisioner"]:
         fail(f"{name} does not run the bounded provisioner")
     image = str(service.get("image", ""))
     if image != EXPECTED_COMPANION_IMAGE:
@@ -428,7 +428,7 @@ def validate_provisioner(engine: str, domain: dict[str, str], service: dict[str,
     if len(service.get("volumes", [])) != 3:
         fail(f"{name} has an unexpected mount")
     labels = service.get("labels", {})
-    if labels.get("org.helixml.mini-dynamo.engine") != engine:
+    if labels.get("org.helixml.ramjet.engine") != engine:
         fail(f"{name} engine label changed")
 
 
@@ -436,7 +436,7 @@ def validate_caddy(path: pathlib.Path = CADDY) -> None:
     text = path.read_text(encoding="utf-8")
     if SESSION_GID not in text or "must never be added" not in text:
         fail("Caddy snippet does not preserve session-group isolation")
-    if "/run/secrets/" in text or "mini-dynamo-snapshot-a/companion.sock" in text:
+    if "/run/secrets/" in text or "ramjet-snapshot-a/companion.sock" in text:
         fail("Caddy snippet exposes snapshot authority")
     expected_proxies: list[str] = []
     for index, domain in enumerate(DOMAINS.values()):

@@ -79,7 +79,7 @@ NODE06_PROFILE = {
     "model": "deepseek-v4-flash",
     "container": "dspark-0731-b",
     "engine_metrics": "http://127.0.0.1:8013/metrics",
-    "deployment_lock": "/run/lock/mini-dynamo-node06-deployment.lock",
+    "deployment_lock": "/run/lock/ramjet-node06-deployment.lock",
     "load_balancer_container": "ds4-loadbalancer",
     "expected_lb_upstream": "http://dspark-0731:8000",
     "expected_lb_live_endpoints": "tcp://dspark-0731:5557",

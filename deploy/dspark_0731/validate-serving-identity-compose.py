@@ -23,8 +23,8 @@ ENGINES = ("dspark-0731", "dspark-0731-b")
 MIDDLEWARE_TARGET = (
     "/opt/venv/lib/python3.12/site-packages/mini_dynamo_engine_identity.py"
 )
-MANIFEST_TARGET = "/opt/mini-dynamo/compatibility.json"
-ENGINE_RUNTIME_MANIFEST_TARGET = "/opt/mini-dynamo/serving-runtime.json"
+MANIFEST_TARGET = "/opt/ramjet/compatibility.json"
+ENGINE_RUNTIME_MANIFEST_TARGET = "/opt/ramjet/serving-runtime.json"
 LB_RUNTIME_MANIFEST_TARGET = "/compat/serving-runtime.json"
 LB_RENDERER_MANIFEST_TARGET = "/compat/deepseek-v4-r34.json"
 MIDDLEWARE_IMPORT = "mini_dynamo_engine_identity.ServingIdentityMiddleware"

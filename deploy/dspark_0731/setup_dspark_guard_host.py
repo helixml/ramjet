@@ -12,7 +12,7 @@ import sys
 from typing import Final
 
 
-STATE_DIR: Final = pathlib.Path("/run/mini-dynamo-dspark-guard")
+STATE_DIR: Final = pathlib.Path("/run/ramjet-dspark-guard")
 STATE_FILE: Final = STATE_DIR / "state.json"
 EMPTY_STATE: Final = b'{"schema_version":1,"runtime_dirty":false,"quarantines":[]}'
 

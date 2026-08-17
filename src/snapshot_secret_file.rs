@@ -328,7 +328,7 @@ mod tests {
         fn new() -> Self {
             let suffix = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "mini-dynamo-secret-loader-{}-{suffix}",
+                "ramjet-secret-loader-{}-{suffix}",
                 std::process::id()
             ));
             fs::create_dir(&path).unwrap();

@@ -77,7 +77,7 @@ Tailscale in about 4s in the qualified r23 run.
 
 ```bash
 # One-time builder creation if it is absent.
-docker buildx create --name mini-dynamo-publisher \
+docker buildx create --name ramjet-publisher \
   --driver docker-container --use
 
 # Build only, or build and stream into node06's Docker image store.
@@ -381,9 +381,9 @@ event: only an authoritative all-blocks clear or an attested incarnation change
 may restore trust without a complete valid replay from zero. A transport failure
 remains retryable because it did not prove the replay content invalid.
 
-`mini-dynamo-snapshot-companion` is the standalone one-engine composition. It
+`ramjet-snapshot-companion` is the standalone one-engine composition. It
 must remain a separate binary and `Dockerfile.companion`; build the ordinary LB
-with `--bin mini-dynamo` so companion changes do not add a second release relink
+with `--bin ramjet` so companion changes do not add a second release relink
 to the serving-image loop. Serve mode must preflight the session secret, digest
 secret, and authenticated incarnation file before any TCP bind, ZMQ connect, or
 UDS publication. Invalid attestation refreshes immediately remove authority;
@@ -411,7 +411,7 @@ helper's read-only `--check`, and run both production validators
 before touching node06, first start with snapshot routing off, and repin current
 immutable images rather than treating the committed candidates as evergreen.
 
-`mini-dynamo-attestation-provisioner` is a host-side, one-shot control-plane
+`ramjet-attestation-provisioner` is a host-side, one-shot control-plane
 binary. It accepts no arguments and obtains only protected file paths, numeric
 ownership, and a freshness bound from the environment. Its identity source is
 schema-v1 output from `bench/node06_engine_metadata.sh`; never derive identity
@@ -607,7 +607,7 @@ ssh node06 'rm -rf /tmp/md && mkdir /tmp/md && tar xzf /tmp/md.tgz -C /tmp/md \
 
 # swap the LB (engines untouched; ~4s, LB-only)
 ssh node06 'cd /home/luke/inference/dspark_0731 \
-  && flock --nonblock /run/lock/mini-dynamo-node06-deployment.lock \
+  && flock --nonblock /run/lock/ramjet-node06-deployment.lock \
     env LB_IMAGE=ghcr.io/helixml/ds4-loadbalancer:<tag> \
     docker compose up -d ds4-loadbalancer'
 
@@ -621,7 +621,7 @@ journal. Never roll back through a mutable tag alone. The LB is stateless;
 swapping it never touches the engines or their KV caches.
 
 Every tool that recreates `ds4-loadbalancer` must hold the same exclusive
-`/run/lock/mini-dynamo-node06-deployment.lock` for its complete inspect/mutate/
+`/run/lock/ramjet-node06-deployment.lock` for its complete inspect/mutate/
 verify interval. The Phase-B P2P harness also adds a unique ownership label and
 service hash; it will not restore over a container it no longer owns. Do not
 bypass either fence with a raw concurrent `docker compose up`.
@@ -942,8 +942,8 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   node06's scarce 8-9GiB available host memory:
 
   ```bash
-  docker build -t ghcr.io/helixml/mini-dynamo:<tag> .
-  docker save ghcr.io/helixml/mini-dynamo:<tag> | gzip -1 | \
+  docker build -t ghcr.io/helixml/ramjet:<tag> .
+  docker save ghcr.io/helixml/ramjet:<tag> | gzip -1 | \
     ssh node06 'gunzip | docker load'
   ```
 
@@ -1335,7 +1335,7 @@ EXPERIMENTS.md — add yours there too):
   rename without updating `deploy/monitoring/rtx6000pro/` and re-running its
   sync into the infra repo.
 - The serving dashboard is canonical in `deploy/monitoring/rtx6000pro/`
-  (`MiniDynamo rtx6000pro`, uid `minidynamo-rtx6000pro`); infra's
+  (`Ramjet rtx6000pro`, uid `minidynamo-rtx6000pro`); infra's
   `clusters/bunker/monitoring/grafana-dashboards.yaml` is a mirror. Edit the
   JSON here, then `python3 deploy/monitoring/rtx6000pro/sync-dashboards.py
   ../infra` and commit both repositories. Never hand-edit the infra copy, and

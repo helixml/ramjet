@@ -1590,40 +1590,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
-name = "mini-dynamo"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bytes",
- "chrono",
- "dynamo-protocols",
- "dynamo-renderer",
- "fastokens",
- "futures",
- "futures-util",
- "getrandom 0.3.4",
- "lru",
- "minijinja",
- "parking_lot",
- "prometheus",
- "reqwest 0.13.4",
- "rmp-serde",
- "serde",
- "serde_bytes",
- "serde_json",
- "sha2",
- "thiserror 2.0.20",
- "tokio",
- "tokio-stream",
- "tracing",
- "tracing-subscriber",
- "url",
- "zeromq",
- "zmq",
-]
-
-[[package]]
 name = "minijinja"
 version = "2.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1984,6 +1950,40 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "ramjet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "chrono",
+ "dynamo-protocols",
+ "dynamo-renderer",
+ "fastokens",
+ "futures",
+ "futures-util",
+ "getrandom 0.3.4",
+ "lru",
+ "minijinja",
+ "parking_lot",
+ "prometheus",
+ "reqwest 0.13.4",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "zeromq",
+ "zmq",
+]
 
 [[package]]
 name = "rand"

@@ -1,4 +1,4 @@
-use mini_dynamo::{
+use ramjet::{
     digest_index::{DigestIndexLimits, DigestKvIndex},
     exact_index::{ExactIndexLimits, ExactKvIndex},
     kv_wire::{BlockRemoved, BlockStored, ExternalBlockHash},

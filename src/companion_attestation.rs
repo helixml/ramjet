@@ -405,10 +405,8 @@ mod tests {
     impl TestFiles {
         fn new() -> Self {
             let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
-            let directory = std::env::temp_dir().join(format!(
-                "mini-dynamo-attestation-{}-{id}",
-                std::process::id()
-            ));
+            let directory = std::env::temp_dir()
+                .join(format!("ramjet-attestation-{}-{id}", std::process::id()));
             fs::create_dir(&directory).unwrap();
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
             let owner = fs::metadata(&directory).unwrap().uid();

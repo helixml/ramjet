@@ -1,8 +1,8 @@
 use std::{ffi::OsString, path::PathBuf};
 
 use anyhow::{Context, bail};
-use mini_dynamo::companion_service::{SingleEngineCompanionConfig, run_single_engine_companion};
-use mini_dynamo::snapshot_socket_path::validate_published_socket;
+use ramjet::companion_service::{SingleEngineCompanionConfig, run_single_engine_companion};
+use ramjet::snapshot_socket_path::validate_published_socket;
 use tokio::sync::watch;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 

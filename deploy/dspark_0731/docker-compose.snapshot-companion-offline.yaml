@@ -12,10 +12,10 @@
 # or authenticate the peer socket.
 #
 # Host preflight:
-#   SNAPSHOT_RUNTIME_DIR_A=/run/mini-dynamo-snapshot-offline-a \
-#   SNAPSHOT_RUNTIME_DIR_B=/run/mini-dynamo-snapshot-offline-b \
-#   SNAPSHOT_SESSION_SECRET_FILE_A=/run/secrets/mini-dynamo-snapshot-session-a \
-#   SNAPSHOT_SESSION_SECRET_FILE_B=/run/secrets/mini-dynamo-snapshot-session-b \
+#   SNAPSHOT_RUNTIME_DIR_A=/run/ramjet-snapshot-offline-a \
+#   SNAPSHOT_RUNTIME_DIR_B=/run/ramjet-snapshot-offline-b \
+#   SNAPSHOT_SESSION_SECRET_FILE_A=/run/secrets/ramjet-snapshot-session-a \
+#   SNAPSHOT_SESSION_SECRET_FILE_B=/run/secrets/ramjet-snapshot-session-b \
 #     ./validate-snapshot-companion-host.sh
 #
 # Render only (starts nothing):
@@ -41,11 +41,11 @@ x-snapshot-sandbox: &snapshot-sandbox
       soft: 128
       hard: 128
   labels:
-    org.helixml.mini-dynamo.scope: offline-non-production
+    org.helixml.ramjet.scope: offline-non-production
 
 x-snapshot-client: &snapshot-client
   <<: *snapshot-sandbox
-  image: ${SNAPSHOT_LB_IMAGE:-snapshot-lb.invalid/mini-dynamo:not-built}
+  image: ${SNAPSHOT_LB_IMAGE:-snapshot-lb.invalid/ramjet:not-built}
   user: "12002:12000"
   pids_limit: 64
   cpus: 0.5
@@ -56,7 +56,7 @@ x-snapshot-client: &snapshot-client
 
 x-snapshot-companion: &snapshot-companion
   <<: *snapshot-sandbox
-  image: ${SNAPSHOT_COMPANION_IMAGE:-snapshot-companion.invalid/mini-dynamo:not-built}
+  image: ${SNAPSHOT_COMPANION_IMAGE:-snapshot-companion.invalid/ramjet:not-built}
   pids_limit: 128
   cpus: 1.0
   mem_limit: 512m
@@ -72,20 +72,20 @@ services:
       [
         "snapshot-client-fixture",
         "--engine-id=engine-a",
-        "--socket=/run/mini-dynamo-snapshot-a/companion-a.sock",
+        "--socket=/run/ramjet-snapshot-a/companion-a.sock",
         "--secret=/run/secrets/snapshot-session-a",
         "--fixtures=/fixtures",
         "--expected-peer-uid=12001",
       ]
     volumes:
       - type: bind
-        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/mini-dynamo-snapshot-offline-a.invalid}
-        target: /run/mini-dynamo-snapshot-a
+        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/ramjet-snapshot-offline-a.invalid}
+        target: /run/ramjet-snapshot-a
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-session-a.invalid}
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/ramjet-snapshot-session-a.invalid}
         target: /run/secrets/snapshot-session-a
         read_only: true
         bind:
@@ -100,18 +100,18 @@ services:
       test:
         [
           "CMD",
-          "/mini-dynamo",
+          "/ramjet",
           "snapshot-client-healthcheck",
-          "/run/mini-dynamo-snapshot-a/companion-a.sock",
+          "/run/ramjet-snapshot-a/companion-a.sock",
         ]
       interval: 5s
       timeout: 2s
       retries: 3
       start_period: 10s
     labels:
-      org.helixml.mini-dynamo.scope: offline-non-production
-      org.helixml.mini-dynamo.engine: engine-a
-      org.helixml.mini-dynamo.role: client
+      org.helixml.ramjet.scope: offline-non-production
+      org.helixml.ramjet.engine: engine-a
+      org.helixml.ramjet.role: client
 
   snapshot-companion-offline-a:
     <<: *snapshot-companion
@@ -121,7 +121,7 @@ services:
       [
         "snapshot-companion-fixture",
         "--engine-id=engine-a",
-        "--socket=/run/mini-dynamo-snapshot-a/companion-a.sock",
+        "--socket=/run/ramjet-snapshot-a/companion-a.sock",
         "--secret=/run/secrets/snapshot-session-a",
         "--fixtures=/fixtures",
         "--expected-client-uid=12002",
@@ -133,12 +133,12 @@ services:
       ]
     volumes:
       - type: bind
-        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/mini-dynamo-snapshot-offline-a.invalid}
-        target: /run/mini-dynamo-snapshot-a
+        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/ramjet-snapshot-offline-a.invalid}
+        target: /run/ramjet-snapshot-a
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-session-a.invalid}
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/ramjet-snapshot-session-a.invalid}
         target: /run/secrets/snapshot-session-a
         read_only: true
         bind:
@@ -153,18 +153,18 @@ services:
       test:
         [
           "CMD",
-          "/mini-dynamo-snapshot-companion",
+          "/ramjet-snapshot-companion",
           "healthcheck",
-          "/run/mini-dynamo-snapshot-a/companion-a.sock",
+          "/run/ramjet-snapshot-a/companion-a.sock",
         ]
       interval: 5s
       timeout: 2s
       retries: 3
       start_period: 10s
     labels:
-      org.helixml.mini-dynamo.scope: offline-non-production
-      org.helixml.mini-dynamo.engine: engine-a
-      org.helixml.mini-dynamo.role: companion
+      org.helixml.ramjet.scope: offline-non-production
+      org.helixml.ramjet.engine: engine-a
+      org.helixml.ramjet.role: companion
 
   snapshot-lb-offline-b:
     <<: *snapshot-client
@@ -173,20 +173,20 @@ services:
       [
         "snapshot-client-fixture",
         "--engine-id=engine-b",
-        "--socket=/run/mini-dynamo-snapshot-b/companion-b.sock",
+        "--socket=/run/ramjet-snapshot-b/companion-b.sock",
         "--secret=/run/secrets/snapshot-session-b",
         "--fixtures=/fixtures",
         "--expected-peer-uid=12003",
       ]
     volumes:
       - type: bind
-        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/mini-dynamo-snapshot-offline-b.invalid}
-        target: /run/mini-dynamo-snapshot-b
+        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/ramjet-snapshot-offline-b.invalid}
+        target: /run/ramjet-snapshot-b
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-session-b.invalid}
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/ramjet-snapshot-session-b.invalid}
         target: /run/secrets/snapshot-session-b
         read_only: true
         bind:
@@ -201,18 +201,18 @@ services:
       test:
         [
           "CMD",
-          "/mini-dynamo",
+          "/ramjet",
           "snapshot-client-healthcheck",
-          "/run/mini-dynamo-snapshot-b/companion-b.sock",
+          "/run/ramjet-snapshot-b/companion-b.sock",
         ]
       interval: 5s
       timeout: 2s
       retries: 3
       start_period: 10s
     labels:
-      org.helixml.mini-dynamo.scope: offline-non-production
-      org.helixml.mini-dynamo.engine: engine-b
-      org.helixml.mini-dynamo.role: client
+      org.helixml.ramjet.scope: offline-non-production
+      org.helixml.ramjet.engine: engine-b
+      org.helixml.ramjet.role: client
 
   snapshot-companion-offline-b:
     <<: *snapshot-companion
@@ -222,7 +222,7 @@ services:
       [
         "snapshot-companion-fixture",
         "--engine-id=engine-b",
-        "--socket=/run/mini-dynamo-snapshot-b/companion-b.sock",
+        "--socket=/run/ramjet-snapshot-b/companion-b.sock",
         "--secret=/run/secrets/snapshot-session-b",
         "--fixtures=/fixtures",
         "--expected-client-uid=12002",
@@ -234,12 +234,12 @@ services:
       ]
     volumes:
       - type: bind
-        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/mini-dynamo-snapshot-offline-b.invalid}
-        target: /run/mini-dynamo-snapshot-b
+        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/ramjet-snapshot-offline-b.invalid}
+        target: /run/ramjet-snapshot-b
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-session-b.invalid}
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/ramjet-snapshot-session-b.invalid}
         target: /run/secrets/snapshot-session-b
         read_only: true
         bind:
@@ -254,15 +254,15 @@ services:
       test:
         [
           "CMD",
-          "/mini-dynamo-snapshot-companion",
+          "/ramjet-snapshot-companion",
           "healthcheck",
-          "/run/mini-dynamo-snapshot-b/companion-b.sock",
+          "/run/ramjet-snapshot-b/companion-b.sock",
         ]
       interval: 5s
       timeout: 2s
       retries: 3
       start_period: 10s
     labels:
-      org.helixml.mini-dynamo.scope: offline-non-production
-      org.helixml.mini-dynamo.engine: engine-b
-      org.helixml.mini-dynamo.role: companion
+      org.helixml.ramjet.scope: offline-non-production
+      org.helixml.ramjet.engine: engine-b
+      org.helixml.ramjet.role: companion

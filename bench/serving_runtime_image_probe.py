@@ -550,7 +550,7 @@ def run_probe(
     environment = safe_environment(service.get("environment"))
     entrypoint, process_arguments = container_process(service)
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="mini-dynamo-runtime-probe-") as directory:
+    with tempfile.TemporaryDirectory(prefix="ramjet-runtime-probe-") as directory:
         wrapper = pathlib.Path(directory) / "vllm"
         wrapper.write_text(WRAPPER, encoding="ascii")
         wrapper.chmod(0o555)

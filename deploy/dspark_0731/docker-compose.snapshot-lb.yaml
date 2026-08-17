@@ -9,8 +9,8 @@
 # production served nothing for ~50 minutes.
 #
 # Preconditions for using this file at all:
-#   1. systemd/mini-dynamo-snapshot-authority.service and
-#      systemd/tmpfiles.d/mini-dynamo-snapshot.conf are installed and enabled,
+#   1. systemd/ramjet-snapshot-authority.service and
+#      systemd/tmpfiles.d/ramjet-snapshot.conf are installed and enabled,
 #      so every source below exists before Docker restores containers.
 #   2. validate-snapshot-production-compose.py passes, including its
 #      serving-path isolation and boot-authority checks.
@@ -38,7 +38,7 @@ services:
       # without the companion inventory that supplies it.
       RJ_EXACT_ROUTE_MODE: ${RJ_SNAPSHOT_ROUTE_MODE:-off}
       RJ_SNAPSHOT_ROUTE_MODE: ${RJ_SNAPSHOT_ROUTE_MODE:-off}
-      RJ_SNAPSHOT_ROUTE_SOCKET_PATHS: /run/mini-dynamo-snapshot-a/companion.sock,/run/mini-dynamo-snapshot-b/companion.sock
+      RJ_SNAPSHOT_ROUTE_SOCKET_PATHS: /run/ramjet-snapshot-a/companion.sock,/run/ramjet-snapshot-b/companion.sock
       RJ_SNAPSHOT_ROUTE_COMPANION_UIDS: "12001,12003"
       RJ_SNAPSHOT_ROUTE_SESSION_SECRET_PATHS: /run/secrets/snapshot-session-a,/run/secrets/snapshot-session-b
       RJ_SNAPSHOT_ROUTE_DIGEST_SECRET_PATHS: /run/secrets/snapshot-digest-a,/run/secrets/snapshot-digest-b
@@ -50,49 +50,49 @@ services:
       RJ_SNAPSHOT_ROUTE_RECONNECT_MAX_MS: "5000"
     volumes:
       - type: bind
-        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/mini-dynamo-snapshot-a.invalid}
-        target: /run/mini-dynamo-snapshot-a
+        source: ${SNAPSHOT_RUNTIME_DIR_A:-/run/ramjet-snapshot-a.invalid}
+        target: /run/ramjet-snapshot-a
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/mini-dynamo-snapshot-b.invalid}
-        target: /run/mini-dynamo-snapshot-b
+        source: ${SNAPSHOT_RUNTIME_DIR_B:-/run/ramjet-snapshot-b.invalid}
+        target: /run/ramjet-snapshot-b
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-session-a.invalid}
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_A:-/run/secrets/ramjet-snapshot-session-a.invalid}
         target: /run/secrets/snapshot-session-a
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-session-b.invalid}
+        source: ${SNAPSHOT_SESSION_SECRET_FILE_B:-/run/secrets/ramjet-snapshot-session-b.invalid}
         target: /run/secrets/snapshot-session-b
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_DIGEST_SECRET_FILE_A:-/run/secrets/mini-dynamo-snapshot-digest-a.invalid}
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_A:-/run/secrets/ramjet-snapshot-digest-a.invalid}
         target: /run/secrets/snapshot-digest-a
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_DIGEST_SECRET_FILE_B:-/run/secrets/mini-dynamo-snapshot-digest-b.invalid}
+        source: ${SNAPSHOT_DIGEST_SECRET_FILE_B:-/run/secrets/ramjet-snapshot-digest-b.invalid}
         target: /run/secrets/snapshot-digest-b
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_ATTESTATION_DIR_A:-/run/mini-dynamo-snapshot-attestation-a.invalid}
+        source: ${SNAPSHOT_ATTESTATION_DIR_A:-/run/ramjet-snapshot-attestation-a.invalid}
         target: /run/attestation-a
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${SNAPSHOT_ATTESTATION_DIR_B:-/run/mini-dynamo-snapshot-attestation-b.invalid}
+        source: ${SNAPSHOT_ATTESTATION_DIR_B:-/run/ramjet-snapshot-attestation-b.invalid}
         target: /run/attestation-b
         read_only: true
         bind:

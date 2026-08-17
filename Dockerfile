@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG RUST_DEPS_IMAGE=ghcr.io/helixml/ramjet:rust-deps-sha256-6b57bfd22e6777aab1238078c03fd331847bdfb906d14d71f382b9c299373e92
+ARG RUST_DEPS_IMAGE=ghcr.io/helixml/ramjet:rust-deps-sha256-55c309403e68e35c6edff986357d452bae09d2c95d7f3deefaad1ffd3033d091
 ARG OCI_REVISION=unknown
 FROM ${RUST_DEPS_IMAGE} AS build
 WORKDIR /src
@@ -10,8 +10,8 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
 COPY compat ./compat
-RUN cargo build --release --locked --offline --bin mini-dynamo \
-    && cp target/release/mini-dynamo /mini-dynamo
+RUN cargo build --release --locked --offline --bin ramjet \
+    && cp target/release/ramjet /ramjet
 
 # The machine-view dashboard builds in its own stage so web/ edits never
 # invalidate the Rust layer and Rust edits never re-run npm.
@@ -29,8 +29,8 @@ LABEL org.opencontainers.image.version="0.1.0"
 LABEL org.opencontainers.image.revision="${OCI_REVISION}"
 # dynamo-tokenizers' PCRE2 regex backend is dynamically linked on Debian.
 COPY --from=build /lib/x86_64-linux-gnu/libpcre2-8.so.0.11.2 /lib/x86_64-linux-gnu/libpcre2-8.so.0
-COPY --from=build /mini-dynamo /mini-dynamo
+COPY --from=build /ramjet /ramjet
 COPY compat /compat
 COPY --from=ui /web/dist /ui
 EXPOSE 8000 9090
-ENTRYPOINT ["/mini-dynamo"]
+ENTRYPOINT ["/ramjet"]

@@ -2,10 +2,10 @@
 set -euo pipefail
 
 fingerprint=vllme2666d9a65-b12x7cecbb2c48-136ce64f2c43f0f8
-base=/prod/mini-dynamo/jit-cache/${fingerprint}
+base=/prod/ramjet/jit-cache/${fingerprint}
 paths=("${base}/engine-a" "${base}/engine-b")
 
-parents=(/prod /prod/mini-dynamo /prod/mini-dynamo/jit-cache "${base}")
+parents=(/prod /prod/ramjet /prod/ramjet/jit-cache "${base}")
 for parent in "${parents[@]}"; do
   if [[ ! -d ${parent} || -L ${parent} || $(readlink -e -- "${parent}") != "${parent}" ]]; then
     echo "persistent JIT-cache host validation failed: cache parent is unsafe" >&2

@@ -33,6 +33,49 @@ function ThemeToggle() {
   )
 }
 
+/**
+ * Wordmark: a compression chevron and the name, nothing else.
+ *
+ * The mark is the one place in this UI where color is decoration rather than
+ * data, so it is kept to the chart hues already in the theme and flips with
+ * them; the name itself stays in ordinary foreground ink so it reads as text
+ * at any size and in forced-colors mode.
+ */
+function Wordmark() {
+  return (
+    <span className="flex items-center gap-2">
+      <svg viewBox="0 0 24 24" aria-hidden className="size-[17px] shrink-0">
+        <defs>
+          <linearGradient
+            id="ramjet-mark"
+            x1="2"
+            y1="4"
+            x2="22"
+            y2="20"
+            gradientUnits="userSpaceOnUse"
+          >
+            <stop offset="0" stopColor="var(--chart-7)" />
+            <stop offset="1" stopColor="var(--chart-1)" />
+          </linearGradient>
+        </defs>
+        <g
+          fill="none"
+          stroke="url(#ramjet-mark)"
+          strokeWidth="2.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M4 5.5 L10.5 12 L4 18.5" />
+          <path d="M13 5.5 L19.5 12 L13 18.5" />
+        </g>
+      </svg>
+      <span className="text-[17px] leading-none font-semibold tracking-[-0.02em]">
+        ramjet
+      </span>
+    </span>
+  )
+}
+
 export function TopBar({
   hostname,
   live,
@@ -45,8 +88,8 @@ export function TopBar({
   return (
     <header className="flex items-center justify-between gap-3">
       <div className="flex items-center gap-2.5">
-        <h1 className="text-base font-semibold tracking-tight">
-          mini-dynamo <span className="text-muted-foreground font-normal">machine view</span>
+        <h1>
+          <Wordmark />
         </h1>
         {hostname ? <Badge variant="outline">{hostname}</Badge> : null}
         {mock ? <Badge>mock data</Badge> : null}

@@ -76,41 +76,41 @@ class DirectoryContract:
     mode: int
 
 
-SESSION_GROUP = GroupContract("mini-dynamo-snapshot", 12000)
-METRICS_A_GROUP = GroupContract("mini-dynamo-snapshot-metrics-a", 12004)
-METRICS_B_GROUP = GroupContract("mini-dynamo-snapshot-metrics-b", 12005)
+SESSION_GROUP = GroupContract("ramjet-snapshot", 12000)
+METRICS_A_GROUP = GroupContract("ramjet-snapshot-metrics-a", 12004)
+METRICS_B_GROUP = GroupContract("ramjet-snapshot-metrics-b", 12005)
 GROUPS = (SESSION_GROUP, METRICS_A_GROUP, METRICS_B_GROUP)
 
 USERS = (
-    UserContract("mini-dynamo-snapshot-a", 12001, 12000, frozenset({12004})),
-    UserContract("mini-dynamo", 12002, 12000, frozenset()),
-    UserContract("mini-dynamo-snapshot-b", 12003, 12000, frozenset({12005})),
+    UserContract("ramjet-snapshot-a", 12001, 12000, frozenset({12004})),
+    UserContract("ramjet", 12002, 12000, frozenset()),
+    UserContract("ramjet-snapshot-b", 12003, 12000, frozenset({12005})),
 )
 
 DIRECTORIES = (
-    DirectoryContract("/run/mini-dynamo-snapshot-a", 12001, 12000, 0o2750),
-    DirectoryContract("/run/mini-dynamo-snapshot-b", 12003, 12000, 0o2750),
-    DirectoryContract("/run/mini-dynamo-snapshot-metrics-a", 12001, 12004, 0o2750),
-    DirectoryContract("/run/mini-dynamo-snapshot-metrics-b", 12003, 12005, 0o2750),
-    DirectoryContract("/run/mini-dynamo-snapshot-attestation-a", 0, 12000, 0o2750),
-    DirectoryContract("/run/mini-dynamo-snapshot-attestation-b", 0, 12000, 0o2750),
+    DirectoryContract("/run/ramjet-snapshot-a", 12001, 12000, 0o2750),
+    DirectoryContract("/run/ramjet-snapshot-b", 12003, 12000, 0o2750),
+    DirectoryContract("/run/ramjet-snapshot-metrics-a", 12001, 12004, 0o2750),
+    DirectoryContract("/run/ramjet-snapshot-metrics-b", 12003, 12005, 0o2750),
+    DirectoryContract("/run/ramjet-snapshot-attestation-a", 0, 12000, 0o2750),
+    DirectoryContract("/run/ramjet-snapshot-attestation-b", 0, 12000, 0o2750),
 )
 
 SECRETS = (
-    "/run/secrets/mini-dynamo-snapshot-session-a",
-    "/run/secrets/mini-dynamo-snapshot-session-b",
-    "/run/secrets/mini-dynamo-snapshot-digest-a",
-    "/run/secrets/mini-dynamo-snapshot-digest-b",
+    "/run/secrets/ramjet-snapshot-session-a",
+    "/run/secrets/ramjet-snapshot-session-b",
+    "/run/secrets/ramjet-snapshot-digest-a",
+    "/run/secrets/ramjet-snapshot-digest-b",
 )
 
 METADATA_TARGETS = (
-    "/run/mini-dynamo-engine-metadata-a.json",
-    "/run/mini-dynamo-engine-metadata-b.json",
+    "/run/ramjet-engine-metadata-a.json",
+    "/run/ramjet-engine-metadata-b.json",
 )
 
 ATTESTATION_TARGETS = (
-    "/run/mini-dynamo-snapshot-attestation-a/engine.json",
-    "/run/mini-dynamo-snapshot-attestation-b/engine.json",
+    "/run/ramjet-snapshot-attestation-a/engine.json",
+    "/run/ramjet-snapshot-attestation-b/engine.json",
 )
 
 NONLOGIN_SHELLS = frozenset({"/usr/sbin/nologin", "/sbin/nologin", "/bin/false"})
