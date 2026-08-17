@@ -45,6 +45,23 @@ These are workload results, not theoretical peaks. Reproduce them from
 [RESULTS.md](RESULTS.md); inspect every accepted and rejected experiment in
 [EXPERIMENTS.md](EXPERIMENTS.md).
 
+### Models with a validated stack
+
+Both measured on node06 — 8× RTX PRO 6000 Blackwell, two TP4 engines each.
+
+| Model | Served as | Decode @ c1 | Decode @ c8 | Aggregate @ c8 | Compose |
+| --- | --- | ---: | ---: | ---: | --- |
+| DeepSeek-V4-Flash (sparse MoE) | `deepseek-v4-flash` | 245.1 tok/s | 107.5 tok/s | 556 tok/s | [`deploy/dspark_0731`](deploy/dspark_0731/docker-compose.yaml) |
+| Qwen3.8-27B (dense) | `qwen3.8-27b` | 77 tok/s · 121 with MTP | ~102 tok/s | 817 tok/s | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
+
+Neither model is simply better. The first two columns are one stream's decode
+rate, which is what a single interactive user feels; the last is the whole box
+under eight, which is what an agent fleet feels. The sparse MoE is 3.2× faster
+per stream while the dense model moves 47% more tokens overall, so the
+aggregate column completely hides the c1 gap. [Model
+profiles](docs/models.md) covers the sizing, sharding, and
+speculative-decoding trade-offs behind these numbers.
+
 ## Start in one minute
 
 For existing engines, the upstream list is normally the only setting you need:
