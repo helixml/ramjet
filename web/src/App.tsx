@@ -8,10 +8,12 @@ import { GpuGrid } from "@/components/GpuGrid"
 import { Meter } from "@/components/Meter"
 import { TabBar, useTabs, type TabDef } from "@/components/Tabs"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   endpointLabel,
   fmtBps,
   fmtBytes,
+  fmtCount,
   fmtMs,
   fmtNum,
   fmtPct,
@@ -33,12 +35,18 @@ function toRow(sample: Sample): Row {
   row.net_tx = host?.net_tx_bps ?? null
   row.disk_r = host?.disk_read_bps ?? null
   row.disk_w = host?.disk_write_bps ?? null
+  row.disk_riops = host?.disk_read_iops ?? null
+  row.disk_wiops = host?.disk_write_iops ?? null
+  row.disk_util = host?.disk_util_pct ?? null
+  row.iowait = host?.iowait_pct ?? null
+  row.io_pressure = host?.io_pressure_pct ?? null
   const serving = sample.serving
   row.gen_tps = serving?.gen_tps ?? null
   row.prompt_tps = serving?.prompt_tps ?? null
   row.cached_tps = serving?.cached_tps ?? null
   row.ttft_p50 = serving?.ttft_p50_ms ?? null
   row.ttft_p95 = serving?.ttft_p95_ms ?? null
+  row.tpot_p95 = serving?.tpot_p95_ms ?? null
   row.inflight = serving?.inflight ?? null
   row.hit_lb = serving?.cache_hit_pct ?? null
   const engines = sample.engines ?? []
@@ -52,14 +60,10 @@ function toRow(sample: Sample): Row {
   upstreams.forEach((upstream, index) => {
     row[`rps_${index}`] = upstream.requests_per_second
   })
-  const gpuUtils = (sample.gpus ?? [])
-    .map((gpu) => gpu.util_pct)
-    .filter((v): v is number => typeof v === "number")
-  row.gpu_mean = gpuUtils.length
-    ? gpuUtils.reduce((sum, v) => sum + v, 0) / gpuUtils.length
-    : null
-  row.gpu_min = gpuUtils.length ? Math.min(...gpuUtils) : null
-  row.gpu_max = gpuUtils.length ? Math.max(...gpuUtils) : null
+  const gpus = sample.gpus ?? []
+  gpus.forEach((gpu) => {
+    row[`gpu_${gpu.index}`] = gpu.util_pct ?? null
+  })
   const engineHits = engines
     .map((engine) => engine.prefix_hit_pct)
     .filter((v): v is number => typeof v === "number")
@@ -84,11 +88,11 @@ const TABS: TabDef[] = [
   { id: "system", label: "System" },
 ]
 
-function ChartGrid({ cards }: { cards: ChartCardProps[] }) {
+function ChartGrid({ cards, loading }: { cards: ChartCardProps[]; loading?: boolean }) {
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
       {cards.map((card) => (
-        <ChartCard key={card.title} {...card} />
+        <ChartCard key={card.title} {...card} loading={loading} />
       ))}
     </div>
   )
@@ -98,6 +102,7 @@ export default function App() {
   const [rangeSeconds, setRangeSeconds] = useState(3600)
   const { active: tab, select: selectTab } = useTabs(TABS, "overview")
   const { summary, series, error, mock } = useDashboardData(rangeSeconds)
+  const loading = summary == null && error == null
   const points = useMemo(() => series?.points ?? [], [series])
   const rows = useMemo(() => points.map(toRow), [points])
   const latest = summary?.latest ?? null
@@ -166,6 +171,13 @@ export default function App() {
     },
     {
       ...shared,
+      title: "Time per output token",
+      description: "p95 decode interval after the first token",
+      format: (v) => fmtMs(v),
+      series: [{ key: "tpot_p95", label: "p95", color: "var(--chart-1)" }],
+    },
+    {
+      ...shared,
       title: "Requests in flight",
       format: (v) => fmtNum(v),
       series: [{ key: "inflight", label: "in flight", color: "var(--chart-1)" }],
@@ -177,6 +189,14 @@ export default function App() {
       format: (v) => fmtNum(v),
       stacked: true,
       series: engineSeries("run"),
+    },
+    {
+      ...shared,
+      title: "Waiting per engine",
+      description: "queued requests not yet scheduled",
+      format: (v) => fmtNum(v),
+      stacked: true,
+      series: engineSeries("wait"),
     },
     {
       ...shared,
@@ -204,17 +224,9 @@ export default function App() {
       format: (v) => fmtNum(v, 1),
       series: engineSeries("rps"),
     },
-    {
-      ...shared,
-      title: "Waiting per engine",
-      description: "queued requests not yet scheduled",
-      format: (v) => fmtNum(v),
-      stacked: true,
-      series: engineSeries("wait"),
-    },
   ]
 
-  const systemCards: ChartCardProps[] = [
+  const computeCards: ChartCardProps[] = [
     {
       ...shared,
       title: "CPU",
@@ -243,6 +255,9 @@ export default function App() {
         { key: "net_tx", label: "transmit", color: "var(--chart-2)" },
       ],
     },
+  ]
+
+  const diskCards: ChartCardProps[] = [
     {
       ...shared,
       title: "Disk I/O",
@@ -253,6 +268,34 @@ export default function App() {
         { key: "disk_w", label: "write", color: "var(--chart-2)" },
       ],
     },
+    {
+      ...shared,
+      title: "Disk pressure",
+      description:
+        latestHost?.disk_inflight != null
+          ? `queue depth ${fmtCount(latestHost.disk_inflight, 1)}`
+          : "iowait, IO stall, busiest disk",
+      format: (v) => fmtPct(v),
+      domain: [0, 100],
+      series: [
+        { key: "iowait", label: "iowait", color: "var(--chart-1)" },
+        { key: "io_pressure", label: "IO stall", color: "var(--chart-2)" },
+        { key: "disk_util", label: "disk busy", color: "var(--chart-3)" },
+      ],
+    },
+    {
+      ...shared,
+      title: "Disk IOPS",
+      description: "completed read and write operations",
+      format: (v) => `${fmtCount(v, 1)}/s`,
+      series: [
+        { key: "disk_riops", label: "read", color: "var(--chart-1)" },
+        { key: "disk_wiops", label: "write", color: "var(--chart-2)" },
+      ],
+    },
+  ]
+
+  const powerCards: ChartCardProps[] = [
     {
       ...shared,
       title: "Power draw",
@@ -282,50 +325,87 @@ export default function App() {
     series: [{ key: "hit_engines", label: "engines", color: "var(--chart-1)" }],
   }
 
-  const gpuCount = latest?.gpus?.length ?? 0
+  const gpuSource = latest?.gpus ?? points[points.length - 1]?.gpus ?? []
+  const gpuDefs = gpuSource.map((gpu) => ({
+    index: gpu.index,
+    label: `GPU ${gpu.index}`,
+    color: `hsl(${(gpu.index * 360) / Math.max(gpuSource.length, 1)}, var(--chart-saturation), var(--chart-lightness))`,
+  }))
+  const gpuCount = gpuDefs.length
   const gpuUtilCard: ChartCardProps = {
     ...shared,
     title: "GPU utilization",
-    description:
-      gpuCount > 1
-        ? `mean across ${gpuCount} devices with the min–max envelope`
-        : "SM busy share",
+    description: gpuCount > 1 ? "SM busy share per device" : "SM busy share",
     format: (v) => fmtPct(v),
     domain: [0, 100],
     height: 200,
-    series: [{ key: "gpu_mean", label: "mean", color: "var(--chart-1)" }],
-    band:
-      gpuCount > 1
-        ? {
-            lowKey: "gpu_min",
-            highKey: "gpu_max",
-            label: "min–max",
-            color: "var(--chart-1)",
-          }
-        : undefined,
+    series: gpuDefs.map((gpu) => ({
+      key: `gpu_${gpu.index}`,
+      label: gpu.label,
+      color: gpu.color,
+    })),
   }
 
   const storageCard = (
-    <Card>
+    <Card aria-busy={loading || undefined}>
       <CardHeader>
         <CardTitle>Storage</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
-        {(latestHost?.disks ?? []).map((disk) => (
-          <Meter
-            key={disk.mount}
-            label={disk.mount}
-            pct={disk.total_bytes > 0 ? (disk.used_bytes / disk.total_bytes) * 100 : null}
-            detail={`${fmtBytes(disk.used_bytes)} / ${fmtBytes(disk.total_bytes)}`}
-          />
-        ))}
+        {loading ? (
+          Array.from({ length: 4 }, (_, index) => (
+            <div key={index} className="flex flex-col gap-1">
+              <div className="flex items-baseline justify-between gap-2">
+                <Skeleton className="h-3 w-16" />
+                <Skeleton className="h-3 w-24" />
+              </div>
+              <Skeleton className="h-1.5 w-full rounded-full" />
+            </div>
+          ))
+        ) : (
+          <>
+        {(latestHost?.disks ?? []).map((disk) => {
+          const inodePct =
+            disk.inodes_total != null &&
+            disk.inodes_total > 0 &&
+            disk.inodes_used != null
+              ? (disk.inodes_used / disk.inodes_total) * 100
+              : null
+          return (
+            <div key={disk.mount} className="flex flex-col gap-1.5">
+              <Meter
+                label={disk.mount}
+                pct={disk.total_bytes > 0 ? (disk.used_bytes / disk.total_bytes) * 100 : null}
+                detail={`${fmtBytes(disk.used_bytes)} / ${fmtBytes(disk.total_bytes)}`}
+              />
+              {inodePct != null ? (
+                <Meter
+                  label={`${disk.mount} inodes`}
+                  pct={inodePct}
+                  detail={`${fmtCount(disk.inodes_used)} / ${fmtCount(disk.inodes_total)}`}
+                />
+              ) : null}
+            </div>
+          )
+        })}
         {memPct != null ? <Meter label="memory" pct={memPct} /> : null}
         {swapPct != null ? <Meter label="swap" pct={swapPct} /> : null}
+        {latestHost?.mem_pressure_pct != null ? (
+          <Meter label="memory stall" pct={latestHost.mem_pressure_pct} />
+        ) : null}
+        {latestHost?.dirty_bytes != null || latestHost?.writeback_bytes != null ? (
+          <div className="text-muted-foreground text-[11px] tabular-nums">
+            dirty {fmtBytes(latestHost?.dirty_bytes)} · writeback{" "}
+            {fmtBytes(latestHost?.writeback_bytes)}
+          </div>
+        ) : null}
         {(latestHost?.disks ?? []).length === 0 && memPct == null ? (
           <div className="text-faint-foreground py-6 text-center text-xs">
             no host telemetry — run bench/machineview_agent.py
           </div>
         ) : null}
+          </>
+        )}
       </CardContent>
     </Card>
   )
@@ -357,21 +437,25 @@ export default function App() {
           label="Gen tok/s"
           value={fmtNum(latestServing?.gen_tps)}
           trend={trend(rows, "gen_tps")}
+          loading={loading}
         />
         <StatTile
           label="TTFT p95"
           value={fmtMs(latestServing?.ttft_p95_ms)}
           trend={trend(rows, "ttft_p95")}
+          loading={loading}
         />
         <StatTile
           label="In flight"
           value={fmtNum(latestServing?.inflight)}
           trend={trend(rows, "inflight")}
+          loading={loading}
         />
         <StatTile
           label="KV cache"
           value={fmtPct(kvAvg)}
           detail={latestEngines.length ? `${latestEngines.length} engines` : undefined}
+          loading={loading}
         />
         <StatTile
           label="Cache hit"
@@ -382,6 +466,7 @@ export default function App() {
           )}
           detail={latestEngines.length ? "engine-reported" : undefined}
           trend={trend(rows, latestEngines.length ? "hit_engines" : "hit_lb")}
+          loading={loading}
         />
         <StatTile
           label="CPU"
@@ -390,6 +475,7 @@ export default function App() {
             latestHost?.load1 != null ? `load ${fmtNum(latestHost.load1, 1)}` : undefined
           }
           trend={trend(rows, "cpu")}
+          loading={loading}
         />
         <StatTile
           label="Memory"
@@ -399,6 +485,7 @@ export default function App() {
               ? `of ${fmtBytes(latestHost.mem_total_bytes)}`
               : undefined
           }
+          loading={loading}
         />
         <StatTile
           label="Power"
@@ -409,6 +496,7 @@ export default function App() {
               : undefined
           }
           trend={trend(rows, "watts_gpu")}
+          loading={loading}
         />
       </div>
 
@@ -419,29 +507,41 @@ export default function App() {
         <>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
             {[...servingCards.slice(0, 3), cacheHitCard].map((card) => (
-              <ChartCard key={card.title} {...card} />
+              <ChartCard key={card.title} {...card} loading={loading} />
             ))}
           </div>
-          {gpuCount > 0 ? <ChartCard {...gpuUtilCard} /> : null}
+          {loading || gpuCount > 0 ? (
+            <ChartCard {...gpuUtilCard} loading={loading} />
+          ) : null}
         </>
       ) : null}
 
-      {tab === "serving" ? <ChartGrid cards={servingCards} /> : null}
+      {tab === "serving" ? <ChartGrid cards={servingCards} loading={loading} /> : null}
 
       {tab === "gpus" ? (
         <>
-          {gpuCount > 0 ? <ChartCard {...gpuUtilCard} /> : null}
-          <GpuGrid points={points} latest={latest} rangeSeconds={rangeSeconds} />
+          {loading || gpuCount > 0 ? (
+            <ChartCard {...gpuUtilCard} loading={loading} />
+          ) : null}
+          <GpuGrid
+            points={points}
+            latest={latest}
+            rangeSeconds={rangeSeconds}
+            loading={loading}
+          />
         </>
       ) : null}
 
       {tab === "system" ? (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {systemCards.slice(0, 5).map((card) => (
-            <ChartCard key={card.title} {...card} />
-          ))}
-          {storageCard}
-          <ChartCard {...systemCards[5]} />
+        <div className="flex flex-col gap-3">
+          <ChartGrid cards={computeCards} loading={loading} />
+          <ChartGrid cards={diskCards} loading={loading} />
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {powerCards.map((card) => (
+              <ChartCard key={card.title} {...card} loading={loading} />
+            ))}
+            {storageCard}
+          </div>
         </div>
       ) : null}
 

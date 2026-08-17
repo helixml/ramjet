@@ -28,6 +28,21 @@ export function fmtNum(value: number | null | undefined, digits = 0): string {
   })
 }
 
+export function fmtCount(value: number | null | undefined, digits = 0): string {
+  if (value == null || !Number.isFinite(value)) return "—"
+  const abs = Math.abs(value)
+  if (abs >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(abs >= 10_000_000 ? 0 : 1)}M`
+  }
+  if (abs >= 10_000) {
+    return `${(value / 1_000).toFixed(abs >= 100_000 ? 0 : 1)}K`
+  }
+  return value.toLocaleString("en-US", {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: 0,
+  })
+}
+
 export function fmtPct(value: number | null | undefined, digits = 0): string {
   if (value == null || !Number.isFinite(value)) return "—"
   return `${value.toFixed(digits)}%`

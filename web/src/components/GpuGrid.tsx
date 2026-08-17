@@ -1,5 +1,6 @@
 import { TriangleAlert, Zap } from "lucide-react"
 import { Card, CardContent } from "@/components/ui/card"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Meter } from "@/components/Meter"
 import { TimeChart } from "@/components/TimeChart"
 import { fmtBytes, fmtNum, fmtPct, fmtWatts } from "@/lib/format"
@@ -182,11 +183,41 @@ export function GpuGrid({
   points,
   latest,
   rangeSeconds,
+  loading = false,
 }: {
   points: Sample[]
   latest: Sample | null
   rangeSeconds: number
+  loading?: boolean
 }) {
+  if (loading) {
+    return (
+      <div className="flex flex-col gap-3" aria-busy>
+        {Array.from({ length: 4 }, (_, index) => (
+          <Card key={index}>
+            <CardContent className="flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-stretch">
+              <div className="flex w-full shrink-0 flex-col gap-2.5 lg:w-60">
+                <div className="flex items-baseline justify-between gap-2">
+                  <Skeleton className="h-4 w-16" />
+                  <Skeleton className="h-7 w-12" />
+                </div>
+                <Skeleton className="h-1.5 w-full rounded-full" />
+                <div className="grid grid-cols-3 gap-x-3 gap-y-2">
+                  {Array.from({ length: 6 }, (_, cell) => (
+                    <div key={cell} className="flex flex-col gap-1">
+                      <Skeleton className="h-2.5 w-10" />
+                      <Skeleton className="h-3.5 w-14" />
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <Skeleton className="min-h-[132px] min-w-0 flex-1" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    )
+  }
   const gpus = collect(points, latest)
   if (gpus.length === 0) {
     return (

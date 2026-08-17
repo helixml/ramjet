@@ -1,50 +1,43 @@
 @import "tailwindcss";
 
 /*
- * Machine-view theme.
- *
- * All colors come from the validated dataviz reference palette: an 8-slot
- * categorical order that passes adjacent-pair CVD checks in both modes,
- * sequential blue steps for same-hue shading, a reserved status palette,
- * and recessive chart chrome. Components consume roles (tokens), never raw
- * hex, so the light/dark swap happens here and only here. Theme resolution:
- * an explicit [data-theme] stamp wins both ways; otherwise the OS decides.
+ * Machine-view theme, aligned with Beszel's hub tokens
+ * (https://github.com/henrygd/beszel): warm paper in light, cool slate in
+ * dark, and the same HSL chart slots. Extra series (GPUs, containers) use
+ * --chart-saturation / --chart-lightness on an even hue wheel.
  */
 
 :root {
   color-scheme: light;
 
-  /* Chart chrome & ink (light) */
-  --background: #f9f9f7; /* page plane */
-  --card: #fcfcfb; /* chart surface */
-  --foreground: #0b0b0b; /* primary ink */
-  --card-foreground: #0b0b0b;
-  --muted: #f0efec;
-  --muted-foreground: #52514e; /* secondary ink */
-  --faint-foreground: #898781; /* axis/label ink */
-  --border: rgba(11, 11, 11, 0.1);
-  --grid: #e1e0d9; /* hairline gridline */
-  --axis: #c3c2b7; /* baseline/axis */
-  --primary: #0b0b0b;
-  --primary-foreground: #fcfcfb;
-  --accent: #f0efec;
-  --accent-foreground: #0b0b0b;
-  --ring: #2a78d6;
+  --background: hsl(30 8% 98%);
+  --card: hsl(30 0% 100%);
+  --foreground: hsl(30 0% 10%);
+  --card-foreground: hsl(30 0% 10%);
+  --muted: hsl(26 6% 94%);
+  --muted-foreground: hsl(24 2.8% 35%);
+  --faint-foreground: hsl(24 3% 54%);
+  --border: hsl(30 8% 85%);
+  --grid: hsl(30 8% 88%);
+  --axis: hsl(30 5% 76%);
+  --primary: hsl(240 6% 10%);
+  --primary-foreground: hsl(30 0% 100%);
+  --accent: hsl(20 23% 94%);
+  --accent-foreground: hsl(240 6% 10%);
+  --ring: hsl(220 70% 50%);
 
-  /* Categorical slots, fixed order (light steps) */
-  --chart-1: #2a78d6; /* blue */
-  --chart-2: #eb6834; /* orange */
-  --chart-3: #1baf7a; /* aqua */
-  --chart-4: #eda100; /* yellow */
-  --chart-5: #e87ba4; /* magenta */
-  --chart-6: #008300; /* green */
-  --chart-7: #4a3aa7; /* violet */
-  --chart-8: #e34948; /* red */
+  --chart-saturation: 65%;
+  --chart-lightness: 50%;
+  --chart-1: hsl(220 70% 50%);
+  --chart-2: hsl(160 60% 45%);
+  --chart-3: hsl(30 80% 55%);
+  --chart-4: hsl(280 65% 60%);
+  --chart-5: hsl(340 75% 55%);
+  --chart-6: hsl(80 60% 48%);
+  --chart-7: hsl(190 65% 50%);
+  --chart-8: hsl(0 70% 55%);
+  --chart-1-soft: hsl(220 50% 72%);
 
-  /* Sequential blue: the second shade when one hue carries two levels */
-  --chart-1-soft: #86b6ef; /* blue step 250 */
-
-  /* Status palette (fixed, never themed) */
   --status-good: #0ca30c;
   --status-warning: #fab219;
   --status-serious: #ec835a;
@@ -56,32 +49,25 @@
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
 
-    --background: #0d0d0d;
-    --card: #1a1a19;
-    --foreground: #ffffff;
-    --card-foreground: #ffffff;
-    --muted: #262624;
-    --muted-foreground: #c3c2b7;
-    --faint-foreground: #898781;
-    --border: rgba(255, 255, 255, 0.1);
-    --grid: #2c2c2a;
-    --axis: #383835;
-    --primary: #ffffff;
-    --primary-foreground: #1a1a19;
-    --accent: #262624;
-    --accent-foreground: #ffffff;
-    --ring: #3987e5;
+    --background: hsl(220 5.5% 9%);
+    --card: hsl(220 5.5% 10.5%);
+    --foreground: hsl(220 2% 97%);
+    --card-foreground: hsl(220 2% 97%);
+    --muted: hsl(220 6% 16%);
+    --muted-foreground: hsl(220 4% 67%);
+    --faint-foreground: hsl(220 4% 52%);
+    --border: hsl(220 3% 17%);
+    --grid: hsl(220 4% 16%);
+    --axis: hsl(220 4% 22%);
+    --primary: hsl(220 2% 96%);
+    --primary-foreground: hsl(220 4% 10%);
+    --accent: hsl(220 5% 15.5%);
+    --accent-foreground: hsl(220 2% 98%);
+    --ring: hsl(220 70% 50%);
 
-    --chart-1: #3987e5;
-    --chart-2: #d95926;
-    --chart-3: #199e70;
-    --chart-4: #c98500;
-    --chart-5: #d55181;
-    --chart-6: #008300;
-    --chart-7: #9085e9;
-    --chart-8: #e66767;
-
-    --chart-1-soft: #184f95; /* blue step 600 */
+    --chart-saturation: 60%;
+    --chart-lightness: 55%;
+    --chart-1-soft: hsl(220 50% 68%);
 
     --delta-good-text: #0ca30c;
   }
@@ -90,32 +76,25 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --background: #0d0d0d;
-  --card: #1a1a19;
-  --foreground: #ffffff;
-  --card-foreground: #ffffff;
-  --muted: #262624;
-  --muted-foreground: #c3c2b7;
-  --faint-foreground: #898781;
-  --border: rgba(255, 255, 255, 0.1);
-  --grid: #2c2c2a;
-  --axis: #383835;
-  --primary: #ffffff;
-  --primary-foreground: #1a1a19;
-  --accent: #262624;
-  --accent-foreground: #ffffff;
-  --ring: #3987e5;
+  --background: hsl(220 5.5% 9%);
+  --card: hsl(220 5.5% 10.5%);
+  --foreground: hsl(220 2% 97%);
+  --card-foreground: hsl(220 2% 97%);
+  --muted: hsl(220 6% 16%);
+  --muted-foreground: hsl(220 4% 67%);
+  --faint-foreground: hsl(220 4% 52%);
+  --border: hsl(220 3% 17%);
+  --grid: hsl(220 4% 16%);
+  --axis: hsl(220 4% 22%);
+  --primary: hsl(220 2% 96%);
+  --primary-foreground: hsl(220 4% 10%);
+  --accent: hsl(220 5% 15.5%);
+  --accent-foreground: hsl(220 2% 98%);
+  --ring: hsl(220 70% 50%);
 
-  --chart-1: #3987e5;
-  --chart-2: #d95926;
-  --chart-3: #199e70;
-  --chart-4: #c98500;
-  --chart-5: #d55181;
-  --chart-6: #008300;
-  --chart-7: #9085e9;
-  --chart-8: #e66767;
-
-  --chart-1-soft: #184f95;
+  --chart-saturation: 60%;
+  --chart-lightness: 55%;
+  --chart-1-soft: hsl(220 50% 68%);
 
   --delta-good-text: #0ca30c;
 }

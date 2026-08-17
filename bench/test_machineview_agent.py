@@ -60,9 +60,10 @@ class NvidiaSmiParsing(unittest.TestCase):
 class ProcParsing(unittest.TestCase):
     def test_cpu_line_busy_and_total(self):
         text = "cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 1 2 3 4 5 6 7 8 9 0\n"
-        busy, total = agent.parse_proc_stat_cpu(text)
+        busy, total, iowait = agent.parse_proc_stat_cpu(text)
         self.assertEqual(total, 1000)
         self.assertEqual(busy, 150)
+        self.assertEqual(iowait, 50)
 
     def test_cpu_line_missing_returns_none(self):
         self.assertIsNone(agent.parse_proc_stat_cpu("intr 1 2 3\n"))
@@ -81,6 +82,8 @@ class ProcParsing(unittest.TestCase):
         self.assertEqual(memory["mem_used_bytes"], 600 * 1024)
         self.assertEqual(memory["mem_cached_bytes"], 200 * 1024)
         self.assertEqual(memory["swap_used_bytes"], 200 * 1024)
+        self.assertIsNone(memory["dirty_bytes"])
+        self.assertIsNone(memory["writeback_bytes"])
 
     def test_net_dev_skips_virtual_interfaces(self):
         text = (
@@ -104,9 +107,22 @@ class ProcParsing(unittest.TestCase):
             " 259       0 nvme0n1 10 0 400 0 5 0 200 0 0 0 0 0 0 0\n"
             " 259       1 nvme0n1p1 9 0 390 0 4 0 190 0 0 0 0 0 0 0\n"
         )
-        read_bytes, written_bytes = agent.parse_diskstats(text)
-        self.assertEqual(read_bytes, (2000 + 400) * 512)
-        self.assertEqual(written_bytes, (1000 + 200) * 512)
+        disk = agent.parse_diskstats(text)
+        self.assertEqual(disk["read_bytes"], (2000 + 400) * 512)
+        self.assertEqual(disk["write_bytes"], (1000 + 200) * 512)
+        self.assertEqual(disk["reads"], 110)
+        self.assertEqual(disk["writes"], 55)
+        self.assertEqual(disk["inflight"], 0)
+        self.assertEqual(set(disk["io_ticks"]), {"sda", "nvme0n1"})
+
+    def test_pressure_some_avg10(self):
+        text = (
+            "some avg10=2.50 avg60=1.00 avg300=0.25 total=12345\n"
+            "full avg10=0.10 avg60=0.00 avg300=0.00 total=9\n"
+        )
+        self.assertEqual(agent.parse_pressure(text), 2.5)
+        self.assertIsNone(agent.parse_pressure("full avg10=9.00 total=1\n"))
+        self.assertIsNone(agent.parse_pressure(None))
 
     def test_loadavg(self):
         self.assertEqual(agent.parse_loadavg("1.25 2.0 3.0 1/234 999\n"), 1.25)
@@ -150,6 +166,10 @@ class CollectorRates(unittest.TestCase):
             self.assertEqual(first["gpus"], [])
             self.assertEqual(len(first["host"]["disks"]), 1)
             self.assertEqual(first["host"]["disks"][0]["mount"], root)
+            self.assertGreater(first["host"]["disks"][0]["inodes_total"], 0)
+            self.assertIn("inodes_used", first["host"]["disks"][0])
+            self.assertIsNone(first["host"]["iowait_pct"])
+            self.assertIsNone(first["host"]["io_pressure_pct"])
 
             self._write(proc, "stat", "cpu 200 0 200 1400 0 0 0 0 0 0\n")
             self._write(
@@ -213,6 +233,54 @@ class CollectorRates(unittest.TestCase):
             second = collector.sample()
             self.assertIsNotNone(second["host"]["cpu_watts"])
             self.assertGreater(second["host"]["cpu_watts"], 0)
+
+    def test_iowait_pressure_and_disk_busy(self):
+        with tempfile.TemporaryDirectory() as root:
+            proc = os.path.join(root, "proc")
+            self._write(proc, "stat", "cpu 100 0 100 700 100 0 0 0 0 0\n")
+            self._write(
+                proc,
+                "diskstats",
+                "   8 0 sda 10 0 100 0 10 0 100 0 2 1000 0 0\n",
+            )
+            self._write(
+                proc,
+                "pressure/io",
+                "some avg10=12.5 avg60=4.0 avg300=1.0 total=9\n"
+                "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+            )
+            self._write(
+                proc,
+                "meminfo",
+                "MemTotal: 1000 kB\nMemAvailable: 400 kB\n"
+                "Dirty: 80 kB\nWriteback: 20 kB\n",
+            )
+            collector = agent.Collector(
+                mounts=[],
+                proc_root=proc,
+                rapl_root=os.path.join(root, "no-rapl"),
+            )
+            collector.nvidia_smi = None
+            collector.sample()
+            self._write(proc, "stat", "cpu 150 0 150 1100 200 0 0 0 0 0\n")
+            self._write(
+                proc,
+                "diskstats",
+                "   8 0 sda 20 0 300 0 40 0 500 0 3 1500 0 0\n",
+            )
+            second = collector.sample()
+            host = second["host"]
+            # total jiffies 1000 → 1600, iowait 100 → 200, busy 200 → 300
+            self.assertAlmostEqual(host["cpu_pct"], 100.0 * 100 / 600)
+            self.assertAlmostEqual(host["iowait_pct"], 100.0 * 100 / 600)
+            self.assertEqual(host["io_pressure_pct"], 12.5)
+            self.assertEqual(host["dirty_bytes"], 80 * 1024)
+            self.assertEqual(host["writeback_bytes"], 20 * 1024)
+            self.assertEqual(host["disk_inflight"], 3.0)
+            self.assertGreater(host["disk_read_iops"], 0)
+            self.assertGreater(host["disk_write_iops"], 0)
+            self.assertIsNotNone(host["disk_util_pct"])
+            self.assertGreater(host["disk_util_pct"], 0)
 
 
 if __name__ == "__main__":
