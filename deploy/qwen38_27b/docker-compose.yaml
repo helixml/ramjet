@@ -35,8 +35,10 @@ services:
     # Container name is retained so existing bench scripts, the deployment
     # lock, and the Grafana ds4proxy_ dashboards keep working.
     # Override only with another immutable tag+digest pair. This pin is the
-    # latest published machine-view build; its OCI revision is 59c6b1e.
-    image: ${LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-59c6b1e@sha256:2c726118bfd25bb62857808c3b2814ab0e5d31ed4be20e84813a02704f09c401}
+    # build qualified on node06 on 2026-08-17; its OCI revision is 261bef8.
+    # It must stay a post-rename image: the RJ_ settings below are ignored by
+    # anything older, which would come up healthy and differently tuned.
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:rust-261bef8@sha256:8bb4f9a1d8158e6d4eae1273e2d823df77d6836be12c62ef4cf80615660fb6a4}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:
