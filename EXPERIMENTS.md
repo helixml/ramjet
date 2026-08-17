@@ -123,7 +123,7 @@ asserted. Two larger levers are consequently untested:
   GPU has 96GB, so the model fits on one card with room for KV. Eight
   independent TP1 engines behind this load balancer would remove every NCCL
   allreduce from the decode path, which for a model this size is usually worth
-  more than anything tuned above. mini-dynamo already fronts N upstreams.
+  more than anything tuned above. ramjet already fronts N upstreams.
 - **MTP speculative decoding.** The checkpoint ships `mtp.safetensors` and the
   image registers `Qwen3_5MTP`. Expect this to help single-stream latency and
   possibly to hurt saturated throughput, so it should be measured at both ends.
@@ -735,7 +735,7 @@ streamed usage accounting, three measured runs after warm-up.
 |---|---:|---:|---:|---:|
 | engine A direct | 1 | 512 | 245.1 tok/s | 199.0 tok/s end-to-end |
 | engine A direct | 8 | 256 | 107.5 tok/s | 556.3 tok/s |
-| mini-dynamo, both engines | 16 | 256 | 105.7 tok/s | **1,087–1,129 tok/s** |
+| ramjet, both engines | 16 | 256 | 105.7 tok/s | **1,087–1,129 tok/s** |
 
 The earlier ~947 tok/s box result used a different mixed/prose workload. The
 new number is not a config win; it demonstrates why speculative-decoding results
@@ -1741,7 +1741,7 @@ and no restart. The live local image is
 
 The legacy `ghcr.io/helixml/ds4-loadbalancer` package also denied the
 repository Actions token despite job-level `packages: write`; its package ACL
-is not inherited from mini-dynamo. The exact r11 image was retagged and
+is not inherited from ramjet. The exact r11 image was retagged and
 published publicly as `ghcr.io/helixml/mini-dynamo:rust-r11-8e38ec7`
 (`sha256:e01f57188b87b80426bcf5a2e0b29964d27e4e78a272903705a4c303cdeda86b`).
 An anonymous manifest read succeeded, node06 pulled that public tag, and the
@@ -1777,7 +1777,7 @@ prioritize bounded queues, replay correctness, and index-update contention over
 custom MessagePack parsing.
 
 Manual workflow run
-[`31579218509`](https://github.com/helixml/mini-dynamo/actions/runs/31579218509)
+[`31579218509`](https://github.com/helixml/ramjet/actions/runs/31579218509)
 passed fmt, strict Clippy, tests, release compilation, and the complete
 distroless image build. GHCR rejected only the final push with
 `permission_denied: write_package`. GitHub's documented package model requires
@@ -3386,7 +3386,7 @@ marker; it has no initial-sync snapshot. Dynamo's `LocalKvIndexer` provides the
 correct recovery shape: an event-range request can return an authoritative
 `TreeDump`, real-event watermark, and reset scope when requested history is too
 old. A direct wire implementation is not possible yet because Dynamo's tree
-dump contains block hashes while mini-dynamo's forward radix index is keyed by
+dump contains block hashes while ramjet's forward radix index is keyed by
 exact token slices. The selected incremental design is a long-lived per-engine
 companion that consumes the existing r34 stream, keeps a bounded memory-only
 block-digest index, and serves an atomic dump plus engine incarnation and
@@ -4313,7 +4313,7 @@ on GPUs 4–7, directed `NODE` topology, directed P2P read/write support, and
 1,830MiB free on each target GPU.
 
 LB and engine container IDs, start times, image IDs, and zero restart counts
-were identical before and after; mini-dynamo remained 2/2 healthy with both
+were identical before and after; ramjet remained 2/2 healthy with both
 `ds4proxy_upstream_up` gauges at one. Tools are staged root-owned and
 non-writable under `/tmp` on node06, but no tool container, CUDA context, LB
 recreate, or benchmark ran. The next gate remains the separately acknowledged
@@ -4917,7 +4917,7 @@ Independent registry reads confirmed `v0.1.0` equals qualified `rust-b0e0700`
 at `sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1`,
 and `companion-v0.1.0` equals `companion-rust-b0e0700` at
 `sha256:4af08be5c011ac56d1bde2463e525c1d57d9ddd21391a3565ec55183566d9f95`.
-Both retain source `https://github.com/helixml/mini-dynamo`, version `0.1.0`,
+Both retain source `https://github.com/helixml/ramjet`, version `0.1.0`,
 and revision `b0e070073d4266018d2f907ff35a7ee88adfdcd4`. The GitHub release was
 subsequently verified by the release owner. With recovery complete, the
 one-purpose promote pipeline, its scripts/tests, and plan ignore are removed;
@@ -4950,7 +4950,7 @@ the pinned registry client:
   `sha256:4af08be5c011ac56d1bde2463e525c1d57d9ddd21391a3565ec55183566d9f95`.
 
 Both application configs carry source
-`https://github.com/helixml/mini-dynamo`, semantic version `0.1.0`, and full
+`https://github.com/helixml/ramjet`, semantic version `0.1.0`, and full
 revision `b0e070073d4266018d2f907ff35a7ee88adfdcd4`. Edge aliases resolved to
 the same SHA-tag digests. At qualification time no release tag existed; the
 subsequent immutable tag points to this exact commit, and promotion may only
@@ -5273,7 +5273,7 @@ the 96 scout, all 630 requests split 311/319. No result had a missing/other
 route or transport error. The released LB, both TP4 engines, and both snapshot
 companions stayed healthy with zero restarts after the experiment.
 
-Decision: do not change mini-dynamo or the global serving policy. The useful
+Decision: do not change ramjet or the global serving policy. The useful
 next boundary is Helix-owned and explicit: shadow a small versioned step-class
 table, retain at least 256 tokens for typed/parallel tools, consider 96 only for
 the simple classes that passed, honor caller overrides, and require equal real
@@ -5693,7 +5693,7 @@ replica. Process inspection instead found the remote `cachebench.py`, its
 SSH client had gone away without terminating the remote benchmark clients.
 After sending `TERM` only to that group, the first poll found both LB inflight
 gauges and both vLLM running-request gauges at zero. This was a harness orphan,
-not evidence that mini-dynamo retained work after a client disconnect.
+not evidence that ramjet retained work after a client disconnect.
 
 The serving cancellation path already races every upstream response body with
 the downstream channel closing, drops the `reqwest::Response`, and releases the
@@ -5927,7 +5927,7 @@ Final qualification after independent review passed `cargo fmt --check`,
 strict all-target/all-feature Clippy (3.85s), 371 Rust unit tests plus every
 integration and doc-test (7.97s warm), agent corpus validation and 232 Python
 tests (2.18s), ordinary Compose rendering, and both snapshot Compose validators
-(0.62s). The final thin-LTO `mini-dynamo` release relink took 32.72s and produced
+(0.62s). The final thin-LTO `ramjet` release relink took 32.72s and produced
 a 12,446,264-byte binary. The removed Go oracle was not run because the Rust
 cutover no longer contains a Go module. The independent final audit found no
 remaining merge blocker. node06 was still unavailable, so no runtime mutation
@@ -6249,7 +6249,7 @@ generation. Raw argv/environment remain absent from stdout.
 The exact r34 generation completed in 637ms and was byte-for-byte identical to
 `compat/deepseek-v4-r34-serving-runtime.json`, retaining SHA-256
 `294b3130d696fdcfb2884f9e41bb705e439c63fd7c7c321a764121707af95ff4`.
-This closes hand-edited field/hash drift inside mini-dynamo. It does not claim
+This closes hand-edited field/hash drift inside ramjet. It does not claim
 the external engine build emits or signs the evidence; that upstream
 supply-chain integration and live node06 qualification remain open.
 

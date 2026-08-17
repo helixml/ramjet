@@ -1,9 +1,9 @@
 ---
-name: troubleshoot-mini-dynamo-node
-description: Diagnose a mini-dynamo GPU inference node by checking NVIDIA GPUs, Docker Compose services, OpenAI endpoints, router health, Prometheus metrics, logs, networking, and basic synthetic requests. Use for outages, degraded health, low throughput, cache misses, stuck requests, GPU errors, or post-deploy verification.
+name: troubleshoot-ramjet-node
+description: Diagnose a ramjet GPU inference node by checking NVIDIA GPUs, Docker Compose services, OpenAI endpoints, router health, Prometheus metrics, logs, networking, and basic synthetic requests. Use for outages, degraded health, low throughput, cache misses, stuck requests, GPU errors, or post-deploy verification.
 ---
 
-# Troubleshoot a mini-dynamo node
+# Troubleshoot a ramjet node
 
 For node06, the 2026-08-14 cooling/AC moratorium overrides the synthetic-test
 and mutation steps below. Read-only health, metrics, bounded logs, inventory,
@@ -60,7 +60,7 @@ scheduler symptom, not a network outage.
 Inspect only bounded recent logs around the incident:
 
 ```bash
-docker compose -f COMPOSE_FILE logs --since 15m --tail 300 mini-dynamo
+docker compose -f COMPOSE_FILE logs --since 15m --tail 300 ramjet
 docker compose -f COMPOSE_FILE logs --since 15m --tail 300 ENGINE_SERVICE \
   | grep -Ei 'error|fatal|panic|traceback|CUDA|NCCL|OOM|Xid|JIT'
 ```

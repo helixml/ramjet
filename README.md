@@ -1,24 +1,24 @@
 <div align="center">
 
-<h1>mini-dynamo</h1>
-<h3>Reuse the prefix. Balance the load.</h3>
+<h1>ramjet</h1>
+<h3>Warm intake. Balanced burn.</h3>
 <p>A compact Rust router that puts each OpenAI-compatible inference request on<br>the healthy GPU replica where it can do the least repeated work.</p>
 <p>
-  <a href="https://github.com/helixml/mini-dynamo/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/helixml/mini-dynamo?style=flat-square&amp;color=635bff"></a>
-  <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/github/license/helixml/mini-dynamo?style=flat-square&amp;color=18a36b"></a>
+  <a href="https://github.com/helixml/ramjet/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/helixml/ramjet?style=flat-square&amp;color=635bff"></a>
+  <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/github/license/helixml/ramjet?style=flat-square&amp;color=18a36b"></a>
   <a href="rust-toolchain.toml"><img alt="Rust 1.95 or newer" src="https://img.shields.io/badge/Rust-1.95%2B-f06a35?style=flat-square"></a>
 </p>
 
 </div>
 
 <p align="center">
-  <img src="docs/assets/deployment.svg" alt="An incoming prompt is scored by mini-dynamo and routed to the GPU replica with the best combination of reusable prefix and available capacity" width="1100">
+  <img src="docs/assets/deployment.svg" alt="An incoming prompt is scored by ramjet and routed to the GPU replica with the best combination of reusable prefix and available capacity" width="1100">
 </p>
 
-mini-dynamo sits between your clients and replicated model servers. It keeps
+ramjet sits between your clients and replicated model servers. It keeps
 conversations and shared system prompts near warm cache state, then lets live
 load override affinity before one replica becomes a hotspot. Clients keep the
-same OpenAI API; engines need no mini-dynamo-specific integration.
+same OpenAI API; engines need no ramjet-specific integration.
 
 ## Why it exists
 
@@ -37,7 +37,7 @@ Reference stack: DeepSeek-V4-Flash-0731, two TP4 replicas, 8× RTX PRO 6000.
 
 | Result | Measured outcome |
 | --- | ---: |
-| Shared-app concurrency, load-blind → mini-dynamo | **298 → 469 output tok/s · 1.57×** |
+| Shared-app concurrency, load-blind → ramjet | **298 → 469 output tok/s · 1.57×** |
 | Fresh 3-app × 4-session locality run | **82.5% cached prompt tokens** |
 | Whole-box deterministic code, c24/max256 | **1,820–1,844 output tok/s** |
 
@@ -51,8 +51,8 @@ For existing engines, the upstream list is normally the only setting you need:
 
 ```yaml
 services:
-  mini-dynamo:
-    image: ghcr.io/helixml/mini-dynamo:v0.1.0@sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1
+  ramjet:
+    image: ghcr.io/helixml/ramjet:v0.1.0@sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1
     restart: unless-stopped
     ports:
       - "8000:8000" # OpenAI API + /health
@@ -86,7 +86,7 @@ exact-placement, and snapshot paths off. See the complete
 score(replica) = min(prefix overlap, affinity cap) − α × live load
 ```
 
-mini-dynamo fingerprints only a bounded prefix, scores every healthy replica,
+ramjet fingerprints only a bounded prefix, scores every healthy replica,
 and reserves load before forwarding. Warm state wins when it is valuable; idle
 capacity wins when reuse no longer pays for the queue. Score ties prefer the
 deeper raw overlap.
@@ -114,6 +114,11 @@ exact-placement canaries, and session-affinity shadow telemetry remain opt-in
 research surfaces. The session path cannot change placement. These paths fail
 closed and are not dependencies of ordinary serving.
 
+> **Naming:** the project was renamed from mini-dynamo to ramjet. Wire and
+> operational identifiers deliberately keep their existing spelling so running
+> deployments and Grafana history stay valid: the `MD_*` environment prefix, the
+> `ds4proxy_*` metrics, and the `X-Mini-Dynamo-*` response headers are unchanged.
+
 ## Operate it
 
 | Task | Start here |
@@ -125,11 +130,11 @@ closed and are not dependencies of ordinary serving.
 | Inspect current work | [Roadmap](ROADMAP.md) |
 
 Codex-compatible repo skills are included for repeatable node operations:
-[`$deploy-mini-dynamo`](.agents/skills/deploy-mini-dynamo/SKILL.md),
-[`$optimize-mini-dynamo-node`](.agents/skills/optimize-mini-dynamo-node/SKILL.md),
-[`$load-test-mini-dynamo-node`](.agents/skills/load-test-mini-dynamo-node/SKILL.md),
+[`$deploy-ramjet`](.agents/skills/deploy-ramjet/SKILL.md),
+[`$optimize-ramjet-node`](.agents/skills/optimize-ramjet-node/SKILL.md),
+[`$load-test-ramjet-node`](.agents/skills/load-test-ramjet-node/SKILL.md),
 and
-[`$troubleshoot-mini-dynamo-node`](.agents/skills/troubleshoot-mini-dynamo-node/SKILL.md).
+[`$troubleshoot-ramjet-node`](.agents/skills/troubleshoot-ramjet-node/SKILL.md).
 
 ## Develop
 

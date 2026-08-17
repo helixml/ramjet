@@ -1,4 +1,0 @@
-interface:
-  display_name: "Deploy mini-dynamo"
-  short_description: "Deploy mini-dynamo safely with Docker Compose"
-  default_prompt: "Use $deploy-mini-dynamo to deploy mini-dynamo on this GPU node with Docker Compose."

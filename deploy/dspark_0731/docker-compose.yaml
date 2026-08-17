@@ -1,4 +1,4 @@
-# Canonical source: helixml/mini-dynamo/deploy/dspark_0731/docker-compose.yaml
+# Canonical source: helixml/ramjet/deploy/dspark_0731/docker-compose.yaml
 # The infra repository and node06 checkout contain generated mirrors; edit here first.
 # DeepSeek-V4-Flash-0731 + DSpark on RTX PRO 6000 Blackwell (SM120), x86.
 # Based on jacklarmer/deepseek-v4-flash-0731-sm120 (measured: 231.5 tok/s

@@ -1,6 +1,6 @@
-# AGENTS.md — working on mini-dynamo
+# AGENTS.md — working on ramjet
 
-Guidance for coding agents (and humans) developing and testing mini-dynamo.
+Guidance for coding agents (and humans) developing and testing ramjet.
 The production deployment is the DeepSeek-V4-Flash serving stack on **node06**;
 full experiments require GPUs, so they run there, not locally.
 
@@ -41,7 +41,7 @@ reuse the canonical checkout's warm target and move compiler scratch to disk:
 
 ```bash
 install -d -m 0700 "$HOME/.ctmp"
-CARGO_TARGET_DIR=/path/to/canonical/mini-dynamo/target \
+CARGO_TARGET_DIR=/path/to/canonical/ramjet/target \
 TMPDIR="$HOME/.ctmp" cargo test --locked
 ```
 
@@ -53,7 +53,7 @@ Feature worktrees on disk should still reuse the canonical checkout's warm
 target unless another Rust lane is active:
 
 ```bash
-CARGO_TARGET_DIR=/path/to/canonical/mini-dynamo/target \
+CARGO_TARGET_DIR=/path/to/canonical/ramjet/target \
   cargo test --locked <module-or-test-name>
 ```
 
@@ -219,7 +219,7 @@ an unfamiliar non-secret setting also fails instead of silently affecting the
 capture. It must reproduce r34 byte-for-byte before use on a candidate. Review
 the candidate diff and rerun the semantic validator plus both service probes;
 never update a pin from the printed digest alone. This closes manual field/hash
-editing inside mini-dynamo, but it does not claim the external engine build
+editing inside ramjet, but it does not claim the external engine build
 itself emits or signs the manifest.
 
 For the default-off persistent JIT-cache overlay, keep the no-GPU loop to:
@@ -705,7 +705,7 @@ not put the thermal journal or bearer in argv-visible systemd properties:
 ```bash
 install -d -o root -g root -m 0700 \
   /home/luke/inference/dspark_0731/.experiments
-systemd-run --unit=mini-dynamo-shadow-soak-rNN --no-block \
+systemd-run --unit=ramjet-shadow-soak-rNN --no-block \
   --property=Type=exec --property=WorkingDirectory=/home/luke/inference/dspark_0731 \
   --property=UMask=0077 --property=Restart=no --property=RuntimeMaxSec=2400 \
   --property=TimeoutStopSec=900 --property=KillMode=mixed \
@@ -1317,7 +1317,7 @@ EXPERIMENTS.md — add yours there too):
    regressions that synthetic benches miss.
 7. **Record**: append the run to EXPERIMENTS.md (config, numbers, verdict),
    update RESULTS.md if it changes a headline, and either promote the tag in
-   the canonical mini-dynamo Compose (`LB_IMAGE` default) or note why not.
+   the canonical ramjet Compose (`LB_IMAGE` default) or note why not.
 8. **Mirror a promoted config**: validate the canonical Compose file, run
    `deploy/dspark_0731/sync-compose.sh ../infra`, and commit the infra
    mirror. Never hand-edit the infra copy.

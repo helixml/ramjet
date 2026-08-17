@@ -1,6 +1,6 @@
 # Configuration
 
-mini-dynamo is configured at startup through environment variables. The normal
+ramjet is configured at startup through environment variables. The normal
 serving path is defaults-first: experimental tokenization, exact KV routing,
 and snapshot routing are all disabled unless explicitly enabled.
 
@@ -240,7 +240,7 @@ mode unless every upstream implements the identity contract below. Inspect
 
 The identity endpoint must capture the frontend and every expected EngineCore
 atomically and return a bounded schema-v3 document. Each incarnation is an
-opaque value of 1–256 ASCII alphanumeric/`.`/`_`/`:`/`-` bytes. mini-dynamo
+opaque value of 1–256 ASCII alphanumeric/`.`/`_`/`:`/`-` bytes. ramjet
 validates these values but never logs, labels, journals, or retains the raw
 values. Enforcing DSpark reliability mode retains only a canonical SHA-256
 commitment of the sorted EngineCore incarnation set. It persists that opaque
@@ -492,7 +492,7 @@ field precedences:
 Optional OpenAI cap fields set to JSON `null` are treated as absent caller
 policy; a non-null malformed preferred field remains invalid instead of
 silently selecting a fallback. Requested/effective here mean the request field
-before/after mini-dynamo's compatibility shim, not an engine-resolved default.
+before/after ramjet's compatibility shim, not an engine-resolved default.
 For example, current vLLM Completions normalizes an absent or null `max_tokens`
 to its default of 16, but this journal intentionally records `unset` rather
 than misrepresenting that server default as a caller-selected budget. Chat

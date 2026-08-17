@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG RUST_DEPS_IMAGE=ghcr.io/helixml/mini-dynamo:rust-deps-sha256-7da447db3053012bff0f7070cfe7a354d74406e3919b2b9d0ec360371911078d
+ARG RUST_DEPS_IMAGE=ghcr.io/helixml/ramjet:rust-deps-sha256-9894f4b88295b81874f2e0a837c1b49014b6a139318ce0556b34f450dc745389
 ARG OCI_REVISION=unknown
 FROM ${RUST_DEPS_IMAGE} AS build
 WORKDIR /src
@@ -14,7 +14,7 @@ RUN cargo build --release --locked --offline \
 
 FROM gcr.io/distroless/cc-debian12
 ARG OCI_REVISION
-LABEL org.opencontainers.image.source="https://github.com/helixml/mini-dynamo"
+LABEL org.opencontainers.image.source="https://github.com/helixml/ramjet"
 LABEL org.opencontainers.image.version="0.1.0"
 LABEL org.opencontainers.image.revision="${OCI_REVISION}"
 COPY --from=build /mini-dynamo-snapshot-companion /mini-dynamo-snapshot-companion

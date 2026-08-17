@@ -28,12 +28,12 @@ printf '%s' "$GHCR_TOKEN" | crane auth login ghcr.io -u "$GHCR_USERNAME" --passw
 
 case "$kind" in
   lb)
-    source="ghcr.io/helixml/mini-dynamo:rust-$short"
-    destination="ghcr.io/helixml/mini-dynamo:$tag"
+    source="ghcr.io/helixml/ramjet:rust-$short"
+    destination="ghcr.io/helixml/ramjet:$tag"
     ;;
   companion)
-    source="ghcr.io/helixml/mini-dynamo:companion-rust-$short"
-    destination="ghcr.io/helixml/mini-dynamo:companion-$tag"
+    source="ghcr.io/helixml/ramjet:companion-rust-$short"
+    destination="ghcr.io/helixml/ramjet:companion-$tag"
     ;;
 esac
 
@@ -41,7 +41,7 @@ source_digest=$(crane digest "$source" 2>/dev/null) || fail source_digest
 config=$(crane config "$source" 2>/dev/null) || fail source_missing
 compact=$(printf '%s' "$config" | tr -d '[:space:]')
 printf '%s' "$compact" | grep -Fq \
-  "\"org.opencontainers.image.source\":\"https://github.com/helixml/mini-dynamo\"" \
+  "\"org.opencontainers.image.source\":\"https://github.com/helixml/ramjet\"" \
   || fail source_label_mismatch
 printf '%s' "$compact" | grep -Fq \
   "\"org.opencontainers.image.version\":\"$version\"" \

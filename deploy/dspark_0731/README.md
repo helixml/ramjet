@@ -1,7 +1,7 @@
 # DeepSeek V4 Flash deployment
 
 This directory is the canonical source for node06's complete Docker Compose
-stack: the Rust mini-dynamo load balancer and both TP4 vLLM/DSpark engines.
+stack: the Rust ramjet load balancer and both TP4 vLLM/DSpark engines.
 The deploy checkout on node06 and the infra repository contain mirrors so
 operators can still use the established `/home/luke/inference/dspark_0731`
 working directory.
@@ -32,7 +32,7 @@ deploy/dspark_0731/sync-compose.sh ../infra
 sync command updates only the mirrored Compose file; it does not touch the
 operational README, benchmark helper, `.env`, containers, or engines.
 
-After the mini-dynamo and infra changes are merged, update node06 explicitly:
+After the ramjet and infra changes are merged, update node06 explicitly:
 
 ```bash
 scp deploy/dspark_0731/docker-compose.yaml \

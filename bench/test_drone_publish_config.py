@@ -45,7 +45,7 @@ class DronePublishConfigTest(unittest.TestCase):
 
     def test_kaniko_publishers_are_cached_and_revision_stamped(self):
         text = DRONE.read_text().split("\n---\n")[0]
-        self.assertEqual(text.count("--cache-repo=ghcr.io/helixml/mini-dynamo-build-cache"), 4)
+        self.assertEqual(text.count("--cache-repo=ghcr.io/helixml/ramjet-build-cache"), 4)
         self.assertEqual(text.count("--snapshot-mode=redo --reproducible"), 4)
         for step in ("publish-image", "publish-companion-image"):
             section = re.search(

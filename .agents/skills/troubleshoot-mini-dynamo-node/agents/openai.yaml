@@ -1,4 +1,0 @@
-interface:
-  display_name: "Troubleshoot a mini-dynamo node"
-  short_description: "Check GPUs, health, metrics, logs, and requests"
-  default_prompt: "Use $troubleshoot-mini-dynamo-node to diagnose this mini-dynamo deployment."

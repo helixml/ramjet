@@ -1,4 +1,4 @@
-# mini-dynamo roadmap
+# ramjet roadmap
 
 Status legend: ✅ done · 🔨 in progress · ⬜ planned. Ordered by
 value-per-effort given the current deployment (2 vLLM+DSpark TP4 instances on
@@ -428,7 +428,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   96-token scout passed only 54/90 because typed and parallel tool calls hit
   the cap. At 256, low/high/max task-rate and throughput ranges overlapped, so
   there is no evidence to replace the high-effort production default. Preserve
-  caller settings in mini-dynamo. Next, put a versioned shadow policy in Helix:
+  caller settings in ramjet. Next, put a versioned shadow policy in Helix:
   class simple text/auto-tool steps separately from structured or parallel
   tool calls, retain 256 for the latter, and require real workflow success plus
   a kill switch before enforcement.
@@ -799,7 +799,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   inclusive starting sequence followed by buffered events and an end marker.
   Dynamo's `LocalKvIndexer` instead serves `TreeDump` plus a real-event
   watermark when the requested event is absent. Its dump is keyed by block
-  hashes, however, while mini-dynamo's current radix tree requires exact token
+  hashes, however, while ramjet's current radix tree requires exact token
   slices. Implement the smallest compatible no-engine-restart seam as a
   long-lived per-engine snapshot companion: subscribe live first, continuously
   maintain bounded exact state, serve one atomic digest-index dump plus engine
@@ -1121,7 +1121,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   standalone selection service, branch-sharded KV indexer, compressed radix
   tree, topology-aware routing, parser separation, and trace replay first-class;
   `best_worker_id` and `get_overlap_scores` expose selection and per-tier overlap
-  without requiring Dynamo to proxy the request. Keep mini-dynamo's two-engine
+  without requiring Dynamo to proxy the request. Keep ramjet's two-engine
   implementation smaller, but preserve those boundaries: engine-neutral exact
   inventory, read-only counterfactual selection/overlap, and replayable workload
   traces. Add an offline `get_overlap_scores`-equivalent diagnostic after the
@@ -1134,7 +1134,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   fits node06. DwarfStar's current native-agent contract reinforces the session
   direction already selected here: rendered conversation plus durable KV state
   is the session truth, tool syntax stays model-native, and a stripped session
-  can rebuild from saved rendered text. For mini-dynamo, preserve the exact
+  can rebuild from saved rendered text. For ramjet, preserve the exact
   engine-rendered-token golden boundary and add an explicit session snapshot /
   rebuild experiment before any persistent L2 promotion.
 
@@ -1158,7 +1158,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   engines. Extend to several models behind one endpoint with per-model
   affinity policy and pool sizing.
 
-## Helix-side follow-ups (not mini-dynamo, but this LB masks them)
+## Helix-side follow-ups (not ramjet, but this LB masks them)
 
 The shims exist because Helix's Zed config emits fields strict engines reject.
 Proper fixes belong upstream: cap Zed `max_output_tokens`, retry-on-5xx for

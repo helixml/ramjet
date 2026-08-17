@@ -1,0 +1,4 @@
+interface:
+  display_name: "Troubleshoot a ramjet node"
+  short_description: "Check GPUs, health, metrics, logs, and requests"
+  default_prompt: "Use $troubleshoot-ramjet-node to diagnose this ramjet deployment."

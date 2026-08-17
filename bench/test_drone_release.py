@@ -110,7 +110,7 @@ class DroneReleaseTest(unittest.TestCase):
             "case \"${1-}\" in\n"
             "  auth) exit 0 ;;\n"
             "  config) printf '%s\\n' '{\"config\":{\"Labels\":{"
-            f"\"org.opencontainers.image.source\":\"https://github.com/helixml/mini-dynamo\","
+            f"\"org.opencontainers.image.source\":\"https://github.com/helixml/ramjet\","
             f"\"org.opencontainers.image.version\":\"1.2.0-alpha.1\","
             f"\"org.opencontainers.image.revision\":\"{sha}\"}}}}' ;;\n"
             "  digest)\n"
@@ -240,9 +240,9 @@ class DroneReleaseTest(unittest.TestCase):
             )
         copies = (self.root / "crane-copies").read_text()
         short = sha[:7]
-        self.assertIn(f":rust-{short} -> ghcr.io/helixml/mini-dynamo:v1.2.0-alpha.1", copies)
+        self.assertIn(f":rust-{short} -> ghcr.io/helixml/ramjet:v1.2.0-alpha.1", copies)
         self.assertIn(
-            f":companion-rust-{short} -> ghcr.io/helixml/mini-dynamo:companion-v1.2.0-alpha.1",
+            f":companion-rust-{short} -> ghcr.io/helixml/ramjet:companion-v1.2.0-alpha.1",
             copies,
         )
 

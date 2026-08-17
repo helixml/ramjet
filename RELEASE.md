@@ -1,4 +1,4 @@
-# Releasing mini-dynamo
+# Releasing ramjet
 
 Releases are immutable GHCR images plus a matching Git tag and GitHub release.
 Mutable `rust-edge` tags are development pointers and are never release

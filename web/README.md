@@ -18,7 +18,7 @@ tooltips, and a table-view twin behind the toggle in each card header.
 bench/machineview_agent.py   host agent (loopback): /proc, statvfs, RAPL, nvidia-smi
         │  GET /sample (JSON)
         ▼
-mini-dynamo LB               samples every MD_MACHINEVIEW_INTERVAL_MS:
+ramjet LB               samples every MD_MACHINEVIEW_INTERVAL_MS:
   src/machineview.rs           - its own Prometheus registry (ds4proxy_*)
         │                      - each upstream's /metrics (vllm:*)
         │                      - the agent (host + GPUs + energy)

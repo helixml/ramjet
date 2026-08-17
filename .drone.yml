@@ -110,8 +110,8 @@ steps:
         mkdir -p /kaniko/.docker
         printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" >/kaniko/.docker/config.json
         exec /kaniko/executor --context . --dockerfile Dockerfile.deps \
-          --destination ghcr.io/helixml/mini-dynamo:rust-deps-sha256-7da447db3053012bff0f7070cfe7a354d74406e3919b2b9d0ec360371911078d \
-          --cache=true --cache-repo=ghcr.io/helixml/mini-dynamo-build-cache \
+          --destination ghcr.io/helixml/ramjet:rust-deps-sha256-9894f4b88295b81874f2e0a837c1b49014b6a139318ce0556b34f450dc745389 \
+          --cache=true --cache-repo=ghcr.io/helixml/ramjet-build-cache \
           --cache-ttl=336h --snapshot-mode=redo --reproducible
     when:
       event:
@@ -137,8 +137,8 @@ steps:
         mkdir -p /kaniko/.docker
         printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" >/kaniko/.docker/config.json
         exec /kaniko/executor --context . --dockerfile Dockerfile.release-tools \
-          --destination ghcr.io/helixml/mini-dynamo:release-tools-sha256-244bfd3b33987aedfd342ca70253320cda509bd4d6bc3aac6320b87fd50c5733 \
-          --cache=true --cache-repo=ghcr.io/helixml/mini-dynamo-build-cache \
+          --destination ghcr.io/helixml/ramjet:release-tools-sha256-244bfd3b33987aedfd342ca70253320cda509bd4d6bc3aac6320b87fd50c5733 \
+          --cache=true --cache-repo=ghcr.io/helixml/ramjet-build-cache \
           --cache-ttl=336h --snapshot-mode=redo --reproducible
     when:
       event:
@@ -168,10 +168,10 @@ steps:
         mkdir -p /kaniko/.docker
         printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" >/kaniko/.docker/config.json
         exec /kaniko/executor --context . --dockerfile Dockerfile \
-          --destination ghcr.io/helixml/mini-dynamo:rust-${DRONE_COMMIT_SHA:0:7} \
-          --destination ghcr.io/helixml/mini-dynamo:rust-edge \
+          --destination ghcr.io/helixml/ramjet:rust-${DRONE_COMMIT_SHA:0:7} \
+          --destination ghcr.io/helixml/ramjet:rust-edge \
           --build-arg OCI_REVISION=${DRONE_COMMIT_SHA} \
-          --cache=true --cache-repo=ghcr.io/helixml/mini-dynamo-build-cache \
+          --cache=true --cache-repo=ghcr.io/helixml/ramjet-build-cache \
           --cache-ttl=336h --snapshot-mode=redo --reproducible
     when:
       event:
@@ -201,10 +201,10 @@ steps:
         mkdir -p /kaniko/.docker
         printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" >/kaniko/.docker/config.json
         exec /kaniko/executor --context . --dockerfile Dockerfile.companion \
-          --destination ghcr.io/helixml/mini-dynamo:companion-rust-${DRONE_COMMIT_SHA:0:7} \
-          --destination ghcr.io/helixml/mini-dynamo:companion-rust-edge \
+          --destination ghcr.io/helixml/ramjet:companion-rust-${DRONE_COMMIT_SHA:0:7} \
+          --destination ghcr.io/helixml/ramjet:companion-rust-edge \
           --build-arg OCI_REVISION=${DRONE_COMMIT_SHA} \
-          --cache=true --cache-repo=ghcr.io/helixml/mini-dynamo-build-cache \
+          --cache=true --cache-repo=ghcr.io/helixml/ramjet-build-cache \
           --cache-ttl=336h --snapshot-mode=redo --reproducible
     when:
       event:
@@ -309,7 +309,7 @@ steps:
       - release-deployment-compose
 
   - name: release-image
-    image: ghcr.io/helixml/mini-dynamo:release-tools-sha256-244bfd3b33987aedfd342ca70253320cda509bd4d6bc3aac6320b87fd50c5733@sha256:1d0d9c383119f43b832008d2b2866c43472175bf0d814d27032b677e30dcac43
+    image: ghcr.io/helixml/ramjet:release-tools-sha256-244bfd3b33987aedfd342ca70253320cda509bd4d6bc3aac6320b87fd50c5733@sha256:1d0d9c383119f43b832008d2b2866c43472175bf0d814d27032b677e30dcac43
     pull: if-not-exists
     environment:
       GHCR_USERNAME:
@@ -326,7 +326,7 @@ steps:
       - release-quality-complete
 
   - name: release-companion-image
-    image: ghcr.io/helixml/mini-dynamo:release-tools-sha256-244bfd3b33987aedfd342ca70253320cda509bd4d6bc3aac6320b87fd50c5733@sha256:1d0d9c383119f43b832008d2b2866c43472175bf0d814d27032b677e30dcac43
+    image: ghcr.io/helixml/ramjet:release-tools-sha256-244bfd3b33987aedfd342ca70253320cda509bd4d6bc3aac6320b87fd50c5733@sha256:1d0d9c383119f43b832008d2b2866c43472175bf0d814d27032b677e30dcac43
     pull: if-not-exists
     environment:
       GHCR_USERNAME:

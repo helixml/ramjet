@@ -1,9 +1,9 @@
 ---
-name: optimize-mini-dynamo-node
-description: Measure and tune a mini-dynamo GPU inference node using controlled, reproducible experiments. Use for GPU/NUMA placement, vLLM or DSpark scheduler settings, routing weights, cache locality, throughput, latency, concurrency, context-size, or image A/B optimization.
+name: optimize-ramjet-node
+description: Measure and tune a ramjet GPU inference node using controlled, reproducible experiments. Use for GPU/NUMA placement, vLLM or DSpark scheduler settings, routing weights, cache locality, throughput, latency, concurrency, context-size, or image A/B optimization.
 ---
 
-# Optimize a mini-dynamo node
+# Optimize a ramjet node
 
 ## Current node06 moratorium
 
@@ -24,7 +24,7 @@ definitions before running GPU work.
 1. Record the immutable engine and LB image digests, process/container start
    times, effective argv, model/tokenizer revision, GPU topology, CPU/NUMA
    placement, and current router configuration.
-2. Check `nvidia-smi`, engine health, mini-dynamo `/health`, queue/load gauges,
+2. Check `nvidia-smi`, engine health, ramjet `/health`, queue/load gauges,
    and recent CUDA/NCCL/OOM/Xid/JIT markers. Do not benchmark an unhealthy or
    identity-ambiguous stack.
 3. Keep unrelated production traffic off the engine whose native metrics will

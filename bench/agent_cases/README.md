@@ -72,7 +72,7 @@ aborting later cells, but any transport failure still stops the matrix.
 
 A lower cap is promotable only if protocol validity and task completion remain
 equal to the control. Never infer quality from fewer completion tokens alone.
-mini-dynamo does not classify content or enforce this policy; it verifies
+ramjet does not classify content or enforce this policy; it verifies
 pass-through and supplies evidence for the Helix control plane, where an
 explicit per-step policy and kill switch belong.
 
