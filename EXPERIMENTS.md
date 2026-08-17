@@ -1,5 +1,45 @@
 # node06 experiment journal
 
+## 2026-08-18 — `rust-29d9e92` rename rollout and the state-path migration
+
+The rename to ramjet finished in the repository, which moved two paths this
+box actually holds: the deployment lock and the machine-view state
+directory. Deployed `rust-29d9e92` with both, LB-only.
+
+The state directory is the part that needed care. `/var/lib/mini-dynamo-machineview`
+held 81MB — the sample ring and nine hours of token history — and Docker
+would have created an empty `/var/lib/ramjet-machineview` and silently reset
+the dashboard. The mutation therefore moves the directory before the
+recreate. A bind mount follows the inode, so the running load balancer kept
+writing through the move and nothing was lost between the `mv` and the
+restart.
+
+The lock rename has no such trick available, so the mutation held **both**
+names nested: `flock /run/lock/mini-dynamo-node06-deployment.lock flock
+/run/lock/ramjet-node06-deployment.lock`. Repository tooling switches names
+in one commit, but a concurrently running older revision would not, and
+mutual exclusion that only half the callers observe is worse than none.
+
+| | |
+|---|---|
+| candidate | `ghcr.io/helixml/ramjet:rust-29d9e92@sha256:e303ed167f2723cec0e2d6f57b027cebfc8efd5f78ecc4b6831d9c31994978a8` |
+| rollback | `ghcr.io/helixml/ramjet:rust-a4abc72@sha256:ce8f496ff95d…` **plus** `.compose-backup/20260818-010318` **plus** moving the state directory back |
+| healthy after | 2s; 4/4 upstreams, `/health` 200, `/ui/` 200, stream handshake 101 |
+| state | restored 17,275 samples and 9 token buckets from the moved directory; mount reads `/var/lib/ramjet-machineview` |
+| engines | all four untouched, zero restarts |
+
+Rollback is now a three-part unit — image, Compose files, and state path.
+Restoring any two of them leaves a load balancer that starts and quietly
+loses its history.
+
+Four classes of name were left alone in the rename, and the reasons are
+worth keeping: hash domain-separation constants (six tests caught the first
+pass rewriting them, which would have changed every derived digest),
+`mini_dynamo_engine_identity` and `/v1/mini-dynamo/identity` which the
+engine-side middleware and a pinned `argv_sha256` already agree on,
+`minidynamo-rtx6000pro` which Grafana history joins on, and the published
+image digests and journal entries that record what actually ran.
+
 ## 2026-08-17 — post-rename `rust-261bef8` rollout on node06 (LB-only)
 
 First deploy of a published post-rename image, and the first that had to move
