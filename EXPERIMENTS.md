@@ -1,5 +1,50 @@
 # node06 experiment journal
 
+## 2026-08-17 — machine-view token history and the History heatmaps (LB-only)
+
+Added a second, much cheaper store beside the machine-view sample ring:
+hourly deltas of the existing `ds4proxy_*` token and request counters, kept
+for 30 days (`MD_MACHINEVIEW_TOKEN_HISTORY_DAYS`) at 24 records a day and
+served from `/api/machineview/tokens`. The dashboard's new History tab draws
+it as a weeks-by-weekday calendar and a weekday-by-hour punchcard.
+
+The ring was the wrong store for this question. It is seconds-resolution and
+bounded to a day (a week at most), and node06's snapshot is already 84.7MB;
+a month of it is not affordable, while a month of hourly buckets is 720 small
+records. Counter resets are treated as unknowable rather than negative: a
+backwards counter contributes nothing and the next scrape re-baselines, so an
+LB restart loses only its in-flight interval. `MD_MACHINEVIEW_STATE_PATH` is
+already set on node06, so the accumulated buckets persist; the state schema
+moved to version 2 and still reads version 1 files (samples restore, history
+starts empty).
+
+**Deployment.** LB-only recreate of the live `qwen38_27b` project
+(base + `topology.8gpu-tp2.yaml` + `machineview.override.yaml`), under
+`/run/lock/mini-dynamo-node06-deployment.lock`, with an automatic baseline
+rollback trap. The rendered diff against the baseline was one line — the
+image — and the four TP2 engines were not touched.
+
+| | |
+|---|---|
+| candidate | `ghcr.io/helixml/ds4-loadbalancer:rust-tokenheatmaps-89f7926` (local build, image ID `sha256:807bfa82…`) |
+| rollback | `ghcr.io/helixml/ds4-loadbalancer:rust-machineview-1a48b70@sha256:2ceb9232…` |
+| build / transfer | 58.3s / 4.1s (15.5MB image) |
+| healthy after | 2s; 4/4 `ds4proxy_upstream_up`, `/health` 200, `/ui/` 200 |
+| restarts | 0; ring restored 17,276 samples, `token_hours=0` as expected |
+
+Two caveats. The candidate image exists only in node06's local image store —
+it is a development build, not a GHCR publish, so the pin above is not
+pullable until this merges and Drone publishes it; the rollback pin is. And
+`ds4proxy_cached_prompt_tokens_total` is 0 for every endpoint on this stack,
+because Qwen returns `prompt_tokens_details: null` (see the 2026-08-14 entry),
+so the heatmaps' "cached" line is structurally zero here rather than measured.
+
+The build also needed `--build-arg RUST_DEPS_IMAGE=…mini-dynamo:rust-deps-sha256-7da447…`.
+The rename commit changed Cargo.toml's `repository` field, which moves the
+content key to `rust-deps-sha256-9894f4b8`, and that image is not published
+yet. Only the URL changed, so the previous key's dependency graph is
+identical; the new key seeds itself on the next main build.
+
 ## 2026-08-14 — Qwen3.8-27B-FP8 replaces DeepSeek-V4-Flash on node06
 
 Brought the whole serving stack over to `Qwen/Qwen3.8-27B-FP8` (vision-language)

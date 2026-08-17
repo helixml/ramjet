@@ -116,3 +116,9 @@ Four things about them are deliberate:
 - **Restarts lose the in-flight interval, not the history.** The counters are
   cumulative, so a restart re-baselines rather than logging a negative delta,
   and with `MD_MACHINEVIEW_STATE_PATH` set the accumulated buckets survive.
+
+The tooltip's `requests` line is `ds4proxy_requests_total` across every
+endpoint and status code, so a quiet hour can show requests with no tokens.
+`cached` is the LB's own `ds4proxy_cached_prompt_tokens_total`, which stays
+at zero against engines that do not return `prompt_tokens_details` — Qwen3.8
+is one of them, so on node06 that line is structurally zero, not measured.
