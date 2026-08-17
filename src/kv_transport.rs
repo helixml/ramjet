@@ -914,16 +914,24 @@ mod tests {
         .await
         .unwrap();
 
+        // The stalled peer must outlive the client's deadline. Sleeping for
+        // the same 100ms the client waits made this a race that CI lost
+        // (build #447): a starved runner let the router drop first, and the
+        // client reported the peer's disconnect instead of its own timeout.
+        // Holding the socket until the verdict is in leaves exactly one way
+        // for the replay to end.
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
             let _request = replay_server.recv().await.unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = released.await;
         });
         let started = Instant::now();
-        let replay = tokio::time::timeout(Duration::from_millis(200), source.replay(0, 0))
+        let replay = tokio::time::timeout(Duration::from_millis(500), source.replay(0, 0))
             .await
             .expect("the blocking replay deadline must remain bounded");
         assert_eq!(replay, Err(KvTransportError::ReplayTimeoutUndrained));
         assert!(started.elapsed() >= Duration::from_millis(15));
+        drop(release);
         // Bounded join: if the request were ever lost to the same handshake
         // race, this recv would block forever and the failure would present as
         // a hung suite rather than a failed assertion.

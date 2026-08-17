@@ -53,8 +53,8 @@ Two stores, two time scales. The ring answers "what is the box doing now"
 at seconds of resolution and is bounded by `RJ_MACHINEVIEW_RETENTION_SECONDS`
 (a day by default, a week at most). The token history answers "when does this
 box get used" from the same `ds4proxy_*` counters at one bucket an hour, so a
-month of it costs 720 small records — that is what the History tab's two
-heatmaps read.
+month of it costs 720 small records — that is what the Overview's two
+token heatmaps read.
 
 ## Development
 
@@ -115,12 +115,14 @@ CPU busy share, load, memory/swap, per-mount usage, whole-disk I/O rates,
 physical-interface network rates, RAPL package watts, and one row per GPU
 from `nvidia-smi`. Rates need two scrapes, so the first sample returns nulls.
 
-## History tab — the two token heatmaps
+## The two token heatmaps
 
-`Tokens by day` is one column per date and one row per three-hour band;
-`Tokens by hour` is a weekday × hour-of-day punchcard summed over the window.
-Both plot prompt + generated tokens as dots, and both are independent of the
-range picker, which drives every other card.
+They sit in the Overview beside the GPU row, compact by design: `Tokens by
+day` is one column per date and one row per three-hour band, `Tokens by hour`
+is a weekday × hour-of-day punchcard summed over the window. Both plot prompt
++ generated tokens as dots, and both are independent of the range picker,
+which drives every other card. The full-precision numbers are behind the
+table toggle in each card header.
 
 Four things about them are deliberate:
 

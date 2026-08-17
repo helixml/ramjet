@@ -98,7 +98,6 @@ const TABS: TabDef[] = [
   { id: "serving", label: "Serving" },
   { id: "gpus", label: "GPUs" },
   { id: "system", label: "System" },
-  { id: "history", label: "History" },
 ]
 
 /** Days of hourly history requested; the LB clamps to its own retention. */
@@ -395,9 +394,45 @@ export default function App() {
   )
   const historyLoading = tokens == null && tokensError == null
   const historyWindow = tokens?.days ?? HISTORY_DAYS
-  const historySummary = `${fmtCount(tokenTotals.total)} tokens · ${fmtCount(
-    tokenTotals.requests,
-  )} requests over ${historyWindow} days`
+  const historyCards = (
+    <div className="flex flex-col gap-3">
+      <HeatmapCard
+        title="Tokens by day"
+        description={
+          tokensError
+            ? `history unavailable — ${tokensError}`
+            : `${fmtCount(tokenTotals.total)} tokens · ${fmtCount(
+                tokenTotals.requests,
+              )} requests over ${historyWindow} days`
+        }
+        rowLabels={tokenDays.rowLabels}
+        columnLabels={tokenDays.columnLabels}
+        cells={tokenDays.cells}
+        scale={dayScale}
+        format={(value) => fmtCount(value)}
+        unit="tokens"
+        cellRole="in that window"
+        cellMaxPx={13}
+        rotateColumnLabels
+        compact
+        loading={historyLoading}
+      />
+      <HeatmapCard
+        title="Tokens by hour"
+        description="weekday × hour of day, your local time"
+        rowLabels={tokenHours.rowLabels}
+        columnLabels={tokenHours.columnLabels}
+        cells={tokenHours.cells}
+        scale={hourScale}
+        format={(value) => fmtCount(value)}
+        unit="tokens"
+        cellRole="in that hour"
+        cellMaxPx={16}
+        compact
+        loading={historyLoading}
+      />
+    </div>
+  )
 
   const storageCard = (
     <Card aria-busy={loading || undefined}>
@@ -565,9 +600,24 @@ export default function App() {
               <ChartCard key={card.title} {...card} loading={loading} />
             ))}
           </div>
-          {loading || gpuCount > 0 ? (
-            <ChartCard {...gpuUtilCard} loading={loading} />
-          ) : null}
+          {/* The history pair is narrow by design, so it rides beside the
+              GPU row rather than taking a tab of its own. */}
+          <div
+            className={
+              loading || gpuCount > 0
+                ? "grid grid-cols-1 gap-3 xl:grid-cols-3"
+                : "grid grid-cols-1 gap-3"
+            }
+          >
+            {loading || gpuCount > 0 ? (
+              <div className="xl:col-span-2">
+                {/* Taller here than on the GPUs tab so the row ends level
+                    with the two stacked history cards beside it. */}
+                <ChartCard {...gpuUtilCard} height={330} loading={loading} />
+              </div>
+            ) : null}
+            {historyCards}
+          </div>
         </>
       ) : null}
 
@@ -596,52 +646,6 @@ export default function App() {
               <ChartCard key={card.title} {...card} loading={loading} />
             ))}
             {storageCard}
-          </div>
-        </div>
-      ) : null}
-
-      {tab === "history" ? (
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-muted-foreground text-xs">{historySummary}</span>
-            {tokensError ? (
-              <span className="text-xs" style={{ color: "var(--status-critical)" }}>
-                ⚠ {tokensError}
-              </span>
-            ) : (
-              <span className="text-faint-foreground text-[11px]">
-                hourly buckets, your local time — independent of the range above
-              </span>
-            )}
-          </div>
-          <div className="flex flex-col gap-3">
-            <HeatmapCard
-              title="Tokens by day"
-              description="prompt + generated, one column per date and one row per three-hour band"
-              rowLabels={tokenDays.rowLabels}
-              columnLabels={tokenDays.columnLabels}
-              cells={tokenDays.cells}
-              scale={dayScale}
-              format={(value) => fmtCount(value)}
-              unit="tokens"
-              cellRole="in that window"
-              cellMaxPx={30}
-              rotateColumnLabels
-              loading={historyLoading}
-            />
-            <HeatmapCard
-              title="Tokens by hour"
-              description={`weekday × hour of day, summed over ${historyWindow} days`}
-              rowLabels={tokenHours.rowLabels}
-              columnLabels={tokenHours.columnLabels}
-              cells={tokenHours.cells}
-              scale={hourScale}
-              format={(value) => fmtCount(value)}
-              unit="tokens"
-              cellRole="in that hour"
-              cellMaxPx={34}
-              loading={historyLoading}
-            />
           </div>
         </div>
       ) : null}

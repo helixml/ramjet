@@ -898,6 +898,7 @@ export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head
   privilege to PR, main, or tag-copy steps.
   Node06 deploys should keep using the warm local `bench/build_transfer.sh`
   path because it reuses the development BuildKit cache.
+- Drone credentials can be found in .env (DRONE_SERVER and DRONE_TOKEN) to view the logs
 - Release tags use the separate `release-tags` Drone pipeline. It triggers only
   for `refs/tags/v*`, repeats the full Rust/Python/Compose quality gate, and
   promotes only the already-qualified `rust-$shortsha` and
