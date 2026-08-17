@@ -34,7 +34,9 @@ services:
   ds4-loadbalancer:
     # Container name is retained so existing bench scripts, the deployment
     # lock, and the Grafana ds4proxy_ dashboards keep working.
-    image: ${LB_IMAGE:?set LB_IMAGE to an immutable MD_-prefixed load balancer}
+    # Override only with another immutable tag+digest pair. This pin is the
+    # latest published machine-view build; its OCI revision is 59c6b1e.
+    image: ${LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-59c6b1e@sha256:2c726118bfd25bb62857808c3b2814ab0e5d31ed4be20e84813a02704f09c401}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:
