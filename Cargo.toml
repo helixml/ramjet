@@ -22,7 +22,7 @@ include = [
 
 [dependencies]
 anyhow = "1.0.104"
-axum = { version = "0.8.9", features = ["http1", "http2", "tokio"] }
+axum = { version = "0.8.9", features = ["http1", "http2", "tokio", "ws"] }
 bytes = "1.12.1"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 dynamo-protocols = "5.3.1"

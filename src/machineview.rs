@@ -23,20 +23,28 @@ use std::{
     collections::HashMap,
     collections::VecDeque,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     Router,
     body::Body,
-    extract::{Query, State},
+    extract::{
+        Query, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     http::{Response, StatusCode},
+    response::IntoResponse,
     routing::get,
 };
 use parking_lot::Mutex;
 use prometheus::Registry;
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 use url::Url;
 
 const MIN_INTERVAL_MS: u64 = 1_000;
@@ -48,6 +56,13 @@ const MAX_SERIES_POINTS: usize = 2_000;
 const PERSIST_EVERY_TICKS: u64 = 60;
 const HISTOGRAM_WINDOW_MS: u64 = 120_000;
 const HOUR_MS: u64 = 3_600_000;
+const MIN_STREAM_INTERVAL_MS: u64 = 200;
+const MAX_STREAM_INTERVAL_MS: u64 = 10_000;
+/// Frames a slow client may fall behind before it is told it lost data.
+const STREAM_CHANNEL_CAPACITY: usize = 64;
+/// A dashboard is a handful of tabs, not a fan-out surface; keep the work
+/// this observation-only path can be asked to do bounded.
+const MAX_STREAM_CLIENTS: usize = 8;
 const MIN_TOKEN_HISTORY_DAYS: u64 = 1;
 const MAX_TOKEN_HISTORY_DAYS: u64 = 400;
 /// Version 1 files carry samples only; version 2 adds the token history and
@@ -70,6 +85,7 @@ pub struct Settings {
     pub interval_ms: u64,
     pub retention_seconds: u64,
     pub token_history_days: u64,
+    pub stream_interval_ms: u64,
     pub agent_url: Option<Url>,
     pub state_path: Option<PathBuf>,
     pub ui_dir: Option<PathBuf>,
@@ -144,6 +160,16 @@ impl Settings {
             MIN_TOKEN_HISTORY_DAYS,
             MAX_TOKEN_HISTORY_DAYS,
         )?;
+        // The live stream reads only the proxy's own in-process registry, so
+        // it can run far faster than the interval that scrapes engines and
+        // the host agent over the network.
+        let stream_interval_ms = bounded(
+            &mut get,
+            "MD_MACHINEVIEW_STREAM_INTERVAL_MS",
+            1_000,
+            MIN_STREAM_INTERVAL_MS,
+            MAX_STREAM_INTERVAL_MS,
+        )?;
         let agent_url = match get("MD_MACHINEVIEW_AGENT_URL").filter(|value| !value.is_empty()) {
             None => None,
             Some(raw) => Some(Url::parse(&raw).ok().filter(Url::has_host).ok_or_else(|| {
@@ -176,6 +202,7 @@ impl Settings {
             interval_ms,
             retention_seconds,
             token_history_days,
+            stream_interval_ms,
             agent_url,
             state_path,
             ui_dir,
@@ -1331,6 +1358,121 @@ fn load_state(path: &Path) -> Option<(Vec<Sample>, Vec<TokenBucket>)> {
         .then_some((state.samples, state.tokens))
 }
 
+// --- Live stream ------------------------------------------------------------
+
+/// One published frame. `serving` frames come from the proxy's own registry
+/// on the fast interval; `sample` frames are the full network-scraped sample
+/// the ring stores, and arrive on the much slower sampling interval.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum StreamFrame<'a> {
+    Hello {
+        now: u64,
+        hostname: Option<&'a str>,
+        interval_ms: u64,
+        stream_interval_ms: u64,
+        retention_seconds: u64,
+        upstreams: Vec<String>,
+    },
+    Serving {
+        t: u64,
+        serving: ServingSample,
+    },
+    Sample {
+        sample: &'a Sample,
+    },
+}
+
+/// Serializes a frame once for every subscriber rather than per client.
+fn encode_frame(frame: &StreamFrame<'_>) -> Option<Arc<str>> {
+    serde_json::to_string(frame)
+        .ok()
+        .map(|body| Arc::from(body.as_str()))
+}
+
+/// Decrements the connected-client count however the socket task ends.
+struct StreamSlot(Arc<Shared>);
+
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        self.0.stream_clients.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+async fn stream_handler(
+    State(shared): State<Arc<Shared>>,
+    upgrade: WebSocketUpgrade,
+) -> Response<Body> {
+    // Reserve the slot before upgrading so a burst of connects cannot race
+    // past the cap between the check and the handshake.
+    let admitted = shared
+        .stream_clients
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            (current < MAX_STREAM_CLIENTS).then_some(current + 1)
+        })
+        .is_ok();
+    if !admitted {
+        return text_error(StatusCode::SERVICE_UNAVAILABLE, "too many stream clients");
+    }
+    upgrade
+        .on_upgrade(move |socket| async move {
+            let _slot = StreamSlot(shared.clone());
+            stream_socket(shared, socket).await;
+        })
+        .into_response()
+}
+
+async fn stream_socket(shared: Arc<Shared>, mut socket: WebSocket) {
+    // Subscribe before sending hello so no frame is missed in between.
+    let mut frames = shared.stream.subscribe();
+    let hello = StreamFrame::Hello {
+        now: now_unix_ms(),
+        hostname: shared.hostname.as_deref(),
+        interval_ms: shared.settings.interval_ms,
+        stream_interval_ms: shared.settings.stream_interval_ms,
+        retention_seconds: shared.settings.retention_seconds,
+        upstreams: shared
+            .upstreams
+            .iter()
+            .map(|url| url.as_str().trim_end_matches('/').to_owned())
+            .collect(),
+    };
+    let Some(hello) = encode_frame(&hello) else {
+        return;
+    };
+    if socket
+        .send(Message::Text(hello.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    loop {
+        tokio::select! {
+            frame = frames.recv() => match frame {
+                Ok(frame) => {
+                    if socket
+                        .send(Message::Text(frame.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                // A client too slow for the fast interval is dropped rather
+                // than served stale frames from a growing backlog.
+                Err(_) => return,
+            },
+            // Reading is what surfaces a closed socket; the dashboard never
+            // sends anything the LB acts on.
+            incoming = socket.recv() => match incoming {
+                None | Some(Err(_) | Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => {}
+            },
+        }
+    }
+}
+
 // --- Runtime ----------------------------------------------------------------
 
 pub struct MachineView {
@@ -1342,8 +1484,21 @@ struct Shared {
     settings: Settings,
     store: Store,
     tokens: Mutex<TokenHistory>,
+    stream: broadcast::Sender<Arc<str>>,
+    stream_clients: AtomicUsize,
     upstreams: Vec<Url>,
     hostname: Option<String>,
+}
+
+impl Shared {
+    fn publish(&self, frame: &StreamFrame<'_>) {
+        if self.stream_clients.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        if let Some(encoded) = encode_frame(frame) {
+            let _ = self.stream.send(encoded);
+        }
+    }
 }
 
 fn now_unix_ms() -> u64 {
@@ -1388,12 +1543,41 @@ impl MachineView {
                 "machineview state restored"
             );
         }
+        let (stream, _) = broadcast::channel(STREAM_CHANNEL_CAPACITY);
         let shared = Arc::new(Shared {
             settings: settings.clone(),
             store,
             tokens: Mutex::new(tokens),
+            stream,
+            stream_clients: AtomicUsize::new(0),
             upstreams: upstreams.clone(),
             hostname: read_hostname(),
+        });
+        // The fast publisher reads only the in-process registry, so it costs
+        // nothing on the network and nothing at all while no one is watching.
+        let fast_shared = shared.clone();
+        let fast_registry = registry.clone();
+        let mut fast_shutdown = shutdown.resubscribe();
+        tokio::spawn(async move {
+            let interval = Duration::from_millis(fast_shared.settings.stream_interval_ms);
+            let mut rates = RateTracker::default();
+            let mut histograms = HistogramWindows::default();
+            loop {
+                tokio::select! {
+                    _ = fast_shutdown.recv() => break,
+                    () = tokio::time::sleep(interval) => {}
+                }
+                if fast_shared.stream_clients.load(Ordering::Relaxed) == 0 {
+                    // Rates are deltas between consecutive observations, so
+                    // the tracker restarts cleanly when a client returns.
+                    rates = RateTracker::default();
+                    continue;
+                }
+                let t = now_unix_ms();
+                let map = gather_registry(&fast_registry);
+                let serving = build_serving_sample(&map, t, &mut rates, &mut histograms);
+                fast_shared.publish(&StreamFrame::Serving { t, serving });
+            }
         });
         let loop_shared = shared.clone();
         let task = tokio::spawn(async move {
@@ -1417,6 +1601,7 @@ impl MachineView {
                 let tick_started = tokio::time::Instant::now();
                 let now = now_unix_ms();
                 let (sample, counters) = sampler.sample(now).await;
+                loop_shared.publish(&StreamFrame::Sample { sample: &sample });
                 loop_shared.store.push(sample);
                 loop_shared.tokens.lock().observe(now, counters);
                 ticks += 1;
@@ -1445,6 +1630,7 @@ impl MachineView {
             .route("/api/machineview/summary", get(summary_handler))
             .route("/api/machineview/series", get(series_handler))
             .route("/api/machineview/tokens", get(tokens_handler))
+            .route("/api/machineview/stream", get(stream_handler))
             .with_state(self.shared.clone());
         if self.shared.settings.ui_dir.is_some() {
             let ui_state = self.shared.clone();
@@ -2061,6 +2247,16 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Bucket sums are exact small integers; the tolerance is only here
+    /// because comparing f64 with `==` is a lint, not because they drift.
+    #[track_caller]
+    fn assert_tokens(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     fn counters(prompt: f64, completion: f64, cached: f64, requests: f64) -> TokenCounters {
         TokenCounters {
             prompt: Some(prompt),
@@ -2077,24 +2273,24 @@ mod tests {
         // already held whatever the process served before this scrape.
         history.observe(HOUR_MS, counters(1_000.0, 100.0, 400.0, 5.0));
         assert_eq!(history.len(), 1);
-        assert_eq!(history.snapshot()[0].prompt, 0.0);
+        assert_tokens(history.snapshot()[0].prompt, 0.0);
 
         history.observe(HOUR_MS + 60_000, counters(1_500.0, 150.0, 600.0, 8.0));
         history.observe(HOUR_MS + 120_000, counters(1_800.0, 170.0, 700.0, 10.0));
         let first = history.snapshot()[0];
         assert_eq!(first.t, HOUR_MS);
-        assert_eq!(first.prompt, 800.0);
-        assert_eq!(first.completion, 70.0);
-        assert_eq!(first.cached, 300.0);
-        assert_eq!(first.requests, 5.0);
+        assert_tokens(first.prompt, 800.0);
+        assert_tokens(first.completion, 70.0);
+        assert_tokens(first.cached, 300.0);
+        assert_tokens(first.requests, 5.0);
 
         // A later hour opens a new bucket without disturbing the closed one.
         history.observe(2 * HOUR_MS + 1_000, counters(2_000.0, 180.0, 750.0, 11.0));
         let buckets = history.snapshot();
         assert_eq!(buckets.len(), 2);
-        assert_eq!(buckets[0].prompt, 800.0);
+        assert_tokens(buckets[0].prompt, 800.0);
         assert_eq!(buckets[1].t, 2 * HOUR_MS);
-        assert_eq!(buckets[1].prompt, 200.0);
+        assert_tokens(buckets[1].prompt, 200.0);
     }
 
     #[test]
@@ -2106,11 +2302,10 @@ mod tests {
         history.observe(HOUR_MS + 20_000, counters(0.0, 0.0, 0.0, 0.0));
         history.observe(HOUR_MS + 30_000, counters(300.0, 30.0, 0.0, 2.0));
         let bucket = history.snapshot()[0];
-        assert_eq!(
-            bucket.prompt, 1_300.0,
-            "the reset contributes nothing and the next delta is measured from zero"
-        );
-        assert_eq!(bucket.requests, 6.0);
+        // The reset contributes nothing and the next delta is measured from
+        // zero: 1,000 before it, 300 after.
+        assert_tokens(bucket.prompt, 1_300.0);
+        assert_tokens(bucket.requests, 6.0);
         assert!(bucket.prompt >= 0.0);
     }
 
@@ -2120,11 +2315,8 @@ mod tests {
         history.observe(2 * HOUR_MS, counters(100.0, 10.0, 0.0, 1.0));
         history.observe(2 * HOUR_MS + 5_000, TokenCounters::default());
         history.observe(2 * HOUR_MS + 10_000, counters(500.0, 50.0, 0.0, 4.0));
-        assert_eq!(
-            history.snapshot()[0].prompt,
-            0.0,
-            "a scrape that lost the metric must not be read as a delta"
-        );
+        // A scrape that lost the metric must not be read as a delta.
+        assert_tokens(history.snapshot()[0].prompt, 0.0);
         // A clock jump backwards must not push an out-of-order bucket.
         history.observe(HOUR_MS, counters(900.0, 90.0, 0.0, 7.0));
         let buckets = history.snapshot();
@@ -2175,13 +2367,64 @@ mod tests {
         );
         let buckets = history.snapshot();
         assert_eq!(buckets.len(), 1, "stale and future buckets are dropped");
-        assert_eq!(buckets[0].prompt, 7.0);
+        assert_tokens(buckets[0].prompt, 7.0);
         // The restored history came from a process whose counters are gone;
         // the first scrape after restart must only re-baseline.
         history.observe(now + 60_000, counters(50_000.0, 5_000.0, 0.0, 400.0));
-        assert_eq!(history.snapshot()[0].prompt, 7.0);
+        assert_tokens(history.snapshot()[0].prompt, 7.0);
         history.observe(now + 120_000, counters(50_100.0, 5_010.0, 0.0, 401.0));
-        assert_eq!(history.snapshot()[0].prompt, 107.0);
+        assert_tokens(history.snapshot()[0].prompt, 107.0);
+    }
+
+    #[test]
+    fn stream_frames_are_tagged_and_carry_their_payload() {
+        let hello = encode_frame(&StreamFrame::Hello {
+            now: 7,
+            hostname: Some("node06"),
+            interval_ms: 5_000,
+            stream_interval_ms: 1_000,
+            retention_seconds: 86_400,
+            upstreams: vec!["http://a:8000".to_owned()],
+        })
+        .expect("hello encodes");
+        assert!(hello.contains(r#""kind":"hello""#), "{hello}");
+        assert!(hello.contains(r#""stream_interval_ms":1000"#), "{hello}");
+
+        let serving = encode_frame(&StreamFrame::Serving {
+            t: 11,
+            serving: ServingSample {
+                gen_tps: Some(1_234.5),
+                ..ServingSample::default()
+            },
+        })
+        .expect("serving encodes");
+        assert!(serving.contains(r#""kind":"serving""#), "{serving}");
+        assert!(serving.contains(r#""gen_tps":1234.5"#), "{serving}");
+
+        let sample = sample_at(21, 42.0);
+        let full = encode_frame(&StreamFrame::Sample { sample: &sample }).expect("sample encodes");
+        assert!(full.contains(r#""kind":"sample""#), "{full}");
+        assert!(full.contains(r#""cpu_pct":42.0"#), "{full}");
+    }
+
+    #[test]
+    fn stream_interval_defaults_to_one_second_and_is_bounded() {
+        let settings = Settings::from_lookup(|_| None).expect("defaults valid");
+        assert_eq!(settings.stream_interval_ms, 1_000);
+        let fast = Settings::from_lookup(|key| {
+            (key == "MD_MACHINEVIEW_STREAM_INTERVAL_MS").then(|| "250".to_owned())
+        })
+        .expect("250ms is inside the bounds");
+        assert_eq!(fast.stream_interval_ms, 250);
+        for rejected in ["0", "50", "60000", "every second"] {
+            assert!(
+                Settings::from_lookup(|key| {
+                    (key == "MD_MACHINEVIEW_STREAM_INTERVAL_MS").then(|| rejected.to_owned())
+                })
+                .is_err(),
+                "{rejected} must be rejected"
+            );
+        }
     }
 
     #[test]

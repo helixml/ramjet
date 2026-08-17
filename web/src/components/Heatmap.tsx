@@ -12,6 +12,8 @@ import { Skeleton } from "@/components/ui/skeleton"
 
 /** The five sequential steps, quietest first. Empty cells use none of them. */
 const RAMP = ["var(--seq-1)", "var(--seq-2)", "var(--seq-3)", "var(--seq-4)", "var(--seq-5)"]
+/** Footprint of the idle speck and the unknown ring, as % of the cell. */
+const QUIET_DOT_PCT = 22
 
 export interface HeatmapMetric {
   label: string
@@ -31,16 +33,20 @@ export interface HeatmapCell {
 export interface HeatmapScale {
   /** 0 = empty/idle, 1..5 = ramp step. */
   step: (value: number | null) => number
+  /** Dot area relative to the cell, 0..1 — area is proportional to value. */
+  area: (value: number | null) => number
   thresholds: number[]
 }
 
 /**
- * Buckets by quantile of the *active* cells rather than linearly.
+ * Two encodings of the same number, because neither alone reads well here.
  *
- * Token volume per hour is heavily skewed — one busy hour can be a hundred
- * times a quiet one — so a linear ramp paints everything but the peak in the
- * lightest step and hides the daily shape the chart exists to show. Exact
- * values stay one hover (or the table view) away.
+ * **Size** is area-proportional to the value, so one enormous hour looks
+ * enormous — the honest encoding, and the one that makes the shape jump out.
+ * **Color** is bucketed by quantile of the *active* cells, because token
+ * volume is skewed enough (a busy hour can be a hundred times a quiet one)
+ * that the area encoding alone leaves the whole quiet half as indistinct
+ * specks. Exact values stay one hover, or the table view, away.
  */
 export function buildScale(values: Array<number | null>): HeatmapScale {
   const active = values
@@ -51,6 +57,7 @@ export function buildScale(values: Array<number | null>): HeatmapScale {
         (quantile) => active[Math.min(active.length - 1, Math.floor(quantile * active.length))],
       )
     : []
+  const peak = active[active.length - 1] ?? 0
   return {
     thresholds,
     step: (value) => {
@@ -60,6 +67,12 @@ export function buildScale(values: Array<number | null>): HeatmapScale {
         if (value > threshold) step += 1
       }
       return Math.min(step, RAMP.length)
+    },
+    // A floor keeps the quietest active cell visible as a dot rather than a
+    // sub-pixel; idle and unknown cells are drawn by their own rules.
+    area: (value) => {
+      if (value == null || value <= 0 || peak <= 0) return 0
+      return Math.max(0.06, Math.min(1, value / peak))
     },
   }
 }
@@ -83,6 +96,8 @@ interface HeatmapProps {
   cellMaxPx?: number
   /** Where the capped grid sits when it is narrower than the card. */
   align?: "start" | "center"
+  /** Stand long column labels on end so 30 dates fit without colliding. */
+  rotateColumnLabels?: boolean
 }
 
 function Heatmap({
@@ -95,6 +110,7 @@ function Heatmap({
   cellRole,
   cellMaxPx = 26,
   align = "start",
+  rotateColumnLabels = false,
 }: HeatmapProps) {
   const container = useRef<HTMLDivElement>(null)
   const [active, setActive] = useState<{
@@ -135,7 +151,16 @@ function Heatmap({
           <div
             key={`head-${column}`}
             aria-hidden
-            className="text-faint-foreground overflow-visible pb-1 text-[10px] whitespace-nowrap"
+            className={
+              rotateColumnLabels
+                ? "text-faint-foreground flex h-11 items-end justify-center pb-1 text-[10px] whitespace-nowrap"
+                : "text-faint-foreground overflow-visible pb-1 text-[10px] whitespace-nowrap"
+            }
+            style={
+              rotateColumnLabels
+                ? { writingMode: "vertical-rl", transform: "rotate(180deg)" }
+                : undefined
+            }
           >
             {label ?? ""}
           </div>
@@ -168,20 +193,35 @@ function Heatmap({
                       : undefined
                   }
                   aria-hidden={cell ? undefined : true}
-                  className="aspect-square min-h-[7px] w-full rounded-[3px] outline-offset-2 focus-visible:outline-2 focus-visible:outline-[var(--ring)]"
-                  style={{
-                    background: unknown
-                      ? "var(--seq-empty)"
-                      : idle
-                        ? "var(--muted)"
-                        : RAMP[step - 1],
-                    boxShadow: unknown ? "inset 0 0 0 1px var(--grid)" : undefined,
-                  }}
+                  className="flex aspect-square min-h-[7px] w-full items-center justify-center rounded-[3px] outline-offset-1 focus-visible:outline-2 focus-visible:outline-[var(--ring)]"
                   onMouseEnter={(event) => cell && show(cell, event.currentTarget)}
                   onFocus={(event) => cell && show(cell, event.currentTarget)}
                   onMouseLeave={() => setActive(null)}
                   onBlur={() => setActive(null)}
-                />
+                >
+                  {/* Area ∝ value, so the side is its square root. Idle is a
+                      solid speck and unknown a hollow ring: same footprint,
+                      unmistakably different marks. */}
+                  <span
+                    aria-hidden
+                    className="pointer-events-none block rounded-full"
+                    style={
+                      unknown || idle
+                        ? {
+                            width: `${QUIET_DOT_PCT}%`,
+                            height: `${QUIET_DOT_PCT}%`,
+                            background: idle ? "var(--muted-foreground)" : "transparent",
+                            opacity: idle ? 0.45 : 1,
+                            boxShadow: unknown ? "inset 0 0 0 1px var(--grid)" : undefined,
+                          }
+                        : {
+                            width: `${Math.sqrt(scale.area(cell?.value ?? null)) * 100}%`,
+                            height: `${Math.sqrt(scale.area(cell?.value ?? null)) * 100}%`,
+                            background: RAMP[step - 1],
+                          }
+                    }
+                  />
+                </div>
               )
             })}
           </div>
@@ -223,26 +263,29 @@ function ScaleLegend() {
         idle
         <span
           aria-hidden
-          className="h-2.5 w-2.5 rounded-[2px]"
-          style={{ background: "var(--muted)" }}
+          className="h-1 w-1 rounded-full"
+          style={{ background: "var(--muted-foreground)", opacity: 0.45 }}
         />
       </span>
       <span className="flex items-center gap-1.5">
         quiet
-        {RAMP.map((color) => (
-          <span
-            key={color}
-            aria-hidden
-            className="h-2.5 w-2.5 rounded-[2px]"
-            style={{ background: color }}
-          />
-        ))}
+        {RAMP.map((color, index) => {
+          const size = 3 + index * 2.5
+          return (
+            <span
+              key={color}
+              aria-hidden
+              className="rounded-full"
+              style={{ background: color, width: size, height: size }}
+            />
+          )
+        })}
         busy
       </span>
       <span className="flex items-center gap-1.5">
         <span
           aria-hidden
-          className="h-2.5 w-2.5 rounded-[2px]"
+          className="h-1.5 w-1.5 rounded-full"
           style={{ boxShadow: "inset 0 0 0 1px var(--grid)" }}
         />
         no data

@@ -65,22 +65,34 @@ export interface Grid {
   cells: HeatmapCell[]
 }
 
+/** Hours per row of the day grid: 24 rows would not fit, 1 hides the shape. */
+const BAND_HOURS = 3
+const BANDS = Array.from({ length: 24 / BAND_HOURS }, (_, band) => {
+  const start = band * BAND_HOURS
+  return `${String(start).padStart(2, "0")}–${String(start + BAND_HOURS).padStart(2, "0")}`
+})
+
 /**
- * Calendar grid: one column per week, one row per weekday.
+ * Calendar grid: one column per date, one row per three-hour band.
  *
- * Days inside the covered span with no recorded hour keep a `null` value —
- * an LB that was down is not a day of zero traffic, and the two must not
- * look the same.
+ * A day is one number, which as a single row of 30 cells wastes the width
+ * and hides everything about *when* in the day the work happened. Splitting
+ * each column into bands keeps the same daily total readable down a column
+ * while showing the shift pattern across it.
+ *
+ * A band with no recorded hour keeps a `null` value — an LB that was down is
+ * not three hours of zero traffic, and the two must not look the same.
  */
 export function dayGrid(buckets: TokenBucket[], now: number): Grid {
   if (buckets.length === 0) {
-    return { rowLabels: WEEKDAYS, columnLabels: [], cells: [] }
+    return { rowLabels: BANDS, columnLabels: [], cells: [] }
   }
-  const byDay = new Map<number, TokenTotals>()
+  const byCell = new Map<string, TokenTotals>()
   for (const bucket of buckets) {
-    const day = startOfLocalDay(bucket.t)
-    const current = byDay.get(day) ?? totals([])
-    byDay.set(day, {
+    const date = new Date(bucket.t)
+    const key = `${startOfLocalDay(bucket.t)}:${Math.floor(date.getHours() / BAND_HOURS)}`
+    const current = byCell.get(key) ?? totals([])
+    byCell.set(key, {
       prompt: current.prompt + bucket.prompt,
       completion: current.completion + bucket.completion,
       cached: current.cached + bucket.cached,
@@ -91,46 +103,37 @@ export function dayGrid(buckets: TokenBucket[], now: number): Grid {
 
   const firstDay = startOfLocalDay(Math.min(...buckets.map((bucket) => bucket.t)))
   const lastDay = startOfLocalDay(now)
-  // Pad back to the Monday of the first week so rows are true weekdays.
-  const firstMonday = new Date(firstDay)
-  firstMonday.setDate(firstMonday.getDate() - weekdayIndex(firstMonday))
-  const origin = firstMonday.getTime()
-  const columns = Math.floor(daysBetween(origin, lastDay) / 7) + 1
+  const columns = daysBetween(firstDay, lastDay) + 1
 
   const cells: HeatmapCell[] = []
+  const columnLabels: Array<string | null> = []
   for (let column = 0; column < columns; column++) {
-    for (let row = 0; row < WEEKDAYS.length; row++) {
-      const date = new Date(origin)
-      date.setDate(date.getDate() + column * 7 + row)
-      const day = date.getTime()
-      if (day < firstDay || day > lastDay) continue
-      const dayTotals = byDay.get(day)
+    const date = new Date(firstDay)
+    date.setDate(date.getDate() + column)
+    const day = date.getTime()
+    // Label every other column; at 30 columns every one collides.
+    columnLabels.push(
+      column % 2 === 0
+        ? date.toLocaleDateString("en-GB", { day: "numeric", month: "short" })
+        : null,
+    )
+    for (let row = 0; row < BANDS.length; row++) {
+      const bandTotals = byCell.get(`${day}:${row}`)
       cells.push({
         row,
         column,
-        label: date.toLocaleDateString("en-GB", {
+        label: `${date.toLocaleDateString("en-GB", {
           weekday: "short",
           day: "numeric",
           month: "short",
-        }),
-        value: dayTotals ? dayTotals.total : null,
-        metrics: dayTotals ? metricsFor(dayTotals) : undefined,
+        })} ${BANDS[row]}`,
+        value: bandTotals ? bandTotals.total : null,
+        metrics: bandTotals ? metricsFor(bandTotals) : undefined,
       })
     }
   }
 
-  // One month label per column, printed only where the month changes.
-  let previousMonth = ""
-  const columnLabels = Array.from({ length: columns }, (_, column) => {
-    const date = new Date(origin)
-    date.setDate(date.getDate() + column * 7)
-    const month = date.toLocaleDateString("en-GB", { month: "short" })
-    if (month === previousMonth) return null
-    previousMonth = month
-    return month
-  })
-
-  return { rowLabels: WEEKDAYS, columnLabels, cells }
+  return { rowLabels: BANDS, columnLabels, cells }
 }
 
 /**

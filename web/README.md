@@ -27,7 +27,27 @@ ramjet LB               samples every MD_MACHINEVIEW_INTERVAL_MS:
         │                    serves JSON + this UI on :9090
         ▼
 /ui/  +  /api/machineview/{summary,series,tokens}
+      +  /api/machineview/stream   (WebSocket, MD_MACHINEVIEW_STREAM_INTERVAL_MS)
 ```
+
+Three cadences, deliberately. `MD_MACHINEVIEW_INTERVAL_MS` (5 s) is what
+costs network: it scrapes every engine's `/metrics` and the host agent, and
+it is what the ring stores. `MD_MACHINEVIEW_STREAM_INTERVAL_MS` (1 s) reads
+only the proxy's own in-process registry, so serving throughput, TTFT, TPOT,
+in-flight and per-upstream request rate stream at 1 Hz without adding a
+single request to an engine. Full samples are pushed onto the same socket as
+they land. Nothing is published while no client is connected, and the rate
+tracker resets when the last one leaves, so an unwatched dashboard costs
+nothing.
+
+The socket is an accelerator, never a requirement. The UI keeps polling
+underneath and reconnects with backoff, so an LB without the route, a proxy
+that will not upgrade, or a dropped connection degrades to the 5 s dashboard
+rather than an empty one. Engine- and host-derived charts (KV cache, running
+and waiting per engine, GPU, disk, power) stay at the sampling interval —
+their data is scraped, not in-process, and a live frame carries no host or
+engine fields to interpolate from. At most 8 clients stream at once; a
+client too slow for the interval is dropped rather than served a backlog.
 
 Two stores, two time scales. The ring answers "what is the box doing now"
 at seconds of resolution and is bounded by `MD_MACHINEVIEW_RETENTION_SECONDS`
@@ -72,6 +92,7 @@ VPN opens http://100.89.187.17:8007/ui/ directly.
 | `MD_MACHINEVIEW_INTERVAL_MS` | `5000` | sampling cadence (1000–60000) |
 | `MD_MACHINEVIEW_RETENTION_SECONDS` | `86400` | ring retention (60–604800) |
 | `MD_MACHINEVIEW_TOKEN_HISTORY_DAYS` | `30` | hourly token-history retention (1–400) |
+| `MD_MACHINEVIEW_STREAM_INTERVAL_MS` | `1000` | live WebSocket cadence for registry-derived serving metrics (200–10000) |
 | `MD_MACHINEVIEW_AGENT_URL` | unset | host agent `/sample` URL; without it there is no host/GPU/energy telemetry |
 | `MD_MACHINEVIEW_STATE_PATH` | unset | JSON snapshot path; restores both the ring and the token history across LB restarts |
 | `MD_MACHINEVIEW_UI_DIR` | `/ui` if present | static bundle directory |
