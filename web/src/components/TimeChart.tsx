@@ -33,7 +33,8 @@ export interface TimeChartProps {
   band?: BandDef
   /** Fix the Y domain, e.g. [0, 100] for percentages. */
   domain?: [number | "auto", number | "auto"]
-  height?: number
+  /** Plot height in px, or "fill" to take the card's remaining height. */
+  height?: number | "fill"
 }
 
 interface TooltipRow {
@@ -113,7 +114,10 @@ export function TimeChart({
 }: TimeChartProps) {
   const fillOpacity = stacked ? 0.45 : series.length === 1 ? 0.4 : 0
   return (
-    <div style={{ height }} className="w-full">
+    <div
+      style={height === "fill" ? undefined : { height }}
+      className={height === "fill" ? "h-full min-h-[240px] w-full" : "w-full"}
+    >
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart
           data={data}

@@ -611,9 +611,9 @@ export default function App() {
           >
             {loading || gpuCount > 0 ? (
               <div className="xl:col-span-2">
-                {/* Taller here than on the GPUs tab so the row ends level
-                    with the two stacked history cards beside it. */}
-                <ChartCard {...gpuUtilCard} height={330} loading={loading} />
+                {/* Fills the row rather than guessing a height, so it ends
+                    level with the two stacked history cards beside it. */}
+                <ChartCard {...gpuUtilCard} height="fill" loading={loading} />
               </div>
             ) : null}
             {historyCards}
