@@ -93,6 +93,22 @@ function trend(rows: Row[], key: string): Array<number | null> {
   return rows.filter((_, index) => index % stride === 0).map((row) => row[key] ?? null)
 }
 
+/** Peak of a series in the last 30s so bursty rates do not flicker to 0/—. */
+const TILE_WINDOW_MS = 30_000
+
+function windowMax(rows: Row[], key: string, now: number): number | null {
+  const from = now - TILE_WINDOW_MS
+  let max: number | null = null
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const row = rows[index]
+    if (row.t < from) break
+    const value = row[key]
+    if (typeof value !== "number" || !Number.isFinite(value)) continue
+    max = max == null ? value : Math.max(max, value)
+  }
+  return max
+}
+
 const TABS: TabDef[] = [
   { id: "overview", label: "Overview" },
   { id: "serving", label: "Serving" },
@@ -143,6 +159,21 @@ export default function App() {
   // The newest live frame is a second old at most; the polled sample can
   // be five.
   const latestServing = live.frames.at(-1)?.serving ?? latest?.serving
+  const servingNow = servingRows.at(-1)?.t ?? Date.now()
+  const genTpsMax = useMemo(
+    () => windowMax(servingRows, "gen_tps", servingNow),
+    [servingRows, servingNow],
+  )
+  const cacheHit = useMemo(() => {
+    const engineHit = windowMax(rows, "hit_engines", rows.at(-1)?.t ?? servingNow)
+    if (engineHit != null) {
+      return { value: engineHit, engineReported: true }
+    }
+    return {
+      value: windowMax(servingRows, "hit_lb", servingNow),
+      engineReported: false,
+    }
+  }, [rows, servingRows, servingNow])
   const latestHost = latest?.host
   const latestEngines = latest?.engines ?? []
   const kvAvg = latestEngines.length
@@ -525,7 +556,8 @@ export default function App() {
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
         <StatTile
           label="Gen tok/s"
-          value={fmtNum(latestServing?.gen_tps)}
+          value={fmtNum(genTpsMax)}
+          detail="30s max"
           trend={trend(servingRows, "gen_tps")}
           loading={loading}
         />
@@ -549,13 +581,11 @@ export default function App() {
         />
         <StatTile
           label="Cache hit"
-          value={fmtPct(
-            latestEngines.length
-              ? (rows[rows.length - 1]?.hit_engines ?? null)
-              : latestServing?.cache_hit_pct,
-          )}
-          detail={latestEngines.length ? "engine-reported" : undefined}
-          trend={latestEngines.length ? trend(rows, "hit_engines") : trend(servingRows, "hit_lb")}
+          value={fmtPct(cacheHit.value)}
+          detail={cacheHit.engineReported ? "engine-reported · 30s max" : "30s max"}
+          trend={
+            cacheHit.engineReported ? trend(rows, "hit_engines") : trend(servingRows, "hit_lb")
+          }
           loading={loading}
         />
         <StatTile
