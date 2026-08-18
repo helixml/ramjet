@@ -379,9 +379,10 @@ export default function App() {
   // month, independent of the range picker that drives every other card.
   const tokenBuckets = useMemo(() => tokens?.buckets ?? [], [tokens])
   const tokenTotals = useMemo(() => totals(tokenBuckets), [tokenBuckets])
+  const historyWindow = tokens?.days ?? HISTORY_DAYS
   const tokenDays = useMemo(
-    () => dayGrid(tokenBuckets, tokens?.now ?? Date.now()),
-    [tokenBuckets, tokens?.now],
+    () => dayGrid(tokenBuckets, tokens?.now ?? Date.now(), historyWindow),
+    [tokenBuckets, tokens?.now, historyWindow],
   )
   const tokenHours = useMemo(() => hourGrid(tokenBuckets), [tokenBuckets])
   const dayScale = useMemo(
@@ -393,7 +394,6 @@ export default function App() {
     [tokenHours],
   )
   const historyLoading = tokens == null && tokensError == null
-  const historyWindow = tokens?.days ?? HISTORY_DAYS
   const historyCards = (
     <div className="flex flex-col gap-3">
       <HeatmapCard

@@ -9,7 +9,7 @@ export function fmtBytes(value: number | null | undefined): string {
     unit += 1
   }
   const digits = scaled >= 100 ? 0 : scaled >= 10 ? 1 : scaled > 0 ? 1 : 0
-  return `${scaled.toFixed(digits)} ${BYTE_UNITS[unit]}`
+  return `${scaled.toFixed(digits)}${BYTE_UNITS[unit]}`
 }
 
 export function fmtBps(value: number | null | undefined): string {
@@ -50,21 +50,21 @@ export function fmtPct(value: number | null | undefined, digits = 0): string {
 
 export function fmtMs(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "—"
-  if (value >= 10_000) return `${(value / 1000).toFixed(1)} s`
-  if (value >= 1_000) return `${(value / 1000).toFixed(2)} s`
-  return `${value.toFixed(0)} ms`
+  if (value >= 10_000) return `${(value / 1000).toFixed(1)}s`
+  if (value >= 1_000) return `${(value / 1000).toFixed(2)}s`
+  return `${value.toFixed(0)}ms`
 }
 
 export function fmtWatts(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "—"
-  if (value >= 1000) return `${(value / 1000).toFixed(2)} kW`
-  return `${value.toFixed(0)} W`
+  if (value >= 1000) return `${(value / 1000).toFixed(2)}kW`
+  return `${value.toFixed(0)}W`
 }
 
 export function fmtWattHours(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "—"
-  if (value >= 1000) return `${(value / 1000).toFixed(1)} kWh`
-  return `${value.toFixed(0)} Wh`
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}kWh`
+  return `${value.toFixed(0)}Wh`
 }
 
 export function fmtClock(t: number, rangeSeconds: number): string {

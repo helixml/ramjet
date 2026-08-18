@@ -71,7 +71,7 @@ function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col">
       <span className="text-faint-foreground text-[10px]">{label}</span>
-      <span className="text-xs font-medium tabular-nums">{value}</span>
+      <span className="font-mono text-xs font-medium tabular-nums">{value}</span>
     </div>
   )
 }
@@ -83,7 +83,7 @@ function TempStat({ label, tempC }: { label: string; tempC: number | null | unde
   return (
     <div className="flex flex-col">
       <span className="text-faint-foreground text-[10px]">{label}</span>
-      <span className="flex items-center gap-1 text-xs font-medium tabular-nums">
+      <span className="flex items-center gap-1 font-mono text-xs font-medium tabular-nums">
         {hot ? <TriangleAlert aria-label="running hot" className="size-3" style={{ color: hot }} /> : null}
         {tempC.toFixed(0)}°C
       </span>
@@ -108,7 +108,7 @@ function GpuRow({ gpu, rangeSeconds }: { gpu: GpuView; rangeSeconds: number }) {
         <div className="flex w-full shrink-0 flex-col gap-2.5 lg:w-60">
           <div className="flex items-baseline justify-between gap-2">
             <span className="text-sm font-semibold">GPU {g.index}</span>
-            <span className="text-xl font-semibold tabular-nums">
+            <span className="font-mono text-xl font-medium tabular-nums">
               {fmtPct(g.util_pct, 0)}
             </span>
           </div>

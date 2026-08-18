@@ -9,7 +9,6 @@ import type { TokenBucket } from "@/lib/api"
 import type { HeatmapCell } from "@/components/Heatmap"
 import { fmtCount } from "@/lib/format"
 
-const DAY_MS = 86_400_000
 /** Monday-first, matching ISO weeks and the way a work week reads. */
 export const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -45,11 +44,6 @@ function weekdayIndex(date: Date): number {
   return (date.getDay() + 6) % 7
 }
 
-/** Whole days between two local midnights, DST-safe (they can differ by ±1h). */
-function daysBetween(from: number, to: number): number {
-  return Math.round((to - from) / DAY_MS)
-}
-
 function metricsFor(bucket: TokenTotals): Array<{ label: string; value: string }> {
   return [
     { label: "prompt", value: fmtCount(bucket.prompt) },
@@ -80,13 +74,13 @@ const BANDS = Array.from({ length: 24 / BAND_HOURS }, (_, band) => {
  * each column into bands keeps the same daily total readable down a column
  * while showing the shift pattern across it.
  *
- * A band with no recorded hour keeps a `null` value — an LB that was down is
- * not three hours of zero traffic, and the two must not look the same.
+ * The grid always covers `days` local dates ending today, even when history
+ * has not filled that window yet — empty past columns are the calendar, not
+ * missing UI. A band with no recorded hour keeps a `null` value: an LB that
+ * was down is not three hours of zero traffic, and the two must not look
+ * the same.
  */
-export function dayGrid(buckets: TokenBucket[], now: number): Grid {
-  if (buckets.length === 0) {
-    return { rowLabels: BANDS, columnLabels: [], cells: [] }
-  }
+export function dayGrid(buckets: TokenBucket[], now: number, days: number): Grid {
   const byCell = new Map<string, TokenTotals>()
   for (const bucket of buckets) {
     const date = new Date(bucket.t)
@@ -101,9 +95,10 @@ export function dayGrid(buckets: TokenBucket[], now: number): Grid {
     })
   }
 
-  const firstDay = startOfLocalDay(Math.min(...buckets.map((bucket) => bucket.t)))
+  const columns = Math.max(1, Math.floor(days))
   const lastDay = startOfLocalDay(now)
-  const columns = daysBetween(firstDay, lastDay) + 1
+  const firstDay = new Date(lastDay)
+  firstDay.setDate(firstDay.getDate() - (columns - 1))
 
   const cells: HeatmapCell[] = []
   const columnLabels: Array<string | null> = []

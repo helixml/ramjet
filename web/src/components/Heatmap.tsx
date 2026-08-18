@@ -146,7 +146,7 @@ function Heatmap({
     <div ref={container} className="relative">
       <div
         role="grid"
-        className={`grid ${gapClass} ${align === "center" ? "justify-center" : "justify-start"}`}
+        className={`grid w-full ${gapClass} ${align === "center" ? "justify-center" : "justify-start"}`}
         style={{
           gridTemplateColumns: `auto repeat(${columnLabels.length}, minmax(0, ${cellMaxPx}px))`,
         }}
@@ -333,7 +333,7 @@ function TableView({
   const metrics = rows.find((row) => row.metrics?.length)?.metrics ?? []
   return (
     <div className="max-h-[220px] overflow-y-auto rounded-md border border-border">
-      <table className="w-full text-[11px] tabular-nums">
+      <table className="w-full font-mono text-[11px] tabular-nums">
         <thead className="bg-muted/60 sticky top-0">
           <tr>
             <th className="text-faint-foreground px-2 py-1 text-left font-medium">when</th>
@@ -380,7 +380,7 @@ export function HeatmapCard({
   ...heatmap
 }: HeatmapCardProps) {
   const [table, setTable] = useState(false)
-  const hasData = heatmap.cells.some((cell) => cell.value != null)
+  const hasGrid = heatmap.columnLabels.length > 0
   const compact = heatmap.compact ?? false
   const emptyHeight = compact ? "h-[110px]" : "h-[150px]"
   return (
@@ -413,7 +413,7 @@ export function HeatmapCard({
       <CardContent className={compact ? "px-3 pb-3 pt-2" : undefined}>
         {loading ? (
           <Skeleton className={`${emptyHeight} w-full rounded-md`} />
-        ) : hasData ? (
+        ) : hasGrid ? (
           table ? (
             <TableView cells={heatmap.cells} format={heatmap.format} />
           ) : (
