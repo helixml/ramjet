@@ -38,12 +38,14 @@ services:
     # the metric prefix moved to ramjet_ separately, which is what the
     # dashboards actually query.
     # Override only with another immutable tag+digest pair. This pin is the
-    # v0.2.0 release qualified on node06 on 2026-08-18; its OCI revision is
-    # 68fb5dc. Rollback target is rust-29d9e92@sha256:e303ed167f2723cec0e2d
-    # 6f57b027cebfc8efd5f78ecc4b6831d9c31994978a8.
+    # v0.3.0 release qualified on node06 on 2026-08-18; its OCI revision is
+    # 37f5286. Rollback target is the v0.2.0 pin
+    # sha256:9a7e2a4bc131911beec428393f0a6ccab8fb7f634217e6baffa574483c762dd8,
+    # which still exports the retired ds4proxy_ metric prefix -- rolling back
+    # blanks the Grafana panels until the dashboard is rolled back with it.
     # It must stay a post-rename image: the RJ_ settings below are ignored by
     # anything older, which would come up healthy and differently tuned.
-    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.2.0@sha256:9a7e2a4bc131911beec428393f0a6ccab8fb7f634217e6baffa574483c762dd8}
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.3.0@sha256:2489110adbed61b7a2a415784d817d48803c234c97509fd2e0eb180c5e7453b3}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:

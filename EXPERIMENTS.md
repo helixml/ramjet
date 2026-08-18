@@ -1,5 +1,68 @@
 # node06 experiment journal
 
+## 2026-08-18 — v0.3.0: the metric prefix rename, and a self-inflicted blind dashboard
+
+Deployed `v0.3.0` (`rust-37f5286@sha256:2489110a…`) LB-only. Every exported
+metric moved from the `ds4proxy_` prefix to `ramjet_`.
+
+### The rollout
+
+Preflighted properly this time, using the lesson from the v0.2.0 outage. The
+compose file list came from the container's
+`com.docker.compose.project.config_files` label rather than being assumed, the
+script refused to proceed if it derived fewer than two files, and the rendered
+baseline was diffed against the rendered candidate before any mutation — the
+only difference was the image line. Recreate took 5.0s, engines were untouched
+(image, start time and restart count identical before and after), all four
+upstreams were up within 2s, and `/health` reported `status: ok` with
+`healthy_replicas: 4`.
+
+The rename verified on the box after the roll: **1096 `ramjet_` series and zero
+`ds4proxy_`**. The deploy script asserted that itself and would have rolled
+back had any old-prefix series survived.
+
+### The part worth writing down
+
+Grafana was blind for roughly three hours, and it was a sequencing error, not a
+deploy failure.
+
+The dashboard mirror was merged to infra `main` before any binary exporting
+`ramjet_*` existed. infra reconciles `clusters/bunker/` through Flux, so the
+live dashboard began querying `ramjet_*` while node06 was still exporting
+`ds4proxy_*`. Every serving panel read empty. Nothing alerted, because no alert
+rule queries these metrics — which is exactly why it could sit unnoticed.
+
+The rule that follows: **a dashboard that queries a renamed metric must not
+land before the binary that exports it.** Where both must change, the producer
+ships first and the consumer follows. Merging them in the other order creates a
+window whose length is however long the release takes, and here that was a
+release, a tag pipeline, and a deploy.
+
+### What the rename costs
+
+Prometheus holds no history under the new names. Panels whose window spans the
+switch show a gap rather than a join until the old series age out of retention.
+A dual-emitting transition was considered and rejected: it would have doubled a
+258KB scrape payload polled at 1s for one retention window.
+
+Rolling back to v0.2.0 restores the old prefix and therefore blanks the panels
+again unless the dashboard is rolled back with it. The compose pin comment says
+so where the rollback digest is recorded, because a rollback that silently
+breaks observability is worse than a slow one.
+
+### Also found and fixed
+
+Prometheus was scraping only upstreams 0 and 1. node06 has run four TP2 engines
+since 2026-08-14, so **half the fleet had no engine-native telemetry at all** —
+no prefix-cache hit rate, no queue depth, no speculative-decode acceptance for
+engines 2 and 3. The load balancer had been serving `/metrics/upstream/2` and
+`/3` the whole time with nothing reading them; all four return 413 distinct
+vllm series. Fixed in infra with two additional scrape jobs.
+
+The scrape config needed no change for the rename itself: the only
+`metric_relabel_configs` key on the GPU `uuid` label, so nothing filters by
+metric name.
+
 ## 2026-08-18 — v0.2.0 rollout, and a 76-second outage from an incomplete Compose render
 
 Deployed `v0.2.0` (`rust-68fb5dc@sha256:9a7e2a4b…`) LB-only. The release fixes
