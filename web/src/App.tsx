@@ -25,6 +25,7 @@ import {
 } from "@/lib/format"
 import { useLiveStream } from "@/hooks/useLiveStream"
 import { sparkline, windowMax, TILE_WINDOW_MS } from "@/lib/sparkline"
+import { rollingAverage, windowLabel } from "@/lib/rolling"
 import type { Sample, ServingSample } from "@/lib/api"
 
 type Row = { t: number } & Record<string, number | null>
@@ -99,6 +100,9 @@ const TABS: TabDef[] = [
 /** Days of hourly history requested; the LB clamps to its own retention. */
 const HISTORY_DAYS = 30
 
+/** Row key the rolling cache-hit average is written to. */
+const CACHE_HIT_KEY = "hit_avg"
+
 function ChartGrid({ cards, loading }: { cards: ChartCardProps[]; loading?: boolean }) {
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -145,6 +149,17 @@ export default function App() {
     () => windowMax(servingRows, "gen_tps", servingNow, TILE_WINDOW_MS),
     [servingRows, servingNow],
   )
+  // A hit rate measured over a few seconds of bursty traffic is 0% or 100%
+  // and rarely anything between, and an idle interval has no ratio at all --
+  // plotted raw that is a comb of hairlines, not a rate. Average it over a
+  // trailing window sized from the visible range, which is both the quantity
+  // people mean by "hit rate" and a line that survives the gaps between
+  // bursts. Five percent of the range keeps roughly twenty of the four
+  // hundred fetched points under each output point.
+  const cacheWindowMs = useMemo(
+    () => Math.min(Math.max(rangeSeconds * 1000 * 0.05, 60_000), 600_000),
+    [rangeSeconds],
+  )
   // `hit_lb` is token-weighted, whichever layer produced it. `hit_engines` is
   // an unweighted mean of per-engine percentages, so a nearly idle engine
   // counts as much as one carrying the fleet -- only reach for it when the
@@ -159,24 +174,47 @@ export default function App() {
     return undefined
   }, [live.frames, points])
   const cacheHit = useMemo(() => {
-    const value = windowMax(servingRows, "hit_lb", servingNow)
-    if (value != null) {
-      return {
-        value,
-        detail: cacheHitSource === "engine_prefix_cache" ? "engine-reported · 30s max" : "30s max",
-        key: "hit_lb" as const,
-        rows: servingRows,
-        now: servingNow,
-      }
-    }
+    // The 1 Hz stream reads only the proxy's own registry, so a fleet whose
+    // hit rate comes from the engines' prefix-cache counters publishes it on
+    // the 5 s sampled rows and never on a live frame. Splicing the live tail
+    // in would end the line minutes short of now, so that case stays on the
+    // polled series.
+    const liveHasHit = live.frames.some(
+      (frame) => typeof frame.serving?.cache_hit_pct === "number",
+    )
+    const weighted = (liveHasHit ? servingRows : rows).some(
+      (row) => typeof row.hit_lb === "number",
+    )
+    const source = weighted && liveHasHit ? servingRows : rows
+    const rolled = rollingAverage(source, {
+      key: weighted ? "hit_lb" : "hit_engines",
+      weightKey: "prompt_tps",
+      windowMs: cacheWindowMs,
+      outKey: CACHE_HIT_KEY,
+    })
+    const description = weighted
+      ? cacheHitSource === "engine_prefix_cache"
+        ? "engine-reported prefix cache"
+        : "cached share of prompt tokens served"
+      : "unweighted engine prefix-cache mean"
+    const detail = weighted
+      ? cacheHitSource === "engine_prefix_cache"
+        ? "engine-reported"
+        : "responses"
+      : "engine mean"
+    const label = windowLabel(cacheWindowMs)
+    // The newest point, not the newest non-null one: the average is absent
+    // exactly when nothing was served in the trailing window, and holding a
+    // stale figure there would read as live.
+    const newest = rolled.at(-1)
     return {
-      value: windowMax(rows, "hit_engines", rows.at(-1)?.t ?? servingNow),
-      detail: "engine mean · 30s max",
-      key: "hit_engines" as const,
-      rows,
-      now: rows.at(-1)?.t ?? servingNow,
+      rows: rolled,
+      value: newest?.[CACHE_HIT_KEY] ?? null,
+      now: newest?.t ?? servingNow,
+      description: `${description} · ${label} rolling average`,
+      detail: `${detail} · ${label} avg`,
     }
-  }, [rows, servingRows, servingNow, cacheHitSource])
+  }, [rows, servingRows, servingNow, live.frames, cacheHitSource, cacheWindowMs])
   const latestHost = latest?.host
   const latestEngines = latest?.engines ?? []
   const kvAvg = latestEngines.length
@@ -380,12 +418,13 @@ export default function App() {
   ]
 
   const cacheHitCard: ChartCardProps = {
-    ...shared,
+    data: cacheHit.rows,
+    rangeSeconds,
     title: "Cache hit rate",
-    description: "engine-reported prefix cache",
+    description: cacheHit.description,
     format: (v) => fmtPct(v),
     domain: [0, 100],
-    series: [{ key: "hit_engines", label: "engines", color: "var(--chart-1)" }],
+    series: [{ key: CACHE_HIT_KEY, label: "hit rate", color: "var(--chart-1)" }],
   }
 
   const gpuSource = latest?.gpus ?? points[points.length - 1]?.gpus ?? []
@@ -589,7 +628,7 @@ export default function App() {
           label="Cache hit"
           value={fmtPct(cacheHit.value)}
           detail={cacheHit.detail}
-          trend={sparkline(cacheHit.rows, cacheHit.key, cacheHit.now, sparkWindowMs)}
+          trend={sparkline(cacheHit.rows, CACHE_HIT_KEY, cacheHit.now, sparkWindowMs)}
           format={fmtPct}
           loading={loading}
         />
