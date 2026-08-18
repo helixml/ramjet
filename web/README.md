@@ -115,6 +115,32 @@ CPU busy share, load, memory/swap, per-mount usage, whole-disk I/O rates,
 physical-interface network rates, RAPL package watts, and one row per GPU
 from `nvidia-smi`. Rates need two scrapes, so the first sample returns nulls.
 
+## Where the cache-hit number comes from
+
+`serving.cache_hit_pct` has two possible sources, and the sample says which
+one it used in `serving.cache_hit_source`:
+
+- `response_usage` — the LB's own `ds4proxy_cached_prompt_tokens_total` over
+  `ds4proxy_prompt_tokens_total`. Authoritative, because it is measured on the
+  responses this proxy actually served.
+- `engine_prefix_cache` — summed `vllm:prefix_cache_hits_total` over summed
+  `vllm:prefix_cache_queries_total` across the scraped engines.
+
+The fallback exists because an engine that never populates
+`prompt_tokens_details.cached_tokens` leaves every cache outcome `unknown` and
+the LB ratio permanently absent. Qwen3.8 on node06 is exactly that case: the
+proxy could not see a hit rate while the engines were reporting ~90%. The
+fallback only ever fills an absent value, so a fleet that does report
+`cached_tokens` keeps the authoritative figure.
+
+Read the engine figure as strictly weaker. It counts every query the engines
+saw, including any traffic this LB did not route, and it measures vLLM's block
+lookups rather than the tokens billed to a response. Rates are summed before
+dividing so the ratio stays token-weighted; averaging four per-engine
+percentages would let a nearly idle engine count as much as one carrying the
+whole fleet. A `queries` rate of zero yields absence, not `0%` — a quiet
+interval is not a cold cache.
+
 ## The two token heatmaps
 
 They sit in the Overview beside the GPU row, compact by design: `Tokens by

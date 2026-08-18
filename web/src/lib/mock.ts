@@ -120,6 +120,7 @@ function buildSamples(): Sample[] {
         ttft_p95_ms: 320 + load * 2400 + burst * 1800 + random() * 250,
         tpot_p95_ms: 18 + load * 14 + random() * 4,
         cache_hit_pct: 52 + random() * 25,
+        cache_hit_source: "response_usage" as const,
         upstreams: UPSTREAMS.map((name, index) => ({
           name,
           up: 1,

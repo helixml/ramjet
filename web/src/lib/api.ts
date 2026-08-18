@@ -71,8 +71,18 @@ export interface ServingSample {
   ttft_p95_ms: number | null
   tpot_p95_ms: number | null
   cache_hit_pct: number | null
+  /** Which layer `cache_hit_pct`/`cached_tps` came from. Absent when both are. */
+  cache_hit_source?: CacheHitSource | null
   upstreams?: UpstreamSample[]
 }
+
+/**
+ * `response_usage` is the proxy's own token-weighted figure, measured on the
+ * served responses. `engine_prefix_cache` is the fallback for engines that
+ * never populate `prompt_tokens_details.cached_tokens`: it counts every query
+ * the engines saw, including traffic this proxy did not route.
+ */
+export type CacheHitSource = "response_usage" | "engine_prefix_cache"
 
 export interface EngineSample {
   endpoint: string

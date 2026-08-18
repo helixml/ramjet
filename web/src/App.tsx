@@ -24,6 +24,7 @@ import {
   fmtWatts,
 } from "@/lib/format"
 import { useLiveStream } from "@/hooks/useLiveStream"
+import { sparkline, windowMax, TILE_WINDOW_MS } from "@/lib/sparkline"
 import type { Sample, ServingSample } from "@/lib/api"
 
 type Row = { t: number } & Record<string, number | null>
@@ -88,27 +89,6 @@ function toRow(sample: Sample): Row {
   return row
 }
 
-function trend(rows: Row[], key: string): Array<number | null> {
-  const stride = Math.max(1, Math.floor(rows.length / 12))
-  return rows.filter((_, index) => index % stride === 0).map((row) => row[key] ?? null)
-}
-
-/** Peak of a series in the last 30s so bursty rates do not flicker to 0/—. */
-const TILE_WINDOW_MS = 30_000
-
-function windowMax(rows: Row[], key: string, now: number): number | null {
-  const from = now - TILE_WINDOW_MS
-  let max: number | null = null
-  for (let index = rows.length - 1; index >= 0; index--) {
-    const row = rows[index]
-    if (row.t < from) break
-    const value = row[key]
-    if (typeof value !== "number" || !Number.isFinite(value)) continue
-    max = max == null ? value : Math.max(max, value)
-  }
-  return max
-}
-
 const TABS: TabDef[] = [
   { id: "overview", label: "Overview" },
   { id: "serving", label: "Serving" },
@@ -160,20 +140,43 @@ export default function App() {
   // be five.
   const latestServing = live.frames.at(-1)?.serving ?? latest?.serving
   const servingNow = servingRows.at(-1)?.t ?? Date.now()
+  const sparkWindowMs = rangeSeconds * 1000
   const genTpsMax = useMemo(
-    () => windowMax(servingRows, "gen_tps", servingNow),
+    () => windowMax(servingRows, "gen_tps", servingNow, TILE_WINDOW_MS),
     [servingRows, servingNow],
   )
+  // `hit_lb` is token-weighted, whichever layer produced it. `hit_engines` is
+  // an unweighted mean of per-engine percentages, so a nearly idle engine
+  // counts as much as one carrying the fleet -- only reach for it when the
+  // weighted figure is absent entirely.
+  const cacheHitSource = useMemo(() => {
+    for (const frames of [live.frames, points]) {
+      for (let index = frames.length - 1; index >= 0; index -= 1) {
+        const source = frames[index].serving?.cache_hit_source
+        if (source != null) return source
+      }
+    }
+    return undefined
+  }, [live.frames, points])
   const cacheHit = useMemo(() => {
-    const engineHit = windowMax(rows, "hit_engines", rows.at(-1)?.t ?? servingNow)
-    if (engineHit != null) {
-      return { value: engineHit, engineReported: true }
+    const value = windowMax(servingRows, "hit_lb", servingNow)
+    if (value != null) {
+      return {
+        value,
+        detail: cacheHitSource === "engine_prefix_cache" ? "engine-reported · 30s max" : "30s max",
+        key: "hit_lb" as const,
+        rows: servingRows,
+        now: servingNow,
+      }
     }
     return {
-      value: windowMax(servingRows, "hit_lb", servingNow),
-      engineReported: false,
+      value: windowMax(rows, "hit_engines", rows.at(-1)?.t ?? servingNow),
+      detail: "engine mean · 30s max",
+      key: "hit_engines" as const,
+      rows,
+      now: rows.at(-1)?.t ?? servingNow,
     }
-  }, [rows, servingRows, servingNow])
+  }, [rows, servingRows, servingNow, cacheHitSource])
   const latestHost = latest?.host
   const latestEngines = latest?.engines ?? []
   const kvAvg = latestEngines.length
@@ -558,19 +561,22 @@ export default function App() {
           label="Gen tok/s"
           value={fmtNum(genTpsMax)}
           detail="30s max"
-          trend={trend(servingRows, "gen_tps")}
+          trend={sparkline(servingRows, "gen_tps", servingNow, sparkWindowMs)}
+          format={fmtNum}
           loading={loading}
         />
         <StatTile
           label="TTFT p95"
           value={fmtMs(latestServing?.ttft_p95_ms)}
-          trend={trend(servingRows, "ttft_p95")}
+          trend={sparkline(servingRows, "ttft_p95", servingNow, sparkWindowMs)}
+          format={fmtMs}
           loading={loading}
         />
         <StatTile
           label="In flight"
           value={fmtNum(latestServing?.inflight)}
-          trend={trend(servingRows, "inflight")}
+          trend={sparkline(servingRows, "inflight", servingNow, sparkWindowMs)}
+          format={fmtNum}
           loading={loading}
         />
         <StatTile
@@ -582,10 +588,9 @@ export default function App() {
         <StatTile
           label="Cache hit"
           value={fmtPct(cacheHit.value)}
-          detail={cacheHit.engineReported ? "engine-reported · 30s max" : "30s max"}
-          trend={
-            cacheHit.engineReported ? trend(rows, "hit_engines") : trend(servingRows, "hit_lb")
-          }
+          detail={cacheHit.detail}
+          trend={sparkline(cacheHit.rows, cacheHit.key, cacheHit.now, sparkWindowMs)}
+          format={fmtPct}
           loading={loading}
         />
         <StatTile
@@ -594,7 +599,8 @@ export default function App() {
           detail={
             latestHost?.load1 != null ? `load ${fmtNum(latestHost.load1, 1)}` : undefined
           }
-          trend={trend(rows, "cpu")}
+          trend={sparkline(rows, "cpu", rows.at(-1)?.t ?? servingNow, sparkWindowMs)}
+          format={fmtPct}
           loading={loading}
         />
         <StatTile
@@ -615,7 +621,8 @@ export default function App() {
               ? fmtWattHours(latest.energy.total_watt_hours)
               : undefined
           }
-          trend={trend(rows, "watts_gpu")}
+          trend={sparkline(rows, "watts_gpu", rows.at(-1)?.t ?? servingNow, sparkWindowMs)}
+          format={fmtWatts}
           loading={loading}
         />
       </div>

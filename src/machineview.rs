@@ -336,8 +336,25 @@ pub struct ServingSample {
     pub ttft_p95_ms: Option<f64>,
     pub tpot_p95_ms: Option<f64>,
     pub cache_hit_pct: Option<f64>,
+    /// Which layer `cache_hit_pct`/`cached_tps` came from. Absent when both
+    /// are absent; never inferred by the reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_hit_source: Option<CacheHitSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub upstreams: Vec<UpstreamSample>,
+}
+
+/// Provenance of the published cache-hit ratio. The proxy's own token-weighted
+/// figure is authoritative because it is measured on the served responses; the
+/// engine figure is a strictly weaker substitute that counts every query the
+/// engines saw, including traffic this proxy did not route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheHitSource {
+    /// `prompt_tokens_details.cached_tokens` on the proxied responses.
+    ResponseUsage,
+    /// Summed `vllm:prefix_cache_{hits,queries}_total` across the engines.
+    EnginePrefixCache,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1090,6 +1107,7 @@ fn merge_samples(bucket: &[&Sample]) -> Sample {
                 ttft_p95_ms: mean(entries.iter().map(|e| e.ttft_p95_ms)),
                 tpot_p95_ms: mean(entries.iter().map(|e| e.tpot_p95_ms)),
                 cache_hit_pct: mean(entries.iter().map(|e| e.cache_hit_pct)),
+                cache_hit_source: entries.iter().rev().find_map(|e| e.cache_hit_source),
                 upstreams,
             }
         });
@@ -1215,8 +1233,22 @@ pub fn build_serving_sample(
         ttft_p95_ms,
         tpot_p95_ms,
         cache_hit_pct,
+        // The caller fills this in: the engine fallback needs the engine
+        // scrapes, which are not available at this layer.
+        cache_hit_source: None,
         upstreams,
     }
+}
+
+/// One engine's scrape: the published sample plus the raw prefix-cache token
+/// rates. The serving section needs those unaveraged, because a fleet-wide
+/// ratio has to be token-weighted rather than a mean of four percentages
+/// carrying wildly different traffic.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EngineScrape {
+    pub sample: EngineSample,
+    pub prefix_hits_per_second: Option<f64>,
+    pub prefix_queries_per_second: Option<f64>,
 }
 
 /// Folds one engine's scraped vLLM metrics into an engine sample.
@@ -1225,7 +1257,7 @@ pub fn build_engine_sample(
     endpoint: &str,
     t_ms: u64,
     rates: &mut RateTracker,
-) -> EngineSample {
+) -> EngineScrape {
     let gen_tps = metric_sum(map, "vllm:generation_tokens_total")
         .and_then(|value| rates.rate(&format!("engine.{endpoint}.generation"), t_ms, value));
     let prompt_tps = metric_sum(map, "vllm:prompt_tokens_total")
@@ -1245,14 +1277,64 @@ pub fn build_engine_sample(
         &["vllm:gpu_cache_usage_perc", "vllm:kv_cache_usage_perc"],
     )
     .map(|fraction| (fraction * 100.0).clamp(0.0, 100.0));
-    EngineSample {
-        endpoint: endpoint.to_owned(),
-        running: metric_sum(map, "vllm:num_requests_running"),
-        waiting: metric_sum(map, "vllm:num_requests_waiting"),
-        kv_cache_pct,
-        gen_tps,
-        prompt_tps,
-        prefix_hit_pct,
+    EngineScrape {
+        sample: EngineSample {
+            endpoint: endpoint.to_owned(),
+            running: metric_sum(map, "vllm:num_requests_running"),
+            waiting: metric_sum(map, "vllm:num_requests_waiting"),
+            kv_cache_pct,
+            gen_tps,
+            prompt_tps,
+            prefix_hit_pct,
+        },
+        prefix_hits_per_second: hits,
+        prefix_queries_per_second: queries,
+    }
+}
+
+/// Token-weighted fleet cache-hit ratio and cached-token rate derived from the
+/// engines' own prefix-cache counters.
+///
+/// This is the fallback for engines that never populate
+/// `prompt_tokens_details.cached_tokens`: they still publish
+/// `vllm:prefix_cache_{hits,queries}_total`, which measures the same thing one
+/// layer down. Rates are summed before dividing so an idle engine contributes
+/// nothing instead of dragging the mean, and a `queries` rate of zero yields
+/// absence rather than a fabricated 0%.
+pub fn engine_prefix_cache_ratio(scrapes: &[EngineScrape]) -> Option<(f64, f64)> {
+    let mut hits = 0.0;
+    let mut queries = 0.0;
+    let mut observed = false;
+    for scrape in scrapes {
+        if let (Some(scraped_hits), Some(scraped_queries)) = (
+            scrape.prefix_hits_per_second,
+            scrape.prefix_queries_per_second,
+        ) {
+            hits += scraped_hits;
+            queries += scraped_queries;
+            observed = true;
+        }
+    }
+    if !observed || queries <= 0.0 {
+        return None;
+    }
+    Some((hits.max(0.0), (hits / queries * 100.0).clamp(0.0, 100.0)))
+}
+
+/// Fills an absent cache-hit ratio from the engines' prefix-cache counters.
+///
+/// Only ever writes when the proxy's own response-usage path produced nothing,
+/// so an engine fleet that does report `cached_tokens` keeps the authoritative
+/// figure. The chosen provenance is published rather than left implicit.
+pub fn apply_engine_cache_fallback(serving: &mut ServingSample, scrapes: &[EngineScrape]) {
+    if serving.cache_hit_pct.is_some() {
+        serving.cache_hit_source = Some(CacheHitSource::ResponseUsage);
+        return;
+    }
+    if let Some((cached_tps, hit_pct)) = engine_prefix_cache_ratio(scrapes) {
+        serving.cached_tps = Some(cached_tps);
+        serving.cache_hit_pct = Some(hit_pct);
+        serving.cache_hit_source = Some(CacheHitSource::EnginePrefixCache);
     }
 }
 
@@ -1711,7 +1793,8 @@ impl Sampler {
     async fn sample(&mut self, t_ms: u64) -> (Sample, TokenCounters) {
         let self_map = gather_registry(&self.registry);
         let counters = token_counters(&self_map);
-        let serving = build_serving_sample(&self_map, t_ms, &mut self.rates, &mut self.histograms);
+        let mut serving =
+            build_serving_sample(&self_map, t_ms, &mut self.rates, &mut self.histograms);
 
         let scrape_timeout = Duration::from_secs(4);
         let engine_bodies = futures::future::join_all(self.upstreams.iter().map(|base| {
@@ -1734,19 +1817,25 @@ impl Sampler {
             }
         }))
         .await;
-        let mut engines = Vec::with_capacity(self.upstreams.len());
+        let mut scrapes = Vec::with_capacity(self.upstreams.len());
         for (base, body) in self.upstreams.iter().zip(engine_bodies) {
             let endpoint = base.as_str().trim_end_matches('/').to_owned();
             if let Some(body) = body {
                 let map = parse_prometheus_text(&body);
-                engines.push(build_engine_sample(&map, &endpoint, t_ms, &mut self.rates));
+                scrapes.push(build_engine_sample(&map, &endpoint, t_ms, &mut self.rates));
             } else {
-                engines.push(EngineSample {
-                    endpoint,
-                    ..EngineSample::default()
+                scrapes.push(EngineScrape {
+                    sample: EngineSample {
+                        endpoint,
+                        ..EngineSample::default()
+                    },
+                    ..EngineScrape::default()
                 });
             }
         }
+        apply_engine_cache_fallback(&mut serving, &scrapes);
+        let engines: Vec<EngineSample> =
+            scrapes.into_iter().map(|scrape| scrape.sample).collect();
 
         let mut host = None;
         let mut gpus = Vec::new();
@@ -2456,7 +2545,7 @@ mod tests {
             "vllm:num_requests_waiting 1\n",
         ));
         let mut rates = RateTracker::default();
-        let sample = build_engine_sample(&first, "http://e:8000", 1_000, &mut rates);
+        let sample = build_engine_sample(&first, "http://e:8000", 1_000, &mut rates).sample;
         assert_eq!(sample.running, Some(3.0));
         assert_eq!(sample.waiting, Some(1.0));
         assert_eq!(sample.kv_cache_pct, Some(42.0));
@@ -2470,7 +2559,7 @@ mod tests {
             "vllm:num_requests_running 2\n",
             "vllm:num_requests_waiting 0\n",
         ));
-        let sample = build_engine_sample(&second, "http://e:8000", 6_000, &mut rates);
+        let sample = build_engine_sample(&second, "http://e:8000", 6_000, &mut rates).sample;
         assert_eq!(sample.gen_tps, Some(200.0));
         assert_eq!(sample.prompt_tps, Some(200.0));
         assert_eq!(sample.prefix_hit_pct, Some(75.0));
@@ -2538,6 +2627,163 @@ mod tests {
             "unknown-only outcomes mean the engine reports no cache detail"
         );
         assert_eq!(sample.cache_hit_pct, None);
+        assert_eq!(sample.cache_hit_source, None);
+    }
+
+    /// Two scrapes per engine: the first seeds the rate tracker, the second
+    /// produces the rate the fallback consumes.
+    fn scrape_pair(
+        rates: &mut RateTracker,
+        endpoint: &str,
+        first: &str,
+        second: &str,
+    ) -> EngineScrape {
+        build_engine_sample(&parse_prometheus_text(first), endpoint, 1_000, rates);
+        build_engine_sample(&parse_prometheus_text(second), endpoint, 6_000, rates)
+    }
+
+    fn prefix_body(hits: u64, queries: u64) -> String {
+        format!(
+            concat!(
+                "vllm:prefix_cache_hits_total {}\n",
+                "vllm:prefix_cache_queries_total {}\n",
+            ),
+            hits, queries
+        )
+    }
+
+    #[test]
+    fn engine_prefix_cache_ratio_is_token_weighted_not_a_mean_of_percentages() {
+        let mut rates = RateTracker::default();
+        // A busy engine at 90% and a nearly idle one at 40%. The unweighted
+        // mean would be 65%; the fleet actually served 8_900/9_950 tokens.
+        let busy = scrape_pair(
+            &mut rates,
+            "http://busy:8000",
+            &prefix_body(0, 0),
+            &prefix_body(9_000, 10_000),
+        );
+        let quiet = scrape_pair(
+            &mut rates,
+            "http://quiet:8000",
+            &prefix_body(0, 0),
+            &prefix_body(20, 50),
+        );
+        let (cached_tps, hit_pct) =
+            engine_prefix_cache_ratio(&[busy, quiet]).expect("both engines reported");
+        assert!((cached_tps - 1_804.0).abs() < 1e-6, "{cached_tps}");
+        assert!((hit_pct - 89.751_243_781_094_53).abs() < 1e-9, "{hit_pct}");
+    }
+
+    #[test]
+    fn engine_prefix_cache_ratio_is_absent_without_queries() {
+        let mut rates = RateTracker::default();
+        // Every engine idle across the interval: no queries, so no ratio. A
+        // zero here would render as a stone-cold cache on a healthy fleet.
+        let idle = scrape_pair(
+            &mut rates,
+            "http://idle:8000",
+            &prefix_body(500, 1_000),
+            &prefix_body(500, 1_000),
+        );
+        assert_eq!(engine_prefix_cache_ratio(&[idle]), None);
+        assert_eq!(engine_prefix_cache_ratio(&[]), None);
+        assert_eq!(engine_prefix_cache_ratio(&[EngineScrape::default()]), None);
+    }
+
+    #[test]
+    fn engine_fallback_fills_cache_hit_when_responses_never_report_cached_tokens() {
+        let mut rates = RateTracker::default();
+        let mut histograms = HistogramWindows::default();
+        let body_at = |prompt: u64, unknown: u64| {
+            format!(
+                concat!(
+                    "ds4proxy_prompt_tokens_total{{endpoint=\"chat\"}} {}\n",
+                    "ds4proxy_cached_prompt_tokens_total{{endpoint=\"chat\"}} 0\n",
+                    "ds4proxy_cache_requests_total{{endpoint=\"chat\",outcome=\"unknown\"}} {}\n",
+                ),
+                prompt, unknown
+            )
+        };
+        let map = parse_prometheus_text(&body_at(1_000, 40));
+        build_serving_sample(&map, 1_000, &mut rates, &mut histograms);
+        let map = parse_prometheus_text(&body_at(2_000, 80));
+        let mut serving = build_serving_sample(&map, 6_000, &mut rates, &mut histograms);
+        assert_eq!(serving.cache_hit_pct, None, "precondition");
+
+        let engine = scrape_pair(
+            &mut rates,
+            "http://e:8000",
+            &prefix_body(0, 0),
+            &prefix_body(900, 1_000),
+        );
+        apply_engine_cache_fallback(&mut serving, &[engine]);
+        assert_eq!(serving.cache_hit_pct, Some(90.0));
+        assert_eq!(serving.cached_tps, Some(180.0));
+        assert_eq!(
+            serving.cache_hit_source,
+            Some(CacheHitSource::EnginePrefixCache)
+        );
+    }
+
+    #[test]
+    fn engine_fallback_never_overwrites_response_usage() {
+        let mut rates = RateTracker::default();
+        let mut histograms = HistogramWindows::default();
+        let body_at = |prompt: u64, cached: u64| {
+            format!(
+                concat!(
+                    "ds4proxy_prompt_tokens_total{{endpoint=\"chat\"}} {}\n",
+                    "ds4proxy_cached_prompt_tokens_total{{endpoint=\"chat\"}} {}\n",
+                    "ds4proxy_cache_requests_total{{endpoint=\"chat\",outcome=\"full\"}} 10\n",
+                ),
+                prompt, cached
+            )
+        };
+        let map = parse_prometheus_text(&body_at(1_000, 400));
+        build_serving_sample(&map, 1_000, &mut rates, &mut histograms);
+        let map = parse_prometheus_text(&body_at(2_000, 900));
+        let mut serving = build_serving_sample(&map, 6_000, &mut rates, &mut histograms);
+        assert_eq!(serving.cache_hit_pct, Some(50.0), "precondition");
+
+        // An engine claiming 90% must not displace the proxy's own 50%.
+        let engine = scrape_pair(
+            &mut rates,
+            "http://e:8000",
+            &prefix_body(0, 0),
+            &prefix_body(900, 1_000),
+        );
+        apply_engine_cache_fallback(&mut serving, &[engine]);
+        assert_eq!(serving.cache_hit_pct, Some(50.0));
+        assert_eq!(serving.cached_tps, Some(100.0));
+        assert_eq!(serving.cache_hit_source, Some(CacheHitSource::ResponseUsage));
+    }
+
+    #[test]
+    fn condense_keeps_the_newest_published_cache_hit_source() {
+        let serving = |source: Option<CacheHitSource>| ServingSample {
+            cache_hit_pct: Some(90.0),
+            cache_hit_source: source,
+            ..ServingSample::default()
+        };
+        let samples: Vec<Sample> = [
+            Some(CacheHitSource::ResponseUsage),
+            Some(CacheHitSource::EnginePrefixCache),
+            None,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, source)| Sample {
+            t: 1_000 + index as u64,
+            serving: Some(serving(source)),
+            ..Sample::default()
+        })
+        .collect();
+        let condensed = merge_samples(&samples.iter().collect::<Vec<_>>());
+        assert_eq!(
+            condensed.serving.and_then(|s| s.cache_hit_source),
+            Some(CacheHitSource::EnginePrefixCache),
+        );
     }
 
     #[test]
