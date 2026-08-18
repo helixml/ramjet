@@ -31,6 +31,18 @@ without raw KV-cache events. Optional DSpark enforcement persists only opaque
 quarantine commitments so an LB restart cannot forget a bad EngineCore. The
 production path remains the proxy plus your existing OpenAI-compatible engines.
 
+## Built-in dashboard
+
+System overview to see how your node is doing:
+
+<img width="1471" height="1085" alt="image" src="https://github.com/user-attachments/assets/b13bd5aa-25b9-41eb-a9de-752c616c343b" />
+
+And specific serving tab:
+
+<img width="1419" height="1214" alt="image" src="https://github.com/user-attachments/assets/6703a7a9-53b4-4d9a-ab07-7389a96fc684" />
+
+You can also just plug it into prometheus, `/metrics` API is available. 
+
 ## Measured on real hardware
 
 Reference stack: DeepSeek-V4-Flash-0731, two TP4 replicas, 8× RTX PRO 6000.
