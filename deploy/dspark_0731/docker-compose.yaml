@@ -30,7 +30,10 @@ services:
   # compat shims, /v1/models context-margin rewrite, Prometheus metrics
   # (:8007 -> Caddy :9105) and engine-native metrics passthrough.
   ds4-loadbalancer:
-    image: ${LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-b0e0700@sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1}
+    # Same digest as the retired ghcr.io/helixml/mini-dynamo:rust-b0e0700 pin;
+    # this content was promoted to ramjet v0.1.0, so only the repository path
+    # changed. Verified present under both paths before the switch.
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.1.0@sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:
