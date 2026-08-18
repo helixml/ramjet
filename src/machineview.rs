@@ -1301,6 +1301,7 @@ pub fn build_engine_sample(
 /// layer down. Rates are summed before dividing so an idle engine contributes
 /// nothing instead of dragging the mean, and a `queries` rate of zero yields
 /// absence rather than a fabricated 0%.
+#[must_use]
 pub fn engine_prefix_cache_ratio(scrapes: &[EngineScrape]) -> Option<(f64, f64)> {
     let mut hits = 0.0;
     let mut queries = 0.0;
@@ -1834,8 +1835,7 @@ impl Sampler {
             }
         }
         apply_engine_cache_fallback(&mut serving, &scrapes);
-        let engines: Vec<EngineSample> =
-            scrapes.into_iter().map(|scrape| scrape.sample).collect();
+        let engines: Vec<EngineSample> = scrapes.into_iter().map(|scrape| scrape.sample).collect();
 
         let mut host = None;
         let mut gpus = Vec::new();
@@ -2756,7 +2756,10 @@ mod tests {
         apply_engine_cache_fallback(&mut serving, &[engine]);
         assert_eq!(serving.cache_hit_pct, Some(50.0));
         assert_eq!(serving.cached_tps, Some(100.0));
-        assert_eq!(serving.cache_hit_source, Some(CacheHitSource::ResponseUsage));
+        assert_eq!(
+            serving.cache_hit_source,
+            Some(CacheHitSource::ResponseUsage)
+        );
     }
 
     #[test]

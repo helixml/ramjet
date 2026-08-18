@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG RUST_DEPS_IMAGE=ghcr.io/helixml/ramjet:rust-deps-sha256-55c309403e68e35c6edff986357d452bae09d2c95d7f3deefaad1ffd3033d091
+ARG RUST_DEPS_IMAGE=ghcr.io/helixml/ramjet:rust-deps-sha256-42fd0c4ae5fd5bf5787187facbfff60e9a8ad03fba8598773cb61e7231c743e9
 ARG OCI_REVISION=unknown
 FROM ${RUST_DEPS_IMAGE} AS build
 WORKDIR /src
@@ -25,7 +25,7 @@ RUN npm run build
 FROM gcr.io/distroless/cc-debian12
 ARG OCI_REVISION
 LABEL org.opencontainers.image.source="https://github.com/helixml/ramjet"
-LABEL org.opencontainers.image.version="0.1.0"
+LABEL org.opencontainers.image.version="0.2.0"
 LABEL org.opencontainers.image.revision="${OCI_REVISION}"
 # dynamo-tokenizers' PCRE2 regex backend is dynamically linked on Debian.
 COPY --from=build /lib/x86_64-linux-gnu/libpcre2-8.so.0.11.2 /lib/x86_64-linux-gnu/libpcre2-8.so.0

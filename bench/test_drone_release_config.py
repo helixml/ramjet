@@ -1,5 +1,6 @@
 import pathlib
 import re
+import tomllib
 import unittest
 
 
@@ -84,13 +85,18 @@ class DroneReleaseConfigTest(unittest.TestCase):
             self.assertFalse((ROOT / "bench" / name).exists(), name)
 
     def test_runtime_images_declare_exact_oci_identity_labels(self):
+        # The version comes from Cargo.toml rather than a literal: the release
+        # publisher verifies the label against the package version, so pinning
+        # a number here only means every release has to edit its own guard.
+        # `bench/test_release_metadata.py` owns cross-file version agreement.
+        version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
         for name in ("Dockerfile", "Dockerfile.companion"):
             dockerfile = (ROOT / name).read_text()
             self.assertIn(
                 'org.opencontainers.image.source="https://github.com/helixml/ramjet"',
                 dockerfile,
             )
-            self.assertIn('org.opencontainers.image.version="0.1.0"', dockerfile)
+            self.assertIn(f'org.opencontainers.image.version="{version}"', dockerfile)
             self.assertIn('org.opencontainers.image.revision="${OCI_REVISION}"', dockerfile)
             self.assertIn("ARG OCI_REVISION", dockerfile)
 
