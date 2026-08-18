@@ -57,13 +57,14 @@ export function StatTile({
               <div className="mt-0.5 font-mono text-xl font-medium leading-tight whitespace-nowrap tabular-nums">
                 {hovered && format ? format(hovered.v as number) : value}
               </div>
-              {hovered ? (
-                <div className="text-faint-foreground truncate text-[10px] tabular-nums">
-                  {fmtClockFull(hovered.t)}
-                </div>
-              ) : detail ? (
-                <div className="text-faint-foreground truncate text-[10px]">{detail}</div>
-              ) : null}
+              {/*
+                Always render this line, even with neither a hover timestamp
+                nor a detail: a tile that grows on hover stretches the whole
+                grid row and makes every sparkline in it jump.
+              */}
+              <div className="text-faint-foreground truncate text-[10px] tabular-nums">
+                {hovered ? fmtClockFull(hovered.t) : (detail ?? "\u00a0")}
+              </div>
             </>
           )}
         </div>
