@@ -41,6 +41,6 @@ done
 docker inspect -f '{{.Name}} image={{.Config.Image}} status={{.State.Status}}' \
   ds4-loadbalancer dspark-0731 dspark-0731-b
 curl -fsS http://127.0.0.1:8007/metrics \
-  | awk '/ds4proxy_upstream_(up|inflight|load_units)/ && $1 !~ /^#/ {print}'
+  | awk '/ramjet_upstream_(up|inflight|load_units)/ && $1 !~ /^#/ {print}'
 nvidia-smi topo -m
 REMOTE

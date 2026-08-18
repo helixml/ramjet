@@ -19,7 +19,7 @@ bench/machineview_agent.py   host agent (loopback): /proc, statvfs, RAPL, nvidia
         │  GET /sample (JSON)
         ▼
 ramjet LB               samples every RJ_MACHINEVIEW_INTERVAL_MS:
-  src/machineview.rs           - its own Prometheus registry (ds4proxy_*)
+  src/machineview.rs           - its own Prometheus registry (ramjet_*)
         │                      - each upstream's /metrics (vllm:*)
         │                      - the agent (host + GPUs + energy)
         │                    stores a bounded in-memory ring plus a long
@@ -52,7 +52,7 @@ client too slow for the interval is dropped rather than served a backlog.
 Two stores, two time scales. The ring answers "what is the box doing now"
 at seconds of resolution and is bounded by `RJ_MACHINEVIEW_RETENTION_SECONDS`
 (a day by default, a week at most). The token history answers "when does this
-box get used" from the same `ds4proxy_*` counters at one bucket an hour, so a
+box get used" from the same `ramjet_*` counters at one bucket an hour, so a
 month of it costs 720 small records — that is what the Overview's two
 token heatmaps read.
 
@@ -120,8 +120,8 @@ from `nvidia-smi`. Rates need two scrapes, so the first sample returns nulls.
 `serving.cache_hit_pct` has two possible sources, and the sample says which
 one it used in `serving.cache_hit_source`:
 
-- `response_usage` — the LB's own `ds4proxy_cached_prompt_tokens_total` over
-  `ds4proxy_prompt_tokens_total`. Authoritative, because it is measured on the
+- `response_usage` — the LB's own `ramjet_cached_prompt_tokens_total` over
+  `ramjet_prompt_tokens_total`. Authoritative, because it is measured on the
   responses this proxy actually served.
 - `engine_prefix_cache` — summed `vllm:prefix_cache_hits_total` over summed
   `vllm:prefix_cache_queries_total` across the scraped engines.
@@ -168,8 +168,8 @@ Four things about them are deliberate:
   cumulative, so a restart re-baselines rather than logging a negative delta,
   and with `RJ_MACHINEVIEW_STATE_PATH` set the accumulated buckets survive.
 
-The tooltip's `requests` line is `ds4proxy_requests_total` across every
+The tooltip's `requests` line is `ramjet_requests_total` across every
 endpoint and status code, so a quiet hour can show requests with no tokens.
-`cached` is the LB's own `ds4proxy_cached_prompt_tokens_total`, which stays
+`cached` is the LB's own `ramjet_cached_prompt_tokens_total`, which stays
 at zero against engines that do not return `prompt_tokens_details` — Qwen3.8
 is one of them, so on node06 that line is structurally zero, not measured.

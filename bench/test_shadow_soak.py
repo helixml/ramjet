@@ -7,20 +7,20 @@ import shadow_soak
 class ShadowSoakTests(unittest.TestCase):
     def test_metrics_are_fixed_and_missing_children_are_zero(self):
         body = """
-ds4proxy_shadow_soak_enabled 1
-ds4proxy_shadow_soak_complete 0
-ds4proxy_shadow_soak_sources 104
-ds4proxy_shadow_soak_source_token_bytes 55000000
-ds4proxy_shadow_soak_duration_seconds 0
-ds4proxy_shadow_soak_phase{phase="running"} 1
-ds4proxy_shadow_soak_attempts_total{outcome="stable"} 7
-ds4proxy_shadow_soak_comparisons_total{outcome="agree"} 6
-ds4proxy_shadow_soak_source_comparisons_total{outcome="would_move"} 2
-ds4proxy_shadow_soak_source_attempts_total{outcome="stable"} 9
-ds4proxy_shadow_soak_overlap_tokens_sum{choice="best"} 700
-ds4proxy_shadow_soak_source_overlap_tokens_sum{choice="best"} 300
-ds4proxy_shadow_soak_placement_total{max_load_delta="2",outcome="kept_gain_gate"} 4
-ds4proxy_shadow_soak_projected_balance_total{max_load_delta="1",outcome="would_balance"} 3
+ramjet_shadow_soak_enabled 1
+ramjet_shadow_soak_complete 0
+ramjet_shadow_soak_sources 104
+ramjet_shadow_soak_source_token_bytes 55000000
+ramjet_shadow_soak_duration_seconds 0
+ramjet_shadow_soak_phase{phase="running"} 1
+ramjet_shadow_soak_attempts_total{outcome="stable"} 7
+ramjet_shadow_soak_comparisons_total{outcome="agree"} 6
+ramjet_shadow_soak_source_comparisons_total{outcome="would_move"} 2
+ramjet_shadow_soak_source_attempts_total{outcome="stable"} 9
+ramjet_shadow_soak_overlap_tokens_sum{choice="best"} 700
+ramjet_shadow_soak_source_overlap_tokens_sum{choice="best"} 300
+ramjet_shadow_soak_placement_total{max_load_delta="2",outcome="kept_gain_gate"} 4
+ramjet_shadow_soak_projected_balance_total{max_load_delta="1",outcome="would_balance"} 3
 """
         parsed = shadow_soak.soak_metrics(body)
         self.assertEqual(parsed["enabled"], 1)

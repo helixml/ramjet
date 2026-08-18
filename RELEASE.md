@@ -16,7 +16,7 @@ Replace `<version>` with the `Cargo.toml` package version being released.
 3. Deploy the load balancer by immutable digest on node06, holding
    `/run/lock/ramjet-node06-deployment.lock` for the whole interval. Do not
    restart any inference engine. Confirm `/health` reports every replica
-   healthy and `ds4proxy_upstream_up` is 1 for each.
+   healthy and `ramjet_upstream_up` is 1 for each.
 4. Run the gates that apply to the deployed stack. Where the box is serving
    live traffic and the moratorium has not been lifted for a supervised
    window, request-generating gates are not available: qualify on the existing

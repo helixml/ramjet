@@ -616,18 +616,18 @@ impl OwnerObserver {
         let observer = Self {
             events: CounterVec::new(
                 Opts::new(
-                    "ds4proxy_snapshot_companion_owner_events_total",
+                    "ramjet_snapshot_companion_owner_events_total",
                     "Companion owner transitions by bounded event and reason",
                 ),
                 &["event", "reason"],
             )?,
             authority: Gauge::with_opts(Opts::new(
-                "ds4proxy_snapshot_companion_authority",
+                "ramjet_snapshot_companion_authority",
                 "Whether authenticated engine-incarnation authority is available",
             ))?,
             replay_duration: HistogramVec::new(
                 prometheus::HistogramOpts::new(
-                    "ds4proxy_snapshot_companion_owner_replay_duration_seconds",
+                    "ramjet_snapshot_companion_owner_replay_duration_seconds",
                     "Transport replay duration by bounded kind and outcome",
                 ),
                 &["kind", "outcome"],
@@ -1474,7 +1474,7 @@ mod tests {
         let family = registry
             .gather()
             .into_iter()
-            .find(|family| family.name() == "ds4proxy_snapshot_companion_owner_events_total")
+            .find(|family| family.name() == "ramjet_snapshot_companion_owner_events_total")
             .expect("owner metric family");
         assert_eq!(family.get_metric().len(), 1);
         let labels = family.get_metric()[0].get_label();

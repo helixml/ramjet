@@ -47,7 +47,7 @@ secrets.
 ```bash
 curl --silent --show-error --fail http://127.0.0.1:API_PORT/health
 curl --silent --show-error --fail http://127.0.0.1:METRICS_PORT/metrics \
-  | grep -E '^(ds4proxy_upstream_up|ds4proxy_route_decisions_total|ds4proxy_cache_requests_total|ds4proxy_snapshot_route_ready)'
+  | grep -E '^(ramjet_upstream_up|ramjet_route_decisions_total|ramjet_cache_requests_total|ramjet_snapshot_route_ready)'
 curl --silent --show-error --fail http://127.0.0.1:ENGINE_PORT/health
 ```
 

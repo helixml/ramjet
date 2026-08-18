@@ -505,7 +505,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(report, SnapshotCompanionRunReport::Off);
-        assert!(metric_text(&registry).contains("ds4proxy_snapshot_companion_enabled 0"));
+        assert!(metric_text(&registry).contains("ramjet_snapshot_companion_enabled 0"));
     }
 
     #[tokio::test]
@@ -533,21 +533,21 @@ mod tests {
         sleep(SOURCE_STATUS_INTERVAL * 2).await;
         let replay = metric_text(&registry);
         assert!(replay.contains(
-            "ds4proxy_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"replay\"} 1"
+            "ramjet_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"replay\"} 1"
         ));
-        assert!(replay.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 0"));
+        assert!(replay.contains("ramjet_snapshot_companion_ready{engine=\"engine-0\"} 0"));
 
         source.phase.store(1, Ordering::Release);
         sleep(SOURCE_STATUS_INTERVAL * 2).await;
         let ready = metric_text(&registry);
         assert!(ready.contains(
-            "ds4proxy_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"ready\"} 1"
+            "ramjet_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"ready\"} 1"
         ));
-        assert!(ready.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 1"));
-        assert!(ready.contains("ds4proxy_snapshot_companion_source_ready{engine=\"engine-0\"} 1"));
+        assert!(ready.contains("ramjet_snapshot_companion_ready{engine=\"engine-0\"} 1"));
+        assert!(ready.contains("ramjet_snapshot_companion_source_ready{engine=\"engine-0\"} 1"));
         assert!(
             ready.contains(
-                "ds4proxy_snapshot_companion_source_indexed_blocks{engine=\"engine-0\"} 42"
+                "ramjet_snapshot_companion_source_indexed_blocks{engine=\"engine-0\"} 42"
             )
         );
 
@@ -555,9 +555,9 @@ mod tests {
         sleep(SOURCE_STATUS_INTERVAL * 2).await;
         let fenced = metric_text(&registry);
         assert!(fenced.contains(
-            "ds4proxy_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"fenced\"} 1"
+            "ramjet_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"fenced\"} 1"
         ));
-        assert!(fenced.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 0"));
+        assert!(fenced.contains("ramjet_snapshot_companion_ready{engine=\"engine-0\"} 0"));
         finish.send(()).unwrap();
         observer.await.unwrap().unwrap();
     }
@@ -580,13 +580,13 @@ mod tests {
                 assert_eq!(supervisor.session_timeout, None);
                 let text = metric_text(registry_ref);
                 assert!(text.contains(
-                    "ds4proxy_snapshot_companion_listening{engine=\"engine-0\"} 1"
+                    "ramjet_snapshot_companion_listening{engine=\"engine-0\"} 1"
                 ));
                 assert!(
-                    text.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 0")
+                    text.contains("ramjet_snapshot_companion_ready{engine=\"engine-0\"} 0")
                 );
                 assert!(text.contains(
-                    "ds4proxy_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"unknown\"} 1"
+                    "ramjet_snapshot_companion_source_phase{engine=\"engine-0\",phase=\"unknown\"} 1"
                 ));
                 drop(listener);
                 Err(SnapshotSupervisorError::Listener)
@@ -602,7 +602,7 @@ mod tests {
         assert!(!files.socket.exists());
         assert!(
             metric_text(&registry)
-                .contains("ds4proxy_snapshot_companion_listening{engine=\"engine-0\"} 0")
+                .contains("ramjet_snapshot_companion_listening{engine=\"engine-0\"} 0")
         );
     }
 

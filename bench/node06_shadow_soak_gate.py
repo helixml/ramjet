@@ -345,10 +345,10 @@ print(boot * 1_000_000_000 + ticks * 1_000_000_000 // os.sysconf('SC_CLK_TCK'))
             raise recovery.GateError(
                 "snapshot_route_pending", "snapshot route authority is not ready"
             )
-        enabled = recovery.metric_value(metrics, "ds4proxy_shadow_soak_enabled")
+        enabled = recovery.metric_value(metrics, "ramjet_shadow_soak_enabled")
         if soak_mode == "capture":
             phase = recovery.metric_value(
-                metrics, "ds4proxy_shadow_soak_phase", {"phase": "collecting"}
+                metrics, "ramjet_shadow_soak_phase", {"phase": "collecting"}
             )
             if enabled != 1 or phase != 1:
                 raise recovery.GateError(

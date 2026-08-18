@@ -15,26 +15,26 @@ import snapshot_recovery_gate as gate
 
 
 READY_METRICS = """
-ds4proxy_snapshot_companion_enabled 1
-ds4proxy_snapshot_companion_authority 1
-ds4proxy_snapshot_companion_listening{engine="engine-0"} 1
-ds4proxy_snapshot_companion_ready{engine="engine-0"} 1
-ds4proxy_snapshot_companion_source_ready{engine="engine-0"} 1
-ds4proxy_snapshot_companion_source_watermark_present{engine="engine-0"} 1
-ds4proxy_snapshot_companion_source_phase{engine="engine-0",phase="ready"} 1
-ds4proxy_snapshot_companion_source_indexed_blocks{engine="engine-0"} 36612
-ds4proxy_snapshot_companion_owner_events_total{event="connect",reason="attempt"} 1
-ds4proxy_snapshot_companion_owner_events_total{event="connect",reason="connected"} 1
+ramjet_snapshot_companion_enabled 1
+ramjet_snapshot_companion_authority 1
+ramjet_snapshot_companion_listening{engine="engine-0"} 1
+ramjet_snapshot_companion_ready{engine="engine-0"} 1
+ramjet_snapshot_companion_source_ready{engine="engine-0"} 1
+ramjet_snapshot_companion_source_watermark_present{engine="engine-0"} 1
+ramjet_snapshot_companion_source_phase{engine="engine-0",phase="ready"} 1
+ramjet_snapshot_companion_source_indexed_blocks{engine="engine-0"} 36612
+ramjet_snapshot_companion_owner_events_total{event="connect",reason="attempt"} 1
+ramjet_snapshot_companion_owner_events_total{event="connect",reason="connected"} 1
 """.strip()
 
 LB_READY_METRICS = """
-ds4proxy_snapshot_route_enabled 1
-ds4proxy_snapshot_route_ready{engine="engine-0"} 1
-ds4proxy_snapshot_route_ready{engine="engine-1"} 1
-ds4proxy_snapshot_route_attempts_active{engine="engine-0"} 1
-ds4proxy_snapshot_route_attempts_active{engine="engine-1"} 1
-ds4proxy_snapshot_route_connections_active{engine="engine-0"} 1
-ds4proxy_snapshot_route_connections_active{engine="engine-1"} 1
+ramjet_snapshot_route_enabled 1
+ramjet_snapshot_route_ready{engine="engine-0"} 1
+ramjet_snapshot_route_ready{engine="engine-1"} 1
+ramjet_snapshot_route_attempts_active{engine="engine-0"} 1
+ramjet_snapshot_route_attempts_active{engine="engine-1"} 1
+ramjet_snapshot_route_connections_active{engine="engine-0"} 1
+ramjet_snapshot_route_connections_active{engine="engine-1"} 1
 """.strip()
 
 

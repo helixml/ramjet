@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- Metrics are exported under the `ramjet_` prefix. Every name that began
+  `ds4proxy_` now begins `ramjet_`; nothing else about the names, labels, or
+  types changed. The prefix had survived two project renames because it was
+  held back for dashboard continuity.
+
+  **Prometheus has no history under the new names.** A panel or alert whose
+  window spans the switch shows a gap rather than a join, and anything querying
+  `ds4proxy_*` stops returning data at the moment the new binary starts. The
+  canonical Grafana dashboard is updated in the same change, but any external
+  dashboard, alert rule, recording rule, or script that greps a metric name has
+  to be updated separately.
+
+  Update the canonical dashboard mirror with
+  `python3 deploy/monitoring/rtx6000pro/sync-dashboards.py ../infra` after
+  taking this.
+
 ## 0.2.0 — 2026-08-18
 
 Renames the project to ramjet, adds the machine-view dashboard and multi-model

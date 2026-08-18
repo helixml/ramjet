@@ -43,7 +43,7 @@ Two consequences worth planning for:
 
 Responses carry `X-Ramjet-*` headers, renamed from `X-Mini-Dynamo-*` in the
 same change. Anything parsing them — route correlation, the shadow-soak
-runner, log pipelines — moves with it. The `ds4proxy_*` metric names are
+runner, log pipelines — moves with it. The `ramjet_*` metric names are
 deliberately untouched so existing Grafana history and alert rules keep
 resolving across the rename.
 
@@ -82,13 +82,13 @@ that from turning a busy stack into a total outage:
 
 - A probe timeout or connection failure does not fence a replica that
   completed a real request in the last 30 seconds; the probe failure is still
-  counted in `ds4proxy_upstream_probe_failures_total`, and the suppression in
-  `ds4proxy_upstream_probe_suppressed_total`. A probe the engine *answers* with
+  counted in `ramjet_upstream_probe_failures_total`, and the suppression in
+  `ramjet_upstream_probe_suppressed_total`. A probe the engine *answers* with
   an error, and any failed request, still fence it immediately.
 - When no replica is healthy, requests are dispatched anyway rather than shed,
-  which is visible in `ds4proxy_route_fail_open` and
-  `ds4proxy_route_fail_open_dispatches_total`. `/health` and
-  `ds4proxy_upstream_up` keep reporting the true admission state throughout.
+  which is visible in `ramjet_route_fail_open` and
+  `ramjet_route_fail_open_dispatches_total`. `/health` and
+  `ramjet_upstream_up` keep reporting the true admission state throughout.
   Deliberate fences are never bypassed: a DSpark quarantine, an unmet
   compatibility admission, and an idle-drain park still refuse traffic, and a
   fleet in those states still returns `503`.
@@ -135,11 +135,11 @@ contains only opaque replica ordinals and SHA-256 commitments. Start with
 enabling enforcement.
 
 Inspect each replica's fixed `reliability_state` and `quarantined` fields in
-`/health`, plus `ds4proxy_dspark_guard_state`,
-`ds4proxy_dspark_guard_windows_total`, and
-`ds4proxy_dspark_guard_quarantines_total`. Durable publication failures use the
+`/health`, plus `ramjet_dspark_guard_state`,
+`ramjet_dspark_guard_windows_total`, and
+`ramjet_dspark_guard_quarantines_total`. Durable publication failures use the
 fixed `persistence_failure` state and
-`ds4proxy_dspark_guard_persistence_failures_total`. Valid windows also export strict
+`ramjet_dspark_guard_persistence_failures_total`. Valid windows also export strict
 acceptance, effective tokens per draft step, and per-position acceptance ratios
 with a separate measurement-available gauge. Replica labels are opaque ordinals;
 no process identity, metric payload, prompt, or completion content is exposed.
@@ -238,7 +238,7 @@ observation-only: it never alters a reservation.
 The recompute can also *raise* a reservation, up to `RJ_ROUTE_MAX_LOAD_UNITS`.
 If the approximate prefix index is stale and the engine has actually evicted
 the prefix, exact overlap is zero and the request correctly reserves the cold
-cost the approximate estimate understated. Expect `ds4proxy_upstream_load_units`
+cost the approximate estimate understated. Expect `ramjet_upstream_load_units`
 to step up on the first placement rollout; watch the upstream-split panel and
 compare against the journal rather than assuming a regression.
 
@@ -262,8 +262,8 @@ A mismatching replica is removed from ordinary serving until a later probe
 passes; the other healthy replica remains available. Keep the default `http`
 mode unless every upstream implements the identity contract below. Inspect
 `compatibility_attested` in `/health`,
-`ds4proxy_upstream_compatibility_admitted`, and
-`ds4proxy_upstream_admission_checks_total` before opting in.
+`ramjet_upstream_compatibility_admitted`, and
+`ramjet_upstream_admission_checks_total` before opting in.
 
 The identity endpoint must capture the frontend and every expected EngineCore
 atomically and return a bounded schema-v3 document. Each incarnation is an
@@ -349,7 +349,7 @@ until a live event/replay qualification and the remaining runtime-bundle work
 are complete.
 
 Cold exact misses also emit a strictly observation-only projected-balance
-counterfactual. `ds4proxy_exact_route_projected_balance_total` adds each
+counterfactual. `ramjet_exact_route_projected_balance_total` adds each
 replica's exact resident tokens to a conservative, current-request-equivalent
 translation of its bounded active load. This makes an in-flight cold prefill
 visible before its KV events arrive. The estimate is token pressure, not a
@@ -469,18 +469,18 @@ Prometheus is exposed at `/metrics`; `/metrics/upstream/{ordinal}` proxies a
 single engine's metrics without exposing its address. The most useful router
 families are:
 
-- `ds4proxy_upstream_up`, inflight, and load gauges for availability.
-- `ds4proxy_route_fail_open` and `ds4proxy_route_fail_open_dispatches_total`
+- `ramjet_upstream_up`, inflight, and load gauges for availability.
+- `ramjet_route_fail_open` and `ramjet_route_fail_open_dispatches_total`
   for intervals served while no replica passed its admission probe, and
-  `ds4proxy_upstream_probe_suppressed_total` for probe failures outvoted by
+  `ramjet_upstream_probe_suppressed_total` for probe failures outvoted by
   recent serving traffic.
-- `ds4proxy_route_decisions_total` for route distribution.
-- `ds4proxy_cache_requests_total` and prompt/cached token counters for observed
+- `ramjet_route_decisions_total` for route distribution.
+- `ramjet_cache_requests_total` and prompt/cached token counters for observed
   cache outcomes.
-- `ds4proxy_cache_ttft_seconds` for streaming time to first generated content.
-- `ds4proxy_session_affinity_total` for bounded prospective pair, health, load,
+- `ramjet_cache_ttft_seconds` for streaming time to first generated content.
+- `ramjet_session_affinity_total` for bounded prospective pair, health, load,
   and score outcomes when session shadow mode is enabled.
-- `ds4proxy_dspark_guard_state` and `ds4proxy_dspark_guard_windows_total` for
+- `ramjet_dspark_guard_state` and `ramjet_dspark_guard_windows_total` for
   DSpark degeneration observation; strict/per-position acceptance and
   effective-tokens-per-step gauges describe each valid window, while
   quarantine transitions use a separate fixed-reason counter.

@@ -9,7 +9,7 @@
 #
 #   * It withholds one replica from routing during a quiet window, and reports
 #     when that replica is fenced and quiet via
-#     ds4proxy_idle_drain_safe_to_stop.
+#     ramjet_idle_drain_safe_to_stop.
 #   * It does NOT stop any container. Acting on the intent belongs to a
 #     separately privileged actor. Never grant the load balancer a Docker
 #     socket; it is in the production request path and a socket there is

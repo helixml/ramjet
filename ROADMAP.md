@@ -27,7 +27,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
 - ✅ **Async compatibility data plane.** Axum/Tokio/Reqwest streaming proxy,
   bounded request bodies, request shims, model metadata rewrite, health probes,
   retryable-status failover, opaque route headers, true generated-token TTFT,
-  privacy-bounded journal v3, and the existing `ds4proxy_*` metric names.
+  privacy-bounded journal v3, and the existing `ramjet_*` metric names.
 - ✅ **Immediate downstream-cancellation propagation.** The relay now selects
   on downstream closure and upstream reads concurrently, so dropping a client
   immediately drops the reqwest response stream even while the engine is
@@ -340,7 +340,7 @@ tokenization, P/D, Kimi K3, and future engine candidates remain post-v0.1 work.
   that *subsequent* approximate decisions read, so warm-engine steering is a
   deliberate feedback loop rather than a no-op; and a stale approximate index
   over an evicted prefix makes the exact reservation rise, so
-  `ds4proxy_upstream_load_units` may step up on first rollout without a
+  `ramjet_upstream_load_units` may step up on first rollout without a
   regression. Raw
   token IDs, block hashes, and prompts remain out of logs. This is local work
   only — no node06 observation has been performed under the cooling moratorium.

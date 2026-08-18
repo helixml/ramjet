@@ -81,13 +81,13 @@ def soak_metrics(body):
         return 0.0 if result is None else result
 
     return {
-        "enabled": value("ds4proxy_shadow_soak_enabled"),
-        "complete": value("ds4proxy_shadow_soak_complete"),
-        "sources": value("ds4proxy_shadow_soak_sources"),
-        "source_token_bytes": value("ds4proxy_shadow_soak_source_token_bytes"),
-        "duration_seconds": value("ds4proxy_shadow_soak_duration_seconds"),
+        "enabled": value("ramjet_shadow_soak_enabled"),
+        "complete": value("ramjet_shadow_soak_complete"),
+        "sources": value("ramjet_shadow_soak_sources"),
+        "source_token_bytes": value("ramjet_shadow_soak_source_token_bytes"),
+        "duration_seconds": value("ramjet_shadow_soak_duration_seconds"),
         "phases": {
-            phase: value("ds4proxy_shadow_soak_phase", {"phase": phase})
+            phase: value("ramjet_shadow_soak_phase", {"phase": phase})
             for phase in (
                 "off",
                 "collecting",
@@ -99,39 +99,39 @@ def soak_metrics(body):
         },
         "attempts": {
             outcome: value(
-                "ds4proxy_shadow_soak_attempts_total", {"outcome": outcome}
+                "ramjet_shadow_soak_attempts_total", {"outcome": outcome}
             )
             for outcome in ATTEMPT_OUTCOMES
         },
         "comparisons": {
             outcome: value(
-                "ds4proxy_shadow_soak_comparisons_total", {"outcome": outcome}
+                "ramjet_shadow_soak_comparisons_total", {"outcome": outcome}
             )
             for outcome in COMPARISON_OUTCOMES
         },
         "source_comparisons": {
             outcome: value(
-                "ds4proxy_shadow_soak_source_comparisons_total",
+                "ramjet_shadow_soak_source_comparisons_total",
                 {"outcome": outcome},
             )
             for outcome in COMPARISON_OUTCOMES
         },
         "source_attempts": {
             outcome: value(
-                "ds4proxy_shadow_soak_source_attempts_total",
+                "ramjet_shadow_soak_source_attempts_total",
                 {"outcome": outcome},
             )
             for outcome in SOURCE_ATTEMPT_OUTCOMES
         },
         "overlap_token_sums": {
             choice: value(
-                "ds4proxy_shadow_soak_overlap_tokens_sum", {"choice": choice}
+                "ramjet_shadow_soak_overlap_tokens_sum", {"choice": choice}
             )
             for choice in ("selected", "best")
         },
         "source_overlap_token_sums": {
             choice: value(
-                "ds4proxy_shadow_soak_source_overlap_tokens_sum",
+                "ramjet_shadow_soak_source_overlap_tokens_sum",
                 {"choice": choice},
             )
             for choice in ("selected", "best")
@@ -139,7 +139,7 @@ def soak_metrics(body):
         "placement": {
             delta: {
                 outcome: value(
-                    "ds4proxy_shadow_soak_placement_total",
+                    "ramjet_shadow_soak_placement_total",
                     {"max_load_delta": delta, "outcome": outcome},
                 )
                 for outcome in PLACEMENT_OUTCOMES
@@ -149,7 +149,7 @@ def soak_metrics(body):
         "projected_balance": {
             delta: {
                 outcome: value(
-                    "ds4proxy_shadow_soak_projected_balance_total",
+                    "ramjet_shadow_soak_projected_balance_total",
                     {"max_load_delta": delta, "outcome": outcome},
                 )
                 for outcome in POLICY_OUTCOMES

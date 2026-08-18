@@ -140,16 +140,16 @@ impl Metrics {
 
         let metrics = Self {
             requests: counter(
-                "ds4proxy_requests_total",
+                "ramjet_requests_total",
                 "Completed proxied requests",
                 &["endpoint", "code", "stream"],
             )?,
             inflight: Gauge::with_opts(Opts::new(
-                "ds4proxy_requests_inflight",
+                "ramjet_requests_inflight",
                 "Requests currently in flight",
             ))?,
             duration: histogram(
-                "ds4proxy_request_duration_seconds",
+                "ramjet_request_duration_seconds",
                 "Full request duration",
                 vec![
                     0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0,
@@ -157,45 +157,45 @@ impl Metrics {
                 &["endpoint"],
             )?,
             ttft: histogram(
-                "ds4proxy_ttft_seconds",
+                "ramjet_ttft_seconds",
                 "Time to first generated token or tool-call delta (streaming only)",
                 latency.clone(),
                 &["endpoint"],
             )?,
             prompt_tokens: counter(
-                "ds4proxy_prompt_tokens_total",
+                "ramjet_prompt_tokens_total",
                 "Prompt tokens processed",
                 &["endpoint"],
             )?,
             cached_tokens: counter(
-                "ds4proxy_cached_prompt_tokens_total",
+                "ramjet_cached_prompt_tokens_total",
                 "Prompt tokens served from KV prefix cache",
                 &["endpoint"],
             )?,
             cache_requests: counter(
-                "ds4proxy_cache_requests_total",
+                "ramjet_cache_requests_total",
                 "Completed responses by exact upstream-reported prompt-cache outcome",
                 &["endpoint", "outcome"],
             )?,
             cache_ttft: histogram(
-                "ds4proxy_cache_ttft_seconds",
+                "ramjet_cache_ttft_seconds",
                 "TTFT by exact upstream-reported prompt-cache outcome (streaming responses only)",
                 latency.clone(),
                 &["endpoint", "outcome"],
             )?,
             completion_tokens: counter(
-                "ds4proxy_completion_tokens_total",
+                "ramjet_completion_tokens_total",
                 "Tokens generated",
                 &["endpoint"],
             )?,
             context_size: histogram(
-                "ds4proxy_context_tokens",
+                "ramjet_context_tokens",
                 "Per-request prompt size (tokens)",
                 tokens,
                 &["endpoint"],
             )?,
             output_size: histogram(
-                "ds4proxy_output_tokens",
+                "ramjet_output_tokens",
                 "Per-request completion size (tokens)",
                 vec![
                     64.0, 256.0, 1024.0, 4096.0, 8192.0, 16384.0, 32768.0, 65536.0,
@@ -203,13 +203,13 @@ impl Metrics {
                 &["endpoint"],
             )?,
             decode_tps: histogram(
-                "ds4proxy_decode_tokens_per_second",
+                "ramjet_decode_tokens_per_second",
                 "Per-request decode throughput (completion tokens / time after first generated token)",
                 tps,
                 &["endpoint"],
             )?,
             tpot: histogram(
-                "ds4proxy_time_per_output_token_seconds",
+                "ramjet_time_per_output_token_seconds",
                 "Per-request mean time per output token after the first token",
                 vec![
                     0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3,
@@ -218,7 +218,7 @@ impl Metrics {
                 &["endpoint"],
             )?,
             request_bytes: histogram(
-                "ds4proxy_request_body_bytes",
+                "ramjet_request_body_bytes",
                 "Request body size",
                 vec![
                     1_024.0,
@@ -231,7 +231,7 @@ impl Metrics {
                 &["endpoint"],
             )?,
             response_bytes: histogram(
-                "ds4proxy_response_body_bytes",
+                "ramjet_response_body_bytes",
                 "Response body size",
                 vec![
                     1_024.0,
@@ -244,146 +244,146 @@ impl Metrics {
                 &["endpoint"],
             )?,
             parse_failures: counter(
-                "ds4proxy_usage_parse_failures_total",
+                "ramjet_usage_parse_failures_total",
                 "Responses where no usage block could be extracted",
                 &["endpoint"],
             )?,
             finish_reasons: counter(
-                "ds4proxy_finish_reasons_total",
+                "ramjet_finish_reasons_total",
                 "Successful responses by finish reason",
                 &["endpoint", "reason"],
             )?,
             upstream_up: gauge(
-                "ds4proxy_upstream_up",
+                "ramjet_upstream_up",
                 "Whether the upstream passes the configured serving-admission probe",
                 &["upstream"],
             )?,
             idle_drain_state: gauge(
-                "ds4proxy_idle_drain_state",
+                "ramjet_idle_drain_state",
                 "Idle-drain state per upstream (0=warm, 1=draining, 2=drained)",
                 &["upstream"],
             )?,
             idle_drain_desired_running: gauge(
-                "ds4proxy_idle_drain_desired_running",
+                "ramjet_idle_drain_desired_running",
                 "Whether the idle-drain policy wants this engine left running",
                 &["upstream"],
             )?,
             idle_drain_safe_to_stop: gauge(
-                "ds4proxy_idle_drain_safe_to_stop",
+                "ramjet_idle_drain_safe_to_stop",
                 "Whether this upstream is fenced and quiet, so stopping it now interrupts no dispatched request",
                 &["upstream"],
             )?,
             idle_drain_transitions: counter(
-                "ds4proxy_idle_drain_transitions_total",
+                "ramjet_idle_drain_transitions_total",
                 "Idle-drain state transitions by upstream and target state",
                 &["upstream", "state"],
             )?,
             idle_drain_fleet_idle: prometheus::Gauge::new(
-                "ds4proxy_idle_drain_fleet_idle",
+                "ramjet_idle_drain_fleet_idle",
                 "Whether the fleet is currently inside its configured idle window",
             )?,
             upstream_probe_time: gauge(
-                "ds4proxy_upstream_probe_duration_seconds",
+                "ramjet_upstream_probe_duration_seconds",
                 "Duration of the latest upstream readiness probe",
                 &["upstream"],
             )?,
             upstream_probe_errors: counter(
-                "ds4proxy_upstream_probe_failures_total",
+                "ramjet_upstream_probe_failures_total",
                 "Failed upstream readiness probes",
                 &["upstream", "reason"],
             )?,
             upstream_probe_suppressed: counter(
-                "ds4proxy_upstream_probe_suppressed_total",
+                "ramjet_upstream_probe_suppressed_total",
                 "Failed readiness probes that did not fence the upstream because it had completed a real request within the recent-serving window",
                 &["upstream", "reason"],
             )?,
             route_fail_open: prometheus::Gauge::new(
-                "ds4proxy_route_fail_open",
+                "ramjet_route_fail_open",
                 "Whether routing is currently dispatching into upstreams that are all marked down, because shedding every request is worse than trying a busy engine",
             )?,
             route_fail_open_dispatches: counter(
-                "ds4proxy_route_fail_open_dispatches_total",
+                "ramjet_route_fail_open_dispatches_total",
                 "Requests dispatched to an upstream that was marked down because no upstream was healthy",
                 &["upstream"],
             )?,
             upstream_compatibility_admitted: gauge(
-                "ds4proxy_upstream_compatibility_admitted",
+                "ramjet_upstream_compatibility_admitted",
                 "Whether the latest atomic serving identity matches the configured manifest",
                 &["upstream"],
             )?,
             upstream_admission_checks: counter(
-                "ds4proxy_upstream_admission_checks_total",
+                "ramjet_upstream_admission_checks_total",
                 "Atomic serving-identity checks by bounded outcome",
                 &["upstream", "outcome"],
             )?,
             dspark_guard_state: gauge(
-                "ds4proxy_dspark_guard_state",
+                "ramjet_dspark_guard_state",
                 "One-hot DSpark reliability state by opaque replica ordinal",
                 &["replica", "state"],
             )?,
             dspark_guard_windows: counter(
-                "ds4proxy_dspark_guard_windows_total",
+                "ramjet_dspark_guard_windows_total",
                 "DSpark reliability samples by opaque replica ordinal and bounded outcome",
                 &["replica", "outcome"],
             )?,
             dspark_guard_quarantines: counter(
-                "ds4proxy_dspark_guard_quarantines_total",
+                "ramjet_dspark_guard_quarantines_total",
                 "DSpark reliability quarantines by opaque replica ordinal and bounded reason",
                 &["replica", "reason"],
             )?,
             dspark_guard_persistence_failures: counter(
-                "ds4proxy_dspark_guard_persistence_failures_total",
+                "ramjet_dspark_guard_persistence_failures_total",
                 "DSpark durable quarantine failures by opaque replica ordinal and fixed operation",
                 &["replica", "operation"],
             )?,
             dspark_guard_measurement_available: gauge(
-                "ds4proxy_dspark_guard_measurement_available",
+                "ramjet_dspark_guard_measurement_available",
                 "Whether the latest DSpark window produced internally consistent deltas",
                 &["replica"],
             )?,
             dspark_guard_strict_acceptance: gauge(
-                "ds4proxy_dspark_guard_strict_acceptance_ratio",
+                "ramjet_dspark_guard_strict_acceptance_ratio",
                 "Accepted divided by proposed draft tokens in the latest valid window",
                 &["replica"],
             )?,
             dspark_guard_effective_tokens_per_step: gauge(
-                "ds4proxy_dspark_guard_effective_tokens_per_step",
+                "ramjet_dspark_guard_effective_tokens_per_step",
                 "One target token plus accepted draft tokens per draft step in the latest valid window",
                 &["replica"],
             )?,
             dspark_guard_position_acceptance: gauge(
-                "ds4proxy_dspark_guard_position_acceptance_ratio",
+                "ramjet_dspark_guard_position_acceptance_ratio",
                 "Accepted draft tokens at one fixed position divided by draft steps in the latest valid window",
                 &["replica", "position"],
             )?,
             upstream_errors: counter(
-                "ds4proxy_upstream_errors_total",
+                "ramjet_upstream_errors_total",
                 "Proxied requests that failed before receiving a complete upstream response",
                 &["endpoint", "reason"],
             )?,
             client_disconnects: counter(
-                "ds4proxy_client_disconnects_total",
+                "ramjet_client_disconnects_total",
                 "Requests cancelled because the downstream client disconnected",
                 &["endpoint"],
             )?,
             last_upstream_success: gauge(
-                "ds4proxy_last_upstream_success_timestamp_seconds",
+                "ramjet_last_upstream_success_timestamp_seconds",
                 "Unix timestamp of the latest successful upstream serving-admission probe",
                 &["upstream"],
             )?,
             upstream_requests: counter(
-                "ds4proxy_upstream_requests_total",
+                "ramjet_upstream_requests_total",
                 "Requests dispatched per upstream engine",
                 &["upstream", "code"],
             )?,
             route_decisions: counter(
-                "ds4proxy_route_decisions_total",
+                "ramjet_route_decisions_total",
                 "Routing decisions by outcome (overlap|load|rr|single)",
                 &["outcome"],
             )?,
             route_overlap: Histogram::with_opts(
                 HistogramOpts::new(
-                    "ds4proxy_route_overlap_blocks",
+                    "ramjet_route_overlap_blocks",
                     "Prefix-cache overlap depth of the chosen upstream, in fingerprint blocks",
                 )
                 .buckets(vec![
@@ -392,33 +392,33 @@ impl Metrics {
             )?,
             route_affinity: Histogram::with_opts(
                 HistogramOpts::new(
-                    "ds4proxy_route_affinity_blocks",
+                    "ramjet_route_affinity_blocks",
                     "Bounded prefix overlap contribution used in the route score",
                 )
                 .buckets(vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]),
             )?,
             session_affinity: counter(
-                "ds4proxy_session_affinity_total",
+                "ramjet_session_affinity_total",
                 "Opaque-session primary/secondary shadow decisions by endpoint and bounded outcome",
                 &["endpoint", "outcome"],
             )?,
             upstream_inflight: gauge(
-                "ds4proxy_upstream_inflight",
+                "ramjet_upstream_inflight",
                 "In-flight requests per upstream",
                 &["upstream"],
             )?,
             upstream_load_units: gauge(
-                "ds4proxy_upstream_load_units",
+                "ramjet_upstream_load_units",
                 "Size-weighted in-flight work used by the router",
                 &["upstream"],
             )?,
             tokenizer_shadow: counter(
-                "ds4proxy_tokenizer_shadow_total",
+                "ramjet_tokenizer_shadow_total",
                 "Selective tokenizer observations by backend, endpoint, and outcome",
                 &["backend", "endpoint", "outcome"],
             )?,
             tokenizer_duration: histogram(
-                "ds4proxy_tokenizer_duration_seconds",
+                "ramjet_tokenizer_duration_seconds",
                 "Background tokenizer request duration",
                 vec![
                     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0,
@@ -426,7 +426,7 @@ impl Metrics {
                 &["backend", "endpoint"],
             )?,
             tokenizer_tokens: histogram(
-                "ds4proxy_tokenizer_tokens",
+                "ramjet_tokenizer_tokens",
                 "Exact tokens returned by a background tokenizer observation",
                 vec![
                     256.0, 1_024.0, 4_096.0, 8_192.0, 16_384.0, 32_768.0, 65_536.0, 98_304.0,
@@ -435,31 +435,31 @@ impl Metrics {
                 &["backend", "endpoint"],
             )?,
             tokenizer_queue_depth: Gauge::with_opts(Opts::new(
-                "ds4proxy_tokenizer_queue_depth",
+                "ramjet_tokenizer_queue_depth",
                 "Background tokenizer jobs waiting for a bounded worker",
             ))?,
             exact_route_shadow: counter(
-                "ds4proxy_exact_route_shadow_total",
+                "ramjet_exact_route_shadow_total",
                 "Exact-token counterfactuals by token backend, endpoint, and bounded outcome",
                 &["backend", "endpoint", "outcome"],
             )?,
             exact_route_preroute: counter(
-                "ds4proxy_exact_route_preroute_total",
+                "ramjet_exact_route_preroute_total",
                 "Pre-route exact-token shadow attempts by endpoint and bounded outcome",
                 &["endpoint", "outcome"],
             )?,
             exact_route_placement: counter(
-                "ds4proxy_exact_route_placement_total",
+                "ramjet_exact_route_placement_total",
                 "Exact placement policy decisions by mode, endpoint, and bounded outcome",
                 &["mode", "endpoint", "outcome"],
             )?,
             exact_route_canary: counter(
-                "ds4proxy_exact_route_canary_total",
+                "ramjet_exact_route_canary_total",
                 "Exact placement canary admissions by endpoint and bounded outcome",
                 &["endpoint", "outcome"],
             )?,
             exact_route_preroute_duration: histogram(
-                "ds4proxy_exact_route_preroute_duration_seconds",
+                "ramjet_exact_route_preroute_duration_seconds",
                 "Latency added by bounded pre-route tokenization and exact lookup",
                 vec![
                     0.000_1, 0.000_25, 0.000_5, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
@@ -468,7 +468,7 @@ impl Metrics {
                 &["endpoint", "stage"],
             )?,
             exact_route_overlap: histogram(
-                "ds4proxy_exact_route_overlap_tokens",
+                "ramjet_exact_route_overlap_tokens",
                 "Exact cached-prefix tokens for the selected and best eligible engine",
                 vec![
                     0.0, 256.0, 1_024.0, 4_096.0, 8_192.0, 16_384.0, 32_768.0, 65_536.0, 98_304.0,
@@ -477,7 +477,7 @@ impl Metrics {
                 &["endpoint", "choice"],
             )?,
             exact_route_gain: histogram(
-                "ds4proxy_exact_route_gain_tokens",
+                "ramjet_exact_route_gain_tokens",
                 "Additional exact cached-prefix tokens available over the selected engine",
                 vec![
                     0.0, 256.0, 1_024.0, 4_096.0, 8_192.0, 16_384.0, 32_768.0, 65_536.0, 98_304.0,
@@ -486,7 +486,7 @@ impl Metrics {
                 &["endpoint"],
             )?,
             exact_route_residency_delta: histogram(
-                "ds4proxy_exact_route_residency_delta_tokens",
+                "ramjet_exact_route_residency_delta_tokens",
                 "Trusted exact-inventory token delta for shadow cold-balance candidates",
                 vec![
                     0.0,
@@ -503,12 +503,12 @@ impl Metrics {
                 &["endpoint"],
             )?,
             exact_route_projected_balance: counter(
-                "ds4proxy_exact_route_projected_balance_total",
+                "ramjet_exact_route_projected_balance_total",
                 "Observation-only cold-balance decisions using exact residency plus load-equivalent in-flight pressure",
                 &["endpoint", "outcome"],
             )?,
             exact_route_projected_residency_delta: histogram(
-                "ds4proxy_exact_route_projected_residency_delta_tokens",
+                "ramjet_exact_route_projected_residency_delta_tokens",
                 "Projected token-pressure delta for observation-only cold-balance candidates",
                 vec![
                     0.0,
@@ -525,54 +525,54 @@ impl Metrics {
                 &["endpoint"],
             )?,
             shadow_soak_enabled: Gauge::with_opts(Opts::new(
-                "ds4proxy_shadow_soak_enabled",
+                "ramjet_shadow_soak_enabled",
                 "Whether the bounded route-only snapshot shadow soak is enabled",
             ))?,
             shadow_soak_phase: gauge(
-                "ds4proxy_shadow_soak_phase",
+                "ramjet_shadow_soak_phase",
                 "Current bounded soak phase as a one-hot fixed-label gauge",
                 &["phase"],
             )?,
             shadow_soak_sources: Gauge::with_opts(Opts::new(
-                "ds4proxy_shadow_soak_sources",
+                "ramjet_shadow_soak_sources",
                 "Accepted in-memory source decisions for the bounded soak",
             ))?,
             shadow_soak_source_token_bytes: Gauge::with_opts(Opts::new(
-                "ds4proxy_shadow_soak_source_token_bytes",
+                "ramjet_shadow_soak_source_token_bytes",
                 "In-memory exact-token bytes retained by the bounded soak",
             ))?,
             shadow_soak_attempts: counter(
-                "ds4proxy_shadow_soak_attempts_total",
+                "ramjet_shadow_soak_attempts_total",
                 "Bounded soak attempts by revision-fenced terminal outcome",
                 &["outcome"],
             )?,
             shadow_soak_comparisons: counter(
-                "ds4proxy_shadow_soak_comparisons_total",
+                "ramjet_shadow_soak_comparisons_total",
                 "Revision-stable exact versus approximate soak comparisons",
                 &["outcome"],
             )?,
             shadow_soak_source_comparisons: counter(
-                "ds4proxy_shadow_soak_source_comparisons_total",
+                "ramjet_shadow_soak_source_comparisons_total",
                 "Contemporaneous exact versus approximate source comparisons",
                 &["outcome"],
             )?,
             shadow_soak_source_attempts: counter(
-                "ds4proxy_shadow_soak_source_attempts_total",
+                "ramjet_shadow_soak_source_attempts_total",
                 "Contemporaneous source exact evaluation attempts by terminal outcome",
                 &["outcome"],
             )?,
             shadow_soak_placement: counter(
-                "ds4proxy_shadow_soak_placement_total",
+                "ramjet_shadow_soak_placement_total",
                 "Contemporaneous source placement sweep by load delta and outcome",
                 &["max_load_delta", "outcome"],
             )?,
             shadow_soak_projected_balance: counter(
-                "ds4proxy_shadow_soak_projected_balance_total",
+                "ramjet_shadow_soak_projected_balance_total",
                 "Contemporaneous source cold-balance sweep by load delta and outcome",
                 &["max_load_delta", "outcome"],
             )?,
             shadow_soak_overlap: histogram(
-                "ds4proxy_shadow_soak_overlap_tokens",
+                "ramjet_shadow_soak_overlap_tokens",
                 "Exact overlap observed by the bounded soak",
                 vec![
                     0.0, 256.0, 1_024.0, 4_096.0, 8_192.0, 16_384.0, 32_768.0, 65_536.0, 98_304.0,
@@ -582,7 +582,7 @@ impl Metrics {
             )?,
             shadow_soak_gain: Histogram::with_opts(
                 HistogramOpts::new(
-                    "ds4proxy_shadow_soak_gain_tokens",
+                    "ramjet_shadow_soak_gain_tokens",
                     "Additional exact cached-prefix tokens in bounded soak comparisons",
                 )
                 .buckets(vec![
@@ -591,7 +591,7 @@ impl Metrics {
                 ]),
             )?,
             shadow_soak_source_overlap: histogram(
-                "ds4proxy_shadow_soak_source_overlap_tokens",
+                "ramjet_shadow_soak_source_overlap_tokens",
                 "Contemporaneous exact overlap in captured source decisions",
                 vec![
                     0.0, 256.0, 1_024.0, 4_096.0, 8_192.0, 16_384.0, 32_768.0, 65_536.0, 98_304.0,
@@ -601,7 +601,7 @@ impl Metrics {
             )?,
             shadow_soak_source_gain: Histogram::with_opts(
                 HistogramOpts::new(
-                    "ds4proxy_shadow_soak_source_gain_tokens",
+                    "ramjet_shadow_soak_source_gain_tokens",
                     "Contemporaneous exact cached-prefix gain in source decisions",
                 )
                 .buckets(vec![
@@ -610,70 +610,70 @@ impl Metrics {
                 ]),
             )?,
             shadow_soak_complete: Gauge::with_opts(Opts::new(
-                "ds4proxy_shadow_soak_complete",
+                "ramjet_shadow_soak_complete",
                 "Whether the bounded soak reached its stable comparison target",
             ))?,
             shadow_soak_duration: Gauge::with_opts(Opts::new(
-                "ds4proxy_shadow_soak_duration_seconds",
+                "ramjet_shadow_soak_duration_seconds",
                 "Wall time of the completed or failed bounded soak",
             ))?,
             compat_attested: gauge(
-                "ds4proxy_compat_attested",
+                "ramjet_compat_attested",
                 "Whether an upstream matches the active exact-route compatibility manifest",
                 &["upstream"],
             )?,
             compat_attestation_checks: counter(
-                "ds4proxy_compat_attestation_checks_total",
+                "ramjet_compat_attestation_checks_total",
                 "Runtime compatibility checks by upstream and bounded outcome",
                 &["upstream", "outcome"],
             )?,
             kv_event_up: gauge(
-                "ds4proxy_kv_event_up",
+                "ramjet_kv_event_up",
                 "Whether the per-upstream KV-event shadow consumer is connected",
                 &["upstream"],
             )?,
             kv_event_trusted: gauge(
-                "ds4proxy_kv_event_trusted",
+                "ramjet_kv_event_trusted",
                 "Whether the per-upstream exact KV inventory has an authoritative generation",
                 &["upstream"],
             )?,
             kv_event_generation: gauge(
-                "ds4proxy_kv_event_generation",
+                "ramjet_kv_event_generation",
                 "Current fenced KV-event generation per upstream",
                 &["upstream"],
             )?,
             kv_event_index_entries: gauge(
-                "ds4proxy_kv_event_index_entries",
+                "ramjet_kv_event_index_entries",
                 "Resident exact KV index entries by bounded kind",
                 &["upstream", "kind"],
             )?,
             kv_event_batches: counter(
-                "ds4proxy_kv_event_batches_total",
+                "ramjet_kv_event_batches_total",
                 "KV-event batches by source and bounded processing outcome",
                 &["upstream", "source", "outcome"],
             )?,
             kv_event_blocks: counter(
-                "ds4proxy_kv_event_blocks_total",
+                "ramjet_kv_event_blocks_total",
                 "Accepted exact-index block mutations by event source and action",
                 &["upstream", "source", "action"],
             )?,
             kv_event_clears: counter(
-                "ds4proxy_kv_event_clears_total",
+                "ramjet_kv_event_clears_total",
                 "Accepted exact-index clear events by event source",
                 &["upstream", "source"],
             )?,
             kv_event_filtered: counter(
-                "ds4proxy_kv_event_filtered_total",
+                "ramjet_kv_event_filtered_total",
                 "KV events conservatively excluded from the exact index by bounded reason",
                 &["upstream", "source", "reason"],
             )?,
             kv_event_reconnects: counter(
-                "ds4proxy_kv_event_reconnects_total",
+                "ramjet_kv_event_reconnects_total",
                 "KV-event consumer reconnect attempts by bounded reason",
                 &["upstream", "reason"],
             )?,
             kv_event_replay_batches: histogram(
-                "ds4proxy_kv_event_replay_batches",
+                "ramjet_kv_event_replay_batches",
                 "Number of batches in a bounded KV-event replay response",
                 vec![
                     1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
@@ -681,13 +681,13 @@ impl Metrics {
                 &["upstream"],
             )?,
             kv_event_replay_duration: histogram(
-                "ds4proxy_kv_event_replay_duration_seconds",
+                "ramjet_kv_event_replay_duration_seconds",
                 "Content-free KV-event replay wall time by bounded phase and terminal outcome",
                 latency.clone(),
                 &["upstream", "phase", "outcome"],
             )?,
             kv_event_replay_bytes: histogram(
-                "ds4proxy_kv_event_replay_bytes",
+                "ramjet_kv_event_replay_bytes",
                 "KV-event replay wire or payload bytes by terminal outcome",
                 vec![
                     1_024.0,
@@ -703,7 +703,7 @@ impl Metrics {
                 &["upstream", "kind", "outcome"],
             )?,
             kv_event_replay_progress: histogram(
-                "ds4proxy_kv_event_replay_progress_batches",
+                "ramjet_kv_event_replay_progress_batches",
                 "KV-event replay message progress by kind and terminal outcome",
                 vec![
                     1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 4096.0,
@@ -712,31 +712,31 @@ impl Metrics {
                 &["upstream", "kind", "outcome"],
             )?,
             snapshot_route_enabled: Gauge::with_opts(Opts::new(
-                "ds4proxy_snapshot_route_enabled",
+                "ramjet_snapshot_route_enabled",
                 "Whether LB snapshot companion consumption is configured",
             ))?,
             snapshot_route_ready: gauge(
-                "ds4proxy_snapshot_route_ready",
+                "ramjet_snapshot_route_ready",
                 "Whether the LB has an authoritative published companion inventory",
                 &["engine"],
             )?,
             snapshot_route_attempts_active: gauge(
-                "ds4proxy_snapshot_route_attempts_active",
+                "ramjet_snapshot_route_attempts_active",
                 "Reconnect attempts currently owned by the LB",
                 &["engine"],
             )?,
             snapshot_route_connections_active: gauge(
-                "ds4proxy_snapshot_route_connections_active",
+                "ramjet_snapshot_route_connections_active",
                 "Connected companion sessions currently owned by the LB",
                 &["engine"],
             )?,
             snapshot_route_attempts: counter(
-                "ds4proxy_snapshot_route_attempts_total",
+                "ramjet_snapshot_route_attempts_total",
                 "LB snapshot companion attempts by bounded kind",
                 &["engine", "kind"],
             )?,
             snapshot_route_attempt_results: counter(
-                "ds4proxy_snapshot_route_attempt_results_total",
+                "ramjet_snapshot_route_attempt_results_total",
                 "LB snapshot companion attempt results by bounded outcome",
                 &["engine", "outcome"],
             )?,
@@ -1168,34 +1168,34 @@ mod tests {
             .map(|family| family.name().to_owned())
             .collect::<std::collections::HashSet<_>>();
         for expected in [
-            "ds4proxy_requests_total",
-            "ds4proxy_upstream_up",
-            "ds4proxy_upstream_compatibility_admitted",
-            "ds4proxy_upstream_admission_checks_total",
-            "ds4proxy_dspark_guard_state",
-            "ds4proxy_dspark_guard_windows_total",
-            "ds4proxy_dspark_guard_quarantines_total",
-            "ds4proxy_dspark_guard_persistence_failures_total",
-            "ds4proxy_dspark_guard_measurement_available",
-            "ds4proxy_dspark_guard_strict_acceptance_ratio",
-            "ds4proxy_dspark_guard_effective_tokens_per_step",
-            "ds4proxy_dspark_guard_position_acceptance_ratio",
-            "ds4proxy_prompt_tokens_total",
-            "ds4proxy_cached_prompt_tokens_total",
-            "ds4proxy_cache_requests_total",
-            "ds4proxy_cache_ttft_seconds",
-            "ds4proxy_completion_tokens_total",
-            "ds4proxy_tokenizer_shadow_total",
-            "ds4proxy_exact_route_preroute_total",
-            "ds4proxy_exact_route_placement_total",
-            "ds4proxy_exact_route_projected_balance_total",
-            "ds4proxy_exact_route_canary_total",
-            "ds4proxy_session_affinity_total",
-            "ds4proxy_shadow_soak_source_attempts_total",
-            "ds4proxy_compat_attested",
-            "ds4proxy_kv_event_trusted",
-            "ds4proxy_kv_event_blocks_total",
-            "ds4proxy_kv_event_clears_total",
+            "ramjet_requests_total",
+            "ramjet_upstream_up",
+            "ramjet_upstream_compatibility_admitted",
+            "ramjet_upstream_admission_checks_total",
+            "ramjet_dspark_guard_state",
+            "ramjet_dspark_guard_windows_total",
+            "ramjet_dspark_guard_quarantines_total",
+            "ramjet_dspark_guard_persistence_failures_total",
+            "ramjet_dspark_guard_measurement_available",
+            "ramjet_dspark_guard_strict_acceptance_ratio",
+            "ramjet_dspark_guard_effective_tokens_per_step",
+            "ramjet_dspark_guard_position_acceptance_ratio",
+            "ramjet_prompt_tokens_total",
+            "ramjet_cached_prompt_tokens_total",
+            "ramjet_cache_requests_total",
+            "ramjet_cache_ttft_seconds",
+            "ramjet_completion_tokens_total",
+            "ramjet_tokenizer_shadow_total",
+            "ramjet_exact_route_preroute_total",
+            "ramjet_exact_route_placement_total",
+            "ramjet_exact_route_projected_balance_total",
+            "ramjet_exact_route_canary_total",
+            "ramjet_session_affinity_total",
+            "ramjet_shadow_soak_source_attempts_total",
+            "ramjet_compat_attested",
+            "ramjet_kv_event_trusted",
+            "ramjet_kv_event_blocks_total",
+            "ramjet_kv_event_clears_total",
         ] {
             assert!(names.contains(expected), "missing metric family {expected}");
         }
@@ -1209,18 +1209,16 @@ mod tests {
             .encode_to_string(&registry.gather())
             .unwrap();
         for expected in [
-            r#"ds4proxy_prompt_tokens_total{endpoint="chat"} 0"#,
-            r#"ds4proxy_cached_prompt_tokens_total{endpoint="chat"} 0"#,
-            r#"ds4proxy_cache_requests_total{endpoint="chat",outcome="cold"} 0"#,
-            r#"ds4proxy_cache_ttft_seconds_count{endpoint="chat",outcome="partial"} 0"#,
+            r#"ramjet_prompt_tokens_total{endpoint="chat"} 0"#,
+            r#"ramjet_cached_prompt_tokens_total{endpoint="chat"} 0"#,
+            r#"ramjet_cache_requests_total{endpoint="chat",outcome="cold"} 0"#,
+            r#"ramjet_cache_ttft_seconds_count{endpoint="chat",outcome="partial"} 0"#,
         ] {
             assert!(text.contains(expected), "missing zero series: {expected}");
         }
         assert_eq!(
             text.lines()
-                .filter(|line| {
-                    line.starts_with("ds4proxy_exact_route_projected_balance_total{")
-                })
+                .filter(|line| { line.starts_with("ramjet_exact_route_projected_balance_total{") })
                 .count(),
             5 * 5
         );
@@ -1232,17 +1230,17 @@ mod tests {
             "fallback",
         ] {
             assert!(text.contains(&format!(
-                "ds4proxy_exact_route_projected_balance_total{{endpoint=\"chat\",outcome=\"{outcome}\"}} 0"
+                "ramjet_exact_route_projected_balance_total{{endpoint=\"chat\",outcome=\"{outcome}\"}} 0"
             )));
         }
         assert_eq!(
             text.lines()
-                .filter(|line| line.starts_with("ds4proxy_session_affinity_total{"))
+                .filter(|line| line.starts_with("ramjet_session_affinity_total{"))
                 .count(),
             5 * SessionAffinityOutcome::ALL.len()
         );
         assert!(text.contains(
-            "ds4proxy_session_affinity_total{endpoint=\"chat\",outcome=\"would_prefer_primary\"} 0"
+            "ramjet_session_affinity_total{endpoint=\"chat\",outcome=\"would_prefer_primary\"} 0"
         ));
     }
 
@@ -1268,25 +1266,25 @@ mod tests {
             .encode_to_string(&registry.gather())
             .unwrap();
         for expected in [
-            "ds4proxy_snapshot_route_enabled 1",
-            r#"ds4proxy_snapshot_route_ready{engine="engine-0"} 0"#,
-            r#"ds4proxy_snapshot_route_attempts_active{engine="engine-0"} 0"#,
-            r#"ds4proxy_snapshot_route_connections_active{engine="engine-0"} 0"#,
-            r#"ds4proxy_snapshot_route_attempts_total{engine="engine-0",kind="initial"} 1"#,
-            r#"ds4proxy_snapshot_route_attempt_results_total{engine="engine-0",outcome="timeout"} 1"#,
-            r#"ds4proxy_snapshot_route_attempt_results_total{engine="engine-1",outcome="random_failure"} 0"#,
+            "ramjet_snapshot_route_enabled 1",
+            r#"ramjet_snapshot_route_ready{engine="engine-0"} 0"#,
+            r#"ramjet_snapshot_route_attempts_active{engine="engine-0"} 0"#,
+            r#"ramjet_snapshot_route_connections_active{engine="engine-0"} 0"#,
+            r#"ramjet_snapshot_route_attempts_total{engine="engine-0",kind="initial"} 1"#,
+            r#"ramjet_snapshot_route_attempt_results_total{engine="engine-0",outcome="timeout"} 1"#,
+            r#"ramjet_snapshot_route_attempt_results_total{engine="engine-1",outcome="random_failure"} 0"#,
         ] {
             assert!(text.contains(expected), "missing series: {expected}");
         }
         assert_eq!(
             text.lines()
-                .filter(|line| line.starts_with("ds4proxy_snapshot_route_attempts_total{"))
+                .filter(|line| line.starts_with("ramjet_snapshot_route_attempts_total{"))
                 .count(),
             2 * SnapshotReconnectAttemptKind::ALL.len()
         );
         assert_eq!(
             text.lines()
-                .filter(|line| line.starts_with("ds4proxy_snapshot_route_attempt_results_total{"))
+                .filter(|line| line.starts_with("ramjet_snapshot_route_attempt_results_total{"))
                 .count(),
             2 * SnapshotReconnectAttemptResult::ALL.len()
         );
