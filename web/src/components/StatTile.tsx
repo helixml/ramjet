@@ -19,8 +19,8 @@ export function StatTile({ label, value, detail, trend, loading = false }: StatT
     .map((v, i) => ({ i, v }))
   return (
     <Card aria-busy={loading || undefined}>
-      <CardContent className="flex items-end justify-between gap-2 px-3.5 py-3">
-        <div className="min-w-0">
+      <CardContent className="relative overflow-hidden px-3.5 py-3">
+        <div className={points.length >= 3 ? "pr-[4.25rem]" : undefined}>
           <div className="text-muted-foreground truncate text-[11px]">{label}</div>
           {loading ? (
             <>
@@ -29,7 +29,7 @@ export function StatTile({ label, value, detail, trend, loading = false }: StatT
             </>
           ) : (
             <>
-              <div className="mt-0.5 whitespace-nowrap text-xl font-semibold leading-tight">
+              <div className="mt-0.5 font-mono text-xl font-medium leading-tight whitespace-nowrap tabular-nums">
                 {value}
               </div>
               {detail ? (
@@ -38,11 +38,12 @@ export function StatTile({ label, value, detail, trend, loading = false }: StatT
             </>
           )}
         </div>
-        {loading ? <Skeleton className="h-8 w-16 shrink-0" /> : null}
-        {!loading && points.length >= 3 ? (
-          <div className="h-8 w-16 shrink-0" aria-hidden>
+        {loading ? (
+          <Skeleton className="absolute right-3.5 bottom-3 h-8 w-16" />
+        ) : points.length >= 3 ? (
+          <div className="pointer-events-none absolute right-2.5 bottom-2.5 h-8 w-16" aria-hidden>
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={points} margin={{ top: 2, right: 2, bottom: 0, left: 2 }}>
+              <AreaChart data={points} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
                 <Area
                   dataKey="v"
                   type="monotone"

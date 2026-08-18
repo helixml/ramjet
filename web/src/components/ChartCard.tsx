@@ -84,7 +84,7 @@ function TableView({
   ]
   return (
     <div className="max-h-[180px] overflow-y-auto rounded-md border border-border">
-      <table className="w-full text-[11px] tabular-nums">
+      <table className="w-full font-mono text-[11px] tabular-nums">
         <thead className="bg-muted/60 sticky top-0">
           <tr>
             <th className="text-faint-foreground px-2 py-1 text-left font-medium">

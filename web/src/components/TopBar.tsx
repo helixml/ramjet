@@ -34,44 +34,48 @@ function ThemeToggle() {
 }
 
 /**
- * Wordmark: a compression chevron and the name, nothing else.
- *
- * The mark is the one place in this UI where color is decoration rather than
- * data, so it is kept to the chart hues already in the theme and flips with
- * them; the name itself stays in ordinary foreground ink so it reads as text
- * at any size and in forced-colors mode.
+ * Wordmark: Helix brand treatment — Sora, tight tracking, cyan→magenta
+ * gradient. Body copy stays Geist; this mark is not interface text.
  */
 function Wordmark() {
   return (
     <span className="flex items-center gap-2">
-      <svg viewBox="0 0 24 24" aria-hidden className="size-[17px] shrink-0">
-        <defs>
-          <linearGradient
-            id="ramjet-mark"
-            x1="2"
-            y1="4"
-            x2="22"
-            y2="20"
-            gradientUnits="userSpaceOnUse"
+      <span
+        aria-hidden
+        className="flex size-7 shrink-0 items-center justify-center rounded-[9px] border"
+        style={{
+          background: "var(--wordmark-tile-bg)",
+          borderColor: "var(--wordmark-tile-border)",
+          boxShadow: "var(--wordmark-tile-shadow)",
+        }}
+      >
+        <svg viewBox="0 0 24 24" className="size-[18px]">
+          <defs>
+            <linearGradient
+              id="ramjet-mark"
+              x1="2"
+              y1="4"
+              x2="22"
+              y2="20"
+              gradientUnits="userSpaceOnUse"
+            >
+              <stop offset="0" stopColor="#22d3ee" />
+              <stop offset="1" stopColor="#e879f9" />
+            </linearGradient>
+          </defs>
+          <g
+            fill="none"
+            stroke="url(#ramjet-mark)"
+            strokeWidth="2.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
           >
-            <stop offset="0" stopColor="var(--chart-7)" />
-            <stop offset="1" stopColor="var(--chart-1)" />
-          </linearGradient>
-        </defs>
-        <g
-          fill="none"
-          stroke="url(#ramjet-mark)"
-          strokeWidth="2.6"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M4 5.5 L10.5 12 L4 18.5" />
-          <path d="M13 5.5 L19.5 12 L13 18.5" />
-        </g>
-      </svg>
-      <span className="text-[17px] leading-none font-semibold tracking-[-0.02em]">
-        ramjet
+            <path d="M4 5.5 L10.5 12 L4 18.5" />
+            <path d="M13 5.5 L19.5 12 L13 18.5" />
+          </g>
+        </svg>
       </span>
+      <span className="wordmark">ramjet</span>
     </span>
   )
 }

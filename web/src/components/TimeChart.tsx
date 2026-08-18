@@ -79,7 +79,7 @@ function ChartTooltip({
                 className="h-0.5 w-3 shrink-0 rounded-full"
                 style={{ background: def.color }}
               />
-              <span className="font-medium tabular-nums">{value}</span>
+              <span className="font-mono font-medium tabular-nums">{value}</span>
               <span className="text-muted-foreground">{def.label}</span>
             </div>
           )
@@ -91,7 +91,7 @@ function ChartTooltip({
               className="h-2 w-3 shrink-0 rounded-sm opacity-40"
               style={{ background: band.color }}
             />
-            <span className="font-medium tabular-nums">
+            <span className="font-mono font-medium tabular-nums">
               {format(low)} – {format(high)}
             </span>
             <span className="text-muted-foreground">{band.label}</span>

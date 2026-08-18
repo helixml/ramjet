@@ -1,137 +1,162 @@
 @import "tailwindcss";
 
 /*
- * Machine-view theme, aligned with Beszel's hub tokens
- * (https://github.com/henrygd/beszel): warm paper in light, cool slate in
- * dark, and the same HSL chart slots. Extra series (GPUs, containers) use
- * --chart-saturation / --chart-lightness on an even hue wheel.
+ * Machine-view theme, matched to helix.ml: Geist for UI text, Helix cyan
+ * (#00d5ff) as the accent, black/white surfaces in dark. Extra series (GPUs,
+ * containers) use --chart-saturation / --chart-lightness on an even hue wheel.
  */
 
 :root {
   color-scheme: light;
 
-  --background: hsl(30 8% 98%);
-  --card: hsl(30 0% 100%);
-  --foreground: hsl(30 0% 10%);
-  --card-foreground: hsl(30 0% 10%);
-  --muted: hsl(26 6% 94%);
-  --muted-foreground: hsl(24 2.8% 35%);
-  --faint-foreground: hsl(24 3% 54%);
-  --border: hsl(30 8% 85%);
-  --grid: hsl(30 8% 88%);
-  --axis: hsl(30 5% 76%);
-  --primary: hsl(240 6% 10%);
-  --primary-foreground: hsl(30 0% 100%);
-  --accent: hsl(20 23% 94%);
-  --accent-foreground: hsl(240 6% 10%);
-  --ring: hsl(220 70% 50%);
+  --background: #fafafa;
+  --card: #ffffff;
+  --foreground: #0a0a0a;
+  --card-foreground: #0a0a0a;
+  --muted: #f0f0f2;
+  --muted-foreground: #5c5c73;
+  --faint-foreground: #8989a5;
+  --border: #e4e4e7;
+  --grid: #ececef;
+  --axis: #d4d4d8;
+  --primary: #00d5ff;
+  --primary-foreground: #000000;
+  --accent: #eefbfe;
+  --accent-foreground: #0a0a0a;
+  --ring: #00d5ff;
 
   --chart-saturation: 65%;
-  --chart-lightness: 50%;
-  --chart-1: hsl(220 70% 50%);
-  --chart-2: hsl(160 60% 45%);
-  --chart-3: hsl(30 80% 55%);
-  --chart-4: hsl(280 65% 60%);
-  --chart-5: hsl(340 75% 55%);
-  --chart-6: hsl(80 60% 48%);
-  --chart-7: hsl(190 65% 50%);
-  --chart-8: hsl(0 70% 55%);
-  --chart-1-soft: hsl(220 50% 72%);
+  --chart-lightness: 48%;
+  --chart-1: #00b8db;
+  --chart-2: hsl(160 60% 40%);
+  --chart-3: hsl(30 80% 50%);
+  --chart-4: hsl(280 65% 55%);
+  --chart-5: hsl(340 75% 50%);
+  --chart-6: hsl(80 60% 42%);
+  --chart-7: hsl(190 65% 42%);
+  --chart-8: hsl(0 70% 50%);
+  --chart-1-soft: #7ae6f5;
 
   /*
-   * Sequential ramp for magnitude grids (the token heatmaps): one hue,
-   * light→dark, five steps. Validated against this mode's card surface —
-   * monotone lightness, adjacent ΔL ≥ 0.06, single hue, and a lightest step
-   * that still clears 2:1 so the quietest active cell stays distinct from an
-   * empty one. --seq-empty is "no traffic", drawn as surface + hairline.
+   * Sequential ramp for magnitude grids (the token heatmaps): Helix cyan,
+   * light→dark, five steps. Quiet cells must stay distinct from empty ones.
    */
-  --seq-1: #86b6ef;
-  --seq-2: #5598e7;
-  --seq-3: #2a78d6;
-  --seq-4: #1c5cab;
-  --seq-5: #104281;
+  --seq-1: #9ae8f5;
+  --seq-2: #4dd4f0;
+  --seq-3: #00b8db;
+  --seq-4: #17839a;
+  --seq-5: #0a5363;
   --seq-empty: transparent;
 
-  --status-good: #0ca30c;
-  --status-warning: #fab219;
-  --status-serious: #ec835a;
-  --status-critical: #d03b3b;
-  --delta-good-text: #006300;
+  --status-good: #16a34a;
+  --status-warning: #eab308;
+  --status-serious: #f97316;
+  --status-critical: #ef4444;
+  --delta-good-text: #15803d;
+  --card-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+  --wordmark-gradient: linear-gradient(105deg, #111827 10%, #0e7490 62%, #86198f 100%);
+  --wordmark-glow: none;
+  --wordmark-tile-bg: rgb(255 255 255 / 0.64);
+  --wordmark-tile-border: rgb(14 116 144 / 0.16);
+  --wordmark-tile-shadow: 0 3px 12px rgb(14 116 144 / 0.1);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
 
-    --background: hsl(220 5.5% 9%);
-    --card: hsl(220 5.5% 10.5%);
-    --foreground: hsl(220 2% 97%);
-    --card-foreground: hsl(220 2% 97%);
-    --muted: hsl(220 6% 16%);
-    --muted-foreground: hsl(220 4% 67%);
-    --faint-foreground: hsl(220 4% 52%);
-    --border: hsl(220 3% 17%);
-    --grid: hsl(220 4% 16%);
-    --axis: hsl(220 4% 22%);
-    --primary: hsl(220 2% 96%);
-    --primary-foreground: hsl(220 4% 10%);
-    --accent: hsl(220 5% 15.5%);
-    --accent-foreground: hsl(220 2% 98%);
-    --ring: hsl(220 70% 50%);
+    --background: #000000;
+    --card: #0a0a0a;
+    --foreground: #ffffff;
+    --card-foreground: #ffffff;
+    --muted: #141414;
+    --muted-foreground: #8989a5;
+    --faint-foreground: #6b6b82;
+    --border: rgb(255 255 255 / 0.08);
+    --grid: rgb(255 255 255 / 0.06);
+    --axis: rgb(255 255 255 / 0.12);
+    --primary: #00d5ff;
+    --primary-foreground: #000000;
+    --accent: #141414;
+    --accent-foreground: #ffffff;
+    --ring: #00d5ff;
+    --card-shadow: 0 0 #0000;
 
-    --chart-saturation: 60%;
-    --chart-lightness: 55%;
-    --chart-1-soft: hsl(220 50% 68%);
+    --chart-saturation: 62%;
+    --chart-lightness: 58%;
+    --chart-1: #00d5ff;
+    --chart-1-soft: #7ae6f5;
 
     /* Dark flips the anchor: quiet recedes toward the surface, busy is
-     * bright. Same hue, same four ordinal checks against the dark card. */
-    --seq-1: #184f95;
-    --seq-2: #256abf;
-    --seq-3: #3987e5;
-    --seq-4: #6da7ec;
-    --seq-5: #b7d3f6;
+     * bright Helix cyan. */
+    --seq-1: #0a4a5c;
+    --seq-2: #0e7a94;
+    --seq-3: #00d5ff;
+    --seq-4: #5ee4ff;
+    --seq-5: #b8f4ff;
 
-    --delta-good-text: #0ca30c;
+    --status-good: #22c55e;
+    --status-warning: #eab308;
+    --status-serious: #f97316;
+    --status-critical: #ef4444;
+    --delta-good-text: #22c55e;
+    --wordmark-gradient: linear-gradient(105deg, #ffffff 12%, #a5f3fc 62%, #f0abfc 100%);
+    --wordmark-glow: 0 0 18px rgb(103 232 249 / 0.12);
+    --wordmark-tile-bg: rgb(255 255 255 / 0.055);
+    --wordmark-tile-border: rgb(255 255 255 / 0.12);
+    --wordmark-tile-shadow: inset 0 1px rgb(255 255 255 / 0.08), 0 4px 16px rgb(0 0 0 / 0.28);
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --background: hsl(220 5.5% 9%);
-  --card: hsl(220 5.5% 10.5%);
-  --foreground: hsl(220 2% 97%);
-  --card-foreground: hsl(220 2% 97%);
-  --muted: hsl(220 6% 16%);
-  --muted-foreground: hsl(220 4% 67%);
-  --faint-foreground: hsl(220 4% 52%);
-  --border: hsl(220 3% 17%);
-  --grid: hsl(220 4% 16%);
-  --axis: hsl(220 4% 22%);
-  --primary: hsl(220 2% 96%);
-  --primary-foreground: hsl(220 4% 10%);
-  --accent: hsl(220 5% 15.5%);
-  --accent-foreground: hsl(220 2% 98%);
-  --ring: hsl(220 70% 50%);
+  --background: #000000;
+  --card: #0a0a0a;
+  --foreground: #ffffff;
+  --card-foreground: #ffffff;
+  --muted: #141414;
+  --muted-foreground: #8989a5;
+  --faint-foreground: #6b6b82;
+  --border: rgb(255 255 255 / 0.08);
+  --grid: rgb(255 255 255 / 0.06);
+  --axis: rgb(255 255 255 / 0.12);
+  --primary: #00d5ff;
+  --primary-foreground: #000000;
+  --accent: #141414;
+  --accent-foreground: #ffffff;
+  --ring: #00d5ff;
+  --card-shadow: 0 0 #0000;
 
-  --chart-saturation: 60%;
-  --chart-lightness: 55%;
-  --chart-1-soft: hsl(220 50% 68%);
+  --chart-saturation: 62%;
+  --chart-lightness: 58%;
+  --chart-1: #00d5ff;
+  --chart-1-soft: #7ae6f5;
 
   /* Dark flips the anchor: quiet recedes toward the surface, busy is
-   * bright. Same hue, same four ordinal checks against the dark card. */
-  --seq-1: #184f95;
-  --seq-2: #256abf;
-  --seq-3: #3987e5;
-  --seq-4: #6da7ec;
-  --seq-5: #b7d3f6;
+   * bright Helix cyan. */
+  --seq-1: #0a4a5c;
+  --seq-2: #0e7a94;
+  --seq-3: #00d5ff;
+  --seq-4: #5ee4ff;
+  --seq-5: #b8f4ff;
 
-  --delta-good-text: #0ca30c;
+  --status-good: #22c55e;
+  --status-warning: #eab308;
+  --status-serious: #f97316;
+  --status-critical: #ef4444;
+  --delta-good-text: #22c55e;
+  --wordmark-gradient: linear-gradient(105deg, #ffffff 12%, #a5f3fc 62%, #f0abfc 100%);
+  --wordmark-glow: 0 0 18px rgb(103 232 249 / 0.12);
+  --wordmark-tile-bg: rgb(255 255 255 / 0.055);
+  --wordmark-tile-border: rgb(255 255 255 / 0.12);
+  --wordmark-tile-shadow: inset 0 1px rgb(255 255 255 / 0.08), 0 4px 16px rgb(0 0 0 / 0.28);
 }
 
 @theme inline {
-  --font-sans:
-    system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+  --font-wordmark: "Sora Variable", Sora, sans-serif;
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -172,6 +197,31 @@
   --color-delta-good-text: var(--delta-good-text);
 }
 
+html,
 body {
   @apply bg-background text-foreground font-sans antialiased;
+}
+
+/* Brand mark — same treatment as Helix ChatSidebarBrandHeader. */
+.wordmark {
+  font-family: var(--font-wordmark);
+  font-size: 18px;
+  font-weight: 680;
+  line-height: 1;
+  letter-spacing: -0.055em;
+  background: var(--wordmark-gradient);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  text-shadow: var(--wordmark-glow);
+}
+
+@media (forced-colors: active) {
+  .wordmark {
+    background: none;
+    color: CanvasText;
+    -webkit-text-fill-color: CanvasText;
+    text-shadow: none;
+  }
 }

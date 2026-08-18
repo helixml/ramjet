@@ -28,7 +28,7 @@ export function Meter({ label, pct, detail, tone = "severity" }: MeterProps) {
     <div className="flex flex-col gap-1">
       <div className="flex items-baseline justify-between gap-2 text-xs">
         <span className="text-muted-foreground truncate">{label}</span>
-        <span className="shrink-0 font-medium tabular-nums">
+        <span className="shrink-0 font-mono font-medium tabular-nums">
           {fmtPct(clamped, 0)}
           {detail ? (
             <span className="text-faint-foreground ml-1.5 font-normal">{detail}</span>
