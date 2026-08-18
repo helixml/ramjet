@@ -141,6 +141,31 @@ percentages would let a nearly idle engine count as much as one carrying the
 whole fleet. A `queries` rate of zero yields absence, not `0%` — a quiet
 interval is not a cold cache.
 
+### How it is plotted
+
+The card and the tile both show a **trailing rolling average**, not the
+per-sample ratio (`src/lib/rolling.ts`). Sampled over five seconds of bursty
+traffic, an instantaneous hit rate is 0% or 100% and rarely anything between,
+and an idle interval has no ratio at all — plotted raw that is a comb of
+vertical hairlines rather than a rate, because a filled area draws each
+isolated point as a spike from zero. The window is 5% of the selected range
+(clamped to 1–10 minutes), so it scales with the pixels available and spans
+the gaps between bursts instead of breaking the line at each one.
+
+Samples are weighted by the prompt-token rate they were measured over, so a
+busy second counts for more than a quiet one — the same reason the engine
+ratio sums rates before dividing. They are also weighted by their own
+duration, so the 1 Hz live tail spliced onto the 5 s history does not swamp
+the older, sparser half of the window. Absent samples stay absent: a window
+containing none of them is a gap, never `0%`.
+
+The line follows `serving.cache_hit_pct` whichever layer produced it, and
+falls back to the unweighted mean of per-engine `prefix_hit_pct` only when no
+weighted figure exists at all; the card's subtitle names the source and the
+window. Because the fallback ratio is filled in by the 5 s sampler and not by
+the 1 Hz stream, an engine-reported fleet plots the polled series — following
+the live tail there would end the line minutes short of now.
+
 ## The two token heatmaps
 
 They sit in the Overview beside the GPU row, compact by design: `Tokens by
