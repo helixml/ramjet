@@ -14,9 +14,18 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 class ReleaseMetadataTest(unittest.TestCase):
     def test_release_version_is_consistent(self) -> None:
+        """`Cargo.toml` is the single source of the version.
+
+        Everything that ships inside the images has to agree with it before a
+        tag is created, because `bench/drone_release_plan.sh` refuses to
+        publish when the tag and the package version disagree. Asserting a
+        literal version here would instead make every release edit its own
+        guard, which is how the guard stops meaning anything.
+        """
         cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())
         version = cargo["package"]["version"]
-        self.assertEqual(version, "0.1.0")
+        # Docker tags reject Cargo build metadata, so reject it at the source.
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
 
         lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
         package_versions = [
@@ -37,10 +46,26 @@ class ReleaseMetadataTest(unittest.TestCase):
                 )
 
         self.assertIn(f"## {version} —", (ROOT / "CHANGELOG.md").read_text())
-        self.assertIn(
-            f"Version {version} is the first public Rust release",
-            (ROOT / "README.md").read_text(),
+
+    def test_readme_pins_a_released_version_by_digest(self) -> None:
+        """The quickstart must pin an immutable digest of a released version.
+
+        It deliberately does not have to be the current `Cargo.toml` version:
+        a release digest only exists after the tag pipeline publishes it, so
+        the pin advances in `RELEASE.md`'s post-acceptance step rather than in
+        the commit that bumps the version.
+        """
+        readme = (ROOT / "README.md").read_text()
+        pins = re.findall(
+            r"ghcr\.io/helixml/ramjet:v(\d+\.\d+\.\d+)@sha256:([0-9a-f]{64})\b",
+            readme,
         )
+        self.assertTrue(pins, "the quickstart must pin an immutable image digest")
+
+        changelog = (ROOT / "CHANGELOG.md").read_text()
+        for pinned_version, _digest in pins:
+            with self.subTest(version=pinned_version):
+                self.assertIn(f"## {pinned_version} —", changelog)
 
     def test_package_has_public_release_documents(self) -> None:
         cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())
