@@ -107,12 +107,12 @@ class DashboardSourceTest(unittest.TestCase):
         raise AssertionError(f"missing panel: {title}")
 
     def test_readiness_renders_a_parked_engine_as_paused(self) -> None:
-        # Regression guard: a readiness panel reading ds4proxy_upstream_up alone
+        # Regression guard: a readiness panel reading ramjet_upstream_up alone
         # shows an idle-drained engine as green READY, hiding the park.
         panel = self._panel("Engine readiness")
         expression = panel["targets"][0]["expr"]
-        self.assertIn("ds4proxy_upstream_up", expression)
-        self.assertIn("ds4proxy_idle_drain_state", expression)
+        self.assertIn("ramjet_upstream_up", expression)
+        self.assertIn("ramjet_idle_drain_state", expression)
         mappings = panel["fieldConfig"]["defaults"]["mappings"][0]["options"]
         self.assertEqual(mappings["0"]["text"], "DOWN")
         self.assertEqual(mappings["1"]["text"], "READY")
@@ -120,7 +120,7 @@ class DashboardSourceTest(unittest.TestCase):
 
     def test_idle_drain_state_panel_is_present(self) -> None:
         panel = self._panel("Idle drain state")
-        self.assertEqual(panel["targets"][0]["expr"], "ds4proxy_idle_drain_state")
+        self.assertEqual(panel["targets"][0]["expr"], "ramjet_idle_drain_state")
         self.assertEqual(panel["targets"][0]["legendFormat"], "{{upstream}}")
         states = panel["fieldConfig"]["defaults"]["mappings"][0]["options"]
         self.assertEqual(
@@ -135,15 +135,15 @@ class DashboardSourceTest(unittest.TestCase):
             self.assertEqual(self._panel(title)["targets"][0]["legendFormat"], "{{upstream}}")
 
     def test_readiness_survives_the_policy_being_off(self) -> None:
-        # ds4proxy_idle_drain_state is only exported while the policy runs, and
+        # ramjet_idle_drain_state is only exported while the policy runs, and
         # it is off in the canonical deployment. Without the `or` fallback the
         # whole readiness tile evaluates empty, so the panel would go blank
         # rather than degrade to DOWN/READY.
         expression = self._panel("Engine readiness")["targets"][0]["expr"]
-        self.assertIn("or (ds4proxy_upstream_up * 0)", expression)
+        self.assertIn("or (ramjet_upstream_up * 0)", expression)
         # A down engine must read DOWN even while it is drained, which is why
         # health multiplies the drain term instead of adding to it.
-        self.assertIn("ds4proxy_upstream_up * (1 +", expression)
+        self.assertIn("ramjet_upstream_up * (1 +", expression)
 
     def test_stop_intent_panel_shows_both_converger_inputs(self) -> None:
         # The privileged actor stops an engine only when desired running is
@@ -151,23 +151,23 @@ class DashboardSourceTest(unittest.TestCase):
         panel = self._panel("Stop intent (desired running / safe to stop)")
         self.assertEqual(
             [target["expr"] for target in panel["targets"]],
-            ["ds4proxy_idle_drain_desired_running", "ds4proxy_idle_drain_safe_to_stop"],
+            ["ramjet_idle_drain_desired_running", "ramjet_idle_drain_safe_to_stop"],
         )
         mappings = panel["fieldConfig"]["defaults"]["mappings"][0]["options"]
         self.assertEqual([mappings[key]["text"] for key in ("0", "1")], ["no", "yes"])
 
     def test_fleet_idle_window_panel_is_present(self) -> None:
         panel = self._panel("Fleet idle window")
-        self.assertEqual(panel["targets"][0]["expr"], "ds4proxy_idle_drain_fleet_idle")
+        self.assertEqual(panel["targets"][0]["expr"], "ramjet_idle_drain_fleet_idle")
         mappings = panel["fieldConfig"]["defaults"]["mappings"][0]["options"]
         self.assertEqual([mappings[key]["text"] for key in ("0", "1")], ["serving", "idle"])
 
     def test_transitions_panel_reports_a_rate_not_a_raw_counter(self) -> None:
-        # Raw ds4proxy_idle_drain_transitions_total only ever climbs; the
+        # Raw ramjet_idle_drain_transitions_total only ever climbs; the
         # flapping this panel exists to catch is visible in the rate.
         panel = self._panel("Drain transitions (per hour)")
         expression = panel["targets"][0]["expr"]
-        self.assertIn("rate(ds4proxy_idle_drain_transitions_total", expression)
+        self.assertIn("rate(ramjet_idle_drain_transitions_total", expression)
         self.assertIn("sum by (upstream, state)", expression)
         self.assertIn("* 3600", expression)
 
@@ -206,7 +206,7 @@ class DashboardSourceTest(unittest.TestCase):
 
 
 def exported_metrics() -> dict[str, tuple[str, ...]]:
-    """Map each `ds4proxy_` metric declared in src/metrics.rs to its labels.
+    """Map each `ramjet_` metric declared in src/metrics.rs to its labels.
 
     The registrations are `name, help, &[labels]` triples, so the label list is
     whatever `&[...]` appears before the constructor's closing `)?`. Metrics
@@ -214,7 +214,7 @@ def exported_metrics() -> dict[str, tuple[str, ...]]:
     """
     source = METRICS_SOURCE.read_text(encoding="utf-8")
     declared: dict[str, tuple[str, ...]] = {}
-    for match in re.finditer(r'"(ds4proxy_[a-z0-9_]+)"', source):
+    for match in re.finditer(r'"(ramjet_[a-z0-9_]+)"', source):
         name = match.group(1)
         if name in declared:
             continue  # A later mention is a test or a registration, not a new metric.
@@ -229,7 +229,7 @@ def referenced_metrics(panels: list[dict]) -> set[str]:
     names: set[str] = set()
     for panel in visualizations(panels):
         for target in panel["targets"]:
-            names.update(re.findall(r"\bds4proxy_[a-z0-9_]+", target["expr"]))
+            names.update(re.findall(r"\bramjet_[a-z0-9_]+", target["expr"]))
     return names
 
 
@@ -254,7 +254,7 @@ class MetricContractTest(unittest.TestCase):
         return metric
 
     def test_every_queried_metric_is_exported(self) -> None:
-        self.assertTrue(self.referenced, "expected ds4proxy queries on the dashboard")
+        self.assertTrue(self.referenced, "expected ramjet queries on the dashboard")
         undefined = sorted(m for m in self.referenced if self.base_name(m) not in self.declared)
         self.assertEqual(undefined, [], "queried but never exported")
 
@@ -268,18 +268,18 @@ class MetricContractTest(unittest.TestCase):
         # The readiness panel multiplies these two series together, which in
         # PromQL requires identical label sets, not merely a shared `upstream`.
         self.assertEqual(
-            self.declared["ds4proxy_idle_drain_state"],
-            self.declared["ds4proxy_upstream_up"],
+            self.declared["ramjet_idle_drain_state"],
+            self.declared["ramjet_upstream_up"],
         )
 
     def test_transitions_are_grouped_by_their_real_labels(self) -> None:
         self.assertEqual(
-            self.declared["ds4proxy_idle_drain_transitions_total"], ("upstream", "state")
+            self.declared["ramjet_idle_drain_transitions_total"], ("upstream", "state")
         )
 
     def test_fleet_idle_is_unlabelled(self) -> None:
         # It is fleet-wide, so a {{upstream}} legend on it would render empty.
-        self.assertEqual(self.declared["ds4proxy_idle_drain_fleet_idle"], ())
+        self.assertEqual(self.declared["ramjet_idle_drain_fleet_idle"], ())
         panel = next(
             p
             for p in visualizations(self.document["panels"])

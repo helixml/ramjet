@@ -124,7 +124,7 @@ Emergent behaviors (tested inline in `src/router.rs`):
 
 ## Metrics
 
-`ds4proxy_*` (compat with existing dashboards): requests/duration/TTFT/TPOT,
+`ramjet_*` (compat with existing dashboards): requests/duration/TTFT/TPOT,
 prompt/cached/completion tokens, context & output size histograms, finish
 reasons, upstream up/probes/errors/requests, client disconnects — plus new:
 `route_decisions_total{outcome}`, `route_overlap_blocks`, `route_affinity_blocks`,
@@ -206,7 +206,7 @@ is the reference for the failure semantics below:
   shuts down with the proxy.
 - `src/snapshot_route.rs` owns the alternative compact companion consumers.
   Each configured source receives only an ordinal `engine-N` telemetry slot.
-  `ds4proxy_snapshot_route_ready` follows the publication actor's authoritative
+  `ramjet_snapshot_route_ready` follows the publication actor's authoritative
   state, while active attempt/connection gauges are balanced by the reconnect
   future's cancellation-safe drop guard. Attempt kinds and terminal outcomes
   are closed enums with every series initialized before the task starts; no

@@ -187,36 +187,36 @@ def metric_value(metrics, name, labels=None):
 def companion_snapshot(metrics):
     engine = {"engine": "engine-0"}
     return {
-        "enabled": metric_value(metrics, "ds4proxy_snapshot_companion_enabled"),
-        "authority": metric_value(metrics, "ds4proxy_snapshot_companion_authority"),
+        "enabled": metric_value(metrics, "ramjet_snapshot_companion_enabled"),
+        "authority": metric_value(metrics, "ramjet_snapshot_companion_authority"),
         "listening": metric_value(
-            metrics, "ds4proxy_snapshot_companion_listening", engine
+            metrics, "ramjet_snapshot_companion_listening", engine
         ),
-        "ready": metric_value(metrics, "ds4proxy_snapshot_companion_ready", engine),
+        "ready": metric_value(metrics, "ramjet_snapshot_companion_ready", engine),
         "source_ready": metric_value(
-            metrics, "ds4proxy_snapshot_companion_source_ready", engine
+            metrics, "ramjet_snapshot_companion_source_ready", engine
         ),
         "watermark_present": metric_value(
             metrics,
-            "ds4proxy_snapshot_companion_source_watermark_present",
+            "ramjet_snapshot_companion_source_watermark_present",
             engine,
         ),
         "source_phase_ready": metric_value(
             metrics,
-            "ds4proxy_snapshot_companion_source_phase",
+            "ramjet_snapshot_companion_source_phase",
             {"engine": "engine-0", "phase": "ready"},
         ),
         "indexed_blocks": metric_value(
-            metrics, "ds4proxy_snapshot_companion_source_indexed_blocks", engine
+            metrics, "ramjet_snapshot_companion_source_indexed_blocks", engine
         ),
         "connect_attempts": metric_value(
             metrics,
-            "ds4proxy_snapshot_companion_owner_events_total",
+            "ramjet_snapshot_companion_owner_events_total",
             {"event": "connect", "reason": "attempt"},
         ),
         "connections": metric_value(
             metrics,
-            "ds4proxy_snapshot_companion_owner_events_total",
+            "ramjet_snapshot_companion_owner_events_total",
             {"event": "connect", "reason": "connected"},
         ),
     }
@@ -239,20 +239,20 @@ def companion_is_ready(snapshot):
 
 
 def lb_snapshot_ready(metrics, engine_count=2):
-    if metric_value(metrics, "ds4proxy_snapshot_route_enabled") != 1:
+    if metric_value(metrics, "ramjet_snapshot_route_enabled") != 1:
         return False
     for index in range(engine_count):
         labels = {"engine": f"engine-{index}"}
-        if metric_value(metrics, "ds4proxy_snapshot_route_ready", labels) != 1:
+        if metric_value(metrics, "ramjet_snapshot_route_ready", labels) != 1:
             return False
         if metric_value(
-            metrics, "ds4proxy_snapshot_route_connections_active", labels
+            metrics, "ramjet_snapshot_route_connections_active", labels
         ) != 1:
             return False
         # An attempt owns the long-lived consumer future through disconnect.
         # Ready therefore means one active attempt and one active connection,
         # not a completed/zero attempt.
-        if metric_value(metrics, "ds4proxy_snapshot_route_attempts_active", labels) != 1:
+        if metric_value(metrics, "ramjet_snapshot_route_attempts_active", labels) != 1:
             return False
     return True
 
@@ -715,7 +715,7 @@ class NodeRuntime:
                 if validate_health(health, require_exact=False) is None:
                     raise GateError("rollback_health_pending", "baseline LB health is pending")
                 metrics = self._fetch_url(self.args.metrics_url)
-                snapshot_enabled = metric_value(metrics, "ds4proxy_snapshot_route_enabled")
+                snapshot_enabled = metric_value(metrics, "ramjet_snapshot_route_enabled")
                 if snapshot_enabled not in (None, 0):
                     raise GateError("rollback_mode_pending", "snapshot mode is still enabled")
                 self._engine_identities_unchanged(baseline)

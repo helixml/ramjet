@@ -97,7 +97,7 @@ nvidia-smi
 ```
 
 Then send one small synthetic OpenAI request, confirm a success status and
-usage, inspect bounded recent logs, and confirm `ds4proxy_upstream_up` for every
+usage, inspect bounded recent logs, and confirm `ramjet_upstream_up` for every
 replica. Do not print completions, prompts, tokens, or secrets in an operational
 report.
 

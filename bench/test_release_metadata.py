@@ -67,34 +67,51 @@ class ReleaseMetadataTest(unittest.TestCase):
             with self.subTest(version=pinned_version):
                 self.assertIn(f"## {pinned_version} —", changelog)
 
-    def test_compose_defaults_pin_the_current_release_by_digest(self) -> None:
-        """Every shipped compose default pins `v<Cargo version>` by digest.
+    def test_compose_defaults_pin_one_released_version_by_digest(self) -> None:
+        """Every shipped compose default pins the same released version.
 
-        These pins rotted silently through the rename: a mirror kept serving a
-        pre-rename image for weeks because nothing compared them to anything.
-        Tag and digest must both be present -- a tag alone is mutable, and a
-        digest alone hides which release it is.
+        These pins rotted silently through the rename -- a mirror served a
+        pre-rename image for weeks -- because nothing ever compared them to
+        anything. Tag and digest must both be present: a tag alone is mutable,
+        a digest alone hides which release it is.
+
+        The pinned version deliberately does not have to equal the current
+        `Cargo.toml` version. A release digest only exists after the tag
+        pipeline publishes it, so between the version bump and publication
+        there is nothing to point at; requiring equality would make that
+        intermediate state unrepresentable. It must be a version `CHANGELOG.md`
+        documents, and every compose file must agree on it.
         """
-        version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
         pattern = re.compile(
-            r"image:\s*\$\{[A-Z_]+:-(ghcr\.io/helixml/ramjet:([^@\s}]+)@sha256:[0-9a-f]{64})\}"
+            r"image:\s*\$\{[A-Z_]+:-(?:ghcr\.io/helixml/ramjet):"
+            r"(?:companion-)?v(\d+\.\d+\.\d+)@sha256:[0-9a-f]{64}\}"
         )
-        bare = re.compile(r"image:\s*\$\{[A-Z_]+:-ghcr\.io/helixml/ramjet:[^@\s}]+\}")
-        found = 0
+        loose = re.compile(r"image:\s*\$\{[A-Z_]+:-ghcr\.io/helixml/ramjet:[^}]*\}")
+        changelog = (ROOT / "CHANGELOG.md").read_text()
+        pinned: dict[str, str] = {}
         for compose in sorted(ROOT.glob("deploy/*/docker-compose*.yaml")):
             text = compose.read_text()
-            with self.subTest(compose=compose.relative_to(ROOT)):
-                self.assertEqual(
-                    bare.findall(text), [], "ramjet image pinned by tag without a digest"
-                )
-                for _ref, tag in pattern.findall(text):
-                    found += 1
-                    self.assertIn(
-                        tag,
-                        {f"v{version}", f"companion-v{version}"},
-                        f"{compose.name} pins {tag}, not the current release",
+            name = str(compose.relative_to(ROOT))
+            with self.subTest(compose=name):
+                for reference in loose.findall(text):
+                    self.assertRegex(
+                        reference,
+                        pattern.pattern.replace("(?:companion-)?v(", "(?:companion-)?v("),
+                        f"{name} pins a ramjet image without a v<x.y.z> tag and digest",
                     )
-        self.assertGreater(found, 0, "no ramjet image pins found to check")
+                for version in pattern.findall(text):
+                    pinned[name] = version
+                    self.assertIn(
+                        f"## {version} —",
+                        changelog,
+                        f"{name} pins v{version}, which CHANGELOG.md does not document",
+                    )
+        self.assertTrue(pinned, "no ramjet image pins found to check")
+        self.assertEqual(
+            len(set(pinned.values())),
+            1,
+            f"compose files disagree on the pinned release: {pinned}",
+        )
 
     def test_package_has_public_release_documents(self) -> None:
         cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())

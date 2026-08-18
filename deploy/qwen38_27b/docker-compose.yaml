@@ -33,7 +33,10 @@
 services:
   ds4-loadbalancer:
     # Container name is retained so existing bench scripts, the deployment
-    # lock, and the Grafana ds4proxy_ dashboards keep working.
+    # lock, and the Prometheus scrape target keep working. It is older than the
+    # project's current name and is deliberately not chased through a rename;
+    # the metric prefix moved to ramjet_ separately, which is what the
+    # dashboards actually query.
     # Override only with another immutable tag+digest pair. This pin is the
     # v0.2.0 release qualified on node06 on 2026-08-18; its OCI revision is
     # 68fb5dc. Rollback target is rust-29d9e92@sha256:e303ed167f2723cec0e2d

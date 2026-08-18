@@ -143,7 +143,7 @@ deeper raw overlap.
   different compatibility-attested EngineCore can durably rearm it. A
   precommitted dirty marker keeps unresolved replicas fenced after an unclean
   LB exit or failed state mutation.
-- Stable `ds4proxy_*` Prometheus metrics on port `9090`.
+- Stable `ramjet_*` Prometheus metrics on port `9090`.
 - Opaque `X-Ramjet-Upstream` route correlation without leaking hosts.
 - Bounded memory, request sanitization, model metadata rewriting, and upstream
   cancellation when the client disappears.
@@ -157,7 +157,7 @@ closed and are not dependencies of ordinary serving.
 > use the `RJ_*` prefix and responses carry `X-Ramjet-*` headers; the retired
 > `MD_*` prefix is refused at startup rather than silently ignored, so a stale
 > overlay fails loudly instead of running a differently tuned proxy. The
-> `ds4proxy_*` metric names are deliberately unchanged so existing Grafana
+> `ramjet_*` metric names are deliberately unchanged so existing Grafana
 > history keeps resolving.
 
 ## Operate it

@@ -38,22 +38,22 @@ class CacheBenchTest(unittest.TestCase):
         self.assertEqual(first[64:], second[64:])
 
     def test_registered_but_unobserved_lb_metric_is_zero(self):
-        body = b"""# HELP ds4proxy_prompt_tokens_total prompts
-# TYPE ds4proxy_prompt_tokens_total counter
-# HELP ds4proxy_cached_prompt_tokens_total cached
-# TYPE ds4proxy_cached_prompt_tokens_total counter
-# HELP ds4proxy_cache_requests_total requests
-# TYPE ds4proxy_cache_requests_total counter
-# HELP ds4proxy_cache_ttft_seconds TTFT
-# TYPE ds4proxy_cache_ttft_seconds histogram
-# HELP ds4proxy_kv_event_blocks_total blocks
-# TYPE ds4proxy_kv_event_blocks_total counter
-# HELP ds4proxy_kv_event_clears_total clears
-# TYPE ds4proxy_kv_event_clears_total counter
-# HELP ds4proxy_exact_route_placement_total exact route placement decisions
-# TYPE ds4proxy_exact_route_placement_total counter
-# HELP ds4proxy_exact_route_projected_balance_total projected balance decisions
-# TYPE ds4proxy_exact_route_projected_balance_total counter
+        body = b"""# HELP ramjet_prompt_tokens_total prompts
+# TYPE ramjet_prompt_tokens_total counter
+# HELP ramjet_cached_prompt_tokens_total cached
+# TYPE ramjet_cached_prompt_tokens_total counter
+# HELP ramjet_cache_requests_total requests
+# TYPE ramjet_cache_requests_total counter
+# HELP ramjet_cache_ttft_seconds TTFT
+# TYPE ramjet_cache_ttft_seconds histogram
+# HELP ramjet_kv_event_blocks_total blocks
+# TYPE ramjet_kv_event_blocks_total counter
+# HELP ramjet_kv_event_clears_total clears
+# TYPE ramjet_kv_event_clears_total counter
+# HELP ramjet_exact_route_placement_total exact route placement decisions
+# TYPE ramjet_exact_route_placement_total counter
+# HELP ramjet_exact_route_projected_balance_total projected balance decisions
+# TYPE ramjet_exact_route_projected_balance_total counter
 """
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = body
@@ -62,15 +62,15 @@ class CacheBenchTest(unittest.TestCase):
         self.assertTrue(all(value == 0 for value in metrics.values()))
 
     def test_shadow_counter_deltas_select_only_bounded_chat_outcomes(self):
-        body = b'''# HELP ds4proxy_exact_route_placement_total decisions
-# TYPE ds4proxy_exact_route_placement_total counter
-ds4proxy_exact_route_placement_total{endpoint="chat",mode="shadow",outcome="would_balance"} 3
-ds4proxy_exact_route_placement_total{endpoint="chat",mode="shadow",outcome="kept_balance_load_gate"} 5
-ds4proxy_exact_route_placement_total{endpoint="chat",mode="placement",outcome="would_balance"} 99
-# HELP ds4proxy_exact_route_projected_balance_total projected decisions
-# TYPE ds4proxy_exact_route_projected_balance_total counter
-ds4proxy_exact_route_projected_balance_total{endpoint="chat",outcome="kept_selected"} 7
-ds4proxy_exact_route_projected_balance_total{endpoint="chat",outcome="would_balance"} 2
+        body = b'''# HELP ramjet_exact_route_placement_total decisions
+# TYPE ramjet_exact_route_placement_total counter
+ramjet_exact_route_placement_total{endpoint="chat",mode="shadow",outcome="would_balance"} 3
+ramjet_exact_route_placement_total{endpoint="chat",mode="shadow",outcome="kept_balance_load_gate"} 5
+ramjet_exact_route_placement_total{endpoint="chat",mode="placement",outcome="would_balance"} 99
+# HELP ramjet_exact_route_projected_balance_total projected decisions
+# TYPE ramjet_exact_route_projected_balance_total counter
+ramjet_exact_route_projected_balance_total{endpoint="chat",outcome="kept_selected"} 7
+ramjet_exact_route_projected_balance_total{endpoint="chat",outcome="would_balance"} 2
 '''
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = body

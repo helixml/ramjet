@@ -859,7 +859,7 @@ mod tests {
         ] {
             assert!(text.contains(labels));
         }
-        assert!(text.contains("ds4proxy_kv_event_clears_total"));
+        assert!(text.contains("ramjet_kv_event_clears_total"));
     }
 
     #[test]
@@ -888,9 +888,9 @@ mod tests {
             .encode_to_string(&registry.gather())
             .unwrap();
         for expected in [
-            r#"ds4proxy_kv_event_replay_duration_seconds_count{outcome="replay_timeout_undrained",phase="total",upstream="engine"} 1"#,
-            r#"ds4proxy_kv_event_replay_bytes_sum{kind="wire",outcome="replay_timeout_undrained",upstream="engine"} 1024"#,
-            r#"ds4proxy_kv_event_replay_progress_batches_sum{kind="requested",outcome="replay_timeout_undrained",upstream="engine"} 6"#,
+            r#"ramjet_kv_event_replay_duration_seconds_count{outcome="replay_timeout_undrained",phase="total",upstream="engine"} 1"#,
+            r#"ramjet_kv_event_replay_bytes_sum{kind="wire",outcome="replay_timeout_undrained",upstream="engine"} 1024"#,
+            r#"ramjet_kv_event_replay_progress_batches_sum{kind="requested",outcome="replay_timeout_undrained",upstream="engine"} 6"#,
         ] {
             assert!(
                 text.contains(expected),

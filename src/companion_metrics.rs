@@ -354,91 +354,91 @@ impl CompanionMetrics {
         let metrics = Self {
             source_count: config.sources.len(),
             enabled: Gauge::with_opts(Opts::new(
-                "ds4proxy_snapshot_companion_enabled",
+                "ramjet_snapshot_companion_enabled",
                 "Whether snapshot companion serving is configured",
             ))?,
             listening: gauge(
-                "ds4proxy_snapshot_companion_listening",
+                "ramjet_snapshot_companion_listening",
                 "Whether the companion Unix socket is published and accepting clients",
                 &["engine"],
             )?,
             ready: gauge(
-                "ds4proxy_snapshot_companion_ready",
+                "ramjet_snapshot_companion_ready",
                 "Whether the companion is listening with an authoritative exact source",
                 &["engine"],
             )?,
             source_ready: gauge(
-                "ds4proxy_snapshot_companion_source_ready",
+                "ramjet_snapshot_companion_source_ready",
                 "Whether the exact source is authoritative and ready for snapshots",
                 &["engine"],
             )?,
             source_phase: gauge(
-                "ds4proxy_snapshot_companion_source_phase",
+                "ramjet_snapshot_companion_source_phase",
                 "Current exact-source lifecycle as a bounded one-hot phase",
                 &["engine", "phase"],
             )?,
             source_watermark_present: gauge(
-                "ds4proxy_snapshot_companion_source_watermark_present",
+                "ramjet_snapshot_companion_source_watermark_present",
                 "Whether the exact source has an authoritative watermark",
                 &["engine"],
             )?,
             source_indexed_blocks: gauge(
-                "ds4proxy_snapshot_companion_source_indexed_blocks",
+                "ramjet_snapshot_companion_source_indexed_blocks",
                 "Blocks retained by the exact companion source",
                 &["engine"],
             )?,
             source_active_sessions: gauge(
-                "ds4proxy_snapshot_companion_source_active_sessions",
+                "ramjet_snapshot_companion_source_active_sessions",
                 "Sessions currently registered with the exact companion source",
                 &["engine"],
             )?,
             sessions: gauge(
-                "ds4proxy_snapshot_companion_sessions",
+                "ramjet_snapshot_companion_sessions",
                 "Snapshot companion sessions by bounded lifecycle state",
                 &["engine", "state"],
             )?,
             session_results: counter(
-                "ds4proxy_snapshot_companion_sessions_total",
+                "ramjet_snapshot_companion_sessions_total",
                 "Snapshot companion terminal sessions by bounded outcome and reason",
                 &["engine", "outcome", "reason"],
             )?,
             tail_queue_depth: gauge(
-                "ds4proxy_snapshot_companion_tail_queue_depth",
+                "ramjet_snapshot_companion_tail_queue_depth",
                 "Authenticated tail frames queued by bounded engine and client slot",
                 &["engine", "client_slot"],
             )?,
             published_generation: gauge(
-                "ds4proxy_snapshot_companion_published_generation",
+                "ramjet_snapshot_companion_published_generation",
                 "Current published companion generation",
                 &["engine"],
             )?,
             published_index_entries: gauge(
-                "ds4proxy_snapshot_companion_published_index_entries",
+                "ramjet_snapshot_companion_published_index_entries",
                 "Entries in the current published digest index",
                 &["engine"],
             )?,
             published_blocks: gauge(
-                "ds4proxy_snapshot_companion_published_blocks",
+                "ramjet_snapshot_companion_published_blocks",
                 "Resident blocks in the published digest index",
                 &["engine"],
             )?,
             published_tokens: gauge(
-                "ds4proxy_snapshot_companion_published_tokens",
+                "ramjet_snapshot_companion_published_tokens",
                 "Logical prefix tokens represented by the published digest index",
                 &["engine"],
             )?,
             last_publish_timestamp: gauge(
-                "ds4proxy_snapshot_companion_last_publish_timestamp_seconds",
+                "ramjet_snapshot_companion_last_publish_timestamp_seconds",
                 "Unix timestamp of the latest successful snapshot publication",
                 &["engine"],
             )?,
             snapshots: counter(
-                "ds4proxy_snapshot_companion_snapshots_total",
+                "ramjet_snapshot_companion_snapshots_total",
                 "Snapshot exchanges by bounded terminal outcome",
                 &["engine", "outcome"],
             )?,
             snapshot_duration: histogram(
-                "ds4proxy_snapshot_companion_snapshot_duration_seconds",
+                "ramjet_snapshot_companion_snapshot_duration_seconds",
                 "Snapshot work duration by bounded phase and terminal outcome",
                 vec![
                     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 3.0, 10.0, 30.0,
@@ -446,7 +446,7 @@ impl CompanionMetrics {
                 &["engine", "phase", "outcome"],
             )?,
             snapshot_bytes: histogram(
-                "ds4proxy_snapshot_companion_snapshot_bytes",
+                "ramjet_snapshot_companion_snapshot_bytes",
                 "Authenticated snapshot frame size by terminal outcome",
                 vec![
                     1_024.0,
@@ -460,32 +460,32 @@ impl CompanionMetrics {
                 &["engine", "outcome"],
             )?,
             tail_frames: counter(
-                "ds4proxy_snapshot_companion_tail_frames_total",
+                "ramjet_snapshot_companion_tail_frames_total",
                 "Authenticated tail frames by bounded kind and outcome",
                 &["engine", "kind", "outcome"],
             )?,
             tail_batches: counter(
-                "ds4proxy_snapshot_companion_tail_batches_total",
+                "ramjet_snapshot_companion_tail_batches_total",
                 "Decoded tail batches by bounded outcome",
                 &["engine", "outcome"],
             )?,
             tail_events: counter(
-                "ds4proxy_snapshot_companion_tail_events_total",
+                "ramjet_snapshot_companion_tail_events_total",
                 "Decoded tail events by bounded semantic kind",
                 &["engine", "kind"],
             )?,
             fences: counter(
-                "ds4proxy_snapshot_companion_fences_total",
+                "ramjet_snapshot_companion_fences_total",
                 "Snapshot lifecycle fences by bounded reason",
                 &["engine", "reason"],
             )?,
             discards: counter(
-                "ds4proxy_snapshot_companion_discards_total",
+                "ramjet_snapshot_companion_discards_total",
                 "Private or published generations discarded by bounded reason",
                 &["engine", "reason"],
             )?,
             identity_changes: counter(
-                "ds4proxy_snapshot_companion_identity_changes_total",
+                "ramjet_snapshot_companion_identity_changes_total",
                 "Authenticated companion identity changes by bounded component",
                 &["engine", "component"],
             )?,
@@ -914,27 +914,27 @@ mod tests {
         CompanionMetrics::new(&registry, &config(SnapshotCompanionMode::Serve)).unwrap();
         let text = text(&registry);
         for expected in [
-            "ds4proxy_snapshot_companion_enabled 1",
-            "ds4proxy_snapshot_companion_listening{engine=\"engine-0\"} 0",
-            "ds4proxy_snapshot_companion_ready{engine=\"engine-0\"} 0",
-            "ds4proxy_snapshot_companion_source_ready{engine=\"engine-0\"} 0",
-            "ds4proxy_snapshot_companion_source_phase{engine=\"engine-1\",phase=\"fenced\"} 0",
-            "ds4proxy_snapshot_companion_source_watermark_present{engine=\"engine-0\"} 0",
-            "ds4proxy_snapshot_companion_source_indexed_blocks{engine=\"engine-0\"} 0",
-            "ds4proxy_snapshot_companion_source_active_sessions{engine=\"engine-1\"} 0",
-            "ds4proxy_snapshot_companion_sessions{engine=\"engine-1\",state=\"catching_up\"} 0",
-            "ds4proxy_snapshot_companion_sessions_total{engine=\"engine-0\",outcome=\"rejected\",reason=\"authentication\"} 0",
-            "ds4proxy_snapshot_companion_tail_queue_depth{client_slot=\"client-1\",engine=\"engine-0\"} 0",
-            "ds4proxy_snapshot_companion_snapshots_total{engine=\"engine-0\",outcome=\"timeout\"} 0",
-            "ds4proxy_snapshot_companion_snapshot_duration_seconds_count{engine=\"engine-1\",outcome=\"success\",phase=\"build\"} 0",
-            "ds4proxy_snapshot_companion_snapshot_duration_seconds_count{engine=\"engine-1\",outcome=\"success\",phase=\"apply\"} 0",
-            "ds4proxy_snapshot_companion_snapshot_duration_seconds_count{engine=\"engine-1\",outcome=\"success\",phase=\"caught_up\"} 0",
-            "ds4proxy_snapshot_companion_tail_frames_total{engine=\"engine-0\",kind=\"caught_up\",outcome=\"queued\"} 0",
-            "ds4proxy_snapshot_companion_tail_batches_total{engine=\"engine-0\",outcome=\"applied\"} 0",
-            "ds4proxy_snapshot_companion_tail_events_total{engine=\"engine-0\",kind=\"stored\"} 0",
-            "ds4proxy_snapshot_companion_fences_total{engine=\"engine-1\",reason=\"tail_gap\"} 0",
-            "ds4proxy_snapshot_companion_discards_total{engine=\"engine-1\",reason=\"superseded\"} 0",
-            "ds4proxy_snapshot_companion_identity_changes_total{component=\"digest_key\",engine=\"engine-0\"} 0",
+            "ramjet_snapshot_companion_enabled 1",
+            "ramjet_snapshot_companion_listening{engine=\"engine-0\"} 0",
+            "ramjet_snapshot_companion_ready{engine=\"engine-0\"} 0",
+            "ramjet_snapshot_companion_source_ready{engine=\"engine-0\"} 0",
+            "ramjet_snapshot_companion_source_phase{engine=\"engine-1\",phase=\"fenced\"} 0",
+            "ramjet_snapshot_companion_source_watermark_present{engine=\"engine-0\"} 0",
+            "ramjet_snapshot_companion_source_indexed_blocks{engine=\"engine-0\"} 0",
+            "ramjet_snapshot_companion_source_active_sessions{engine=\"engine-1\"} 0",
+            "ramjet_snapshot_companion_sessions{engine=\"engine-1\",state=\"catching_up\"} 0",
+            "ramjet_snapshot_companion_sessions_total{engine=\"engine-0\",outcome=\"rejected\",reason=\"authentication\"} 0",
+            "ramjet_snapshot_companion_tail_queue_depth{client_slot=\"client-1\",engine=\"engine-0\"} 0",
+            "ramjet_snapshot_companion_snapshots_total{engine=\"engine-0\",outcome=\"timeout\"} 0",
+            "ramjet_snapshot_companion_snapshot_duration_seconds_count{engine=\"engine-1\",outcome=\"success\",phase=\"build\"} 0",
+            "ramjet_snapshot_companion_snapshot_duration_seconds_count{engine=\"engine-1\",outcome=\"success\",phase=\"apply\"} 0",
+            "ramjet_snapshot_companion_snapshot_duration_seconds_count{engine=\"engine-1\",outcome=\"success\",phase=\"caught_up\"} 0",
+            "ramjet_snapshot_companion_tail_frames_total{engine=\"engine-0\",kind=\"caught_up\",outcome=\"queued\"} 0",
+            "ramjet_snapshot_companion_tail_batches_total{engine=\"engine-0\",outcome=\"applied\"} 0",
+            "ramjet_snapshot_companion_tail_events_total{engine=\"engine-0\",kind=\"stored\"} 0",
+            "ramjet_snapshot_companion_fences_total{engine=\"engine-1\",reason=\"tail_gap\"} 0",
+            "ramjet_snapshot_companion_discards_total{engine=\"engine-1\",reason=\"superseded\"} 0",
+            "ramjet_snapshot_companion_identity_changes_total{component=\"digest_key\",engine=\"engine-0\"} 0",
         ] {
             assert!(text.contains(expected), "missing series: {expected}");
         }
@@ -949,7 +949,7 @@ mod tests {
             metrics.engine_slot(0),
             Err(CompanionMetricsError::InvalidEngineSlot)
         ));
-        assert!(text(&registry).contains("ds4proxy_snapshot_companion_enabled 0"));
+        assert!(text(&registry).contains("ramjet_snapshot_companion_enabled 0"));
     }
 
     #[test]
@@ -988,42 +988,38 @@ mod tests {
         assert!(metrics.engine_slot(2).is_err());
 
         let before_stop = text(&registry);
+        assert!(before_stop.contains("ramjet_snapshot_companion_listening{engine=\"engine-1\"} 1"));
+        assert!(before_stop.contains("ramjet_snapshot_companion_ready{engine=\"engine-1\"} 1"));
         assert!(
-            before_stop.contains("ds4proxy_snapshot_companion_listening{engine=\"engine-1\"} 1")
-        );
-        assert!(before_stop.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-1\"} 1"));
-        assert!(
-            before_stop.contains("ds4proxy_snapshot_companion_source_ready{engine=\"engine-1\"} 1")
+            before_stop.contains("ramjet_snapshot_companion_source_ready{engine=\"engine-1\"} 1")
         );
         assert!(before_stop.contains(
-            "ds4proxy_snapshot_companion_source_phase{engine=\"engine-1\",phase=\"ready\"} 1"
+            "ramjet_snapshot_companion_source_phase{engine=\"engine-1\",phase=\"ready\"} 1"
         ));
         assert!(
             before_stop.contains(
-                "ds4proxy_snapshot_companion_source_active_sessions{engine=\"engine-1\"} 2"
+                "ramjet_snapshot_companion_source_active_sessions{engine=\"engine-1\"} 2"
             )
         );
         assert_eq!(
             before_stop
                 .lines()
-                .filter(|line| line.starts_with("ds4proxy_snapshot_companion_source_phase{"))
+                .filter(|line| line.starts_with("ramjet_snapshot_companion_source_phase{"))
                 .count(),
             ENGINE_SLOTS.len() * source_phases().len()
         );
 
         metrics.set_listening(engine, false);
         let stopped = text(&registry);
-        assert!(stopped.contains("ds4proxy_snapshot_companion_listening{engine=\"engine-1\"} 0"));
-        assert!(stopped.contains("ds4proxy_snapshot_companion_ready{engine=\"engine-1\"} 0"));
-        assert!(
-            stopped.contains("ds4proxy_snapshot_companion_source_ready{engine=\"engine-1\"} 1")
-        );
+        assert!(stopped.contains("ramjet_snapshot_companion_listening{engine=\"engine-1\"} 0"));
+        assert!(stopped.contains("ramjet_snapshot_companion_ready{engine=\"engine-1\"} 0"));
+        assert!(stopped.contains("ramjet_snapshot_companion_source_ready{engine=\"engine-1\"} 1"));
         assert!(before_stop.contains(
-            "ds4proxy_snapshot_companion_published_index_entries{engine=\"engine-1\"} 36612"
+            "ramjet_snapshot_companion_published_index_entries{engine=\"engine-1\"} 36612"
         ));
         assert!(
             before_stop.contains(
-                "ds4proxy_snapshot_companion_published_tokens{engine=\"engine-1\"} 9216000"
+                "ramjet_snapshot_companion_published_tokens{engine=\"engine-1\"} 9216000"
             )
         );
         for forbidden in [

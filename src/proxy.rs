@@ -1584,7 +1584,7 @@ impl Proxy {
     /// Publishes the fail-open gauge and logs only the transitions, so a
     /// saturated fleet cannot turn one incident into a request-rate log flood.
     ///
-    /// This is deliberately a separate series from `ds4proxy_upstream_up`:
+    /// This is deliberately a separate series from `ramjet_upstream_up`:
     /// dashboards must keep reading that gauge as "this upstream passed its
     /// admission probe", and a fail-open interval is exactly the case where it
     /// reads zero while traffic is still being served.
@@ -2816,8 +2816,8 @@ mod tests {
         );
     }
 
-    /// The Grafana readiness panel combines `ds4proxy_upstream_up` with
-    /// `ds4proxy_idle_drain_state` by matching on the `upstream` label. If the
+    /// The Grafana readiness panel combines `ramjet_upstream_up` with
+    /// `ramjet_idle_drain_state` by matching on the `upstream` label. If the
     /// two ever disagree on the label value the join silently yields nothing
     /// and the panel goes blank, so the contract is pinned here.
     fn upstream_labels(collector: &dyn prometheus::core::Collector) -> Vec<String> {

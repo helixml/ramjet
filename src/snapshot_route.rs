@@ -392,8 +392,8 @@ mod tests {
         let text = prometheus::TextEncoder::new()
             .encode_to_string(&registry.gather())
             .unwrap();
-        assert!(text.contains("ds4proxy_snapshot_route_enabled 0"));
-        assert!(text.contains(r#"ds4proxy_snapshot_route_ready{engine="engine-0"} 0"#));
+        assert!(text.contains("ramjet_snapshot_route_enabled 0"));
+        assert!(text.contains(r#"ramjet_snapshot_route_ready{engine="engine-0"} 0"#));
     }
 
     #[tokio::test]

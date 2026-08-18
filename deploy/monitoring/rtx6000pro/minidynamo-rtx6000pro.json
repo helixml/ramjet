@@ -25,7 +25,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Serving state per engine. PAUSED (grey) means the idle-drain policy withheld a healthy engine from routing to save idle power - it is not a fault. Health is multiplied by the drain state so a stopped engine still reads DOWN, never PAUSED; the trailing `or (ds4proxy_upstream_up * 0)` keeps the panel working when idle-drain is off and exports no drain series.",
+      "description": "Serving state per engine. PAUSED (grey) means the idle-drain policy withheld a healthy engine from routing to save idle power - it is not a fault. Health is multiplied by the drain state so a stopped engine still reads DOWN, never PAUSED; the trailing `or (ramjet_upstream_up * 0)` keeps the panel working when idle-drain is off and exports no drain series.",
       "fieldConfig": {
         "defaults": {
           "mappings": [
@@ -99,7 +99,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "ds4proxy_upstream_up * (1 + ((ds4proxy_idle_drain_state > bool 0) or (ds4proxy_upstream_up * 0)))",
+          "expr": "ramjet_upstream_up * (1 + ((ramjet_idle_drain_state > bool 0) or (ramjet_upstream_up * 0)))",
           "legendFormat": "{{upstream}}",
           "refId": "A"
         }
@@ -162,7 +162,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(ds4proxy_completion_tokens_total[2m]))",
+          "expr": "sum(rate(ramjet_completion_tokens_total[2m]))",
           "legendFormat": "decode",
           "refId": "A"
         }
@@ -225,7 +225,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "ds4proxy_requests_inflight",
+          "expr": "ramjet_requests_inflight",
           "legendFormat": "in flight",
           "refId": "A"
         }
@@ -288,7 +288,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(ds4proxy_requests_total{code=~\"5..\"}[5m])) or vector(0)",
+          "expr": "sum(increase(ramjet_requests_total{code=~\"5..\"}[5m])) or vector(0)",
           "legendFormat": "5xx",
           "refId": "A"
         }
@@ -353,7 +353,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(ds4proxy_cached_prompt_tokens_total[10m])) / sum(rate(ds4proxy_prompt_tokens_total[10m])) * 100",
+          "expr": "sum(rate(ramjet_cached_prompt_tokens_total[10m])) / sum(rate(ramjet_prompt_tokens_total[10m])) * 100",
           "legendFormat": "cache hit",
           "refId": "A"
         }
@@ -417,7 +417,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(ds4proxy_completion_tokens_total[$__range])) or vector(0)",
+          "expr": "sum(increase(ramjet_completion_tokens_total[$__range])) or vector(0)",
           "instant": true,
           "legendFormat": "generated",
           "refId": "A"
@@ -482,7 +482,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(ds4proxy_prompt_tokens_total[$__range])) or vector(0)",
+          "expr": "sum(increase(ramjet_prompt_tokens_total[$__range])) or vector(0)",
           "instant": true,
           "legendFormat": "prompt",
           "refId": "A"
@@ -547,7 +547,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(ds4proxy_cached_prompt_tokens_total[$__range])) or vector(0)",
+          "expr": "sum(increase(ramjet_cached_prompt_tokens_total[$__range])) or vector(0)",
           "instant": true,
           "legendFormat": "cached",
           "refId": "A"
@@ -1137,7 +1137,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(ds4proxy_completion_tokens_total[2m]))",
+          "expr": "sum(rate(ramjet_completion_tokens_total[2m]))",
           "legendFormat": "decode",
           "refId": "A"
         },
@@ -1146,7 +1146,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(ds4proxy_prompt_tokens_total[2m]))",
+          "expr": "sum(rate(ramjet_prompt_tokens_total[2m]))",
           "legendFormat": "prefill (incl. cached)",
           "refId": "B"
         },
@@ -1354,7 +1354,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(ds4proxy_ttft_seconds_bucket[10m])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(ramjet_ttft_seconds_bucket[10m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
@@ -1363,7 +1363,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(ds4proxy_ttft_seconds_bucket[10m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ramjet_ttft_seconds_bucket[10m])))",
           "legendFormat": "p95",
           "refId": "B"
         }
@@ -1458,7 +1458,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(ds4proxy_time_per_output_token_seconds_bucket[10m])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(ramjet_time_per_output_token_seconds_bucket[10m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
@@ -1467,7 +1467,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(ds4proxy_time_per_output_token_seconds_bucket[10m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ramjet_time_per_output_token_seconds_bucket[10m])))",
           "legendFormat": "p95",
           "refId": "B"
         }
@@ -1562,7 +1562,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(ds4proxy_context_tokens_bucket[30m])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(ramjet_context_tokens_bucket[30m])))",
           "legendFormat": "p50 prompt",
           "refId": "A"
         },
@@ -1571,7 +1571,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(ds4proxy_context_tokens_bucket[30m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ramjet_context_tokens_bucket[30m])))",
           "legendFormat": "p95 prompt",
           "refId": "B"
         },
@@ -1580,7 +1580,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(ds4proxy_output_tokens_bucket[30m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ramjet_output_tokens_bucket[30m])))",
           "legendFormat": "p95 output",
           "refId": "C"
         }
@@ -1772,7 +1772,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(ds4proxy_cached_prompt_tokens_total[10m])) / sum(rate(ds4proxy_prompt_tokens_total[10m])) * 100",
+          "expr": "sum(rate(ramjet_cached_prompt_tokens_total[10m])) / sum(rate(ramjet_prompt_tokens_total[10m])) * 100",
           "legendFormat": "usage-level (client-visible)",
           "refId": "A"
         },
@@ -1876,7 +1876,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (upstream) (rate(ds4proxy_upstream_requests_total[5m])) * 60",
+          "expr": "sum by (upstream) (rate(ramjet_upstream_requests_total[5m])) * 60",
           "legendFormat": "{{upstream}} req/min",
           "refId": "A"
         },
@@ -1885,7 +1885,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (reason) (rate(ds4proxy_upstream_errors_total[5m])) * 60",
+          "expr": "sum by (reason) (rate(ramjet_upstream_errors_total[5m])) * 60",
           "legendFormat": "error: {{reason}} /min",
           "refId": "B"
         },
@@ -1894,7 +1894,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (upstream) (rate(ds4proxy_upstream_probe_failures_total[5m])) * 60",
+          "expr": "sum by (upstream) (rate(ramjet_upstream_probe_failures_total[5m])) * 60",
           "legendFormat": "probe-fail {{upstream}}",
           "refId": "C"
         }
@@ -1989,7 +1989,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (reason) (rate(ds4proxy_finish_reasons_total[10m])) * 60",
+          "expr": "sum by (reason) (rate(ramjet_finish_reasons_total[10m])) * 60",
           "legendFormat": "{{reason}}",
           "refId": "A"
         }
@@ -2084,7 +2084,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (code) (rate(ds4proxy_requests_total{code!~\"2..\"}[5m])) * 60",
+          "expr": "sum by (code) (rate(ramjet_requests_total{code!~\"2..\"}[5m])) * 60",
           "legendFormat": "HTTP {{code}}",
           "refId": "A"
         }
@@ -2790,7 +2790,7 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "ds4proxy_idle_drain_state",
+              "expr": "ramjet_idle_drain_state",
               "legendFormat": "{{upstream}}",
               "refId": "A"
             }
@@ -2879,7 +2879,7 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "ds4proxy_idle_drain_desired_running",
+              "expr": "ramjet_idle_drain_desired_running",
               "legendFormat": "{{upstream}} desired running",
               "refId": "A"
             },
@@ -2888,7 +2888,7 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "ds4proxy_idle_drain_safe_to_stop",
+              "expr": "ramjet_idle_drain_safe_to_stop",
               "legendFormat": "{{upstream}} safe to stop",
               "refId": "B"
             }
@@ -2977,7 +2977,7 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "ds4proxy_idle_drain_fleet_idle",
+              "expr": "ramjet_idle_drain_fleet_idle",
               "legendFormat": "fleet",
               "refId": "A"
             }
@@ -3071,7 +3071,7 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "sum by (upstream, state) (rate(ds4proxy_idle_drain_transitions_total[30m])) * 3600",
+              "expr": "sum by (upstream, state) (rate(ramjet_idle_drain_transitions_total[30m])) * 3600",
               "legendFormat": "{{upstream}} -> {{state}}",
               "refId": "A"
             }

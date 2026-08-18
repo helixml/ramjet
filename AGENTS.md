@@ -444,7 +444,7 @@ stale `_MS` variable is inert rather than a thousand-fold misconfiguration.
 Restoring the warm floor runs on every tick, not only on traffic: a park that
 was safe when made becomes unsafe if the replica that stayed warm later fails,
 and during an idle window no request would arrive to notice. Keep
-`ds4proxy_idle_drain_state` labelled identically to `ds4proxy_upstream_up`; the
+`ramjet_idle_drain_state` labelled identically to `ramjet_upstream_up`; the
 Grafana readiness panel joins them on `upstream` to render a parked engine as
 grey PAUSED instead of green READY.
 
@@ -612,7 +612,7 @@ ssh node06 'cd /home/luke/inference/dspark_0731 \
     docker compose up -d ds4-loadbalancer'
 
 # verify
-ssh node06 'docker logs ds4-loadbalancer --tail 1; curl -s :8007/metrics | grep ds4proxy_upstream_up'
+ssh node06 'docker logs ds4-loadbalancer --tail 1; curl -s :8007/metrics | grep ramjet_upstream_up'
 ```
 
 Rollback is the same command with the previously accepted immutable
@@ -1236,7 +1236,7 @@ To compare two LB images cleanly: deploy image X, run a bench with a fresh
 salt, capture; deploy image Y, run the SAME bench with ANOTHER fresh salt,
 capture; compare. Never reuse a salt across the two — warm state leaks.
 Read the router's own decisions with
-`curl -s :8007/metrics | grep ds4proxy_route_decisions_total`.
+`curl -s :8007/metrics | grep ramjet_route_decisions_total`.
 
 
 ### Using both TP4 pairs without invalidating the result
@@ -1297,7 +1297,7 @@ EXPERIMENTS.md — add yours there too):
    and `python3 -m unittest discover -s bench -p 'test_*.py'`; add/extend a
    router test for any routing change.
 2. **Build + deploy candidate** on node06 (section above) with a fresh
-   `<tag>`; confirm `ds4proxy_upstream_up` shows both engines and the boot
+   `<tag>`; confirm `ramjet_upstream_up` shows both engines and the boot
    log line has the config you meant to ship.
 3. **Correctness before capacity**: for an engine candidate, run
    `candidate_gate.py --through smoke` inside `node06_gpu_guard.py`; continue
@@ -1331,9 +1331,15 @@ EXPERIMENTS.md — add yours there too):
   traffic shares the box with real users — keep concurrency modest and
   prefer short `max_tokens`. Never stop the engines to test the LB.
 - Secrets (Caddy bearer, Helix API key) are fetched on-box, never committed.
-- Metric names keep the `ds4proxy_` prefix for dashboard continuity — do not
-  rename without updating `deploy/monitoring/rtx6000pro/` and re-running its
-  sync into the infra repo.
+- Metric names use the `ramjet_` prefix. They carried `ds4proxy_` until
+  2026-08-18, two renames after the name stopped being accurate; the prefix was
+  held back for dashboard continuity and then moved deliberately. Prometheus
+  has no history under the new names before that date, so a panel querying a
+  window that spans the switch shows a gap rather than a join. Renaming again
+  means updating `src/metrics.rs`, `deploy/monitoring/rtx6000pro/`, and every
+  bench script that greps a metric, then re-running the dashboard sync into
+  infra. `bench/test_monitoring_dashboards.py` fails if the dashboard queries a
+  metric the code does not export, so it catches a half-finished rename.
 - The serving dashboard is canonical in `deploy/monitoring/rtx6000pro/`
   (`Ramjet rtx6000pro`, uid `minidynamo-rtx6000pro`); infra's
   `clusters/bunker/monitoring/grafana-dashboards.yaml` is a mirror. Edit the

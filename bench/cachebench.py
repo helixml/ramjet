@@ -26,33 +26,33 @@ from engine_metrics import metric_value
 
 
 LB_COUNTERS = {
-    "prompt_tokens": ("ds4proxy_prompt_tokens_total", None),
-    "cached_prompt_tokens": ("ds4proxy_cached_prompt_tokens_total", None),
-    "cache_requests": ("ds4proxy_cache_requests_total", None),
-    "cache_ttft_samples": ("ds4proxy_cache_ttft_seconds_count", None),
+    "prompt_tokens": ("ramjet_prompt_tokens_total", None),
+    "cached_prompt_tokens": ("ramjet_cached_prompt_tokens_total", None),
+    "cache_requests": ("ramjet_cache_requests_total", None),
+    "cache_ttft_samples": ("ramjet_cache_ttft_seconds_count", None),
     "live_stored_blocks": (
-        "ds4proxy_kv_event_blocks_total",
+        "ramjet_kv_event_blocks_total",
         {"source": "live", "action": "stored"},
     ),
     "live_removed_blocks": (
-        "ds4proxy_kv_event_blocks_total",
+        "ramjet_kv_event_blocks_total",
         {"source": "live", "action": "removed"},
     ),
-    "live_clear_events": ("ds4proxy_kv_event_clears_total", {"source": "live"}),
+    "live_clear_events": ("ramjet_kv_event_clears_total", {"source": "live"}),
     "shadow_exact_agree": (
-        "ds4proxy_exact_route_placement_total",
+        "ramjet_exact_route_placement_total",
         {"mode": "shadow", "endpoint": "chat", "outcome": "kept_agree"},
     ),
     "shadow_cold_all_zero": (
-        "ds4proxy_exact_route_placement_total",
+        "ramjet_exact_route_placement_total",
         {"mode": "shadow", "endpoint": "chat", "outcome": "kept_all_zero"},
     ),
     "shadow_cold_would_balance": (
-        "ds4proxy_exact_route_placement_total",
+        "ramjet_exact_route_placement_total",
         {"mode": "shadow", "endpoint": "chat", "outcome": "would_balance"},
     ),
     "shadow_cold_delta_gate": (
-        "ds4proxy_exact_route_placement_total",
+        "ramjet_exact_route_placement_total",
         {
             "mode": "shadow",
             "endpoint": "chat",
@@ -60,7 +60,7 @@ LB_COUNTERS = {
         },
     ),
     "shadow_cold_load_gate": (
-        "ds4proxy_exact_route_placement_total",
+        "ramjet_exact_route_placement_total",
         {
             "mode": "shadow",
             "endpoint": "chat",
@@ -68,23 +68,23 @@ LB_COUNTERS = {
         },
     ),
     "projected_cold_kept_selected": (
-        "ds4proxy_exact_route_projected_balance_total",
+        "ramjet_exact_route_projected_balance_total",
         {"endpoint": "chat", "outcome": "kept_selected"},
     ),
     "projected_cold_would_balance": (
-        "ds4proxy_exact_route_projected_balance_total",
+        "ramjet_exact_route_projected_balance_total",
         {"endpoint": "chat", "outcome": "would_balance"},
     ),
     "projected_cold_delta_gate": (
-        "ds4proxy_exact_route_projected_balance_total",
+        "ramjet_exact_route_projected_balance_total",
         {"endpoint": "chat", "outcome": "kept_delta_gate"},
     ),
     "projected_cold_load_gate": (
-        "ds4proxy_exact_route_projected_balance_total",
+        "ramjet_exact_route_projected_balance_total",
         {"endpoint": "chat", "outcome": "kept_load_gate"},
     ),
     "projected_cold_fallback": (
-        "ds4proxy_exact_route_projected_balance_total",
+        "ramjet_exact_route_projected_balance_total",
         {"endpoint": "chat", "outcome": "fallback"},
     ),
 }

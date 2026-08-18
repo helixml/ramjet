@@ -843,10 +843,10 @@ pub struct TokenCounters {
 #[must_use]
 pub fn token_counters(map: &MetricMap) -> TokenCounters {
     TokenCounters {
-        prompt: metric_sum(map, "ds4proxy_prompt_tokens_total"),
-        completion: metric_sum(map, "ds4proxy_completion_tokens_total"),
-        cached: metric_sum(map, "ds4proxy_cached_prompt_tokens_total"),
-        requests: metric_sum(map, "ds4proxy_requests_total"),
+        prompt: metric_sum(map, "ramjet_prompt_tokens_total"),
+        completion: metric_sum(map, "ramjet_completion_tokens_total"),
+        cached: metric_sum(map, "ramjet_cached_prompt_tokens_total"),
+        requests: metric_sum(map, "ramjet_requests_total"),
     }
 }
 
@@ -1162,20 +1162,20 @@ pub fn build_serving_sample(
     rates: &mut RateTracker,
     histograms: &mut HistogramWindows,
 ) -> ServingSample {
-    let requests_per_second = metric_sum(map, "ds4proxy_requests_total")
+    let requests_per_second = metric_sum(map, "ramjet_requests_total")
         .and_then(|value| rates.rate("self.requests", t_ms, value));
-    let prompt_tps = metric_sum(map, "ds4proxy_prompt_tokens_total")
+    let prompt_tps = metric_sum(map, "ramjet_prompt_tokens_total")
         .and_then(|value| rates.rate("self.prompt_tokens", t_ms, value));
     // Engines that never emit `prompt_tokens_details.cached_tokens` leave
     // every cache outcome "unknown". Token-weighted hit data does not exist
     // then, and a hard 0 would misreport absence as a cold cache.
-    let cache_reporting = metric_by_label(map, "ds4proxy_cache_requests_total", "outcome")
+    let cache_reporting = metric_by_label(map, "ramjet_cache_requests_total", "outcome")
         .iter()
         .any(|(outcome, count)| outcome != "unknown" && *count > 0.0);
-    let cached_tps = metric_sum(map, "ds4proxy_cached_prompt_tokens_total")
+    let cached_tps = metric_sum(map, "ramjet_cached_prompt_tokens_total")
         .and_then(|value| rates.rate("self.cached_tokens", t_ms, value))
         .filter(|_| cache_reporting);
-    let gen_tps = metric_sum(map, "ds4proxy_completion_tokens_total")
+    let gen_tps = metric_sum(map, "ramjet_completion_tokens_total")
         .and_then(|value| rates.rate("self.completion_tokens", t_ms, value));
     let cache_hit_pct = match (prompt_tps, cached_tps) {
         (Some(prompt), Some(cached)) if prompt > 0.0 => {
@@ -1183,7 +1183,7 @@ pub fn build_serving_sample(
         }
         _ => None,
     };
-    let ttft_buckets = histogram_buckets(map, "ds4proxy_ttft_seconds");
+    let ttft_buckets = histogram_buckets(map, "ramjet_ttft_seconds");
     let (ttft_p50_ms, ttft_p95_ms) = if ttft_buckets.is_empty() {
         (None, None)
     } else {
@@ -1195,7 +1195,7 @@ pub fn build_serving_sample(
             .map(|seconds| seconds * 1_000.0);
         (p50, p95)
     };
-    let tpot_buckets = histogram_buckets(map, "ds4proxy_time_per_output_token_seconds");
+    let tpot_buckets = histogram_buckets(map, "ramjet_time_per_output_token_seconds");
     let tpot_p95_ms = if tpot_buckets.is_empty() {
         None
     } else {
@@ -1203,9 +1203,9 @@ pub fn build_serving_sample(
             .observe_quantile("self.tpot.p95", t_ms, tpot_buckets, 0.95)
             .map(|seconds| seconds * 1_000.0)
     };
-    let up_by_upstream = metric_by_label(map, "ds4proxy_upstream_up", "upstream");
-    let inflight_by_upstream = metric_by_label(map, "ds4proxy_upstream_inflight", "upstream");
-    let requests_by_upstream = metric_by_label(map, "ds4proxy_upstream_requests_total", "upstream");
+    let up_by_upstream = metric_by_label(map, "ramjet_upstream_up", "upstream");
+    let inflight_by_upstream = metric_by_label(map, "ramjet_upstream_inflight", "upstream");
+    let requests_by_upstream = metric_by_label(map, "ramjet_upstream_requests_total", "upstream");
     let upstreams = up_by_upstream
         .iter()
         .map(|(name, up)| UpstreamSample {
@@ -1224,7 +1224,7 @@ pub fn build_serving_sample(
         })
         .collect();
     ServingSample {
-        inflight: metric_sum(map, "ds4proxy_requests_inflight"),
+        inflight: metric_sum(map, "ramjet_requests_inflight"),
         requests_per_second,
         prompt_tps,
         gen_tps,
@@ -2151,8 +2151,8 @@ mod tests {
             "# TYPE vllm:num_requests_running gauge\n",
             "vllm:num_requests_running{model_name=\"deepseek\"} 7\n",
             "vllm:generation_tokens_total{model_name=\"deepseek\"} 1234.5\n",
-            "ds4proxy_ttft_seconds_bucket{endpoint=\"chat\",le=\"0.5\"} 3\n",
-            "ds4proxy_ttft_seconds_bucket{endpoint=\"chat\",le=\"+Inf\"} 4\n",
+            "ramjet_ttft_seconds_bucket{endpoint=\"chat\",le=\"0.5\"} 3\n",
+            "ramjet_ttft_seconds_bucket{endpoint=\"chat\",le=\"+Inf\"} 4\n",
             "bad line without value\n",
             "vllm:num_requests_waiting 2\n",
         );
@@ -2163,7 +2163,7 @@ mod tests {
             metric_sum(&map, "vllm:generation_tokens_total"),
             Some(1234.5)
         );
-        let buckets = histogram_buckets(&map, "ds4proxy_ttft_seconds");
+        let buckets = histogram_buckets(&map, "ramjet_ttft_seconds");
         assert_eq!(buckets.len(), 2);
         assert_eq!(buckets[0], (0.5, 3.0));
         assert!(buckets[1].0.is_infinite());
@@ -2519,11 +2519,11 @@ mod tests {
     #[test]
     fn token_counters_read_the_proxy_registry_shapes() {
         let map = parse_prometheus_text(concat!(
-            "ds4proxy_prompt_tokens_total 1234\n",
-            "ds4proxy_completion_tokens_total 56\n",
-            "ds4proxy_cached_prompt_tokens_total 789\n",
-            "ds4proxy_requests_total{route=\"chat\"} 3\n",
-            "ds4proxy_requests_total{route=\"completions\"} 4\n",
+            "ramjet_prompt_tokens_total 1234\n",
+            "ramjet_completion_tokens_total 56\n",
+            "ramjet_cached_prompt_tokens_total 789\n",
+            "ramjet_requests_total{route=\"chat\"} 3\n",
+            "ramjet_requests_total{route=\"completions\"} 4\n",
         ));
         let counters = token_counters(&map);
         assert_eq!(counters.prompt, Some(1234.0));
@@ -2568,14 +2568,14 @@ mod tests {
     #[test]
     fn build_serving_sample_reads_registry_shapes() {
         let body = concat!(
-            "ds4proxy_requests_inflight 5\n",
-            "ds4proxy_requests_total{code=\"200\"} 100\n",
-            "ds4proxy_prompt_tokens_total{endpoint=\"chat\"} 1000\n",
-            "ds4proxy_cached_prompt_tokens_total{endpoint=\"chat\"} 400\n",
-            "ds4proxy_completion_tokens_total{endpoint=\"chat\"} 300\n",
-            "ds4proxy_upstream_up{upstream=\"http://a:8000\"} 1\n",
-            "ds4proxy_upstream_up{upstream=\"http://b:8000\"} 0\n",
-            "ds4proxy_upstream_inflight{upstream=\"http://a:8000\"} 4\n",
+            "ramjet_requests_inflight 5\n",
+            "ramjet_requests_total{code=\"200\"} 100\n",
+            "ramjet_prompt_tokens_total{endpoint=\"chat\"} 1000\n",
+            "ramjet_cached_prompt_tokens_total{endpoint=\"chat\"} 400\n",
+            "ramjet_completion_tokens_total{endpoint=\"chat\"} 300\n",
+            "ramjet_upstream_up{upstream=\"http://a:8000\"} 1\n",
+            "ramjet_upstream_up{upstream=\"http://b:8000\"} 0\n",
+            "ramjet_upstream_inflight{upstream=\"http://a:8000\"} 4\n",
         );
         let map = parse_prometheus_text(body);
         let mut rates = RateTracker::default();
@@ -2587,12 +2587,12 @@ mod tests {
         assert_eq!(first.upstreams[0].inflight, Some(4.0));
         assert_eq!(first.upstreams[1].up, Some(0.0));
         let body = concat!(
-            "ds4proxy_requests_inflight 5\n",
-            "ds4proxy_requests_total{code=\"200\"} 110\n",
-            "ds4proxy_prompt_tokens_total{endpoint=\"chat\"} 2000\n",
-            "ds4proxy_cached_prompt_tokens_total{endpoint=\"chat\"} 900\n",
-            "ds4proxy_completion_tokens_total{endpoint=\"chat\"} 800\n",
-            "ds4proxy_cache_requests_total{endpoint=\"chat\",outcome=\"partial\"} 5\n",
+            "ramjet_requests_inflight 5\n",
+            "ramjet_requests_total{code=\"200\"} 110\n",
+            "ramjet_prompt_tokens_total{endpoint=\"chat\"} 2000\n",
+            "ramjet_cached_prompt_tokens_total{endpoint=\"chat\"} 900\n",
+            "ramjet_completion_tokens_total{endpoint=\"chat\"} 800\n",
+            "ramjet_cache_requests_total{endpoint=\"chat\",outcome=\"partial\"} 5\n",
         );
         let map = parse_prometheus_text(body);
         let second = build_serving_sample(&map, 6_000, &mut rates, &mut histograms);
@@ -2610,9 +2610,9 @@ mod tests {
         let body_at = |prompt: u64, unknown: u64| {
             format!(
                 concat!(
-                    "ds4proxy_prompt_tokens_total{{endpoint=\"chat\"}} {}\n",
-                    "ds4proxy_cached_prompt_tokens_total{{endpoint=\"chat\"}} 0\n",
-                    "ds4proxy_cache_requests_total{{endpoint=\"chat\",outcome=\"unknown\"}} {}\n",
+                    "ramjet_prompt_tokens_total{{endpoint=\"chat\"}} {}\n",
+                    "ramjet_cached_prompt_tokens_total{{endpoint=\"chat\"}} 0\n",
+                    "ramjet_cache_requests_total{{endpoint=\"chat\",outcome=\"unknown\"}} {}\n",
                 ),
                 prompt, unknown
             )
@@ -2698,9 +2698,9 @@ mod tests {
         let body_at = |prompt: u64, unknown: u64| {
             format!(
                 concat!(
-                    "ds4proxy_prompt_tokens_total{{endpoint=\"chat\"}} {}\n",
-                    "ds4proxy_cached_prompt_tokens_total{{endpoint=\"chat\"}} 0\n",
-                    "ds4proxy_cache_requests_total{{endpoint=\"chat\",outcome=\"unknown\"}} {}\n",
+                    "ramjet_prompt_tokens_total{{endpoint=\"chat\"}} {}\n",
+                    "ramjet_cached_prompt_tokens_total{{endpoint=\"chat\"}} 0\n",
+                    "ramjet_cache_requests_total{{endpoint=\"chat\",outcome=\"unknown\"}} {}\n",
                 ),
                 prompt, unknown
             )
@@ -2733,9 +2733,9 @@ mod tests {
         let body_at = |prompt: u64, cached: u64| {
             format!(
                 concat!(
-                    "ds4proxy_prompt_tokens_total{{endpoint=\"chat\"}} {}\n",
-                    "ds4proxy_cached_prompt_tokens_total{{endpoint=\"chat\"}} {}\n",
-                    "ds4proxy_cache_requests_total{{endpoint=\"chat\",outcome=\"full\"}} 10\n",
+                    "ramjet_prompt_tokens_total{{endpoint=\"chat\"}} {}\n",
+                    "ramjet_cached_prompt_tokens_total{{endpoint=\"chat\"}} {}\n",
+                    "ramjet_cache_requests_total{{endpoint=\"chat\",outcome=\"full\"}} 10\n",
                 ),
                 prompt, cached
             )
