@@ -603,17 +603,47 @@ an emergency fallback only:
 # ship source, build the image tag on node06
 tar czf /tmp/md.tgz --exclude=.git --exclude=target . && scp /tmp/md.tgz node06:/tmp/
 ssh node06 'rm -rf /tmp/md && mkdir /tmp/md && tar xzf /tmp/md.tgz -C /tmp/md \
-  && cd /tmp/md && docker build -t ghcr.io/helixml/ds4-loadbalancer:<tag> .'
+  && cd /tmp/md && docker build -t ghcr.io/helixml/ramjet:<tag> .'
 
-# swap the LB (engines untouched; ~4s, LB-only)
-ssh node06 'cd /home/luke/inference/dspark_0731 \
+# swap the LB (engines untouched; ~4s, LB-only). COMPOSE_FILES below is the
+# complete -f list from the running container; see the warning that follows.
+ssh node06 'cd /home/luke/inference/qwen38_27b \
   && flock --nonblock /run/lock/ramjet-node06-deployment.lock \
-    env LB_IMAGE=ghcr.io/helixml/ds4-loadbalancer:<tag> \
-    docker compose up -d ds4-loadbalancer'
+    env LB_IMAGE=ghcr.io/helixml/ramjet:<tag> \
+    docker compose $COMPOSE_FILES up -d --no-deps ds4-loadbalancer'
 
 # verify
 ssh node06 'docker logs ds4-loadbalancer --tail 1; curl -s :8007/metrics | grep ramjet_upstream_up'
 ```
+
+**Never recreate with a partial `-f` list.** A Compose service is defined by
+every file it was created from, and `docker compose up` with fewer files
+silently renders a *different* service rather than failing. On 2026-08-18 an
+LB recreate passed only the base file while the container had been created
+from three; the base alone renders a two-replica topology naming hosts that do
+not exist on this box, and Caddy returned 16 502s over 76 seconds. The
+automatic rollback inherited the same defect — it restored the correct image
+under the same wrong render — so the outage outlived the rollback.
+
+Read the list from the container and use exactly it:
+
+```bash
+ssh node06 'docker inspect ds4-loadbalancer \
+  --format "{{index .Config.Labels \"com.docker.compose.project.config_files\"}}"'
+# e.g. .../docker-compose.yaml,.../topology.8gpu-tp2.yaml,.../machineview.override.yaml
+```
+
+Then diff the rendered baseline against the rendered candidate before mutating.
+The only difference should be the image line:
+
+```bash
+diff <(LB_IMAGE=<current> docker compose $COMPOSE_FILES config) \
+     <(LB_IMAGE=<candidate> docker compose $COMPOSE_FILES config)
+```
+
+Reading the label and then not building the command from it is not a control.
+This check is what turns a wrong file list into a failed diff instead of an
+outage.
 
 Rollback is the same command with the previously accepted immutable
 `LB_IMAGE=repository:tag@sha256:digest`, recorded in the experiment/deployment
