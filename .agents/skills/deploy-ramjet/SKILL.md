@@ -67,12 +67,36 @@ not a default feature.
 
 ## Validate before mutation
 
-Run the narrow, read-only gates first:
+First establish the **complete** file list. A Compose service is defined by
+every file it was created from, and `docker compose up` with fewer files
+silently renders a different service instead of failing. Read the list from the
+running container rather than assuming it is one file:
 
 ```bash
-docker compose -f COMPOSE_FILE config --quiet
-docker compose -f COMPOSE_FILE config --images
-docker compose -f COMPOSE_FILE ps
+docker inspect CONTAINER \
+  --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
+```
+
+Use that entire list as `COMPOSE_FILES` (`-f a.yaml -f b.yaml ...`) in every
+command below, including rollback. A rollback rendered from a partial list
+restores the old image under a different configuration and does not undo the
+change.
+
+Then run the narrow, read-only gates:
+
+```bash
+docker compose $COMPOSE_FILES config --quiet
+docker compose $COMPOSE_FILES config --images
+docker compose $COMPOSE_FILES ps
+```
+
+Diff the rendered baseline against the rendered candidate before mutating. For
+an image-only change the only difference should be the image line; anything
+else means the file list or an override is wrong:
+
+```bash
+diff <(LB_IMAGE=<current> docker compose $COMPOSE_FILES config) \
+     <(LB_IMAGE=<candidate> docker compose $COMPOSE_FILES config)
 ```
 
 Pull images before the maintenance window. When adding or changing a vLLM flag,
@@ -90,7 +114,7 @@ complete inspect/mutate/verify interval.
 After startup, verify:
 
 ```bash
-docker compose -f COMPOSE_FILE ps
+docker compose $COMPOSE_FILES ps
 curl --fail http://127.0.0.1:API_PORT/health
 curl --fail http://127.0.0.1:METRICS_PORT/metrics
 nvidia-smi
