@@ -4,8 +4,12 @@
 <h3>Warm intake. Balanced burn.</h3>
 <p>A compact Rust router that puts each OpenAI-compatible inference request on<br>the healthy GPU replica where it can do the least repeated work.</p>
 <p>
-  <a href="https://github.com/helixml/ramjet/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/helixml/ramjet?style=flat-square&amp;color=635bff"></a>
-  <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/github/license/helixml/ramjet?style=flat-square&amp;color=18a36b"></a>
+  <!-- The release and license badges were API-backed and rendered "repo not
+       found" because this repository is private: shields.io queries the GitHub
+       API anonymously. The release and LICENSE themselves are fine. If the
+       repository is ever made public, they can be restored as:
+         https://img.shields.io/github/v/release/helixml/ramjet
+         https://img.shields.io/github/license/helixml/ramjet -->
   <a href="rust-toolchain.toml"><img alt="Rust 1.95 or newer" src="https://img.shields.io/badge/Rust-1.95%2B-f06a35?style=flat-square"></a>
 </p>
 
@@ -102,8 +106,12 @@ The example pins a released image by immutable digest; see
 [`CHANGELOG.md`](CHANGELOG.md) for what each version contains.
 Safe defaults enable locality/load routing and keep tokenizer, raw KV-event,
 exact-placement, and snapshot paths off. See the complete
-[configuration table](docs/configuration.md), or start from the validated
-[two-replica Compose stack](deploy/dspark_0731/docker-compose.yaml).
+[configuration table](docs/configuration.md), or start from the
+[four-replica Compose stack](deploy/qwen38_27b/docker-compose.yaml) currently
+running in production, which generates its topology for 1 to 8 GPUs. The
+[two-replica DeepSeek-V4-Flash stack](deploy/dspark_0731/docker-compose.yaml)
+is the previous deployment, kept as a reviewed alternative and rollback
+record.
 
 > **Backend compatibility:** `model-server-1` and `model-server-2` are example
 > Docker DNS names—replace them with your backends. The default router is not
@@ -189,4 +197,8 @@ authoritative response usage still enforces the token-density gate. See the
 </details>
 
 See [AGENTS.md](AGENTS.md) for the GPU-free inner loop, full release gate, and
-node06 benchmark contract. Apache-2.0 licensed.
+node06 benchmark contract.
+
+## License
+
+[Apache-2.0](LICENSE).
