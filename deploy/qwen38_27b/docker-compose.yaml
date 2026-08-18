@@ -35,10 +35,12 @@ services:
     # Container name is retained so existing bench scripts, the deployment
     # lock, and the Grafana ds4proxy_ dashboards keep working.
     # Override only with another immutable tag+digest pair. This pin is the
-    # build qualified on node06 on 2026-08-17; its OCI revision is 261bef8.
+    # v0.2.0 release qualified on node06 on 2026-08-18; its OCI revision is
+    # 68fb5dc. Rollback target is rust-29d9e92@sha256:e303ed167f2723cec0e2d
+    # 6f57b027cebfc8efd5f78ecc4b6831d9c31994978a8.
     # It must stay a post-rename image: the RJ_ settings below are ignored by
     # anything older, which would come up healthy and differently tuned.
-    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:rust-261bef8@sha256:8bb4f9a1d8158e6d4eae1273e2d823df77d6836be12c62ef4cf80615660fb6a4}
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.2.0@sha256:9a7e2a4bc131911beec428393f0a6ccab8fb7f634217e6baffa574483c762dd8}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:

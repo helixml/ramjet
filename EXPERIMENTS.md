@@ -1,5 +1,103 @@
 # node06 experiment journal
 
+## 2026-08-18 — v0.2.0 rollout, and a 76-second outage from an incomplete Compose render
+
+Deployed `v0.2.0` (`rust-68fb5dc@sha256:9a7e2a4b…`) LB-only. The release fixes
+the machine view's cache-hit blind spot: the qwen3.8-27b engines never populate
+`prompt_tokens_details.cached_tokens`, so `ds4proxy_cached_prompt_tokens_total`
+sat at zero, all 419 chat responses classified `outcome="unknown"`, and
+`serving.cache_hit_pct` was permanently absent while the engines themselves
+reported ~90% through `vllm:prefix_cache_hits_total`.
+
+### The outage — read this before the next deploy
+
+The first recreate ran `docker compose up -d --no-deps ds4-loadbalancer` with
+the **base Compose file only**. The running container had been created from
+three:
+
+```
+docker-compose.yaml,topology.8gpu-tp2.yaml,machineview.override.yaml
+```
+
+The base file alone renders a two-replica topology pointing at `qwen38-a` and
+`qwen38-b`, which do not exist on this box. The load balancer came up healthy
+as a process, reported `total_replicas: 2` with zero healthy, and Caddy
+returned **16 × 502 between 11:22:22Z and 11:23:38Z**. No 5xx occurred anywhere
+else in the surrounding half hour.
+
+The automatic rollback fired correctly on the failed upstream check, but it
+inherited the same defect: it restored the baseline *image* under the same
+base-only render, so the wrong topology survived the rollback. Service was
+restored only by an explicit recreate naming all three files.
+
+Two lessons, both already implied by the guidance and neither actually applied:
+
+- The `com.docker.compose.project.config_files` label was read during
+  preflight and then not used to build the command. Reading it is not the
+  control; **rendering from it is**. Every recreate must pass the exact file
+  list that label names.
+- A rollback that does not reproduce the baseline render is not a rollback. The
+  second attempt preflighted `docker compose config` for baseline and candidate
+  and diffed them: **the only difference was the image line**. That diff is
+  cheap and would have caught this before the mutation, not after.
+
+### The successful roll
+
+With the correct three-file render: recreate 2.9s, engines untouched (image,
+start time, and restart count identical before and after), 4/4 upstreams up
+within 2s, `/health` `status: ok` with `healthy_replicas: 4`, boot line
+reporting `version: 0.2.0`, all four KV shadow consumers connected, and
+machine-view state restored (17,268 samples, 23 token-hours).
+
+### The fix, verified live
+
+Before the roll `cache_hit_pct` was `null` on every sample. After it, an active
+interval published **98.46%** with `cache_hit_source: engine_prefix_cache` and
+27,834 cached tokens/s.
+
+Cross-checked against the engines directly, sampling summed
+`vllm:prefix_cache_{hits,queries}_total` at 10s intervals:
+
+| interval | hits | queries | ratio |
+|---|---|---|---|
+| active | 27,200 | 28,451 | 95.6% |
+| active | 27,200 | 28,820 | 94.4% |
+| active | 28,000 | 29,371 | 95.3% |
+| active | 60,800 | 63,648 | 95.5% |
+| active | 31,200 | 32,513 | 96.0% |
+| idle | 0 | 0 | absent |
+
+The idle rows matter as much as the active ones: they are the case where a
+naive implementation publishes `0%` and paints a stone-cold cache on a healthy
+fleet. The published API returned `cache_hit_pct: null` for exactly those
+intervals.
+
+Note the ratio is summed-then-divided across engines, not a mean of per-engine
+percentages. On this deployment one engine carried 373 of 444 requests at 94%
+while a nearly idle peer sat at 44.9%; averaging those as equals is wrong, and
+the previous dashboard fallback did precisely that.
+
+### Not qualified
+
+No request-generating benchmark ran. node06 carries live production traffic
+under the cooling moratorium, so acceptance rests on observed production
+traffic — 14 streaming chat completions, zero 5xx, `route_fail_open` 0 — and
+not on a synthetic matrix. TTFT immediately after the roll is not comparable to
+the pre-roll baseline: the approximate prefix index is in-memory and rebuilds
+from empty on every LB restart, so early requests route without cache
+knowledge. That is inherent to a stateless restart, not a property of 0.2.0.
+
+Rollback target remains
+`rust-29d9e92@sha256:e303ed167f2723cec0e2d6f57b027cebfc8efd5f78ecc4b6831d9c31994978a8`.
+
+### Release cost note
+
+Bumping the crate version rotates `.docker/rust-deps-key`, because `Cargo.toml`
+is a keyed dependency input. Build #467 therefore paid a 255s cold dependency
+compile despite changing no dependency; the app publishers took 170s and 132s.
+The PR gate itself was 67s. If version-only rotation becomes a recurring
+annoyance, excluding `package.version` from the key is the change to consider.
+
 ## 2026-08-18 — `rust-29d9e92` rename rollout and the state-path migration
 
 The rename to ramjet finished in the repository, which moved two paths this
