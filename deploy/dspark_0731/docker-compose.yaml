@@ -30,7 +30,11 @@ services:
   # compat shims, /v1/models context-margin rewrite, Prometheus metrics
   # (:8007 -> Caddy :9105) and engine-native metrics passthrough.
   ds4-loadbalancer:
-    image: ${LB_IMAGE:-ghcr.io/helixml/mini-dynamo:rust-b0e0700@sha256:62d949e0e6b3880796fab6c12f148f24d3f76449cb8397da6e81fe6e57dd70a1}
+    # Replaces the retired ghcr.io/helixml/mini-dynamo:rust-b0e0700 pin. This
+    # stack is not currently deployed -- node06 serves the qwen38_27b stack --
+    # so v0.2.0 here is the current default, not a qualified rollout. Qualify
+    # before reviving this stack.
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.2.0@sha256:9a7e2a4bc131911beec428393f0a6ccab8fb7f634217e6baffa574483c762dd8}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:
