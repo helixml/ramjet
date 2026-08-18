@@ -35,7 +35,7 @@ production path remains the proxy plus your existing OpenAI-compatible engines.
 
 System overview to see how your node is doing:
 
-<img width="1471" height="1085" alt="image" src="https://github.com/user-attachments/assets/b13bd5aa-25b9-41eb-a9de-752c616c343b" />
+<img width="1441" height="1221" alt="image" src="https://github.com/user-attachments/assets/05deee62-4fcf-4220-ac77-bb318b2ce8ba" />
 
 And specific serving tab:
 
