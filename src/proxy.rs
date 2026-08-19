@@ -31,6 +31,7 @@ use crate::{
         MAX_PROMETHEUS_BYTES, Observation, ParseFailure, WindowOutcome, parse_prometheus,
     },
     dspark_guard_store::{DsparkGuardStore, DsparkGuardStorePolicy},
+    engine_park::{ParkAction, ParkState, plan as plan_parking},
     exact_route_inventory::ExactRouteInventory,
     exact_shadow::ExactRouteSnapshot,
     idle_drain::{IdleDrainDecision, IdleDrainPolicy, UpstreamDrainState, UpstreamObservation},
@@ -47,6 +48,15 @@ use crate::{
 };
 
 const MAX_REQUEST_BODY: usize = 64 << 20;
+/// Budget for one sleep, wake, or reconcile call.
+///
+/// A level-1 wake copies the whole model from host memory back onto the
+/// device, so this is sized for a transfer rather than for a control call. It
+/// is deliberately far longer than the readiness probe budget: a wake that is
+/// merely slow must not be recorded as a failure, because the recovery for an
+/// unknown state is another round trip against an engine that is already busy
+/// moving weights.
+const ENGINE_PARK_TIMEOUT_MS: u64 = 120_000;
 const MAX_PROBE_BODY: usize = 64 << 10;
 const MAX_CONCURRENT_UPSTREAM_PROBES: usize = 8;
 /// How recently a real request must have completed on an upstream for a failed
@@ -180,6 +190,13 @@ impl Inner {
 struct IdleDrainState {
     policy: Mutex<IdleDrainPolicy>,
     origin: Instant,
+    /// This balancer's belief about each replica's sleep state.
+    ///
+    /// Held separately from the policy because it survives policy decisions:
+    /// a replica the policy wants running is still parked until its wake call
+    /// returns, and routing must respect the engine's real state rather than
+    /// the intent.
+    park: Mutex<Vec<ParkState>>,
 }
 
 impl IdleDrainState {
@@ -875,6 +892,7 @@ impl Proxy {
                     0,
                 )),
                 origin,
+                park: Mutex::new(vec![ParkState::Awake; config.upstreams.len()]),
             }
         });
         let upstream_liveness = (0..config.upstreams.len())
@@ -1816,7 +1834,7 @@ impl Proxy {
         ));
         loop {
             interval.tick().await;
-            self.idle_drain_round();
+            self.idle_drain_round().await;
         }
     }
 
@@ -1831,7 +1849,7 @@ impl Proxy {
 
     /// One evaluation: sample every upstream, tick the policy, then apply the
     /// result to routing and telemetry.
-    fn idle_drain_round(&self) {
+    async fn idle_drain_round(&self) {
         let Some(state) = self.inner.idle_drain.as_ref() else {
             return;
         };
@@ -1848,6 +1866,205 @@ impl Proxy {
         let now_ms = state.now_ms();
         let decision = state.policy.lock().tick(now_ms, &observations);
         self.publish_idle_drain(&decision);
+        self.converge_engine_parking(&decision).await;
+    }
+
+    /// Converges each engine onto the policy's intent with vLLM sleep mode.
+    ///
+    /// Actuations run concurrently because a wake is a host-to-device copy of
+    /// the whole model and a sleep is not instant either; serialising them
+    /// would make a fleet-wide resume take the sum of its transfers. They are
+    /// still bounded: one action per upstream per round, and the plan itself
+    /// caps how many replicas may hold offloaded weights at once.
+    async fn converge_engine_parking(&self, decision: &IdleDrainDecision) {
+        let config = self.inner.config.engine_park;
+        // Observe advances the state machine and publishes intent, but must
+        // never mutate an engine: its whole purpose is to be consequence-free.
+        if !config.actuator.actuates() || !self.inner.config.idle_drain.mode.fences_routing() {
+            return;
+        }
+        let Some(state) = self.inner.idle_drain.as_ref() else {
+            return;
+        };
+        let actions = {
+            let park = state.park.lock();
+            plan_parking(&decision.upstreams, &park, &config)
+        };
+
+        // Publish the in-flight state before issuing anything. A sleep that is
+        // about to be sent must already fence its replica, because the engine
+        // may act on it before this process learns the call succeeded.
+        {
+            let mut park = state.park.lock();
+            for (upstream, action) in actions.iter().enumerate() {
+                match action {
+                    Some(ParkAction::Sleep) => park[upstream] = ParkState::Parking,
+                    Some(ParkAction::Wake) => park[upstream] = ParkState::Waking,
+                    Some(ParkAction::Reconcile) | None => {}
+                }
+            }
+        }
+        self.apply_park_fences(decision);
+        self.publish_park_state();
+
+        let pending = actions
+            .iter()
+            .enumerate()
+            .filter_map(|(upstream, action)| action.map(|action| (upstream, action)))
+            .map(|(upstream, action)| async move {
+                (upstream, action, self.actuate_park(upstream, action).await)
+            })
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return;
+        }
+        let results = futures::future::join_all(pending).await;
+
+        {
+            let mut park = state.park.lock();
+            for (upstream, action, outcome) in results {
+                park[upstream] = outcome;
+                let label = self.upstream_label(upstream);
+                self.inner
+                    .metrics
+                    .engine_park_actions
+                    .with_label_values(&[&label, action.label(), outcome.label()])
+                    .inc();
+                tracing::info!(
+                    upstream,
+                    action = action.label(),
+                    state = outcome.label(),
+                    level = self.inner.config.engine_park.level.label(),
+                    "engine park actuation"
+                );
+            }
+        }
+        self.apply_park_fences(decision);
+        self.publish_park_state();
+    }
+
+    /// Issues one actuation and reports the resulting believed state.
+    ///
+    /// A failure never propagates: the engine is still serving, and losing the
+    /// ability to park an idle replica is an optimisation regression, not a
+    /// serving one. The replica is left [`ParkState::Unknown`], which fences
+    /// it and schedules a reconciliation rather than guessing.
+    async fn actuate_park(&self, upstream: usize, action: ParkAction) -> ParkState {
+        let Some(base) = self.inner.config.upstreams.get(upstream) else {
+            return ParkState::Unknown;
+        };
+        let level = self.inner.config.engine_park.level.wire();
+        let (path, success) = match action {
+            ParkAction::Sleep => (format!("sleep?level={level}&mode=abort"), ParkState::Parked),
+            ParkAction::Wake => ("wake_up".to_owned(), ParkState::Awake),
+            ParkAction::Reconcile => ("is_sleeping".to_owned(), ParkState::Awake),
+        };
+        let Ok(url) = base.join(&path) else {
+            return ParkState::Unknown;
+        };
+        let started = Instant::now();
+        let mut request = match action {
+            ParkAction::Reconcile => self.inner.client.get(url),
+            ParkAction::Sleep | ParkAction::Wake => self.inner.client.post(url),
+        };
+        if let Some(token) = self.inner.config.upstream_token.as_deref() {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .timeout(Duration::from_millis(ENGINE_PARK_TIMEOUT_MS))
+            .send()
+            .await;
+        self.inner
+            .metrics
+            .engine_park_action_seconds
+            .with_label_values(&[action.label()])
+            .observe(started.elapsed().as_secs_f64());
+
+        let Ok(response) = response else {
+            return ParkState::Unknown;
+        };
+        if !response.status().is_success() {
+            return ParkState::Unknown;
+        }
+        if action != ParkAction::Reconcile {
+            return success;
+        }
+        // `/is_sleeping` is the only call that reports rather than commands,
+        // so it is the only one whose body decides the state. The body is a
+        // single boolean field; anything larger than the probe bound is not
+        // that response and is not worth buffering from the request path.
+        let Ok(bytes) = response.bytes().await else {
+            return ParkState::Unknown;
+        };
+        if bytes.len() > MAX_PROBE_BODY {
+            return ParkState::Unknown;
+        }
+        match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(body) => match body.get("is_sleeping").and_then(serde_json::Value::as_bool) {
+                Some(true) => ParkState::Parked,
+                Some(false) => ParkState::Awake,
+                None => ParkState::Unknown,
+            },
+            Err(_) => ParkState::Unknown,
+        }
+    }
+
+    /// Whether this replica's believed sleep state forbids routing to it,
+    /// independently of what the drain policy currently intends.
+    fn park_fenced(&self, upstream: usize) -> bool {
+        if !self.inner.config.engine_park.actuator.actuates()
+            || !self.inner.config.idle_drain.mode.fences_routing()
+        {
+            return false;
+        }
+        self.inner.idle_drain.as_ref().is_some_and(|state| {
+            state
+                .park
+                .lock()
+                .get(upstream)
+                .copied()
+                .is_some_and(ParkState::must_fence)
+        })
+    }
+
+    /// Re-applies routing authority after the sleep state has moved.
+    ///
+    /// This recomputes the same conjunction as [`Self::publish_idle_drain`]
+    /// rather than only adding fences. A wake that has just returned must be
+    /// able to *clear* the fence it imposed, and the policy's own intent was
+    /// published earlier in this round, so nothing else will notice that the
+    /// replica became routable again.
+    ///
+    /// It is deliberately a second, later authority than the policy's fence.
+    /// The policy unfences a replica the instant it wants it running, which is
+    /// correct for its purpose but would dispatch traffic into an engine whose
+    /// weights are still in host memory.
+    fn apply_park_fences(&self, decision: &IdleDrainDecision) {
+        if !self.inner.config.engine_park.actuator.actuates()
+            || !self.inner.config.idle_drain.mode.fences_routing()
+        {
+            return;
+        }
+        for (upstream, intent) in decision.upstreams.iter().enumerate() {
+            self.inner
+                .router
+                .set_drained(upstream, intent.fenced || self.park_fenced(upstream));
+        }
+    }
+
+    fn publish_park_state(&self) {
+        let Some(state) = self.inner.idle_drain.as_ref() else {
+            return;
+        };
+        let park = state.park.lock();
+        for (upstream, park_state) in park.iter().enumerate() {
+            let label = self.upstream_label(upstream);
+            self.inner
+                .metrics
+                .engine_park_state
+                .with_label_values(&[&label])
+                .set(park_state.code());
+        }
     }
 
     fn publish_idle_drain(&self, decision: &IdleDrainDecision) {
@@ -1858,7 +2075,9 @@ impl Proxy {
             // Routing authority is applied before telemetry so a scrape can
             // never advertise a replica as parked while it is still routable.
             if self.inner.config.idle_drain.mode.fences_routing() {
-                self.inner.router.set_drained(upstream, intent.fenced);
+                self.inner
+                    .router
+                    .set_drained(upstream, intent.fenced || self.park_fenced(upstream));
             }
             metrics
                 .idle_drain_state
@@ -2672,6 +2891,207 @@ mod tests {
             .collect::<Vec<_>>();
         let decision = state.policy.lock().tick(ms, &observations);
         proxy.publish_idle_drain(&decision);
+    }
+
+    /// A mock engine exposing vLLM's dev sleep API, recording what it was
+    /// asked to do so a test can assert the exact wire contract.
+    #[derive(Clone, Default)]
+    struct SleepyEngine {
+        sleeping: Arc<AtomicBool>,
+        sleep_calls: Arc<AtomicU64>,
+        wake_calls: Arc<AtomicU64>,
+        levels: Arc<Mutex<Vec<String>>>,
+        fail: Arc<AtomicBool>,
+    }
+
+    impl SleepyEngine {
+        fn router(&self) -> AxumRouter {
+            let sleep_state = self.clone();
+            let wake_state = self.clone();
+            let query_state = self.clone();
+            AxumRouter::new()
+                .route(
+                    "/sleep",
+                    axum::routing::post(
+                        move |axum::extract::RawQuery(query): axum::extract::RawQuery| {
+                            let state = sleep_state.clone();
+                            async move {
+                                if state.fail.load(Ordering::Acquire) {
+                                    return StatusCode::INTERNAL_SERVER_ERROR;
+                                }
+                                state.sleep_calls.fetch_add(1, Ordering::AcqRel);
+                                state.levels.lock().push(query.unwrap_or_default());
+                                state.sleeping.store(true, Ordering::Release);
+                                StatusCode::OK
+                            }
+                        },
+                    ),
+                )
+                .route(
+                    "/wake_up",
+                    axum::routing::post(move || {
+                        let state = wake_state.clone();
+                        async move {
+                            state.wake_calls.fetch_add(1, Ordering::AcqRel);
+                            state.sleeping.store(false, Ordering::Release);
+                            StatusCode::OK
+                        }
+                    }),
+                )
+                .route(
+                    "/is_sleeping",
+                    axum::routing::get(move || {
+                        let state = query_state.clone();
+                        async move {
+                            axum::Json(serde_json::json!({
+                                "is_sleeping": state.sleeping.load(Ordering::Acquire),
+                            }))
+                        }
+                    }),
+                )
+        }
+    }
+
+    /// Builds an idle-drain proxy whose upstreams are real mock engines.
+    async fn sleepy_fleet(mode: &str) -> (Proxy, SleepyEngine, SleepyEngine) {
+        let first = SleepyEngine::default();
+        let second = SleepyEngine::default();
+        let (a, engine_a) = start_upstream(first.router()).await;
+        let (b, engine_b) = start_upstream(second.router()).await;
+        // The mock engines must outlive the test body: dropping the join
+        // handles would abort them mid-actuation.
+        std::mem::forget((engine_a, engine_b));
+        (idle_drain_proxy(&[a, b], mode), first, second)
+    }
+
+    /// Drives the policy clock and then converges parking, which is what the
+    /// production loop does each round.
+    async fn advance_and_converge(proxy: &Proxy, ms: u64) {
+        let state = proxy.inner.idle_drain.as_ref().expect("policy enabled");
+        let observations = (0..proxy.inner.config.upstreams.len())
+            .map(|upstream| {
+                let (inflight, _, _, healthy) = proxy
+                    .inner
+                    .router
+                    .state(upstream)
+                    .unwrap_or((0, 0, 0, false));
+                UpstreamObservation { healthy, inflight }
+            })
+            .collect::<Vec<_>>();
+        let decision = state.policy.lock().tick(ms, &observations);
+        proxy.publish_idle_drain(&decision);
+        proxy.converge_engine_parking(&decision).await;
+    }
+
+    fn park_states(proxy: &Proxy) -> Vec<ParkState> {
+        proxy
+            .inner
+            .idle_drain
+            .as_ref()
+            .expect("policy enabled")
+            .park
+            .lock()
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn an_idle_replica_is_slept_with_the_documented_vllm_query_string() {
+        let (proxy, first, second) = sleepy_fleet("drain").await;
+        // Past the idle window, then past the drain grace.
+        advance_and_converge(&proxy, 61_000).await;
+        advance_and_converge(&proxy, 63_000).await;
+
+        let slept =
+            first.sleep_calls.load(Ordering::Acquire) + second.sleep_calls.load(Ordering::Acquire);
+        assert_eq!(
+            slept, 1,
+            "exactly one replica parks; the warm floor keeps one"
+        );
+        let levels = first
+            .levels
+            .lock()
+            .iter()
+            .chain(second.levels.lock().iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(levels, vec!["level=1&mode=abort".to_owned()]);
+        assert!(park_states(&proxy).contains(&ParkState::Parked));
+    }
+
+    #[tokio::test]
+    async fn a_parked_replica_stays_fenced_from_routing_until_its_wake_returns() {
+        let (proxy, _first, _second) = sleepy_fleet("drain").await;
+        advance_and_converge(&proxy, 61_000).await;
+        advance_and_converge(&proxy, 63_000).await;
+        let parked = park_states(&proxy)
+            .iter()
+            .position(|state| *state == ParkState::Parked)
+            .expect("one replica parked");
+        assert!(proxy.inner.router.drained(parked));
+
+        // Traffic arrives. The policy wants the replica running immediately,
+        // but its weights are still in host memory, so routing must keep
+        // withholding it until the wake call has actually returned.
+        observe_idle_drain_activity_at(&proxy, 63_500);
+        advance_and_converge(&proxy, 64_000).await;
+        assert_eq!(park_states(&proxy)[parked], ParkState::Awake);
+        assert!(!proxy.inner.router.drained(parked));
+    }
+
+    #[tokio::test]
+    async fn a_failed_sleep_leaves_the_replica_fenced_rather_than_assumed_awake() {
+        let first = SleepyEngine::default();
+        let second = SleepyEngine::default();
+        first.fail.store(true, Ordering::Release);
+        second.fail.store(true, Ordering::Release);
+        let (a, engine_a) = start_upstream(first.router()).await;
+        let (b, engine_b) = start_upstream(second.router()).await;
+        // The mock engines must outlive the test body: dropping the join
+        // handles would abort them mid-actuation.
+        std::mem::forget((engine_a, engine_b));
+        let proxy = idle_drain_proxy(&[a, b], "drain");
+
+        advance_and_converge(&proxy, 61_000).await;
+        advance_and_converge(&proxy, 63_000).await;
+
+        let unknown = park_states(&proxy)
+            .iter()
+            .position(|state| *state == ParkState::Unknown)
+            .expect("the failed replica is unknown, not awake");
+        assert!(
+            proxy.inner.router.drained(unknown),
+            "an engine that may or may not have slept must not receive traffic"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_replica_is_reconciled_from_the_engine_rather_than_guessed() {
+        let (proxy, first, _second) = sleepy_fleet("drain").await;
+        {
+            let state = proxy.inner.idle_drain.as_ref().unwrap();
+            *state.park.lock() = vec![ParkState::Unknown, ParkState::Awake];
+        }
+        // The engine reports it is awake, so the balancer may unfence it.
+        advance_and_converge(&proxy, 1_000).await;
+        assert_eq!(park_states(&proxy)[0], ParkState::Awake);
+        assert_eq!(first.wake_calls.load(Ordering::Acquire), 0);
+        assert_eq!(first.sleep_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn the_actuator_never_touches_an_engine_in_observe_mode() {
+        // Observe mode with the sleep actuator is rejected at startup, so the
+        // only reachable observe configuration is a non-actuating one.
+        let (proxy, first, second) = sleepy_fleet("observe").await;
+        advance_and_converge(&proxy, 61_000).await;
+        advance_and_converge(&proxy, 63_000).await;
+        assert_eq!(first.sleep_calls.load(Ordering::Acquire), 0);
+        assert_eq!(second.sleep_calls.load(Ordering::Acquire), 0);
+        assert!(
+            park_states(&proxy)
+                .iter()
+                .all(|state| *state == ParkState::Awake)
+        );
     }
 
     #[tokio::test]
