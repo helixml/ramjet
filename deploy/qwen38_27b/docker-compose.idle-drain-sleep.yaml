@@ -1,0 +1,58 @@
+# Enforcement overlay that parks an idle engine with vLLM sleep mode.
+#
+# This is the first idle-drain configuration where the load balancer carries
+# out its own decision. Everything before it published intent and waited for a
+# separately privileged actor.
+#
+# Why that is now allowed. The original rule was that the balancer must not
+# hold a Docker socket, because it sits in the production request path and a
+# socket there is root-equivalent on the host. vLLM sleep mode is not a Docker
+# socket: parking is POST /sleep, resuming is POST /wake_up, and both are
+# authenticated with the same upstream bearer token the balancer already uses
+# for readiness probes. The authority is reversible, engine-scoped, and
+# smaller than the routing authority the balancer already exercises. The rule
+# still stands for container stop/start; this overlay does not need it.
+#
+# Render it on top of the base file AND the sleep-mode topology, whose engines
+# are started with --enable-sleep-mode and VLLM_SERVER_DEV_MODE=1:
+#
+#   docker compose -f docker-compose.yaml \
+#     -f topology.8gpu-tp2.sleep.yaml \
+#     -f docker-compose.idle-drain-sleep.yaml up -d
+#
+# The topology half costs a full engine restart on all four replicas, so it is
+# a rolling engine change, not an LB-only swap. Qualify with
+# docker-compose.idle-drain-observe.yaml first: observe advances the same state
+# machine and publishes the same intent while fencing nothing and calling
+# nothing.
+#
+# Two limits that are not in this file:
+#
+#   * RJ_IDLE_DRAIN_MAX_PARKED bounds HOST memory, not GPU memory. Level-1
+#     sleep offloads weights to host RAM, so each parked Qwen3.8-27B engine is
+#     roughly 27GB against the 30GiB node06 has free after the ZFS ARC cap.
+#     One replica may sleep. Raising this without re-measuring available host
+#     memory is how the box ends up back in swap.
+#   * VLLM_SERVER_DEV_MODE registers vLLM's whole dev route group, not only
+#     the three sleep endpoints. Those ports are published on loopback and the
+#     Compose network only. Never expose an engine port through Caddy.
+services:
+  ds4-loadbalancer:
+    environment:
+      RJ_IDLE_DRAIN_MODE: drain
+      # off  = publish intent only, the historic behaviour.
+      # sleep = this balancer issues /sleep and /wake_up itself.
+      RJ_IDLE_DRAIN_ACTUATOR: sleep
+      # 1 = offload weights to host RAM, keep them there while parked. Waking
+      #     is a host-to-device copy.
+      # 2 = discard weights too. No host RAM while parked, but waking re-reads
+      #     the model, which a 16GiB-capped ARC will not absorb.
+      RJ_IDLE_DRAIN_SLEEP_LEVEL: "1"
+      # Replicas that may hold offloaded weights at once. See the host-memory
+      # note above before raising this.
+      RJ_IDLE_DRAIN_MAX_PARKED: "1"
+      RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS: "900"
+      RJ_IDLE_DRAIN_MIN_WARM: "1"
+      RJ_IDLE_DRAIN_COOLDOWN_SECONDS: "300"
+      RJ_IDLE_DRAIN_GRACE_SECONDS: "30"
+      RJ_IDLE_DRAIN_INTERVAL_SECONDS: "15"

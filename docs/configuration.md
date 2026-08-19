@@ -171,6 +171,62 @@ cardinality are part of assignment identity; reordering the list or rotating
 the key deliberately remaps sessions. Keep the affinity key separate from the
 exact-canary and snapshot secrets.
 
+### Idle drain and engine parking (experimental)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `RJ_IDLE_DRAIN_MODE` | `off` | `off`, `observe` (evaluate and publish, fence nothing), or `drain` (fence a parked replica from routing). `drain` needs at least two upstreams. |
+| `RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS` | `900` | Quiet period before the fleet counts as idle. At least 60. |
+| `RJ_IDLE_DRAIN_MIN_WARM` | `1` | Replicas that must stay warm. Clamped to at least one; an unhealthy replica never counts toward it. |
+| `RJ_IDLE_DRAIN_COOLDOWN_SECONDS` | `300` | Minimum spacing between drain transitions. Never applies to resuming. |
+| `RJ_IDLE_DRAIN_GRACE_SECONDS` | `30` | Quiet time a fenced replica must accumulate before it is safe to park. |
+| `RJ_IDLE_DRAIN_INTERVAL_SECONDS` | `15` | Policy evaluation period. |
+| `RJ_IDLE_DRAIN_ACTUATOR` | `sleep` | `off` publishes intent only; `sleep` parks the engine with vLLM sleep mode. Can only act in `drain` mode. |
+| `RJ_IDLE_DRAIN_SLEEP_LEVEL` | `1` | `1` offloads weights to host RAM; `2` discards them and re-reads the model on wake. |
+| `RJ_IDLE_DRAIN_MAX_PARKED` | `1` | Replicas that may hold offloaded weights at once. Must be fewer than the upstream count in `drain` mode. |
+
+The knobs are expressed in seconds. There is deliberately no `_MS` alias, so a
+stale millisecond-spelled variable is inert rather than a thousand-fold
+misconfiguration.
+
+The policy is asymmetric on purpose. Draining is gated by the cooldown and the
+warm floor; resuming is immediate and bypasses every rate limit, because being
+short of capacity costs a cold start while parking late costs watt-minutes. The
+warm floor is restored on every tick rather than only on traffic: a park that
+was safe when it was made becomes unsafe if the replica that stayed warm later
+fails, and during an idle window no request would arrive to notice.
+
+`RJ_IDLE_DRAIN_ACTUATOR=sleep` is the first configuration in which the balancer
+carries out its own decision. That is allowed because vLLM sleep mode is not a
+Docker socket: `POST /sleep` and `POST /wake_up` authenticate with the same
+`RJ_UPSTREAM_TOKEN` the readiness probe already uses, so the authority is
+reversible and engine-scoped. The rule against giving the balancer a Docker
+socket still stands for container stop/start, which this path does not need.
+
+The engine must be started with `--enable-sleep-mode` and `VLLM_SERVER_DEV_MODE=1`;
+the second is what registers `/sleep`, `/wake_up`, and `/is_sleeping`. Both are
+startup-time, so enabling parking costs an engine restart, and dev mode
+registers vLLM's whole dev route group — keep those ports on the Compose
+network and never expose one through a public listener.
+
+A parked or waking replica stays fenced from routing regardless of what the
+policy intends, because the policy unfences the instant it wants a replica
+running and the weights may still be in host memory. A sleep or wake that
+fails leaves the replica in `unknown`, which fences it and schedules a
+`/is_sleeping` reconciliation rather than guessing; failures never reach
+`/health` or upstream health, because the engine is still serving and a
+balancer that cannot park an idle replica has lost an optimisation, not a
+capability.
+
+`RJ_IDLE_DRAIN_MAX_PARKED` bounds **host** memory, not GPU memory. Level-1
+sleep moves weights into host RAM, so the cap is about how much the box can
+absorb: on node06 one Qwen3.8-27B engine is roughly 27GB against 30GiB free
+after the ZFS ARC cap. The warm floor cannot express that, because it counts
+replicas rather than bytes.
+
+Observe mode never actuates even with the default actuator, so it remains the
+consequence-free way to qualify the policy against real traffic.
+
 ### Tokenization (experimental)
 
 | Variable | Default | Description |

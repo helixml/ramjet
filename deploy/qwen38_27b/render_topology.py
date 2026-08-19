@@ -91,11 +91,17 @@ def validate_topology(gpus, tp):
         raise ValueError(f"--tensor-parallel {tp} must be a power of two")
 
 
-def engine_service(index, gpu_ids, tp, port, numa):
+def engine_service(index, gpu_ids, tp, port, numa, sleep_mode=False):
     """Renders one engine service block."""
 
     devices = ", ".join(f'"{gpu}"' for gpu in gpu_ids)
     cpuset = f'\n    cpuset: "{numa}"' if numa else ""
+    # Sleep mode is two coupled changes and both need an engine restart:
+    # the engine arg reserves the offload path at startup, and the dev-mode
+    # switch is what registers /sleep, /wake_up, and /is_sleeping. Neither is
+    # useful without the other, so they are emitted together or not at all.
+    dev_mode = '\n      VLLM_SERVER_DEV_MODE: "1"' if sleep_mode else ""
+    sleep_flag = "\n      - --enable-sleep-mode" if sleep_mode else ""
     return f"""  qwen38-e{index}:
     image: ${{IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}}
     container_name: qwen38-e{index}
@@ -123,8 +129,8 @@ def engine_service(index, gpu_ids, tp, port, numa):
     environment:
       CUDA_DEVICE_ORDER: PCI_BUS_ID
       NCCL_P2P_DISABLE: ${{NCCL_P2P_DISABLE:-0}}
-      VLLM_API_KEY: ${{VLLM_API_KEY:-qwen-local}}
-    command:
+      VLLM_API_KEY: ${{VLLM_API_KEY:-qwen-local}}{dev_mode}
+    command:{sleep_flag}
       - --served-model-name=${{SERVED_MODEL_NAME:-qwen3.8-27b}}
       - --host=0.0.0.0
       - --port=8000
@@ -143,7 +149,7 @@ def engine_service(index, gpu_ids, tp, port, numa):
 """
 
 
-def render(gpus, tp, numa_split, name):
+def render(gpus, tp, numa_split, name, sleep_mode=False):
     """Renders the full overlay text for a topology."""
 
     engines = gpus // tp
@@ -173,7 +179,7 @@ def render(gpus, tp, numa_split, name):
         if numa_split:
             half = gpus // 2
             numa = numa_split[0] if gpu_ids[-1] < half else numa_split[1]
-        out.append(engine_service(index, gpu_ids, tp, engine["port"], numa))
+        out.append(engine_service(index, gpu_ids, tp, engine["port"], numa, sleep_mode))
     return "\n".join(out)
 
 
@@ -189,6 +195,13 @@ def main():
              "e.g. '0-11,24-35;12-23,36-47'. Omit on single-socket hosts.",
     )
     parser.add_argument("--json", action="store_true", help="print the plan and exit")
+    parser.add_argument(
+        "--sleep-mode", action="store_true",
+        help="emit --enable-sleep-mode and VLLM_SERVER_DEV_MODE=1 so the load "
+             "balancer's idle-drain actuator can park an engine with vLLM "
+             "sleep mode. Costs an engine restart and exposes vLLM's dev "
+             "routes on the Compose network; never publish that port.",
+    )
     args = parser.parse_args()
 
     gpus, tp = args.gpus, args.tensor_parallel
@@ -206,7 +219,7 @@ def main():
     numa = args.numa_split.split(";") if args.numa_split else None
     if numa and len(numa) != 2:
         raise SystemExit("--numa-split needs exactly two semicolon-separated cpusets")
-    text = render(gpus, tp, numa, name)
+    text = render(gpus, tp, numa, name, args.sleep_mode)
 
     if args.output:
         args.output.write_text(text)
