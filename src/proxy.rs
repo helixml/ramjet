@@ -1866,6 +1866,12 @@ impl Proxy {
         let now_ms = state.now_ms();
         let decision = state.policy.lock().tick(now_ms, &observations);
         self.publish_idle_drain(&decision);
+        // Published every round, including in observe mode where nothing is
+        // actuated. A gauge that only appears once the actuator has run would
+        // make "every replica is awake" indistinguishable from "this build
+        // does not export the series", which is exactly the question an
+        // observe-mode soak is asking.
+        self.publish_park_state();
         self.converge_engine_parking(&decision).await;
     }
 
@@ -3076,6 +3082,19 @@ mod tests {
         assert_eq!(park_states(&proxy)[0], ParkState::Awake);
         assert_eq!(first.wake_calls.load(Ordering::Acquire), 0);
         assert_eq!(first.sleep_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn park_state_is_exported_in_observe_mode_so_a_soak_can_read_it() {
+        let (proxy, _first, _second) = sleepy_fleet("observe").await;
+        advance_and_converge(&proxy, 61_000).await;
+        let exported = proxy
+            .inner
+            .metrics
+            .engine_park_state
+            .with_label_values(&[&proxy.upstream_label(0)])
+            .get();
+        assert!(exported.to_bits() == ParkState::Awake.code().to_bits());
     }
 
     #[tokio::test]
