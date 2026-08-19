@@ -1,5 +1,40 @@
 # node06 experiment journal
 
+## 2026-08-19 — machine-view tile sparklines stopped jumping on hover
+
+LB-only deploy of `rust-14d1dc2` (image id `sha256:d6f60bfc…`), built from
+merged PR #209. UI-only change: `StatTile` always renders its third line
+instead of only when a hover timestamp or a `detail` string exists.
+
+The tiles with no detail (`TTFT p95`, `In flight`) previously grew by one 10px
+line the moment the pointer entered, and because the sparkline is positioned
+against the bottom of the card's content box, the chart dropped 15px on hover
+and sat 15px above its neighbours the rest of the time. Measured in the mock
+dashboard, `.recharts-wrapper` tops for the eight tiles were 135px unhovered /
+150px hovered before, and a uniform 150px in both states after.
+
+### The rollout
+
+Built locally with `bench/build_transfer.sh` against the deployment's real
+repository (`RAMJET_IMAGE_REPOSITORY=ghcr.io/helixml/ramjet`): 180.3s build
+(cold buildx builder, full crate compile plus the `ui` npm stage) and a 6.2s
+transfer. The compose file list came from the container's
+`com.docker.compose.project.config_files` label — base plus
+`topology.8gpu-tp2.yaml` plus `machineview.override.yaml` — and the rendered
+baseline/candidate diff was the single `image:` line. The recreate ran under
+`/run/lock/ramjet-node06-deployment.lock` with an unconditional rollback trap
+to the pinned baseline; readiness came back in 12.0s.
+
+After the roll all four `qwen38-e*` upstreams reported `ramjet_upstream_up 1`,
+`/v1/models` answered with the bearer, `/ui/` returned 200, and the served
+bundle is `assets/index-CyM2jASl.js` — the same asset hash as the local build
+carrying the fix. No engine was touched, no benchmark traffic was generated,
+and no GPU work was performed.
+
+Rollback is one `LB_IMAGE` flip to
+`ghcr.io/helixml/ramjet:rust-37f5286@sha256:2489110adbed61b7a2a415784d817d48803c234c97509fd2e0eb180c5e7453b3`
+through the same three-file render and the same lock.
+
 ## 2026-08-18 — v0.3.0: the metric prefix rename, and a self-inflicted blind dashboard
 
 Deployed `v0.3.0` (`rust-37f5286@sha256:2489110a…`) LB-only. Every exported
