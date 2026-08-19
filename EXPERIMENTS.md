@@ -7076,3 +7076,58 @@ setting. Level 2 discards weights instead and pays a reload that a
 16GiB-capped ARC will no longer absorb. No sleep or wake call has been issued
 against a live engine; that remains the first qualification step, and
 `--enable-sleep-mode` is not yet in any committed Compose file.
+
+## 2026-08-19 — r125 LB-side sleep actuator and observe-mode soak
+
+`RJ_IDLE_DRAIN_ACTUATOR=sleep` lets the balancer carry out its own parking
+decision with vLLM sleep mode instead of publishing intent for an actor that
+does not exist on this box. The Docker-socket rule is unchanged; sleep mode is
+not a socket, and `POST /sleep`/`POST /wake_up` authenticate with the same
+`RJ_UPSTREAM_TOKEN` as the readiness probe.
+
+Preflight against the pinned r34 image was GPU-free and took under a second:
+`EngineArgs(enable_sleep_mode=True)._check_feature_supported()` returned clean,
+the CLI exposes `--enable-sleep-mode`/`--no-enable-sleep-mode` defaulting to
+`False`, and the routes are in `vllm/entrypoints/serve/dev/sleep/api_router.py`
+behind `VLLM_SERVER_DEV_MODE`: `POST /sleep?level=&mode=`, `POST /wake_up?tags=`,
+`GET /is_sleeping`.
+
+The local gate passed 597 Rust tests, 479 Python tests, Clippy with warnings
+denied, and a locked release build. `bench/build_transfer.sh` produced a
+15,794,281-byte image in 59.8s and transferred it in 6.4s. The LB-only swap
+under the common deployment lock took 12.0s to 4/4 healthy against the exact
+three-file config list the running container was created from, with the
+rendered diff limited to the image line and six `RJ_IDLE_DRAIN_*` variables.
+All four engines retained their 2026-08-15T07:48Z start times and zero restart
+counts.
+
+One defect was found and fixed by deploying: the park-state gauge was published
+only from the actuation path, so in observe mode it had no series at all, which
+makes "every replica is awake" indistinguishable from "this build does not
+export the series". It is now published every round.
+
+**The soak proves the negative, and cannot currently prove the positive.**
+Across 125 samples over 31 minutes under real Helix traffic,
+`ramjet_idle_drain_fleet_idle` stayed 0, `ramjet_idle_drain_state` stayed
+`[0,0,0,0]`, `ramjet_engine_park_state` stayed `[0,0,0,0]`,
+`ramjet_idle_drain_safe_to_stop` stayed `[0,0,0,0]`, `ramjet_upstream_up`
+stayed `[1,1,1,1]`, and no `ramjet_engine_park_actions_total` series was ever
+created. The actuator gate held: observe mode called nothing.
+
+The reason no park was observed is the traffic pattern, not the policy. A
+10-minute measurement of the LB's own request counters recorded 228 requests
+and a **longest quiet gap of 20 seconds** against the configured 900-second
+idle window. At roughly 7.6 requests per minute with no gap beyond 20s, this
+policy would never fire on node06 during working hours at any setting above
+about 30 seconds, and a window that short would park engines between ordinary
+requests. The value case for parking here is overnight and weekend windows,
+not working-hours idleness. That is worth knowing before tuning
+`RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS` down to manufacture a demonstration.
+
+A live park additionally requires the engine half, which is not deployed:
+`--enable-sleep-mode` and `VLLM_SERVER_DEV_MODE=1` are startup-time, so
+enabling them is a rolling restart of all four replicas with a model load each,
+not an LB-only swap. Until that window exists, the sleep/wake path is qualified
+only by unit and mock-engine tests, which assert the exact query string vLLM
+receives but not a real device transfer. Do not describe it as
+production-qualified.
