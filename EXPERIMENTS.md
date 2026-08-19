@@ -7012,3 +7012,67 @@ This still does not own candidate startup/model load/JIT or automatic rollback.
 Those remain the next container-aware rollout-owner boundary. The first live
 r11 request remains forbidden until cooling repair evidence, one-TP4 isolation,
 exact metadata capture, and the guarded smoke are all current.
+
+## 2026-08-19 — node06 host RAM recovered and vLLM sleep-mode preflight
+
+The recurring "~8-9GiB available host memory" constraint in `AGENTS.md` was
+never attributed. It is not the engines. Read-only inspection under the
+current qwen38 4xTP2 stack found 125.5GiB total, 111GiB used, 864MiB free,
+13GiB available, and swap 100% consumed (8.0GiB of 8.0GiB, 744KiB free) with
+no OOM kill in the ring buffer at 5 days uptime.
+
+`AnonPages` was 54GiB, which is the whole engine footprint: eight
+`VLLM::Worker_TP` at roughly 6GB, four API servers at 1.7GB, four
+`VLLM::EngineCore` at 1.3GB. `docker stats` agreed at 13.5-14.2GiB per engine
+container. `Shmem` was only 1.2GiB, so the services' `shm_size: 32gb`/`16gb`
+settings are inert under `ipc: host` and consume nothing; that suspect is
+closed.
+
+The unattributed remainder was **ZFS ARC at 38.78GiB**. `/prod` is a 2.52T ZFS
+pool holding the model weights and engine cache, and `zfs_arc_max` was `0`,
+i.e. the default ceiling of 50% of RAM (62.77GiB). ARC is kernel memory that
+Linux reports as used and excludes from `MemAvailable`, so it is invisible to
+`free -h` triage and to `docker stats`.
+
+Capping `zfs_arc_max` at 16GiB (runtime write plus a persisted
+`/etc/modprobe.d/zfs-ramjet.conf`) moved the target immediately but not the
+resident size; ARC shrinks lazily. A `drop_caches` sync then reclaimed it to
+13.45GiB. `swapoff -a`/`swapon -a` took 55.8s and returned the engines' paged
+out anonymous memory. Neither step touched an engine, the LB, or a GPU.
+
+| | before | after |
+|---|---:|---:|
+| ARC resident | 38.78GiB | 13.45GiB |
+| MemAvailable | 13GiB | 30GiB |
+| MemFree | 864MiB | 30GiB |
+| Swap used | 8.0GiB (100%) | 0B |
+| NUMA node 0 free | 689MB | 21,340MB |
+| NUMA node 1 free | 178MB | 9,408MB |
+
+The engines were untouched throughout: same four containers at 4 days uptime,
+LB at 7 hours. `capture_node06.sh` records only `free -h` total, which is why
+this went unattributed across four months of entries; it should also capture
+`MemAvailable`, per-NUMA free, ARC size, and swap.
+
+The pinned r34 image supports vLLM sleep mode, which makes host-RAM weight
+offload a real option rather than a speculative one. `EngineArgs(
+enable_sleep_mode=True)._check_feature_supported()` returned clean, and the
+CLI exposes `--enable-sleep-mode`/`--no-enable-sleep-mode` defaulting to
+`False`, so enabling it costs one engine restart. The routes live in
+`vllm/entrypoints/serve/dev/sleep/api_router.py`, not `api_server.py`, and are
+registered only when `VLLM_SERVER_DEV_MODE` is set: `POST /sleep?level=1&
+mode=abort`, `POST /wake_up?tags=...`, and `GET /is_sleeping`. Modal's
+Ministral 3 example uses the same two verbs around a platform checkpoint; the
+checkpoint half does not transfer, because Modal documents GPU memory
+snapshots as incompatible with multi-GPU code and unhelpful when startup is
+weight-load bound, and Modal's own DeepSeek-V4-Flash example uses volume-cached
+kernels instead.
+
+Sizing follows from the recovered headroom, not from the feature. Level-1
+sleep offloads weights to host RAM; Qwen3.8-27B-FP8 is roughly 27GB per
+engine against 30GiB available, so **at most one engine may be slept at level
+1 on this box**. Four concurrent level-1 sleeps are not possible at any ARC
+setting. Level 2 discards weights instead and pays a reload that a
+16GiB-capped ARC will no longer absorb. No sleep or wake call has been issued
+against a live engine; that remains the first qualification step, and
+`--enable-sleep-mode` is not yet in any committed Compose file.

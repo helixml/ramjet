@@ -450,7 +450,34 @@ grey PAUSED instead of green READY.
 
 ```bash
 cargo test --locked idle_drain
+cargo test --locked engine_park
+cargo test --locked proxy::tests::a_parked
+python3 -m unittest bench.test_render_topology
 ```
+
+`RJ_IDLE_DRAIN_ACTUATOR=sleep` is the first configuration in which the LB
+carries out its own decision, and it is the default. The Docker-socket rule is
+unchanged — it is root-equivalent and the LB stays out of it — but vLLM sleep
+mode is not a socket: `POST /sleep` and `POST /wake_up` use the same
+`RJ_UPSTREAM_TOKEN` as the readiness probe. Actuation is still gated on
+`drain`, so `observe` remains consequence-free and the default deployment is
+unaffected while `RJ_IDLE_DRAIN_MODE` is `off`.
+
+Keep two invariants when touching this path. A parked or waking replica stays
+fenced from routing whatever the policy intends, because the policy unfences
+the instant it wants a replica running and the weights may still be in host
+memory; the fence expression must therefore stay a single conjunction applied
+in both the publish and post-actuation paths. And `RJ_IDLE_DRAIN_MAX_PARKED`
+bounds host memory rather than replicas: level-1 sleep offloads roughly 27GB
+per Qwen3.8-27B engine against the 30GiB node06 has free after the ZFS ARC cap,
+so raising it without re-measuring available host memory is how the box ends
+up back in swap.
+
+The engine half costs a restart: `--enable-sleep-mode` and
+`VLLM_SERVER_DEV_MODE=1` are both startup-time, and the second registers vLLM's
+whole dev route group. Render them with
+`render_topology.py --sleep-mode`, never by hand-editing a generated topology,
+and keep those ports on the Compose network.
 
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
@@ -526,28 +553,31 @@ Guarded runs remain capped at **25 minutes of continuous inference**
 starts with the workload, not the guard, so cool-start waiting does not consume
 it.
 
-The moratorium is lifted **per run**, not globally. An authorized run names a
-reviewed window in `RAMJET_NODE06_AUTHORIZATION`
-(`supervised-2026-08-14`) and inherits that window's bounds; an unnamed or
-unknown window still fails closed, so a stale environment cannot become
-standing permission. AC repair has still **not** been confirmed.
+### Access policy (2026-08-19)
 
-### Superseded: active cooling/AC moratorium (2026-08-14)
+node06 is always reachable. SSH, read-only inventory, Compose rendering,
+LB-only deploys, engine restarts, model loads, and bounded benchmark cells
+need no separate per-run authorization. The earlier cooling/AC moratorium is
+withdrawn.
 
-Do not run request-generating traffic on node06, start or restart either vLLM
-engine, load a model, run JIT/warmup, or execute an engine-candidate rollout,
-even if the host and all GPUs become reachable. AC repair or healthy telemetry
-alone does not authorize a run. Resume only after the user explicitly
-authorizes a specific supervised startup/workload/rollback interval after the
-repair. Until then, do not connect merely to poll availability. GPU-free work
-is limited to development-host image/manifest inspection, registry pulls,
-runtime-receipt validation, Compose rendering without mutation, local tests,
-and documentation. Commands later in this section describe the future
-supervised procedure; they are not current authorization to execute it.
-The active GPU guard and P2P harness contain a static fail-closed moratorium.
-Do not bypass or monkeypatch it in an operational workflow. Lifting it requires
-the user's explicit supervised authorization after AC repair and a reviewed
-repository change; healthy telemetry alone cannot satisfy it.
+The one standing limit is duration: **do not run a full-node performance
+benchmark for longer than 30 minutes.** The guard's 25-minute
+continuous-inference cap (`--max-runtime-seconds`, default and maximum 1500,
+exit code 79) already sits inside that budget, so a guarded run satisfies it
+by construction. A hand-rolled sustained load does not, and must bound itself
+explicitly.
+
+Access is not the only control, and lifting it does not lift the others. The
+intake-air thermal guard, the common deployment lock, the exact `-f` file
+list, single-homing during direct-engine measurement, and fail-closed
+telemetry handling are engineering controls: they stop a run that is cooking
+the box, racing another deploy, or producing a contaminated number. They still
+apply to every run.
+
+`bench/node06_operational_moratorium.py` still fails closed in code and gates
+both `node06_gpu_guard.py` and the P2P harness. Until that module is changed,
+a guarded run needs `RAMJET_NODE06_AUTHORIZATION` to name a reviewed window
+(`supervised-2026-08-14`); an unnamed or unknown window is rejected.
 
 For DSpark reliability changes, keep the GPU-free loop focused and exercise
 the real routing boundary with loopback upstreams:
@@ -561,8 +591,8 @@ cargo test --locked proxy::tests::observe_mode_polls
 python3 -m unittest bench.test_dspark_guard_host bench.test_dspark_guard_compose
 ```
 
-`RJ_DSPARK_GUARD_MODE` stays `off` in the canonical deployment until cooling
-is repaired. Re-entry starts with one TP4 pair in `observe`; require the exact
+`RJ_DSPARK_GUARD_MODE` stays `off` in the canonical deployment until it is
+qualified. Re-entry starts with one TP4 pair in `observe`; require the exact
 r34 K5 series shape and a clean false-positive interval before dual-pair
 observe. Never skip directly to `quarantine`: enforcement additionally requires
 qualified `compatibility` admission and the dedicated durable-state overlay.
@@ -760,8 +790,7 @@ counters exactly. A host power loss cannot execute an in-memory rollback; after
 any connectivity loss, verify boot ID, detached-unit result, LB config/image,
 engine identities, and the journal before treating rollback as proved.
 
-After the active moratorium is explicitly lifted for a specific supervised run,
-no sustained request-generating benchmark may start until a read-only
+No sustained request-generating benchmark may start until a read-only
 inventory/temperature/power preflight is recorded with
 `bench/capture_node06.sh`. Inspect each device's reported target,
 maximum-operating, slowdown, and shutdown thresholds; never infer the hardware
@@ -861,7 +890,7 @@ pull r11 outside engine startup and benchmark timing. If r4 is absent, budget
 the full cold transfer. Do not pull both images merely to reproduce this
 metadata calculation; registry manifests are sufficient.
 
-After explicit supervised authorization following cooling repair, pull r11 once outside benchmark timing, validate the
+Pull r11 once outside benchmark timing, then validate the
 pinned image's `EngineArgs` before GPU assignment. Under the common deployment
 lock, use the committed base+overlay render to recreate only the LB first,
 verify all engine/KV endpoint lists contain only A, and then recreate exactly
@@ -1361,6 +1390,13 @@ EXPERIMENTS.md — add yours there too):
   traffic shares the box with real users — keep concurrency modest and
   prefer short `max_tokens`. Never stop the engines to test the LB.
 - Secrets (Caddy bearer, Helix API key) are fetched on-box, never committed.
+- node06's host RAM is dominated by ZFS ARC, not by the engines. `/prod` is a
+  ZFS pool holding the weights and engine cache, and an uncapped
+  `zfs_arc_max` defaults to half of RAM. ARC is kernel memory that Linux
+  reports as used and excludes from `MemAvailable`, so it is invisible to both
+  `free -h` triage and `docker stats`. It is capped at 16GiB in
+  `/etc/modprobe.d/zfs-ramjet.conf`; if available memory looks wrong again,
+  read `/proc/spl/kstat/zfs/arcstats` before suspecting a leak.
 - Metric names use the `ramjet_` prefix. They carried `ds4proxy_` until
   2026-08-18, two renames after the name stopped being accurate; the prefix was
   held back for dashboard continuity and then moved deliberately. Prometheus
