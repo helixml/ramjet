@@ -27,10 +27,35 @@ and idle-drain stays in observe (no vLLM sleep endpoints). Reasoning parser
 Rollback: the four vLLM containers `qwen38-e0..e3` are stopped, not removed;
 `docker start` them and recreate the LB from the previous file list
 (`topology.8gpu-tp2.yaml` in place of the sglang overlay) with the same
-pinned LB image. Not yet done: a Helix `/api/v1/sessions/chat` end-to-end
-and any aggregate-capacity qualification — the c64+ regime is unmeasured on
-this stack, and NVFP4 quality has no gate yet. Watch
-`minidynamo-rtx6000pro` per the checklist.
+pinned LB image. Not yet done: any aggregate-capacity qualification — the
+c64+ regime is unmeasured on this stack, and NVFP4 quality has no gate yet.
+Watch `minidynamo-rtx6000pro` per the checklist.
+
+### Helix end-to-end, and the cold-prefill cost of TP1 (same day)
+
+A real Helix agent session (`ses_01kzgrzwybcw3qcg8bj9jqbsyv`) exercised the
+stack through the full path. All requests returned 200 and the router did the
+right thing: the session's second turn hit 315/324 overlap blocks and stuck
+to its engine. Turn-level numbers from the route journal:
+
+| turn | prompt tokens | TTFT | decode |
+|---|---|---|---|
+| 1 (cold) | 196,521 | **56.8s** | 357 tok in 3.2s |
+| 2 (cached) | 201,926 | 4.1s | 1,104 tok @ ~86 tok/s |
+| 3 (cached) | 203,383 | 2.6s | 624 tok @ ~100 tok/s |
+
+The 56.8s cold first turn is the TP1 tradeoff, not a defect: prefill measured
+8.9K tok/s at 48K depth on one engine and decays with attention depth to
+~3.5K tok/s at 196K, and a single GPU carries all of it where the old TP2
+pair split it. A `--chunked-prefill-size 32768` candidate was A/B'd against
+the 8192 default on a live engine and measured slower (7.5-8.3K vs 8.9K
+tok/s at 48K), so the default stands and the candidate engine was restored
+to the canonical render. Decode at 200K context runs ~86-100 tok/s — below
+the short-context 150+ but above the vLLM+MTP class at the same depth.
+
+Watchlist: cold sessions are one 57s TTFT per agent workspace; if Helix
+traffic turns out to churn workspaces faster than it reuses them, that cost
+dominates and the TP2 vLLM recipe wins back interactive feel.
 
 ## 2026-08-20 — DFlash2 + NVFP4 repro: the 300s tok/s claim is H200 bandwidth, not a software trick
 

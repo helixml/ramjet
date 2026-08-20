@@ -54,6 +54,15 @@ quantization headroom. Speculative decoding also inverts at high concurrency
 (the MTP data shows +112% at c8 becoming -12.5% at c256); qualify aggregate
 capacity for your own traffic before assuming both wins at once.
 
+Single-GPU engines also pay for **cold long-context prefill**: a real Helix
+agent session's 196K-token first turn measured 56.8s TTFT (about 3.5K tok/s
+at that depth; ~8.9K tok/s at 48K), where the TP2 recipe spreads prefill
+over two GPUs. Prefix-cache affinity makes the following turns cheap — the
+same session's 200K-token turns 2 and 3 measured 4.1s and 2.6s TTFT — so
+this hurts once per session, not per message. Raising
+`--chunked-prefill-size` to 32768 was measured *slower* (7.5-8.3K vs 8.9K
+tok/s); the default 8192 stands.
+
 ## Switching between recipes
 
 The LB is stateless and the engines keep nothing worth preserving across a
