@@ -70,6 +70,10 @@ export interface ServingSample {
   ttft_p50_ms: number | null
   ttft_p95_ms: number | null
   tpot_p95_ms: number | null
+  /** Median per-stream decode rate over the histogram window. */
+  stream_tps_p50?: number | null
+  /** Slowest-5% per-stream decode rate — the tail a user feels. */
+  stream_tps_p05?: number | null
   cache_hit_pct: number | null
   /** Which layer `cache_hit_pct`/`cached_tps` came from. Absent when both are. */
   cache_hit_source?: CacheHitSource | null

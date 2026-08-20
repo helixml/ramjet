@@ -8,6 +8,22 @@ const SPARKLINE_BUCKETS = 24
 
 type Timed = { t: number } & Record<string, number | null>
 
+/** Mean of a series in the trailing window. Nulls are skipped, zeros are not. */
+export function windowMean(rows: Timed[], key: string, now: number, windowMs = TILE_WINDOW_MS): number | null {
+  const from = now - windowMs
+  let sum = 0
+  let count = 0
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const row = rows[index]
+    if (row.t < from) break
+    const value = row[key]
+    if (typeof value !== "number" || !Number.isFinite(value)) continue
+    sum += value
+    count++
+  }
+  return count === 0 ? null : sum / count
+}
+
 /** Peak of a series in the trailing window. Nulls are skipped, zeros are not. */
 export function windowMax(rows: Timed[], key: string, now: number, windowMs = TILE_WINDOW_MS): number | null {
   const from = now - windowMs
