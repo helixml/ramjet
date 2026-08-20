@@ -452,6 +452,7 @@ grey PAUSED instead of green READY.
 cargo test --locked idle_drain
 cargo test --locked engine_park
 cargo test --locked utilization_tests
+cargo test --locked --test engine_park_simulation
 cargo test --locked proxy::tests::a_parked
 python3 -m unittest bench.test_render_topology
 ```
@@ -494,6 +495,26 @@ The anti-flap invariant is that a release is refused when it would push the
 remaining replicas to or past `RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA`. Without
 it the policy can park and wake on alternating ticks, paying a full weight
 transfer each way.
+
+Qualify this policy in CI, not on node06. `tests/engine_park_simulation.rs`
+runs the closed loop — scripted arrivals with prefix affinity, a virtual clock,
+injected sleep failures and slow wakes, and engines that refuse work while
+asleep — deterministically in microseconds. It covers the cases production
+cannot be asked to perform: a burst arriving at a parked replica, a sleep call
+that fails, the last warm replica dying during a quiet window. A production
+soak supplies one traffic pattern, only while you watch, and it changes
+underneath the run; the 2026-08-19 soak lost its fleet shape partway through
+and its result became unusable.
+
+The simulation calls `engine_park::fenced`, the same function the proxy
+applies, so a scenario cannot pass against a drifted copy of the fence rule.
+Keep it that way: if a new routing-authority rule appears, put it in
+`engine_park` and call it from both places rather than restating it.
+
+What the simulation cannot prove stays a live question: that vLLM's `/sleep`
+frees device memory on the pinned fork, how long a wake takes, whether the
+offloaded weights fit in host RAM, and what parking costs in lost prefix-cache
+residency. Those need one engine and a maintenance window, not a soak.
 
 The engine half costs a restart: `--enable-sleep-mode` and
 `VLLM_SERVER_DEV_MODE=1` are both startup-time, and the second registers vLLM's
@@ -707,6 +728,16 @@ Every tool that recreates `ds4-loadbalancer` must hold the same exclusive
 verify interval. The Phase-B P2P harness also adds a unique ownership label and
 service hash; it will not restore over a container it no longer owns. Do not
 bypass either fence with a raw concurrent `docker compose up`.
+
+node06's GPUs are shared with work that is not in this repository. Before
+starting or restarting any engine, check who owns its devices with
+`nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv` and map
+each PID to its container through `/proc/<pid>/cgroup`. On 2026-08-20 two
+qwen38 engines were found stopped and were restarted as if they had failed;
+they had in fact been stopped deliberately to free GPUs 4-7 for an SGLang
+comparison, and the restarted engine then looped fourteen times on
+`ValueError: Free memory on device cuda:1 ... less than desired GPU memory
+utilization`. A stopped engine on this box is not evidence of a fault.
 
 Before attributing a running engine to the canonical Compose file, inspect its
 `com.docker.compose.project.config_files` label and compare its rendered service

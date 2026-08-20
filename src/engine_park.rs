@@ -197,6 +197,23 @@ impl ParkAction {
     }
 }
 
+/// Whether routing must withhold a replica, combining the policy's intent with
+/// what this balancer believes about the engine's sleep state.
+///
+/// This is the single authority expression, and it exists as a function so
+/// that every path applying routing authority uses the same rule rather than
+/// re-deriving it. Two callers apply it per round — once when the policy's
+/// intent is published, and again after actuation moves the sleep state — and
+/// a simulation exercises the same function rather than a copy of it.
+///
+/// The park state can only ever *add* a fence. The policy unfences a replica
+/// the instant it wants it running, which is right for its purpose and wrong
+/// for dispatch: the weights may still be in host memory.
+#[must_use]
+pub fn fenced(intent: UpstreamIntent, park: ParkState) -> bool {
+    intent.fenced || park.must_fence()
+}
+
 /// Chooses this round's actuations from the policy's intent and the balancer's
 /// current belief about each replica.
 ///
