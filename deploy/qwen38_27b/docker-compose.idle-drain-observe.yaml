@@ -31,6 +31,12 @@ services:
   ds4-loadbalancer:
     environment:
       RJ_IDLE_DRAIN_MODE: observe
+      # Selects what makes a replica releasable. Override to `utilization` to
+      # qualify per-replica release, which is the trigger that can actually
+      # fire on a fleet whose traffic never stops.
+      RJ_IDLE_DRAIN_RELEASE: ${RJ_IDLE_DRAIN_RELEASE:-fleet-idle}
+      RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS: ${RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS:-600}
+      RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA: ${RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA:-4}
       # Quiet period before the fleet counts as idle. Deliberately long: the
       # cost of parking too eagerly is a wake latency on live traffic, and the
       # cost of parking too late is a few hundred watt-minutes.

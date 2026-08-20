@@ -34,7 +34,9 @@ use crate::{
     engine_park::{ParkAction, ParkState, plan as plan_parking},
     exact_route_inventory::ExactRouteInventory,
     exact_shadow::ExactRouteSnapshot,
-    idle_drain::{IdleDrainDecision, IdleDrainPolicy, UpstreamDrainState, UpstreamObservation},
+    idle_drain::{
+        IdleDrainDecision, IdleDrainPolicy, UpstreamDrainState, UpstreamIntent, UpstreamObservation,
+    },
     journal::{RouteAnnotations, RouteJournal},
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
@@ -2015,22 +2017,30 @@ impl Proxy {
         }
     }
 
-    /// Whether this replica's believed sleep state forbids routing to it,
-    /// independently of what the drain policy currently intends.
-    fn park_fenced(&self, upstream: usize) -> bool {
+    /// The single routing-authority expression, shared with the simulation
+    /// harness so a test cannot pass against a re-implementation of the rule.
+    fn routing_fenced(&self, upstream: usize, intent: UpstreamIntent) -> bool {
+        crate::engine_park::fenced(intent, self.park_state(upstream))
+    }
+
+    /// This balancer's belief about one replica's sleep state.
+    fn park_state(&self, upstream: usize) -> ParkState {
         if !self.inner.config.engine_park.actuator.actuates()
             || !self.inner.config.idle_drain.mode.fences_routing()
         {
-            return false;
+            return ParkState::Awake;
         }
-        self.inner.idle_drain.as_ref().is_some_and(|state| {
-            state
-                .park
-                .lock()
-                .get(upstream)
-                .copied()
-                .is_some_and(ParkState::must_fence)
-        })
+        self.inner
+            .idle_drain
+            .as_ref()
+            .map_or(ParkState::Awake, |state| {
+                state
+                    .park
+                    .lock()
+                    .get(upstream)
+                    .copied()
+                    .unwrap_or(ParkState::Awake)
+            })
     }
 
     /// Re-applies routing authority after the sleep state has moved.
@@ -2054,7 +2064,7 @@ impl Proxy {
         for (upstream, intent) in decision.upstreams.iter().enumerate() {
             self.inner
                 .router
-                .set_drained(upstream, intent.fenced || self.park_fenced(upstream));
+                .set_drained(upstream, self.routing_fenced(upstream, *intent));
         }
     }
 
@@ -2076,6 +2086,9 @@ impl Proxy {
     fn publish_idle_drain(&self, decision: &IdleDrainDecision) {
         let metrics = &self.inner.metrics;
         metrics.idle_drain_fleet_idle.set(f64::from(decision.idle));
+        metrics
+            .idle_drain_load_per_replica
+            .set(usize_to_f64(decision.load_per_serving_replica));
         for (upstream, intent) in decision.upstreams.iter().enumerate() {
             let label = self.upstream_label(upstream);
             // Routing authority is applied before telemetry so a scrape can
@@ -2083,7 +2096,7 @@ impl Proxy {
             if self.inner.config.idle_drain.mode.fences_routing() {
                 self.inner
                     .router
-                    .set_drained(upstream, intent.fenced || self.park_fenced(upstream));
+                    .set_drained(upstream, self.routing_fenced(upstream, *intent));
             }
             metrics
                 .idle_drain_state

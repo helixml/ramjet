@@ -47,6 +47,7 @@
               "type": "value"
             }
           ],
+          "noValue": "no upstreams reporting",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -63,8 +64,7 @@
               }
             ]
           },
-          "unit": "short",
-          "noValue": "no upstreams reporting"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -3077,6 +3077,284 @@
             }
           ],
           "title": "Drain transitions (per hour)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "description": "Mean in-flight requests across replicas that are actually serving. This is the utilization release's decision input: a replica is releasable only while this stays below RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA, and reaching that threshold resumes every parked replica immediately. Tune the threshold from what this panel actually shows rather than from a guess; the observed value on the node06 agent workload is 1-2. Parked replicas are excluded from both sides of the mean, because they carry no work and cannot absorb any.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisPlacement": "auto",
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineWidth": 2,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "min": 0,
+              "noValue": "idle-drain policy is off",
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 0,
+            "y": 67
+          },
+          "id": 37,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.0.0+security-01",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "ramjet_idle_drain_load_per_replica",
+              "legendFormat": "mean in-flight per serving replica",
+              "refId": "A"
+            }
+          ],
+          "title": "Release pressure (mean in-flight per serving replica)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "description": "What the balancer believes about each engine's vLLM sleep state. Distinct from the drain state above: the policy decides intent, this is what actually happened to the engine. A replica stays withheld from routing in every state except awake, because a sleeping engine hangs rather than refusing -- a request routed into one stalls until its own timeout. 'unknown' means a sleep or wake call failed and the real state is not established; the balancer reconciles it against /is_sleeping rather than guessing.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "custom": {
+                "axisPlacement": "auto",
+                "fillOpacity": 80,
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineWidth": 0,
+                "spanNulls": false
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "green",
+                      "text": "awake"
+                    },
+                    "1": {
+                      "color": "yellow",
+                      "text": "parking"
+                    },
+                    "2": {
+                      "color": "text",
+                      "text": "parked"
+                    },
+                    "3": {
+                      "color": "yellow",
+                      "text": "waking"
+                    },
+                    "4": {
+                      "color": "red",
+                      "text": "unknown"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "noValue": "sleep actuator is off",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text"
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 12,
+            "y": 67
+          },
+          "id": 38,
+          "options": {
+            "alignValue": "left",
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "mergeValues": true,
+            "rowHeight": 0.85,
+            "showValue": "auto",
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.0.0+security-01",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "ramjet_engine_park_state",
+              "legendFormat": "{{upstream}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Engine sleep state",
+          "type": "state-timeline"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "description": "Sleep and wake calls the balancer issued, by outcome. A healthy parked fleet is quiet here: repeated sleep/wake pairs mean the policy is flapping, which costs a full weight transfer each way and is worse than never parking. Sustained 'unknown' outcomes mean the engine is not answering its dev endpoints, which fences the replica rather than failing it.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisPlacement": "auto",
+                "drawStyle": "bars",
+                "fillOpacity": 60,
+                "lineWidth": 1,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "min": 0,
+              "noValue": "no actuation in window",
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 0,
+            "y": 72
+          },
+          "id": 39,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.0.0+security-01",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (action, outcome) (increase(ramjet_engine_park_actions_total[1h]))",
+              "legendFormat": "{{action}} -> {{outcome}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Sleep/wake actuations (per hour)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "description": "How long sleep and wake calls take. A wake is a host-to-device copy of the whole model and is the latency a burst pays when it arrives at a shrunken fleet, so it bounds how aggressive the release policy can safely be. A direct 2026-08-20 measurement on one Qwen3.8-27B TP2 engine recorded 23.2s to sleep and 894ms to wake; treat a large regression as a reason to widen the quiet window.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisPlacement": "auto",
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineWidth": 2,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "min": 0,
+              "noValue": "no actuation in window",
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 12,
+            "y": 72
+          },
+          "id": 40,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.0.0+security-01",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "histogram_quantile(0.95, sum by (action, le) (rate(ramjet_engine_park_action_seconds_bucket[1h])))",
+              "legendFormat": "{{action}} p95",
+              "refId": "A"
+            }
+          ],
+          "title": "Sleep/wake duration (p95)",
           "type": "timeseries"
         }
       ],

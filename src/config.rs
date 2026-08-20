@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::{
     engine_park::{EngineParkConfig, ParkActuator, SleepLevel},
-    idle_drain::{IdleDrainConfig, IdleDrainMode},
+    idle_drain::{IdleDrainConfig, IdleDrainMode, IdleDrainRelease},
 };
 
 const MAX_SNAPSHOT_ROUTE_SOCKET_PATH_BYTES: usize = 64;
@@ -1649,6 +1649,21 @@ fn idle_drain_settings(
         ));
     }
 
+    let release = match get("RJ_IDLE_DRAIN_RELEASE")
+        .as_deref()
+        .unwrap_or("fleet-idle")
+    {
+        "fleet-idle" => IdleDrainRelease::FleetIdle,
+        "utilization" => IdleDrainRelease::Utilization,
+        value => {
+            return Err(invalid(
+                "RJ_IDLE_DRAIN_RELEASE",
+                value.to_owned(),
+                "fleet-idle or utilization",
+            ));
+        }
+    };
+
     let idle_after_seconds = bounded_positive(
         get,
         "RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS",
@@ -1675,6 +1690,28 @@ fn idle_drain_settings(
         MAX_IDLE_DRAIN_SECONDS,
     )?;
 
+    // A per-replica quiet window is measured against one replica while its
+    // peers keep serving, so it does not carry the fleet-wide window's
+    // "nothing happened anywhere" evidence. It is floored well above a request
+    // gap for the same reason: a replica between two turns of one conversation
+    // is not idle, it is waiting.
+    let upstream_idle_after_seconds = bounded_positive(
+        get,
+        "RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS",
+        300,
+        MAX_IDLE_DRAIN_SECONDS,
+    )?;
+    if release == IdleDrainRelease::Utilization
+        && upstream_idle_after_seconds < MIN_IDLE_DRAIN_IDLE_AFTER_SECONDS
+    {
+        return Err(invalid(
+            "RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS",
+            upstream_idle_after_seconds.to_string(),
+            "at least 60; a shorter window parks a replica between conversation turns",
+        ));
+    }
+    let resume_load_per_replica = positive(get, "RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA", 4)?;
+
     // The warm floor may equal the fleet size, which simply disables parking.
     // It may never be zero: something must stay warm to answer the next
     // request, and that invariant is the whole reason this policy is safe.
@@ -1689,10 +1726,13 @@ fn idle_drain_settings(
 
     Ok(IdleDrainConfig {
         mode,
+        release,
         idle_after: Duration::from_secs(seconds_to_u64(idle_after_seconds)),
         min_warm,
         cooldown: Duration::from_secs(seconds_to_u64(cooldown_seconds)),
         drain_grace: Duration::from_secs(seconds_to_u64(drain_grace_seconds)),
+        upstream_idle_after: Duration::from_secs(seconds_to_u64(upstream_idle_after_seconds)),
+        resume_load_per_replica,
     })
 }
 
@@ -1799,6 +1839,45 @@ mod tests {
     /// The seconds-suffixed names are the deployment contract. A half-finished
     /// rename that left a millisecond alias in place would silently apply a
     /// value a thousand times too small, so the old names must be inert.
+    #[test]
+    fn the_release_trigger_defaults_to_fleet_idle() {
+        // Utilization trades burst headroom and cache residency for power.
+        // Fleet idleness cannot make serving worse, so it stays the default
+        // and utilization is opted into per deployment.
+        let config = two_upstreams(&[]).unwrap();
+        assert_eq!(config.idle_drain.release, IdleDrainRelease::FleetIdle);
+        assert_eq!(
+            config.idle_drain.upstream_idle_after,
+            Duration::from_mins(5)
+        );
+        assert_eq!(config.idle_drain.resume_load_per_replica, 4);
+    }
+
+    #[test]
+    fn utilization_release_rejects_a_quiet_window_shorter_than_a_conversation_gap() {
+        let error = two_upstreams(&[
+            ("RJ_IDLE_DRAIN_RELEASE", "utilization"),
+            ("RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS", "30"),
+        ])
+        .unwrap_err();
+        assert!(
+            format!("{error}").contains("RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS"),
+            "{error}"
+        );
+        let ok = two_upstreams(&[
+            ("RJ_IDLE_DRAIN_RELEASE", "utilization"),
+            ("RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS", "600"),
+        ])
+        .unwrap();
+        assert_eq!(ok.idle_drain.release, IdleDrainRelease::Utilization);
+        assert_eq!(ok.idle_drain.upstream_idle_after, Duration::from_mins(10));
+    }
+
+    #[test]
+    fn an_unknown_release_trigger_is_rejected_at_startup() {
+        assert!(two_upstreams(&[("RJ_IDLE_DRAIN_RELEASE", "aggressive")]).is_err());
+    }
+
     #[test]
     fn the_park_actuator_defaults_to_sleep_but_cannot_act_until_drain_mode() {
         // Default-on is safe because the actuator is gated by the drain mode,

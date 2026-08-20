@@ -176,6 +176,9 @@ exact-canary and snapshot secrets.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `RJ_IDLE_DRAIN_MODE` | `off` | `off`, `observe` (evaluate and publish, fence nothing), or `drain` (fence a parked replica from routing). `drain` needs at least two upstreams. |
+| `RJ_IDLE_DRAIN_RELEASE` | `fleet-idle` | `fleet-idle` releases only when nothing is running anywhere; `utilization` releases an individually quiet replica while its peers serve. |
+| `RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS` | `300` | Zero-inflight time before one replica is releasable under `utilization`. At least 60. |
+| `RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA` | `4` | Mean in-flight per serving replica that resumes every parked replica, and the anti-flap bound. |
 | `RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS` | `900` | Quiet period before the fleet counts as idle. At least 60. |
 | `RJ_IDLE_DRAIN_MIN_WARM` | `1` | Replicas that must stay warm. Clamped to at least one; an unhealthy replica never counts toward it. |
 | `RJ_IDLE_DRAIN_COOLDOWN_SECONDS` | `300` | Minimum spacing between drain transitions. Never applies to resuming. |
@@ -218,14 +221,67 @@ fails leaves the replica in `unknown`, which fences it and schedules a
 balancer that cannot park an idle replica has lost an optimisation, not a
 capability.
 
-`RJ_IDLE_DRAIN_MAX_PARKED` bounds **host** memory, not GPU memory. Level-1
-sleep moves weights into host RAM, so the cap is about how much the box can
-absorb: on node06 one Qwen3.8-27B engine is roughly 27GB against 30GiB free
-after the ZFS ARC cap. The warm floor cannot express that, because it counts
-replicas rather than bytes.
+`RJ_IDLE_DRAIN_MAX_PARKED` bounds **host** memory, not GPU memory, and the
+warm floor cannot express that because it counts replicas rather than bytes.
+
+A direct measurement on node06 (2026-08-20) is worth knowing before tuning it.
+Level-1 sleep on one Qwen3.8-27B TP2 engine freed 87,890MiB of VRAM per GPU in
+23.2s and woke in 894ms with inference working 132ms later — but it took about
+38GiB of host memory and did not release it on wake. Available memory stayed at
+4.5GiB while the engine was awake and serving; only stopping the container
+recovered it.
+
+Read the cap as "how many replicas may ever park during a container's
+lifetime", not "how many may be parked at once". Raising it commits another
+~38GiB permanently, not transiently.
+
+The same run found that a sleeping engine **hangs** rather than refusing: a
+request issued to it produced no response within ten seconds. Routing into a
+sleeping replica stalls requests until their own timeouts instead of failing
+fast, which is why the park fence is an invariant rather than a nicety.
 
 Observe mode never actuates even with the default actuator, so it remains the
 consequence-free way to qualify the policy against real traffic.
+
+#### Choosing a release trigger
+
+These are different products, not two tunings of one. **Fleet idleness** is a
+statement about the whole deployment and is safe by construction: nothing is
+running anywhere, so parking costs nothing. It is the default for that reason.
+
+It is also, on a deployment whose traffic never stops, a policy that never
+fires. node06 was measured with a longest quiet gap of 20 seconds against a
+900-second window while six of eight GPUs sat at 0% utilization drawing about
+620W — all traffic co-located on one replica by the prefix router, which is the
+router working correctly. No setting of `RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS`
+recovers that power, because the fleet is genuinely busy.
+
+**Utilization** releases a replica that has been individually quiet. Under it,
+resume stops keying on request arrival — meaningless when requests never stop —
+and keys on load pressure instead: when mean in-flight per serving replica
+reaches `RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA`, every parked replica comes
+back, ignoring the cooldown as every move toward capacity does.
+
+That same threshold is the anti-flap bound. A release is refused when it would
+push the remaining replicas to or past it, so the policy can never park a
+replica the next tick would have to wake — each such cycle costs a full weight
+transfer in both directions and is strictly worse than never parking.
+
+Two costs are real here and are not present under fleet idleness. A burst
+arrives to fewer engines and waits on a wake. And sleeping discards the
+replica's KV cache, so a session returning to a parked replica re-prefills;
+that is why the per-replica window is floored at 60s and defaults to 300s, since
+a replica between two turns of one conversation is waiting rather than idle.
+
+Target selection differs between the triggers, and the difference matters.
+Fleet idleness picks the highest-indexed healthy replica, which is sound
+because an idle fleet's replicas are interchangeable. Utilization picks the
+replica that has been quiet *longest* and requires it to be at zero inflight:
+on node06 the highest-indexed replica is the one holding the entire workload,
+so selecting by index would park production and leave three idle engines warm.
+
+Tune from `ramjet_idle_drain_load_per_replica`, which exports the decision
+input directly.
 
 ### Tokenization (experimental)
 

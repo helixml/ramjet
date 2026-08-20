@@ -451,6 +451,8 @@ grey PAUSED instead of green READY.
 ```bash
 cargo test --locked idle_drain
 cargo test --locked engine_park
+cargo test --locked utilization_tests
+cargo test --locked --test engine_park_simulation
 cargo test --locked proxy::tests::a_parked
 python3 -m unittest bench.test_render_topology
 ```
@@ -467,11 +469,58 @@ Keep two invariants when touching this path. A parked or waking replica stays
 fenced from routing whatever the policy intends, because the policy unfences
 the instant it wants a replica running and the weights may still be in host
 memory; the fence expression must therefore stay a single conjunction applied
-in both the publish and post-actuation paths. And `RJ_IDLE_DRAIN_MAX_PARKED`
-bounds host memory rather than replicas: level-1 sleep offloads roughly 27GB
-per Qwen3.8-27B engine against the 30GiB node06 has free after the ZFS ARC cap,
-so raising it without re-measuring available host memory is how the box ends
-up back in swap.
+in both the publish and post-actuation paths. A sleeping engine was measured to
+*hang* rather than refuse, so routing into one stalls requests until their own
+timeouts instead of failing fast.
+
+And `RJ_IDLE_DRAIN_MAX_PARKED` bounds host memory rather than replicas. The
+2026-08-20 direct measurement recorded level-1 sleep freeing 87,890MiB of VRAM
+per GPU in 23.2s with an 894ms wake, but taking about 38GiB of host memory and
+**not returning it on wake** — available memory stayed at 4.5GiB with the
+engine awake and serving, and only stopping the container recovered it. Read
+the cap as how many replicas may ever park during a container's lifetime, not
+how many are parked at once.
+
+`RJ_IDLE_DRAIN_RELEASE` picks what makes a replica releasable, and the two
+options are different products. `fleet-idle` is safe by construction and is the
+default, but on 2026-08-19 node06 measured a longest quiet gap of 20 seconds
+against a 900-second window while six of eight GPUs sat at 0% drawing about
+620W, all traffic co-located on `qwen38-e3` by the prefix router. Fleet idleness
+recovers none of that at any setting. `utilization` releases an individually
+quiet replica while its peers serve, and keys resume on load pressure rather
+than request arrival, which is meaningless when requests never stop.
+
+Do not let `utilization` reuse fleet-idle target selection. That helper picks
+the highest-indexed healthy replica, which is sound only because an idle
+fleet's replicas are interchangeable; here the highest-indexed replica is the
+one holding the entire workload. Utilization picks the longest-quiet replica
+and requires zero inflight. Keep
+`the_only_serving_replica_is_never_the_one_parked` green.
+
+The anti-flap invariant is that a release is refused when it would push the
+remaining replicas to or past `RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA`. Without
+it the policy can park and wake on alternating ticks, paying a full weight
+transfer each way.
+
+Qualify this policy in CI, not on node06. `tests/engine_park_simulation.rs`
+runs the closed loop — scripted arrivals with prefix affinity, a virtual clock,
+injected sleep failures and slow wakes, and engines that refuse work while
+asleep — deterministically in microseconds. It covers the cases production
+cannot be asked to perform: a burst arriving at a parked replica, a sleep call
+that fails, the last warm replica dying during a quiet window. A production
+soak supplies one traffic pattern, only while you watch, and it changes
+underneath the run; the 2026-08-19 soak lost its fleet shape partway through
+and its result became unusable.
+
+The simulation calls `engine_park::fenced`, the same function the proxy
+applies, so a scenario cannot pass against a drifted copy of the fence rule.
+Keep it that way: if a new routing-authority rule appears, put it in
+`engine_park` and call it from both places rather than restating it.
+
+What the simulation cannot prove stays a live question: that vLLM's `/sleep`
+frees device memory on the pinned fork, how long a wake takes, whether the
+offloaded weights fit in host RAM, and what parking costs in lost prefix-cache
+residency. Those need one engine and a maintenance window, not a soak.
 
 The engine half costs a restart: `--enable-sleep-mode` and
 `VLLM_SERVER_DEV_MODE=1` are both startup-time, and the second registers vLLM's
@@ -685,6 +734,16 @@ Every tool that recreates `ds4-loadbalancer` must hold the same exclusive
 verify interval. The Phase-B P2P harness also adds a unique ownership label and
 service hash; it will not restore over a container it no longer owns. Do not
 bypass either fence with a raw concurrent `docker compose up`.
+
+node06's GPUs are shared with work that is not in this repository. Before
+starting or restarting any engine, check who owns its devices with
+`nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv` and map
+each PID to its container through `/proc/<pid>/cgroup`. On 2026-08-20 two
+qwen38 engines were found stopped and were restarted as if they had failed;
+they had in fact been stopped deliberately to free GPUs 4-7 for an SGLang
+comparison, and the restarted engine then looped fourteen times on
+`ValueError: Free memory on device cuda:1 ... less than desired GPU memory
+utilization`. A stopped engine on this box is not evidence of a fault.
 
 Before attributing a running engine to the canonical Compose file, inspect its
 `com.docker.compose.project.config_files` label and compare its rendered service

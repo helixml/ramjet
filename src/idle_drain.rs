@@ -62,10 +62,44 @@ impl IdleDrainMode {
     }
 }
 
+/// What makes a replica releasable.
+///
+/// These are different products, not two tunings of one. Fleet idleness is a
+/// statement about the whole deployment and is safe by construction: nothing
+/// is running anywhere, so parking costs nothing. Utilization is a statement
+/// about one replica while the fleet keeps serving, which trades burst
+/// headroom and cache residency for power.
+///
+/// Fleet idleness is the default because it cannot make serving worse. It is
+/// also, on a box whose traffic never stops, a policy that never fires: node06
+/// measured a longest quiet gap of 20 seconds against a 900-second window
+/// while six of eight GPUs sat at 0% utilization drawing about 620W. That is
+/// the case [`IdleDrainRelease::Utilization`] exists for.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum IdleDrainRelease {
+    /// Release only when no replica has served anything for the idle window.
+    #[default]
+    FleetIdle,
+    /// Release a replica that has been individually quiet, even while its
+    /// peers are busy.
+    Utilization,
+}
+
+impl IdleDrainRelease {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FleetIdle => "fleet_idle",
+            Self::Utilization => "utilization",
+        }
+    }
+}
+
 /// Tuning for [`IdleDrainPolicy`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IdleDrainConfig {
     pub mode: IdleDrainMode,
+    pub release: IdleDrainRelease,
     /// Quiet period before the fleet is considered idle.
     pub idle_after: Duration,
     /// Serving replicas that must always remain warm. Clamped to at least one.
@@ -77,16 +111,32 @@ pub struct IdleDrainConfig {
     /// reported safe to stop. This covers requests already dispatched when the
     /// fence was applied.
     pub drain_grace: Duration,
+    /// How long one replica must sit at zero inflight before
+    /// [`IdleDrainRelease::Utilization`] will release it. Unused under
+    /// [`IdleDrainRelease::FleetIdle`].
+    pub upstream_idle_after: Duration,
+    /// Mean in-flight requests per serving replica at or above which every
+    /// parked replica is resumed.
+    ///
+    /// Under utilization release this replaces "any request resumes
+    /// everything", which is meaningless when requests never stop. It is also
+    /// the anti-flap invariant: a release is refused when it would push the
+    /// remaining replicas to or past this level, so the policy can never park
+    /// a replica that the very next tick would have to wake.
+    pub resume_load_per_replica: usize,
 }
 
 impl Default for IdleDrainConfig {
     fn default() -> Self {
         Self {
             mode: IdleDrainMode::Off,
+            release: IdleDrainRelease::FleetIdle,
             idle_after: Duration::from_mins(15),
             min_warm: 1,
             cooldown: Duration::from_mins(5),
             drain_grace: Duration::from_secs(30),
+            upstream_idle_after: Duration::from_mins(5),
+            resume_load_per_replica: 4,
         }
     }
 }
@@ -178,6 +228,10 @@ impl UpstreamIntent {
 /// The outcome of one [`IdleDrainPolicy::tick`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct IdleDrainDecision {
+    /// Mean in-flight requests across serving replicas, the utilization
+    /// trigger's decision input. Exported so a deployment can tune
+    /// `resume_load_per_replica` from observed pressure instead of guesswork.
+    pub load_per_serving_replica: usize,
     pub upstreams: Vec<UpstreamIntent>,
     /// Upstreams whose state changed during this tick, for transition metrics.
     pub transitions: Vec<(usize, UpstreamDrainState)>,
@@ -208,6 +262,11 @@ pub struct IdleDrainPolicy {
     /// When each fenced upstream last reported non-zero inflight, used to apply
     /// the drain grace period.
     busy_since_ms: Vec<u64>,
+    /// When each upstream last reported non-zero inflight, tracked for every
+    /// replica rather than only fenced ones. This is the utilization release's
+    /// evidence, so it must keep accruing while the replica is serving
+    /// normally.
+    idle_since_ms: Vec<u64>,
     last_activity_ms: u64,
     last_drain_transition_ms: Option<u64>,
 }
@@ -225,6 +284,7 @@ impl IdleDrainPolicy {
             config,
             states: vec![UpstreamDrainState::Warm; upstreams],
             busy_since_ms: vec![now_ms; upstreams],
+            idle_since_ms: vec![now_ms; upstreams],
             last_activity_ms: now_ms,
             last_drain_transition_ms: None,
         }
@@ -260,14 +320,24 @@ impl IdleDrainPolicy {
             return self.decide(now_ms, observations, &previous, false);
         }
 
+        self.record_upstream_activity(now_ms, observations);
+
         let idle = self.fleet_idle(now_ms, observations);
-        if idle {
-            self.advance_drain(now_ms, observations);
-        } else {
-            // Resume is unconditional and immediate. It deliberately ignores
-            // the cooldown: arriving traffic must never wait on a rate limit
-            // that exists only to stop the policy flapping while quiet.
-            self.states.fill(UpstreamDrainState::Warm);
+        match self.config.release {
+            IdleDrainRelease::FleetIdle => {
+                if idle {
+                    self.advance_drain(now_ms, observations);
+                } else {
+                    // Resume is unconditional and immediate. It deliberately
+                    // ignores the cooldown: arriving traffic must never wait
+                    // on a rate limit that exists only to stop the policy
+                    // flapping while quiet.
+                    self.states.fill(UpstreamDrainState::Warm);
+                }
+            }
+            IdleDrainRelease::Utilization => {
+                self.advance_utilization(now_ms, observations);
+            }
         }
         // Checked on every tick, including quiet ones. A replica parked while
         // the fleet was healthy can be left below the floor later by an
@@ -277,6 +347,120 @@ impl IdleDrainPolicy {
         self.restore_warm_floor(now_ms, observations);
 
         self.decide(now_ms, observations, &previous, idle)
+    }
+
+    /// Stamps the last moment each replica had work, for the utilization
+    /// release's per-replica quiet measurement.
+    fn record_upstream_activity(&mut self, now_ms: u64, observations: &[UpstreamObservation]) {
+        for (index, since) in self.idle_since_ms.iter_mut().enumerate() {
+            let inflight = observations
+                .get(index)
+                .map_or(usize::MAX, |observation| observation.inflight);
+            if inflight > 0 {
+                *since = now_ms;
+            }
+        }
+    }
+
+    /// Releases individually quiet replicas while the fleet keeps serving.
+    ///
+    /// Resume is evaluated first and, as everywhere else in this policy, is
+    /// not rate-limited. It cannot key on request arrival the way fleet-idle
+    /// release does: under this trigger requests never stop, so "any activity
+    /// resumes everything" would un-park on the very next tick. Load pressure
+    /// is the signal instead.
+    fn advance_utilization(&mut self, now_ms: u64, observations: &[UpstreamObservation]) {
+        self.promote_drained(now_ms, observations);
+
+        if self.load_per_serving_replica(observations) >= self.config.resume_load_per_replica {
+            self.states.fill(UpstreamDrainState::Warm);
+            self.last_drain_transition_ms = Some(now_ms);
+            return;
+        }
+
+        let warm_serving = self.warm_serving_count(observations);
+        if warm_serving <= self.config.effective_min_warm() {
+            return;
+        }
+        if !self.cooldown_elapsed(now_ms) {
+            return;
+        }
+        // Refuse a release that would immediately satisfy the resume
+        // condition. Without this the policy could park a replica and wake it
+        // on the next tick forever, which costs a full weight transfer each
+        // way and is strictly worse than never parking at all.
+        if self.projected_load_after_release(observations, warm_serving)
+            >= self.config.resume_load_per_replica
+        {
+            return;
+        }
+        if let Some(target) = self.select_quietest(now_ms, observations) {
+            self.states[target] = UpstreamDrainState::Draining;
+            self.busy_since_ms[target] = now_ms;
+            self.last_drain_transition_ms = Some(now_ms);
+        }
+    }
+
+    /// Mean in-flight requests across replicas that are actually serving.
+    ///
+    /// Parked replicas are excluded from both sides: they carry no work and
+    /// they are not available to absorb any, so including them would understate
+    /// the pressure on the replicas that remain.
+    fn load_per_serving_replica(&self, observations: &[UpstreamObservation]) -> usize {
+        let serving = self.warm_serving_count(observations);
+        if serving == 0 {
+            return usize::MAX;
+        }
+        self.serving_inflight(observations).div_ceil(serving)
+    }
+
+    /// What the mean would become if one more replica were released.
+    fn projected_load_after_release(
+        &self,
+        observations: &[UpstreamObservation],
+        warm_serving: usize,
+    ) -> usize {
+        let remaining = warm_serving.saturating_sub(1);
+        if remaining == 0 {
+            return usize::MAX;
+        }
+        self.serving_inflight(observations).div_ceil(remaining)
+    }
+
+    fn serving_inflight(&self, observations: &[UpstreamObservation]) -> usize {
+        self.states
+            .iter()
+            .enumerate()
+            .filter(|(_, state)| !state.fenced())
+            .filter_map(|(index, _)| observations.get(index))
+            .map(|observation| observation.inflight)
+            .sum()
+    }
+
+    /// Picks the replica that has been quiet longest, and only if it is quiet
+    /// enough to qualify.
+    ///
+    /// This deliberately does not reuse [`Self::select_target`]. That helper
+    /// picks the highest-indexed healthy replica, which is correct when the
+    /// fleet is idle because every replica is equally idle by definition.
+    /// Under this trigger the highest-indexed replica may be the *only* one
+    /// serving traffic — on node06 it is — so selecting by index would park
+    /// the engine holding the entire workload.
+    fn select_quietest(&self, now_ms: u64, observations: &[UpstreamObservation]) -> Option<usize> {
+        let threshold_ms = duration_to_ms(self.config.upstream_idle_after);
+        self.states
+            .iter()
+            .enumerate()
+            .filter(|(index, state)| {
+                !state.fenced()
+                    && observations
+                        .get(*index)
+                        .is_some_and(|observation| observation.healthy && observation.inflight == 0)
+            })
+            .map(|(index, _)| (index, now_ms.saturating_sub(self.idle_since_ms[index])))
+            .filter(|(_, quiet_ms)| *quiet_ms >= threshold_ms)
+            .max_by_key(|(index, quiet_ms)| (*quiet_ms, *index))
+            .map(|(index, _)| index)
     }
 
     /// The fleet is idle when nothing is in flight anywhere *and* the quiet
@@ -457,6 +641,7 @@ impl IdleDrainPolicy {
         let _ = now_ms;
 
         IdleDrainDecision {
+            load_per_serving_replica: self.load_per_serving_replica(observations),
             upstreams,
             transitions,
             idle,
@@ -466,6 +651,176 @@ impl IdleDrainPolicy {
 
 fn duration_to_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod utilization_tests {
+    use super::*;
+
+    /// The node06 shape: four replicas, all traffic on the last one.
+    fn node06_config() -> IdleDrainConfig {
+        IdleDrainConfig {
+            mode: IdleDrainMode::Drain,
+            release: IdleDrainRelease::Utilization,
+            idle_after: Duration::from_mins(15),
+            min_warm: 1,
+            cooldown: Duration::from_mins(5),
+            drain_grace: Duration::from_secs(30),
+            upstream_idle_after: Duration::from_mins(5),
+            resume_load_per_replica: 4,
+        }
+    }
+
+    fn observations(inflight: &[usize]) -> Vec<UpstreamObservation> {
+        inflight
+            .iter()
+            .map(|inflight| UpstreamObservation {
+                healthy: true,
+                inflight: *inflight,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_only_serving_replica_is_never_the_one_parked() {
+        // The hazard this trigger introduces. Fleet-idle release picks the
+        // highest-indexed replica because when nothing is running they are
+        // interchangeable. On node06 the highest-indexed replica is the one
+        // holding the entire workload, so index-based selection would park
+        // production and leave three idle engines warm.
+        let mut policy = IdleDrainPolicy::new(node06_config(), 4, 0);
+        let busy = observations(&[0, 0, 0, 2]);
+        let mut now = 0;
+        for _ in 0..40 {
+            now += 30_000;
+            let decision = policy.tick(now, &busy);
+            assert!(
+                decision.upstreams[3].desired_running,
+                "the serving replica must stay running at t={now}"
+            );
+        }
+        // ...and one of the genuinely quiet replicas was released instead.
+        let parked = (0..4)
+            .filter(|index| !policy.tick(now, &busy).upstreams[*index].desired_running)
+            .count();
+        assert!(parked > 0, "a quiet replica should have been released");
+    }
+
+    #[test]
+    fn a_quiet_replica_is_released_while_its_peers_keep_serving() {
+        let mut policy = IdleDrainPolicy::new(node06_config(), 4, 0);
+        let busy = observations(&[0, 0, 0, 2]);
+        let decision = policy.tick(310_000, &busy);
+        assert_eq!(
+            decision.desired_running(),
+            3,
+            "exactly one replica parks per cooldown window"
+        );
+        assert!(decision.upstreams[3].desired_running);
+    }
+
+    #[test]
+    fn a_replica_quiet_for_less_than_its_window_is_not_released() {
+        let mut policy = IdleDrainPolicy::new(node06_config(), 4, 0);
+        let decision = policy.tick(299_000, &observations(&[0, 0, 0, 2]));
+        assert_eq!(decision.desired_running(), 4);
+    }
+
+    #[test]
+    fn load_pressure_resumes_every_parked_replica() {
+        let mut policy = IdleDrainPolicy::new(node06_config(), 4, 0);
+        let quiet = observations(&[0, 0, 0, 2]);
+        let mut now = 310_000;
+        policy.tick(now, &quiet);
+        now += 310_000;
+        policy.tick(now, &quiet);
+        assert!(policy.tick(now, &quiet).desired_running() < 4);
+
+        // A burst lands on what is left. Resume ignores the cooldown.
+        now += 1_000;
+        let burst = observations(&[0, 0, 0, 12]);
+        let decision = policy.tick(now, &burst);
+        assert_eq!(
+            decision.desired_running(),
+            4,
+            "load pressure must restore the whole fleet"
+        );
+    }
+
+    #[test]
+    fn a_release_that_would_immediately_trigger_resume_is_refused() {
+        // Anti-flap. With two serving replicas carrying 6 requests, releasing
+        // one leaves the other at 6 >= the resume threshold of 4, so the very
+        // next tick would wake it again. Each cycle costs a full weight
+        // transfer both ways, which is strictly worse than never parking.
+        let mut config = node06_config();
+        config.min_warm = 1;
+        let mut policy = IdleDrainPolicy::new(config, 2, 0);
+        let decision = policy.tick(310_000, &observations(&[0, 6]));
+        assert_eq!(
+            decision.desired_running(),
+            2,
+            "parking here would oscillate, so it must not happen"
+        );
+    }
+
+    #[test]
+    fn the_warm_floor_still_bounds_utilization_release() {
+        let mut config = node06_config();
+        config.min_warm = 3;
+        let mut policy = IdleDrainPolicy::new(config, 4, 0);
+        let quiet = observations(&[0, 0, 0, 0]);
+        let mut now = 0;
+        for _ in 0..20 {
+            now += 310_000;
+            policy.tick(now, &quiet);
+        }
+        assert_eq!(policy.tick(now, &quiet).desired_running(), 3);
+    }
+
+    #[test]
+    fn an_unhealthy_quiet_replica_is_not_released() {
+        // It is quiet because it is broken, not because it is spare. Parking
+        // it would report a deliberate fence over a failure.
+        let mut policy = IdleDrainPolicy::new(node06_config(), 2, 0);
+        let sick = vec![
+            UpstreamObservation {
+                healthy: false,
+                inflight: 0,
+            },
+            UpstreamObservation {
+                healthy: true,
+                inflight: 1,
+            },
+        ];
+        let decision = policy.tick(310_000, &sick);
+        assert!(decision.upstreams[0].desired_running);
+    }
+
+    #[test]
+    fn a_replica_that_becomes_busy_restarts_its_quiet_measurement() {
+        let mut policy = IdleDrainPolicy::new(node06_config(), 4, 0);
+        // Quiet for most of the window, then serves one request.
+        policy.tick(290_000, &observations(&[0, 0, 0, 2]));
+        policy.tick(295_000, &observations(&[1, 0, 0, 2]));
+        // Past the original deadline, but its clock restarted at 295s.
+        let decision = policy.tick(400_000, &observations(&[0, 0, 0, 2]));
+        assert!(
+            decision.upstreams[0].desired_running,
+            "serving a request must restart the quiet window"
+        );
+    }
+
+    #[test]
+    fn fleet_idle_release_is_unchanged_by_the_new_trigger() {
+        let mut config = node06_config();
+        config.release = IdleDrainRelease::FleetIdle;
+        let mut policy = IdleDrainPolicy::new(config, 4, 0);
+        // Individually quiet replicas, but the fleet is not idle: fleet-idle
+        // release must still refuse to park anything.
+        let decision = policy.tick(910_000, &observations(&[0, 0, 0, 2]));
+        assert_eq!(decision.desired_running(), 4);
+    }
 }
 
 #[cfg(test)]
@@ -481,6 +836,7 @@ mod tests {
             min_warm: 1,
             cooldown: Duration::from_mins(5),
             drain_grace: Duration::from_secs(30),
+            ..IdleDrainConfig::default()
         }
     }
 

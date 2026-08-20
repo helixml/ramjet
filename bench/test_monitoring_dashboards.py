@@ -195,6 +195,10 @@ class DashboardSourceTest(unittest.TestCase):
                 "Stop intent (desired running / safe to stop)",
                 "Fleet idle window",
                 "Drain transitions (per hour)",
+                "Release pressure (mean in-flight per serving replica)",
+                "Engine sleep state",
+                "Sleep/wake actuations (per hour)",
+                "Sleep/wake duration (p95)",
             ],
         )
 
@@ -263,6 +267,17 @@ class MetricContractTest(unittest.TestCase):
         # not tell an operator whether stopping an engine is safe or why.
         drain = {name for name in self.declared if "idle_drain" in name}
         self.assertEqual(sorted(drain - self.referenced), [])
+
+    def test_all_engine_park_metrics_are_surfaced(self) -> None:
+        # Same reasoning as the drain metrics, and the gap was real: the park
+        # gauge, actuation counter, and duration histogram all shipped exported
+        # but invisible, so an operator could see that a replica was withheld
+        # without seeing that the balancer had put the engine to sleep.
+        park = {name for name in self.declared if "engine_park" in name}
+        # A histogram is declared under its base name but queried per suffix,
+        # so compare against the base names the dashboard actually reaches.
+        surfaced = {self.base_name(name) for name in self.referenced}
+        self.assertEqual(sorted(park - surfaced), [])
 
     def test_drain_and_readiness_labels_agree(self) -> None:
         # The readiness panel multiplies these two series together, which in
