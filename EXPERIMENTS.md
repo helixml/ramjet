@@ -1,6 +1,77 @@
 # node06 experiment journal
 
-## 2026-08-19 — machine-view tile sparklines stopped jumping on hover
+## 2026-08-20 — DFlash2 + NVFP4 repro: the 300s tok/s claim is H200 bandwidth, not a software trick
+
+A screenshot claimed "Qwen3.8-27B NVFP4 + DFlash2, 300s tok/s" (323 after,
+308–335 before) on sglang. Reproduced the stack on node06 to see whether the
+number transfers to our RTX PRO 6000 Blackwell cards. It does not, and the
+decomposition says why.
+
+Setup: production single-homed onto qwen38-e0/e1 (GPUs 0–3) via
+`topology.4gpu-tp2.yaml` LB-only recreate under the deployment lock (render
+diff was the three env lines plus e2/e3 leaving); e2/e3 stopped to free GPUs
+4–7. sglang cookbook image `lmsysorg/sglang:qwen38-27b` (Aug 14) with sglang
+main @ `38b74d294` python-tree bind-mounted over it — the cookbook tag has the
+DFLASH worker but not the `DFlash2DraftModel` registry entry, which is what
+the screenshot's "overlay" was for. Target `Inferact/Qwen3.8-27B-NVFP4`
+(24.2GB on GPU; the RadixArk export quantizes lm_head, which the DFlash2
+selector rejects — "requires a dense FP16/BF16/FP32 target lm_head" — and is
+what the screenshot's "NVFP4 lm_head in-place apply" patch addressed). Draft
+`z-lab/Qwen3.8-27B-DFlash2`, block 8. FlashInfer fp4_gemm autotuned for
+sm120; selector folded into the draft cuda graph. All request cells under
+`node06_gpu_guard.py` (three passing journals in
+`qwen38_27b/.experiments/dflash2-repro-*`); intake air 44C throughout.
+
+Batch-1 decode, thinking off, tok/s from response usage, GPU 4:
+
+| config | min | median | max |
+|---|---|---|---|
+| no speculation | 57.1 | 57.4 | 57.4 |
+| DFlash2 block 8, official sampling | 126 | 144 | 179 |
+| DFlash2 block 8, greedy | 147 | 151–158 | 218 |
+| DFlash2 block 16 (out of spec, draft trained for 8) | 136 | 173 | 269 |
+
+Acceptance is healthy — 3.4–5.7 of 8 drafted (rate 0.54–0.66), matching the
+model card — so DFlash2 delivers a real 2.6–3.8x. The wall is the base rate:
+57.4 tok/s flat is 78% of the 1.79TB/s GDDR7 roofline for 24.2GB of resident
+weights. Physics, not configuration. To reach 323 at this acceptance you need
+a ~2.5x faster base, i.e. HBM-class bandwidth; the DFlash2 model card's own
+eval is "SGLang on one NVIDIA H200" (4.8TB/s), where base ~150 x ~2.2
+effective is exactly the low 300s. The claim is true on the claimant's
+hardware and does not transfer to this box.
+
+The recipe (client is `bench/dflash2_bench.py`; drop the three
+`--speculative-*` flags for the no-spec baseline):
+
+```bash
+git -C /prod/src/sglang checkout 38b74d294
+docker run -d --name sglang-dflash2 \
+  --gpus '"device=4"' --shm-size 32g --init \
+  -p 127.0.0.1:30002:30002 \
+  -v /prod/models:/models:ro \
+  -v /prod/engine-cache-sglang:/root/.cache \
+  -v /prod/src/sglang/python/sglang:/sgl-workspace/sglang/python/sglang:ro \
+  --entrypoint python3 lmsysorg/sglang:qwen38-27b \
+  -m sglang.launch_server \
+    --model-path /models/Inferact/Qwen3.8-27B-NVFP4 \
+    --served-model-name qwen3.8-27b-nvfp4 \
+    --speculative-algorithm DFLASH \
+    --speculative-draft-model-path /models/z-lab/Qwen3.8-27B-DFlash2 \
+    --speculative-num-draft-tokens 8 \
+    --host 0.0.0.0 --port 30002
+
+RAMJET_NODE06_AUTHORIZATION=supervised-2026-08-14 \
+  python3 ./node06_gpu_guard.py --label dflash2-repro \
+  --output .experiments/dflash2-repro-thermal.jsonl \
+  -- python3 ./dflash2_bench.py http://127.0.0.1:30002 qwen3.8-27b-nvfp4 \
+     --sampling greedy --repetitions 2 --max-tokens 1024
+```
+
+State left behind: prod on GPUs 0–3 (rollback: `topology.8gpu-tp2.yaml`
+recreate + `docker start qwen38-e2 qwen38-e3`), `sglang-dflash2` on GPU 4
+(:30002, block 8) and `sglang-baseline` on GPU 5 (:30001) for further poking.
+Checkpoints under `/prod/models/{Inferact,RadixArk,z-lab}`, sglang checkout at
+`/prod/src/sglang`.
 
 LB-only deploy of `rust-14d1dc2` (image id `sha256:d6f60bfc…`), built from
 merged PR #209. UI-only change: `StatTile` always renders its third line
