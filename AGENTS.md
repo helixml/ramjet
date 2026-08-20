@@ -469,11 +469,17 @@ Keep two invariants when touching this path. A parked or waking replica stays
 fenced from routing whatever the policy intends, because the policy unfences
 the instant it wants a replica running and the weights may still be in host
 memory; the fence expression must therefore stay a single conjunction applied
-in both the publish and post-actuation paths. And `RJ_IDLE_DRAIN_MAX_PARKED`
-bounds host memory rather than replicas: level-1 sleep offloads roughly 27GB
-per Qwen3.8-27B engine against the 30GiB node06 has free after the ZFS ARC cap,
-so raising it without re-measuring available host memory is how the box ends
-up back in swap.
+in both the publish and post-actuation paths. A sleeping engine was measured to
+*hang* rather than refuse, so routing into one stalls requests until their own
+timeouts instead of failing fast.
+
+And `RJ_IDLE_DRAIN_MAX_PARKED` bounds host memory rather than replicas. The
+2026-08-20 direct measurement recorded level-1 sleep freeing 87,890MiB of VRAM
+per GPU in 23.2s with an 894ms wake, but taking about 38GiB of host memory and
+**not returning it on wake** — available memory stayed at 4.5GiB with the
+engine awake and serving, and only stopping the container recovered it. Read
+the cap as how many replicas may ever park during a container's lifetime, not
+how many are parked at once.
 
 `RJ_IDLE_DRAIN_RELEASE` picks what makes a replica releasable, and the two
 options are different products. `fleet-idle` is safe by construction and is the

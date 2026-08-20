@@ -7202,3 +7202,62 @@ not an LB-only swap. Until that window exists, the sleep/wake path is qualified
 only by unit and mock-engine tests, which assert the exact query string vLLM
 receives but not a real device transfer. Do not describe it as
 production-qualified.
+
+## 2026-08-20 — r127 direct vLLM sleep-mode measurement on one engine
+
+The simulation in `tests/engine_park_simulation.rs` deliberately does not claim
+anything about engine behaviour. This measures it directly, with ramjet out of
+the loop: `qwen38-e3` was recreated from the committed sleep topology (the
+render differed from the running one by exactly `--enable-sleep-mode` and
+`VLLM_SERVER_DEV_MODE: "1"`), the LB was single-homed to e0/e1 in the same
+interval so no production request could reach the engine under test, and the
+endpoints were driven with `curl`.
+
+Model load after recreate took 540s. `/is_sleeping` answered before any sleep
+call, confirming the dev route group registers as documented.
+
+| Step | Result |
+|---|---|
+| `POST /sleep?level=1&mode=abort` | HTTP 200 in **23,179ms** |
+| GPU 6/7 memory | 91,507MiB → **3,617MiB** each (87,890MiB freed per GPU, ~171.7GiB per TP2 pair) |
+| Host MemAvailable | 42.6GiB → **4.5GiB** |
+| Request while asleep | **hung**; curl aborted at its 10s budget with no response |
+| `POST /wake_up` | HTTP 200 in **894ms** |
+| GPU 6/7 after wake | 89,599MiB each |
+| Inference after wake | HTTP 200 in **132ms** |
+
+Two results matter more than the timings.
+
+**A sleeping engine hangs rather than refusing.** The request issued while
+asleep produced no response at all within ten seconds; it did not return an
+error. A load balancer that routed into a sleeping replica would therefore
+stall requests until their own timeouts, not fail them fast. This is direct
+evidence for the fence-before-unfence invariant rather than a plausibility
+argument for it.
+
+**Level-1 sleep does not return host memory on wake.** Available memory stayed
+at 4.5GiB after the engine was awake and serving again. The engine's container
+was then measured at 60.06GiB against 12.32GiB for the untouched `qwen38-e0`,
+its two `VLLM::Worker_TP` processes at 30.3GB RSS each against 5.5GB, and
+system `shared` at 45GiB against the 1.1-1.2GiB seen all week. Stopping the
+container returned MemAvailable from 4.4GiB to 65.4GiB immediately, so the
+memory is held by the engine process rather than leaked system-wide.
+
+The operational consequence is that a park/wake cycle **ratchets**: roughly
+38GiB of host memory is taken on the first sleep and retained for the
+container's lifetime, whether or not the replica is currently parked. Whether
+that is a deliberate buffer reuse in the fork or an omission is not
+established here, and this run does not attempt to diagnose it.
+
+This invalidates the sizing that `RJ_IDLE_DRAIN_MAX_PARKED` documentation was
+written against. The earlier figure of "roughly 27GB per engine against 30GiB
+available" treated the cost as transient and per-currently-parked-replica. The
+measured cost is about 38GiB, permanent for the container's lifetime, and
+therefore cumulative across distinct replicas that have each parked once. A cap
+of one remains correct on this box; raising it is not a matter of having enough
+memory for one more concurrent park, but for one more engine ever parking.
+
+Cleanup: the engine under test was stopped rather than restarted, which
+returned both its host memory and GPUs 6/7 to the SGLang comparison occupying
+GPUs 4/5. Swap was drained afterwards. Production served from e0/e1 throughout
+and reported `ok 2/2` at the end; no request reached the engine under test.

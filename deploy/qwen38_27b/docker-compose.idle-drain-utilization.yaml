@@ -25,11 +25,16 @@
 #     floored at 60s and defaulted to 300s for this reason: a replica between
 #     two turns of one conversation is waiting, not idle.
 #
-# Host memory decides how far this can go. Level-1 sleep offloads weights INTO
-# host RAM at roughly 27GB per engine against about 30GiB available, so
-# exactly one replica can be parked at level 1. Parking three would need
-# level 2, which discards weights and makes wake a full model reload. Start at
-# one and level 1.
+# Host memory decides how far this can go, and it is worse than it looks.
+# Measured on 2026-08-20: level-1 sleep on one Qwen3.8-27B TP2 engine freed
+# 87,890MiB of VRAM per GPU in 23.2s and woke in 894ms, but took about 38GiB of
+# host memory and DID NOT RETURN IT ON WAKE. Available memory stayed at 4.5GiB
+# with the engine awake and serving; only stopping the container recovered it.
+#
+# So the cap does not bound concurrent parks, it bounds how many replicas may
+# ever park during a container's lifetime. One is the right number here.
+# Raising it is not a question of affording one more simultaneous park but of
+# affording another 38GiB permanently. Re-measure before changing it.
 #
 # Render on the sleep-mode topology, whose engines carry --enable-sleep-mode:
 #

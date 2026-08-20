@@ -221,11 +221,24 @@ fails leaves the replica in `unknown`, which fences it and schedules a
 balancer that cannot park an idle replica has lost an optimisation, not a
 capability.
 
-`RJ_IDLE_DRAIN_MAX_PARKED` bounds **host** memory, not GPU memory. Level-1
-sleep moves weights into host RAM, so the cap is about how much the box can
-absorb: on node06 one Qwen3.8-27B engine is roughly 27GB against 30GiB free
-after the ZFS ARC cap. The warm floor cannot express that, because it counts
-replicas rather than bytes.
+`RJ_IDLE_DRAIN_MAX_PARKED` bounds **host** memory, not GPU memory, and the
+warm floor cannot express that because it counts replicas rather than bytes.
+
+A direct measurement on node06 (2026-08-20) is worth knowing before tuning it.
+Level-1 sleep on one Qwen3.8-27B TP2 engine freed 87,890MiB of VRAM per GPU in
+23.2s and woke in 894ms with inference working 132ms later — but it took about
+38GiB of host memory and did not release it on wake. Available memory stayed at
+4.5GiB while the engine was awake and serving; only stopping the container
+recovered it.
+
+Read the cap as "how many replicas may ever park during a container's
+lifetime", not "how many may be parked at once". Raising it commits another
+~38GiB permanently, not transiently.
+
+The same run found that a sleeping engine **hangs** rather than refusing: a
+request issued to it produced no response within ten seconds. Routing into a
+sleeping replica stalls requests until their own timeouts instead of failing
+fast, which is why the park fence is an invariant rather than a nicety.
 
 Observe mode never actuates even with the default actuator, so it remains the
 consequence-free way to qualify the policy against real traffic.

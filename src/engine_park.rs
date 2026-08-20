@@ -20,11 +20,23 @@
 //!   in host memory would dispatch real traffic into a sleeping engine, and
 //!   the policy's own resume path is deliberately immediate — it cannot wait
 //!   for a device copy that has not happened yet.
+//!
+//!   A sleeping engine does not refuse work, it *hangs*: a request issued to a
+//!   measured sleeping replica produced no response within ten seconds rather
+//!   than an error. Routing into one stalls requests until their own timeouts
+//!   instead of failing them fast, which is why this fence is an invariant and
+//!   not an optimisation.
 //! * Level-1 sleep offloads weights to host RAM, so parking is bounded by a
-//!   concurrency cap as well as by the warm floor. On node06 one Qwen3.8-27B
-//!   engine is roughly 27GB against 30GiB available after the ZFS ARC cap:
-//!   one replica may sleep, four may not. The warm floor alone does not
-//!   express that, because it counts replicas rather than host memory.
+//!   concurrency cap as well as by the warm floor. The warm floor cannot
+//!   express that, because it counts replicas rather than bytes.
+//!
+//!   The cost is worse than "one replica's weights while it is parked". A
+//!   2026-08-20 measurement on node06 recorded a Qwen3.8-27B TP2 engine taking
+//!   about 38GiB of host memory on its first sleep and **not returning it on
+//!   wake**: available memory stayed at 4.5GiB with the engine awake and
+//!   serving, and only stopping the container recovered it. Treat the cap as
+//!   bounding how many replicas may *ever* park during a container's lifetime,
+//!   not how many are parked right now.
 //!
 //! Actuation never reports failure into `/health` or upstream health. A
 //! replica whose sleep or wake call failed is fenced and reconciled, not
