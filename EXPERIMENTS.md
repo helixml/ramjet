@@ -1,5 +1,37 @@
 # node06 experiment journal
 
+## 2026-08-20 — node06 switched to SGLang NVFP4 + DFlash2 (8x TP1)
+
+Following the repro below, the whole box now serves Qwen3.8-27B through the
+new `topology.8gpu-sglang-dflash2.yaml`: eight single-GPU SGLang engines
+(NVFP4 target, DFlash2 block-8 draft) behind the unchanged
+`rust-r125-sleep-actuator-4d66605` LB. Same served name `qwen3.8-27b`, so no
+client changed. Zero-downtime phased roll: sglang e4-e7 on the freed GPUs,
+LB swing scoped to them, vLLM e0/e1 stopped, sglang e0-e3 up, final LB
+recreate on the full default render. `ramjet_upstream_up` 8/8.
+
+Two findings worth keeping:
+
+* SGLang's `qwen` tool-call parser is the Qwen2.5 JSON detector and silently
+  swallowed every Qwen3.8 tool call (26 completion tokens, empty content,
+  `tool_calls: null`). Qwen3.8's template emits `<function=...>` XML — vLLM's
+  `qwen3_xml` — and the SGLang equivalent is `qwen3_coder`. Verified through
+  the LB: proper `tool_calls` with `finish_reason: "tool_calls"`.
+* Through-LB batch-1 greedy: 125-216 tok/s, median 153 — identical to the
+  direct-engine numbers, so the LB path costs nothing measurable.
+
+The LB runs with `RJ_KV_EVENT_MODE=off` (SGLang publishes no vLLM KV events)
+and idle-drain stays in observe (no vLLM sleep endpoints). Reasoning parser
+`qwen3` confirmed working (clean `content`, populated `reasoning_tokens`).
+
+Rollback: the four vLLM containers `qwen38-e0..e3` are stopped, not removed;
+`docker start` them and recreate the LB from the previous file list
+(`topology.8gpu-tp2.yaml` in place of the sglang overlay) with the same
+pinned LB image. Not yet done: a Helix `/api/v1/sessions/chat` end-to-end
+and any aggregate-capacity qualification — the c64+ regime is unmeasured on
+this stack, and NVFP4 quality has no gate yet. Watch
+`minidynamo-rtx6000pro` per the checklist.
+
 ## 2026-08-20 — DFlash2 + NVFP4 repro: the 300s tok/s claim is H200 bandwidth, not a software trick
 
 A screenshot claimed "Qwen3.8-27B NVFP4 + DFlash2, 300s tok/s" (323 after,
