@@ -1,5 +1,20 @@
 # node06 experiment journal
 
+## 2026-08-20 — v0.4.0 released and accepted on node06
+
+Drone main build #513 published `rust-1d0223e` (deps seed rebuilt once for
+the version-bump lockfile change, as expected). Deployed the LB by immutable
+digest `sha256:467e7edf…` under the common lock on the sglang topology file
+list; `ramjet_upstream_up` stayed 8/8. Acceptance ran against the live
+four-agent traffic plus probes: 200s across chat and tool-call requests,
+`qwen3_coder` tool parsing intact, stream-TPS quantiles publishing
+(p50 150 / p05 123 tok/s), no non-200 responses in the LB counters.
+Tag build #514 promoted the same manifests to `v0.4.0` and
+`companion-v0.4.0` with digest equality confirmed, so the deployed container
+is byte-identical to the released artifact. Rollback is the v0.3.0 pin
+`sha256:2489110a…` (predates the stream_tps fields — the Stream tok/s tile
+goes empty on rollback).
+
 ## 2026-08-20 — r128 LB-only deploy: honest Gen tok/s tile, per-stream decode quantiles
 
 Deployed `ghcr.io/helixml/ds4-loadbalancer:rust-r127-stream-tps-7e892b1`
