@@ -2076,6 +2076,9 @@ impl Proxy {
     fn publish_idle_drain(&self, decision: &IdleDrainDecision) {
         let metrics = &self.inner.metrics;
         metrics.idle_drain_fleet_idle.set(f64::from(decision.idle));
+        metrics
+            .idle_drain_load_per_replica
+            .set(usize_to_f64(decision.load_per_serving_replica));
         for (upstream, intent) in decision.upstreams.iter().enumerate() {
             let label = self.upstream_label(upstream);
             // Routing authority is applied before telemetry so a scrape can

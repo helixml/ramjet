@@ -36,6 +36,7 @@ pub struct Metrics {
     pub idle_drain_safe_to_stop: GaugeVec,
     pub idle_drain_transitions: CounterVec,
     pub idle_drain_fleet_idle: Gauge,
+    pub idle_drain_load_per_replica: Gauge,
     pub engine_park_state: GaugeVec,
     pub engine_park_actions: CounterVec,
     pub engine_park_action_seconds: HistogramVec,
@@ -284,6 +285,10 @@ impl Metrics {
             idle_drain_fleet_idle: prometheus::Gauge::new(
                 "ramjet_idle_drain_fleet_idle",
                 "Whether the fleet is currently inside its configured idle window",
+            )?,
+            idle_drain_load_per_replica: prometheus::Gauge::new(
+                "ramjet_idle_drain_load_per_replica",
+                "Mean in-flight requests across serving replicas, the utilization release's decision input",
             )?,
             engine_park_state: gauge(
                 "ramjet_engine_park_state",
@@ -929,6 +934,7 @@ impl Metrics {
             Box::new(self.idle_drain_safe_to_stop.clone()),
             Box::new(self.idle_drain_transitions.clone()),
             Box::new(self.idle_drain_fleet_idle.clone()),
+            Box::new(self.idle_drain_load_per_replica.clone()),
             Box::new(self.engine_park_state.clone()),
             Box::new(self.engine_park_actions.clone()),
             Box::new(self.engine_park_action_seconds.clone()),

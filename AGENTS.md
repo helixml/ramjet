@@ -451,6 +451,7 @@ grey PAUSED instead of green READY.
 ```bash
 cargo test --locked idle_drain
 cargo test --locked engine_park
+cargo test --locked utilization_tests
 cargo test --locked proxy::tests::a_parked
 python3 -m unittest bench.test_render_topology
 ```
@@ -472,6 +473,27 @@ bounds host memory rather than replicas: level-1 sleep offloads roughly 27GB
 per Qwen3.8-27B engine against the 30GiB node06 has free after the ZFS ARC cap,
 so raising it without re-measuring available host memory is how the box ends
 up back in swap.
+
+`RJ_IDLE_DRAIN_RELEASE` picks what makes a replica releasable, and the two
+options are different products. `fleet-idle` is safe by construction and is the
+default, but on 2026-08-19 node06 measured a longest quiet gap of 20 seconds
+against a 900-second window while six of eight GPUs sat at 0% drawing about
+620W, all traffic co-located on `qwen38-e3` by the prefix router. Fleet idleness
+recovers none of that at any setting. `utilization` releases an individually
+quiet replica while its peers serve, and keys resume on load pressure rather
+than request arrival, which is meaningless when requests never stop.
+
+Do not let `utilization` reuse fleet-idle target selection. That helper picks
+the highest-indexed healthy replica, which is sound only because an idle
+fleet's replicas are interchangeable; here the highest-indexed replica is the
+one holding the entire workload. Utilization picks the longest-quiet replica
+and requires zero inflight. Keep
+`the_only_serving_replica_is_never_the_one_parked` green.
+
+The anti-flap invariant is that a release is refused when it would push the
+remaining replicas to or past `RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA`. Without
+it the policy can park and wake on alternating ticks, paying a full weight
+transfer each way.
 
 The engine half costs a restart: `--enable-sleep-mode` and
 `VLLM_SERVER_DEV_MODE=1` are both startup-time, and the second registers vLLM's
