@@ -7261,3 +7261,49 @@ Cleanup: the engine under test was stopped rather than restarted, which
 returned both its host memory and GPUs 6/7 to the SGLang comparison occupying
 GPUs 4/5. Swap was drained afterwards. Production served from e0/e1 throughout
 and reported `ok 2/2` at the end; no request reached the engine under test.
+
+## 2026-08-20 — node06 state after the parking work
+
+Recorded because the box is deliberately not in its default shape, and the
+next person to look at it should not read that as breakage.
+
+**Load balancer.** `ds4-loadbalancer` runs
+`ghcr.io/helixml/ramjet:rust-r126-utilization-c9b6c96`, a locally built
+candidate from the branch that became #213, not a published `main` image. It
+was created from four files — base, `machineview.override.yaml`,
+`topology.8gpu-tp2.sleep.yaml`, and `docker-compose.idle-drain-observe.yaml` —
+and any recreate must pass exactly that list. It is single-homed to e0/e1 with
+`RJ_UPSTREAM`, `RJ_KV_EVENT_LIVE_ENDPOINTS`, and `RJ_KV_EVENT_REPLAY_ENDPOINTS`
+all reduced to matching cardinality, which is why `/health` reports `ok 2/2`
+rather than a degraded four. Idle drain is `observe` with
+`RJ_IDLE_DRAIN_RELEASE=utilization`; observe actuates nothing, so no engine was
+ever slept by the balancer.
+
+**Engines.** e0 and e1 are up at five days with zero restarts and serve all
+production traffic. e2 and e3 are stopped, and neither is a fault:
+
+- e2's GPUs 4-5 are held by `sglang-baseline` and `sglang-dflash2`, an
+  unrelated comparison started at 07:04Z and 07:12Z. e2 was restarted at 08:15Z
+  in the mistaken belief that it had failed, looped fourteen times on
+  `Free memory on device cuda:1 (13.87/94.97 GiB) ... less than desired`, and
+  was stopped. Do not restart it until those GPUs are released.
+- e3 was the engine used for the r127 sleep measurement. It was stopped rather
+  than restarted so that its ~48GiB of retained host memory and GPUs 6-7 both
+  returned; GPUs 6-7 now read 0MiB and are available.
+
+**Host.** MemAvailable 57.2GiB, swap drained to zero, `zfs_arc_max` capped at
+16GiB in `/etc/modprobe.d/zfs-ramjet.conf`.
+
+**To restore the canonical four-engine deployment** the SGLang comparison must
+release GPUs 4-5 first. Then recreate e2 and e3 from the base plus
+`topology.8gpu-tp2.yaml` — the plain topology, not the `.sleep` one, unless
+sleep mode is being deployed deliberately — and recreate the LB from the same
+render with the full four-upstream `RJ_UPSTREAM` and matching KV endpoint
+lists, on a published `main` image rather than the candidate. Bring engines up
+one at a time: two simultaneous model loads on this box previously drove it
+into swap.
+
+The observe-mode sampler unit `ramjet-r125-observe` has been stopped; its
+journal remains at `.experiments/r125-observe-soak.jsonl`. Its records are
+evidence only for the fleet shape that existed while it ran, which changed
+underneath it.
