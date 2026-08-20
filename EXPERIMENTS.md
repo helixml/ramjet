@@ -1,6 +1,77 @@
 # node06 experiment journal
 
-## 2026-08-19 — machine-view tile sparklines stopped jumping on hover
+## 2026-08-20 — DFlash2 + NVFP4 repro: the 300s tok/s claim is H200 bandwidth, not a software trick
+
+A screenshot claimed "Qwen3.8-27B NVFP4 + DFlash2, 300s tok/s" (323 after,
+308–335 before) on sglang. Reproduced the stack on node06 to see whether the
+number transfers to our RTX PRO 6000 Blackwell cards. It does not, and the
+decomposition says why.
+
+Setup: production single-homed onto qwen38-e0/e1 (GPUs 0–3) via
+`topology.4gpu-tp2.yaml` LB-only recreate under the deployment lock (render
+diff was the three env lines plus e2/e3 leaving); e2/e3 stopped to free GPUs
+4–7. sglang cookbook image `lmsysorg/sglang:qwen38-27b` (Aug 14) with sglang
+main @ `38b74d294` python-tree bind-mounted over it — the cookbook tag has the
+DFLASH worker but not the `DFlash2DraftModel` registry entry, which is what
+the screenshot's "overlay" was for. Target `Inferact/Qwen3.8-27B-NVFP4`
+(24.2GB on GPU; the RadixArk export quantizes lm_head, which the DFlash2
+selector rejects — "requires a dense FP16/BF16/FP32 target lm_head" — and is
+what the screenshot's "NVFP4 lm_head in-place apply" patch addressed). Draft
+`z-lab/Qwen3.8-27B-DFlash2`, block 8. FlashInfer fp4_gemm autotuned for
+sm120; selector folded into the draft cuda graph. All request cells under
+`node06_gpu_guard.py` (three passing journals in
+`qwen38_27b/.experiments/dflash2-repro-*`); intake air 44C throughout.
+
+Batch-1 decode, thinking off, tok/s from response usage, GPU 4:
+
+| config | min | median | max |
+|---|---|---|---|
+| no speculation | 57.1 | 57.4 | 57.4 |
+| DFlash2 block 8, official sampling | 126 | 144 | 179 |
+| DFlash2 block 8, greedy | 147 | 151–158 | 218 |
+| DFlash2 block 16 (out of spec, draft trained for 8) | 136 | 173 | 269 |
+
+Acceptance is healthy — 3.4–5.7 of 8 drafted (rate 0.54–0.66), matching the
+model card — so DFlash2 delivers a real 2.6–3.8x. The wall is the base rate:
+57.4 tok/s flat is 78% of the 1.79TB/s GDDR7 roofline for 24.2GB of resident
+weights. Physics, not configuration. To reach 323 at this acceptance you need
+a ~2.5x faster base, i.e. HBM-class bandwidth; the DFlash2 model card's own
+eval is "SGLang on one NVIDIA H200" (4.8TB/s), where base ~150 x ~2.2
+effective is exactly the low 300s. The claim is true on the claimant's
+hardware and does not transfer to this box.
+
+The recipe (client is `bench/dflash2_bench.py`; drop the three
+`--speculative-*` flags for the no-spec baseline):
+
+```bash
+git -C /prod/src/sglang checkout 38b74d294
+docker run -d --name sglang-dflash2 \
+  --gpus '"device=4"' --shm-size 32g --init \
+  -p 127.0.0.1:30002:30002 \
+  -v /prod/models:/models:ro \
+  -v /prod/engine-cache-sglang:/root/.cache \
+  -v /prod/src/sglang/python/sglang:/sgl-workspace/sglang/python/sglang:ro \
+  --entrypoint python3 lmsysorg/sglang:qwen38-27b \
+  -m sglang.launch_server \
+    --model-path /models/Inferact/Qwen3.8-27B-NVFP4 \
+    --served-model-name qwen3.8-27b-nvfp4 \
+    --speculative-algorithm DFLASH \
+    --speculative-draft-model-path /models/z-lab/Qwen3.8-27B-DFlash2 \
+    --speculative-num-draft-tokens 8 \
+    --host 0.0.0.0 --port 30002
+
+RAMJET_NODE06_AUTHORIZATION=supervised-2026-08-14 \
+  python3 ./node06_gpu_guard.py --label dflash2-repro \
+  --output .experiments/dflash2-repro-thermal.jsonl \
+  -- python3 ./dflash2_bench.py http://127.0.0.1:30002 qwen3.8-27b-nvfp4 \
+     --sampling greedy --repetitions 2 --max-tokens 1024
+```
+
+State left behind: prod on GPUs 0–3 (rollback: `topology.8gpu-tp2.yaml`
+recreate + `docker start qwen38-e2 qwen38-e3`), `sglang-dflash2` on GPU 4
+(:30002, block 8) and `sglang-baseline` on GPU 5 (:30001) for further poking.
+Checkpoints under `/prod/models/{Inferact,RadixArk,z-lab}`, sglang checkout at
+`/prod/src/sglang`.
 
 LB-only deploy of `rust-14d1dc2` (image id `sha256:d6f60bfc…`), built from
 merged PR #209. UI-only change: `StatTile` always renders its third line
@@ -7012,3 +7083,122 @@ This still does not own candidate startup/model load/JIT or automatic rollback.
 Those remain the next container-aware rollout-owner boundary. The first live
 r11 request remains forbidden until cooling repair evidence, one-TP4 isolation,
 exact metadata capture, and the guarded smoke are all current.
+
+## 2026-08-19 — node06 host RAM recovered and vLLM sleep-mode preflight
+
+The recurring "~8-9GiB available host memory" constraint in `AGENTS.md` was
+never attributed. It is not the engines. Read-only inspection under the
+current qwen38 4xTP2 stack found 125.5GiB total, 111GiB used, 864MiB free,
+13GiB available, and swap 100% consumed (8.0GiB of 8.0GiB, 744KiB free) with
+no OOM kill in the ring buffer at 5 days uptime.
+
+`AnonPages` was 54GiB, which is the whole engine footprint: eight
+`VLLM::Worker_TP` at roughly 6GB, four API servers at 1.7GB, four
+`VLLM::EngineCore` at 1.3GB. `docker stats` agreed at 13.5-14.2GiB per engine
+container. `Shmem` was only 1.2GiB, so the services' `shm_size: 32gb`/`16gb`
+settings are inert under `ipc: host` and consume nothing; that suspect is
+closed.
+
+The unattributed remainder was **ZFS ARC at 38.78GiB**. `/prod` is a 2.52T ZFS
+pool holding the model weights and engine cache, and `zfs_arc_max` was `0`,
+i.e. the default ceiling of 50% of RAM (62.77GiB). ARC is kernel memory that
+Linux reports as used and excludes from `MemAvailable`, so it is invisible to
+`free -h` triage and to `docker stats`.
+
+Capping `zfs_arc_max` at 16GiB (runtime write plus a persisted
+`/etc/modprobe.d/zfs-ramjet.conf`) moved the target immediately but not the
+resident size; ARC shrinks lazily. A `drop_caches` sync then reclaimed it to
+13.45GiB. `swapoff -a`/`swapon -a` took 55.8s and returned the engines' paged
+out anonymous memory. Neither step touched an engine, the LB, or a GPU.
+
+| | before | after |
+|---|---:|---:|
+| ARC resident | 38.78GiB | 13.45GiB |
+| MemAvailable | 13GiB | 30GiB |
+| MemFree | 864MiB | 30GiB |
+| Swap used | 8.0GiB (100%) | 0B |
+| NUMA node 0 free | 689MB | 21,340MB |
+| NUMA node 1 free | 178MB | 9,408MB |
+
+The engines were untouched throughout: same four containers at 4 days uptime,
+LB at 7 hours. `capture_node06.sh` records only `free -h` total, which is why
+this went unattributed across four months of entries; it should also capture
+`MemAvailable`, per-NUMA free, ARC size, and swap.
+
+The pinned r34 image supports vLLM sleep mode, which makes host-RAM weight
+offload a real option rather than a speculative one. `EngineArgs(
+enable_sleep_mode=True)._check_feature_supported()` returned clean, and the
+CLI exposes `--enable-sleep-mode`/`--no-enable-sleep-mode` defaulting to
+`False`, so enabling it costs one engine restart. The routes live in
+`vllm/entrypoints/serve/dev/sleep/api_router.py`, not `api_server.py`, and are
+registered only when `VLLM_SERVER_DEV_MODE` is set: `POST /sleep?level=1&
+mode=abort`, `POST /wake_up?tags=...`, and `GET /is_sleeping`. Modal's
+Ministral 3 example uses the same two verbs around a platform checkpoint; the
+checkpoint half does not transfer, because Modal documents GPU memory
+snapshots as incompatible with multi-GPU code and unhelpful when startup is
+weight-load bound, and Modal's own DeepSeek-V4-Flash example uses volume-cached
+kernels instead.
+
+Sizing follows from the recovered headroom, not from the feature. Level-1
+sleep offloads weights to host RAM; Qwen3.8-27B-FP8 is roughly 27GB per
+engine against 30GiB available, so **at most one engine may be slept at level
+1 on this box**. Four concurrent level-1 sleeps are not possible at any ARC
+setting. Level 2 discards weights instead and pays a reload that a
+16GiB-capped ARC will no longer absorb. No sleep or wake call has been issued
+against a live engine; that remains the first qualification step, and
+`--enable-sleep-mode` is not yet in any committed Compose file.
+
+## 2026-08-19 — r125 LB-side sleep actuator and observe-mode soak
+
+`RJ_IDLE_DRAIN_ACTUATOR=sleep` lets the balancer carry out its own parking
+decision with vLLM sleep mode instead of publishing intent for an actor that
+does not exist on this box. The Docker-socket rule is unchanged; sleep mode is
+not a socket, and `POST /sleep`/`POST /wake_up` authenticate with the same
+`RJ_UPSTREAM_TOKEN` as the readiness probe.
+
+Preflight against the pinned r34 image was GPU-free and took under a second:
+`EngineArgs(enable_sleep_mode=True)._check_feature_supported()` returned clean,
+the CLI exposes `--enable-sleep-mode`/`--no-enable-sleep-mode` defaulting to
+`False`, and the routes are in `vllm/entrypoints/serve/dev/sleep/api_router.py`
+behind `VLLM_SERVER_DEV_MODE`: `POST /sleep?level=&mode=`, `POST /wake_up?tags=`,
+`GET /is_sleeping`.
+
+The local gate passed 597 Rust tests, 479 Python tests, Clippy with warnings
+denied, and a locked release build. `bench/build_transfer.sh` produced a
+15,794,281-byte image in 59.8s and transferred it in 6.4s. The LB-only swap
+under the common deployment lock took 12.0s to 4/4 healthy against the exact
+three-file config list the running container was created from, with the
+rendered diff limited to the image line and six `RJ_IDLE_DRAIN_*` variables.
+All four engines retained their 2026-08-15T07:48Z start times and zero restart
+counts.
+
+One defect was found and fixed by deploying: the park-state gauge was published
+only from the actuation path, so in observe mode it had no series at all, which
+makes "every replica is awake" indistinguishable from "this build does not
+export the series". It is now published every round.
+
+**The soak proves the negative, and cannot currently prove the positive.**
+Across 125 samples over 31 minutes under real Helix traffic,
+`ramjet_idle_drain_fleet_idle` stayed 0, `ramjet_idle_drain_state` stayed
+`[0,0,0,0]`, `ramjet_engine_park_state` stayed `[0,0,0,0]`,
+`ramjet_idle_drain_safe_to_stop` stayed `[0,0,0,0]`, `ramjet_upstream_up`
+stayed `[1,1,1,1]`, and no `ramjet_engine_park_actions_total` series was ever
+created. The actuator gate held: observe mode called nothing.
+
+The reason no park was observed is the traffic pattern, not the policy. A
+10-minute measurement of the LB's own request counters recorded 228 requests
+and a **longest quiet gap of 20 seconds** against the configured 900-second
+idle window. At roughly 7.6 requests per minute with no gap beyond 20s, this
+policy would never fire on node06 during working hours at any setting above
+about 30 seconds, and a window that short would park engines between ordinary
+requests. The value case for parking here is overnight and weekend windows,
+not working-hours idleness. That is worth knowing before tuning
+`RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS` down to manufacture a demonstration.
+
+A live park additionally requires the engine half, which is not deployed:
+`--enable-sleep-mode` and `VLLM_SERVER_DEV_MODE=1` are startup-time, so
+enabling them is a rolling restart of all four replicas with a model load each,
+not an LB-only swap. Until that window exists, the sleep/wake path is qualified
+only by unit and mock-engine tests, which assert the exact query string vLLM
+receives but not a real device transfer. Do not describe it as
+production-qualified.

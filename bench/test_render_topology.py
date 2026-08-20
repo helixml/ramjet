@@ -24,9 +24,9 @@ SUPPORTED = [
 ]
 
 
-def render(gpus, tp, numa="", name="t.yaml"):
+def render(gpus, tp, numa="", name="t.yaml", sleep_mode=False):
     return render_topology.render(
-        gpus, tp, numa.split(";") if numa else None, name
+        gpus, tp, numa.split(";") if numa else None, name, sleep_mode
     )
 
 
@@ -114,13 +114,43 @@ class RenderTests(unittest.TestCase):
         self.assertTrue(committed, "expected committed topology renders")
         for path in committed:
             with self.subTest(path=path.name):
-                stem = path.stem.split(".")[1]
+                parts = path.name.split(".")
+                stem = parts[1]
                 gpus = int(stem.split("gpu")[0])
                 tp = int(stem.split("tp")[1])
                 numa = NODE06_NUMA if gpus == 8 else ""
+                # topology.<shape>.sleep.yaml is the same topology rendered
+                # with vLLM sleep mode enabled on every engine.
+                sleep_mode = "sleep" in parts[2:-1]
                 self.assertEqual(
-                    path.read_text(), render(gpus, tp, numa, path.name)
+                    path.read_text(),
+                    render(gpus, tp, numa, path.name, sleep_mode),
                 )
+
+    def test_sleep_mode_adds_the_engine_arg_and_the_dev_route_switch_together(self):
+        # Either alone is useless: the engine arg reserves the offload path at
+        # startup, and the dev-mode switch is what registers /sleep,
+        # /wake_up, and /is_sleeping. Shipping one without the other would
+        # look enabled and silently fail to park anything.
+        plain = render(8, 2, NODE06_NUMA)
+        self.assertNotIn("--enable-sleep-mode", plain)
+        self.assertNotIn("VLLM_SERVER_DEV_MODE", plain)
+
+        sleepy = render(8, 2, NODE06_NUMA, sleep_mode=True)
+        self.assertEqual(sleepy.count("--enable-sleep-mode"), 4)
+        self.assertEqual(sleepy.count('VLLM_SERVER_DEV_MODE: "1"'), 4)
+
+    def test_sleep_mode_changes_nothing_else_about_the_topology(self):
+        # The parked-engine overlay must not become a backdoor for unrelated
+        # engine changes; a sleep render differs only by the two coupled lines.
+        plain = render(8, 2, NODE06_NUMA).splitlines()
+        sleepy = render(8, 2, NODE06_NUMA, sleep_mode=True).splitlines()
+        added = [line for line in sleepy if line not in plain]
+        self.assertEqual(
+            sorted(set(added)),
+            ["      - --enable-sleep-mode", '      VLLM_SERVER_DEV_MODE: "1"'],
+        )
+        self.assertEqual([line for line in plain if line not in sleepy], [])
 
 
 class CommandLineTests(unittest.TestCase):

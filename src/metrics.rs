@@ -36,6 +36,9 @@ pub struct Metrics {
     pub idle_drain_safe_to_stop: GaugeVec,
     pub idle_drain_transitions: CounterVec,
     pub idle_drain_fleet_idle: Gauge,
+    pub engine_park_state: GaugeVec,
+    pub engine_park_actions: CounterVec,
+    pub engine_park_action_seconds: HistogramVec,
     pub upstream_probe_time: GaugeVec,
     pub upstream_probe_errors: CounterVec,
     pub upstream_probe_suppressed: CounterVec,
@@ -281,6 +284,22 @@ impl Metrics {
             idle_drain_fleet_idle: prometheus::Gauge::new(
                 "ramjet_idle_drain_fleet_idle",
                 "Whether the fleet is currently inside its configured idle window",
+            )?,
+            engine_park_state: gauge(
+                "ramjet_engine_park_state",
+                "Engine sleep state per upstream (0=awake, 1=parking, 2=parked, 3=waking, 4=unknown)",
+                &["upstream"],
+            )?,
+            engine_park_actions: counter(
+                "ramjet_engine_park_actions_total",
+                "Engine sleep/wake actuations by upstream, action, and outcome",
+                &["upstream", "action", "outcome"],
+            )?,
+            engine_park_action_seconds: histogram(
+                "ramjet_engine_park_action_seconds",
+                "Wall time of engine sleep/wake actuations by action",
+                vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0],
+                &["action"],
             )?,
             upstream_probe_time: gauge(
                 "ramjet_upstream_probe_duration_seconds",
@@ -910,6 +929,9 @@ impl Metrics {
             Box::new(self.idle_drain_safe_to_stop.clone()),
             Box::new(self.idle_drain_transitions.clone()),
             Box::new(self.idle_drain_fleet_idle.clone()),
+            Box::new(self.engine_park_state.clone()),
+            Box::new(self.engine_park_actions.clone()),
+            Box::new(self.engine_park_action_seconds.clone()),
             Box::new(self.upstream_probe_time.clone()),
             Box::new(self.upstream_probe_errors.clone()),
             Box::new(self.upstream_probe_suppressed.clone()),

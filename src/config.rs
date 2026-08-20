@@ -8,7 +8,10 @@ use std::{
 use thiserror::Error;
 use url::Url;
 
-use crate::idle_drain::{IdleDrainConfig, IdleDrainMode};
+use crate::{
+    engine_park::{EngineParkConfig, ParkActuator, SleepLevel},
+    idle_drain::{IdleDrainConfig, IdleDrainMode},
+};
 
 const MAX_SNAPSHOT_ROUTE_SOCKET_PATH_BYTES: usize = 64;
 const MAX_SNAPSHOT_ROUTE_PATH_BYTES: usize = 4_096;
@@ -49,6 +52,7 @@ pub struct Config {
     pub dspark_guard_state_group_gid: u32,
     pub idle_drain: IdleDrainConfig,
     pub idle_drain_interval_seconds: usize,
+    pub engine_park: EngineParkConfig,
     pub max_tokens_strip: i64,
     pub advertise_ctx_margin: i64,
     pub route_alpha: f64,
@@ -520,6 +524,7 @@ impl Config {
             upstream_token.is_some(),
         )?;
         let idle_drain = idle_drain_settings(&mut get, upstreams.len())?;
+        let engine_park = engine_park_settings(&mut get, idle_drain.mode, upstreams.len())?;
 
         Ok(Self {
             upstreams,
@@ -540,6 +545,7 @@ impl Config {
             dspark_guard_state_owner_uid,
             dspark_guard_state_group_gid,
             idle_drain,
+            engine_park,
             idle_drain_interval_seconds: bounded_positive(
                 &mut get,
                 "RJ_IDLE_DRAIN_INTERVAL_SECONDS",
@@ -1556,6 +1562,69 @@ fn seconds_to_u64(value: usize) -> u64 {
 /// Draining is rejected outright on a single-upstream deployment: there is no
 /// replica to fall back to, so the only reachable outcome would be parking the
 /// engine that serves every request.
+/// Parses the engine-parking actuator.
+///
+/// The actuator defaults to `sleep`, but that is not by itself a behaviour
+/// change: it can only act once `RJ_IDLE_DRAIN_MODE` is `drain`, which is
+/// still off by default.
+///
+/// `observe` is deliberately not rejected here even though it can never
+/// actuate. Observe is the documented way to qualify the policy against real
+/// traffic, and refusing to start on the default actuator would make the safe
+/// mode the one that needs extra configuration. Actuation is gated at the
+/// point of use instead.
+fn engine_park_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    mode: IdleDrainMode,
+    upstreams: usize,
+) -> Result<EngineParkConfig, ConfigError> {
+    let actuator = match get("RJ_IDLE_DRAIN_ACTUATOR").as_deref().unwrap_or("sleep") {
+        "off" => ParkActuator::Off,
+        "sleep" => ParkActuator::Sleep,
+        value => {
+            return Err(invalid(
+                "RJ_IDLE_DRAIN_ACTUATOR",
+                value.to_owned(),
+                "off or sleep",
+            ));
+        }
+    };
+    let level = match get("RJ_IDLE_DRAIN_SLEEP_LEVEL").as_deref().unwrap_or("1") {
+        "1" => SleepLevel::Offload,
+        "2" => SleepLevel::Discard,
+        value => {
+            return Err(invalid(
+                "RJ_IDLE_DRAIN_SLEEP_LEVEL",
+                value.to_owned(),
+                "1 (offload weights to host memory) or 2 (discard weights)",
+            ));
+        }
+    };
+
+    // Level-1 sleep moves weights into host RAM, so the number of replicas
+    // parked at once bounds host memory rather than GPU memory. The warm floor
+    // cannot express that: it counts replicas, and a fleet of small engines
+    // has a very different host cost from one large engine.
+    let max_parked = positive(get, "RJ_IDLE_DRAIN_MAX_PARKED", 1)?;
+    // Bound the cap only where it can act. `drain` already requires two
+    // replicas, so the default of one always fits; validating unconditionally
+    // would instead reject every single-upstream deployment at startup for a
+    // setting that can never be reached.
+    if mode == IdleDrainMode::Drain && max_parked >= upstreams {
+        return Err(invalid(
+            "RJ_IDLE_DRAIN_MAX_PARKED",
+            max_parked.to_string(),
+            "fewer than the number of RJ_UPSTREAM replicas; something must stay warm",
+        ));
+    }
+
+    Ok(EngineParkConfig {
+        actuator,
+        level,
+        max_parked,
+    })
+}
+
 fn idle_drain_settings(
     get: &mut impl FnMut(&str) -> Option<String>,
     upstreams: usize,
@@ -1730,6 +1799,61 @@ mod tests {
     /// The seconds-suffixed names are the deployment contract. A half-finished
     /// rename that left a millisecond alias in place would silently apply a
     /// value a thousand times too small, so the old names must be inert.
+    #[test]
+    fn the_park_actuator_defaults_to_sleep_but_cannot_act_until_drain_mode() {
+        // Default-on is safe because the actuator is gated by the drain mode,
+        // which is itself off by default. A deployment that never enables
+        // idle drain is unaffected by this setting existing.
+        let config = two_upstreams(&[]).unwrap();
+        assert_eq!(config.engine_park.actuator, ParkActuator::Sleep);
+        assert_eq!(config.engine_park.level, SleepLevel::Offload);
+        assert_eq!(config.engine_park.max_parked, 1);
+        assert_eq!(config.idle_drain.mode, IdleDrainMode::Off);
+    }
+
+    #[test]
+    fn observe_mode_starts_with_the_default_actuator_rather_than_refusing() {
+        // Observe is the documented qualification path. Rejecting it on the
+        // default actuator would make the safe mode the one needing extra
+        // configuration.
+        let config = two_upstreams(&[("RJ_IDLE_DRAIN_MODE", "observe")]).unwrap();
+        assert_eq!(config.idle_drain.mode, IdleDrainMode::Observe);
+        assert_eq!(config.engine_park.actuator, ParkActuator::Sleep);
+    }
+
+    #[test]
+    fn a_single_upstream_deployment_still_starts_on_the_default_cap() {
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some("http://only:8000".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(config.engine_park.max_parked, 1);
+    }
+
+    #[test]
+    fn the_park_cap_must_leave_a_replica_warm_once_draining_is_enforced() {
+        let error = two_upstreams(&[
+            ("RJ_IDLE_DRAIN_MODE", "drain"),
+            ("RJ_IDLE_DRAIN_MAX_PARKED", "2"),
+        ])
+        .unwrap_err();
+        assert!(
+            format!("{error}").contains("RJ_IDLE_DRAIN_MAX_PARKED"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unknown_actuator_and_sleep_level_values_are_rejected_at_startup() {
+        assert!(two_upstreams(&[("RJ_IDLE_DRAIN_ACTUATOR", "stop")]).is_err());
+        assert!(two_upstreams(&[("RJ_IDLE_DRAIN_SLEEP_LEVEL", "3")]).is_err());
+        let discard = two_upstreams(&[("RJ_IDLE_DRAIN_SLEEP_LEVEL", "2")]).unwrap();
+        assert_eq!(discard.engine_park.level, SleepLevel::Discard);
+        let off = two_upstreams(&[("RJ_IDLE_DRAIN_ACTUATOR", "off")]).unwrap();
+        assert_eq!(off.engine_park.actuator, ParkActuator::Off);
+    }
+
     #[test]
     fn idle_drain_reads_seconds_keys_and_ignores_millisecond_names() {
         let config = two_upstreams(&[
