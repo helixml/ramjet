@@ -63,21 +63,29 @@ These are workload results, not theoretical peaks. Reproduce them from
 
 ### Models with a validated stack
 
-Both measured on node06 — 8× RTX PRO 6000 Blackwell, two TP4 engines each.
-The full-box column reports the best qualified saturation point recorded for
-that topology, not a shared concurrency level.
+All measured on node06 — 8× RTX PRO 6000 Blackwell; the engine topology is
+listed per row. The full-box column reports the best qualified saturation
+point recorded for that stack, not a shared concurrency level.
 
 | Model | Served as | Decode @ c1 | Best qualified full-box throughput | Measured shape | Compose |
 | --- | --- | ---: | ---: | --- | --- |
-| DeepSeek-V4-Flash (sparse MoE) | `deepseek-v4-flash` | 245.1 tok/s | 1,891.2 tok/s | c24/max256 | [`deploy/dspark_0731`](deploy/dspark_0731/docker-compose.yaml) |
-| Qwen3.8-27B (dense) | `qwen3.8-27b` | 77 tok/s · 121 with MTP | 7,890.9 tok/s | c256/max256, MTP off | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
+| DeepSeek-V4-Flash (sparse MoE) | `deepseek-v4-flash` | 245.1 tok/s | 1,891.2 tok/s | 2× TP4, c24/max256 | [`deploy/dspark_0731`](deploy/dspark_0731/docker-compose.yaml) |
+| Qwen3.8-27B FP8 (dense, vLLM) | `qwen3.8-27b` | 77 tok/s · 121 with MTP | 7,890.9 tok/s | 2× TP4, c256/max256, MTP off | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
+| Qwen3.8-27B NVFP4 (dense, SGLang + DFlash2) | `qwen3.8-27b` | 144–153 tok/s | 4,256.3 tok/s | 8× TP1, c256/max256, DFlash2 on | [`deploy/qwen38_27b` (overlay)](deploy/qwen38_27b/topology.8gpu-sglang-dflash2.yaml) |
 
-Neither model is simply better. Single-stream decode is what an interactive
-user feels; the full-box figure is a capacity landmark for a saturated agent
-fleet. These maxima come from separate model-specific workloads, so they are
-not a matched head-to-head benchmark. Qwen's saturation result has MTP off
-because MTP improves low-concurrency latency but measured 12.5% slower at
-c256. [Model profiles](docs/models.md) covers the sizing, sharding, and
+Neither model — and neither Qwen stack — is simply better. Single-stream
+decode is what an interactive user feels; the full-box figure is a capacity
+landmark for a saturated agent fleet. These maxima come from separate
+model-specific workloads, so they are not a matched head-to-head benchmark.
+The vLLM row's saturation result has MTP off because speculation improves
+low-concurrency latency but wastes rejected drafts once the batch saturates
+the GPU — the same trade that caps the DFlash2 row's full-box figure while
+roughly doubling its per-stream decode. On the SGLang stack the same
+3-app × 4-session × 2-turn locality run measured **87.3% cached prompt
+tokens**, and 12 concurrent same-app requests spread across 7 of 8 engines
+at 714 tok/s. Its cost is cold long-context prefill: a 196K-token first
+turn pays ~57s of TTFT on one GPU, with prefix-cached follow-ups at 2–4s.
+[Model profiles](docs/models.md) covers the sizing, sharding, and
 speculative-decoding trade-offs behind these numbers.
 
 ## Start in one minute

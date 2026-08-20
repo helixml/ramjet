@@ -5,6 +5,26 @@ Hardware: node06, 2× vLLM+DSpark TP4 instances (DeepSeek-V4-Flash-0731),
 router). Candidate = `1.1.0-rc1` (overlap+load router, `alpha=4`).
 Method: `bench/locality_bench.sh` + a concurrent-same-app harness.
 
+## v0.4.0 SGLang NVFP4 + DFlash2 snapshot (2026-08-20)
+
+The box now serves Qwen3.8-27B NVFP4 on eight single-GPU SGLang engines with
+the DFlash2 block-8 draft (`deploy/qwen38_27b/topology.8gpu-sglang-dflash2.yaml`)
+behind the released `v0.4.0` LB. Landmarks, all through the LB on an
+otherwise idle box, every request-generating cell under the thermal guard:
+
+| Gate | Result |
+|---|---:|
+| batch-1 decode (streaming client) | **144 tok/s sampled / ~153 greedy median; 126–218 range** |
+| concurrency ladder c1/8/32/64/128/256, max256 | **97.9 / 707 / 1,984 / 2,938 / 3,797 / 4,256.3 tok/s; 489/489 requests** |
+| locality 3×4×2 (`--enable-cache-report`) | **87.3% cached prompt tokens; 24/24** |
+| same-app c12/max256 | **714 tok/s; spread across 7 of 8 engines; 12/12** |
+| 196K cold prefill (single GPU) | **56.8s TTFT (~3.5K tok/s at depth; 8.9K tok/s at 48K)** |
+| 200K prefix-cached turns (live agent traffic) | **2.6–4.1s TTFT; ~86–100 tok/s decode at depth** |
+
+The vLLM FP8 rows below remain the reference for that stack; the two Qwen
+stacks trade per-stream decode (roughly 2× better here) against saturation
+ceiling (7,890.9 tok/s there vs 4,256.3 here) and cold long-context prefill.
+
 ## Current node06 production snapshot
 
 The historical router study below remains reproducible, but the production

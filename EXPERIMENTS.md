@@ -1,5 +1,31 @@
 # node06 experiment journal
 
+## 2026-08-20 — v0.4.0 SGLang stack benchmark suite, and the cache-report flag
+
+With the agents quiet, ran the standard suite against the released stack
+(8× TP1 SGLang NVFP4 + DFlash2 behind `v0.4.0`), every request-generating
+cell under `node06_gpu_guard.py` with fresh salts and journals
+(`.experiments/sglang-v040-*.jsonl`). Results promoted to README and
+RESULTS.md:
+
+* Concurrency ladder (max256): c1 97.9, c8 707, c32 1,984, c64 2,938,
+  c128 3,797, c256 **4,256.3** output tok/s; 489/489 requests, even
+  62–66-per-upstream spread. The saturation ceiling sits at 54% of the vLLM
+  MTP-off figure (7,890.9) — the expected price of verifying 8-token drafts
+  at full batch, paid for ~2× per-stream decode.
+* Same-app c12/max256: 714 tok/s aggregate, spread across 7 of 8 engines by
+  load deflection (the shipped `concurrent_sameapp.sh` still parses a
+  two-upstream A/B split and reports 0/0 on this topology; the split was
+  read from the route journal).
+* Locality 3×4×2: first run reported **0.0% cached** while turn-2 walls
+  (0.5–0.65s for 18.9K-token prompts) proved the radix cache was hitting —
+  SGLang omits `cached_tokens` from response usage unless
+  `--enable-cache-report` is set. Added the flag to the overlay and rolled
+  the fleet two engines at a time (LB never below 6/8); the rerun measured
+  **87.3% cached prompt tokens**. The flag also restores the LB's
+  token-weighted cache-hit metric and machine view's `response_usage`
+  source, which had silently fallen back to the engine-reported ratio.
+
 ## 2026-08-20 — v0.4.0 released and accepted on node06
 
 Drone main build #513 published `rust-1d0223e` (deps seed rebuilt once for
