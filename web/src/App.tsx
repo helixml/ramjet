@@ -24,7 +24,7 @@ import {
   fmtWatts,
 } from "@/lib/format"
 import { useLiveStream } from "@/hooks/useLiveStream"
-import { sparkline, windowMax, TILE_WINDOW_MS } from "@/lib/sparkline"
+import { sparkline, windowMean, TILE_WINDOW_MS } from "@/lib/sparkline"
 import { rollingAverage, windowLabel } from "@/lib/rolling"
 import type { Sample, ServingSample } from "@/lib/api"
 
@@ -43,6 +43,8 @@ function toServingRow(t: number, serving: ServingSample | undefined): Row {
   row.ttft_p50 = serving?.ttft_p50_ms ?? null
   row.ttft_p95 = serving?.ttft_p95_ms ?? null
   row.tpot_p95 = serving?.tpot_p95_ms ?? null
+  row.stream_tps_p50 = serving?.stream_tps_p50 ?? null
+  row.stream_tps_p05 = serving?.stream_tps_p05 ?? null
   row.inflight = serving?.inflight ?? null
   row.hit_lb = serving?.cache_hit_pct ?? null
   ;(serving?.upstreams ?? []).forEach((upstream, index) => {
@@ -145,8 +147,11 @@ export default function App() {
   const latestServing = live.frames.at(-1)?.serving ?? latest?.serving
   const servingNow = servingRows.at(-1)?.t ?? Date.now()
   const sparkWindowMs = rangeSeconds * 1000
-  const genTpsMax = useMemo(
-    () => windowMax(servingRows, "gen_tps", servingNow, TILE_WINDOW_MS),
+  // Mean, not max: the counter books a request's whole completion count in
+  // the sample where it finished, so a 30s max reads a single big turn's
+  // completion tick as thousands of tok/s the fleet never sustained.
+  const genTpsAvg = useMemo(
+    () => windowMean(servingRows, "gen_tps", servingNow, TILE_WINDOW_MS),
     [servingRows, servingNow],
   )
   // A hit rate measured over a few seconds of bursty traffic is 0% or 100%
@@ -595,12 +600,24 @@ export default function App() {
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-9">
         <StatTile
           label="Gen tok/s"
-          value={fmtNum(genTpsMax)}
-          detail="30s max"
+          value={fmtNum(genTpsAvg)}
+          detail="30s avg"
           trend={sparkline(servingRows, "gen_tps", servingNow, sparkWindowMs)}
+          format={fmtNum}
+          loading={loading}
+        />
+        <StatTile
+          label="Stream tok/s"
+          value={fmtNum(latestServing?.stream_tps_p50)}
+          detail={
+            latestServing?.stream_tps_p05 != null
+              ? `p5 ${fmtNum(latestServing.stream_tps_p05)}`
+              : "per-request p50"
+          }
+          trend={sparkline(servingRows, "stream_tps_p50", servingNow, sparkWindowMs)}
           format={fmtNum}
           loading={loading}
         />

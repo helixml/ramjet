@@ -119,6 +119,8 @@ function buildSamples(): Sample[] {
         ttft_p50_ms: 140 + load * 420 + random() * 60,
         ttft_p95_ms: 320 + load * 2400 + burst * 1800 + random() * 250,
         tpot_p95_ms: 18 + load * 14 + random() * 4,
+        stream_tps_p50: 120 - load * 30 + random() * 20,
+        stream_tps_p05: 55 - load * 15 + random() * 10,
         cache_hit_pct: 52 + random() * 25,
         cache_hit_source: "response_usage" as const,
         upstreams: UPSTREAMS.map((name, index) => ({

@@ -335,6 +335,17 @@ pub struct ServingSample {
     pub ttft_p50_ms: Option<f64>,
     pub ttft_p95_ms: Option<f64>,
     pub tpot_p95_ms: Option<f64>,
+    /// Per-stream decode throughput quantiles over the retained histogram
+    /// window: the rate an individual request's decode actually ran at.
+    /// Distinct from `gen_tps`, which books a request's whole completion
+    /// count into the sample where it finished and therefore spikes on
+    /// completion ticks rather than measuring any stream's speed.
+    #[serde(default)]
+    pub stream_tps_p50: Option<f64>,
+    /// Slowest-5% per-stream decode rate: the tail a user actually feels.
+    /// (For throughput the bad tail is the low quantile, unlike TTFT.)
+    #[serde(default)]
+    pub stream_tps_p05: Option<f64>,
     pub cache_hit_pct: Option<f64>,
     /// Which layer `cache_hit_pct`/`cached_tps` came from. Absent when both
     /// are absent; never inferred by the reader.
@@ -1106,6 +1117,8 @@ fn merge_samples(bucket: &[&Sample]) -> Sample {
                 ttft_p50_ms: mean(entries.iter().map(|e| e.ttft_p50_ms)),
                 ttft_p95_ms: mean(entries.iter().map(|e| e.ttft_p95_ms)),
                 tpot_p95_ms: mean(entries.iter().map(|e| e.tpot_p95_ms)),
+                stream_tps_p50: mean(entries.iter().map(|e| e.stream_tps_p50)),
+                stream_tps_p05: mean(entries.iter().map(|e| e.stream_tps_p05)),
                 cache_hit_pct: mean(entries.iter().map(|e| e.cache_hit_pct)),
                 cache_hit_source: entries.iter().rev().find_map(|e| e.cache_hit_source),
                 upstreams,
@@ -1203,6 +1216,15 @@ pub fn build_serving_sample(
             .observe_quantile("self.tpot.p95", t_ms, tpot_buckets, 0.95)
             .map(|seconds| seconds * 1_000.0)
     };
+    let stream_buckets = histogram_buckets(map, "ramjet_decode_tokens_per_second");
+    let (stream_tps_p50, stream_tps_p05) = if stream_buckets.is_empty() {
+        (None, None)
+    } else {
+        let p50 =
+            histograms.observe_quantile("self.stream_tps.p50", t_ms, stream_buckets.clone(), 0.5);
+        let p05 = histograms.observe_quantile("self.stream_tps.p05", t_ms, stream_buckets, 0.05);
+        (p50, p05)
+    };
     let up_by_upstream = metric_by_label(map, "ramjet_upstream_up", "upstream");
     let inflight_by_upstream = metric_by_label(map, "ramjet_upstream_inflight", "upstream");
     let requests_by_upstream = metric_by_label(map, "ramjet_upstream_requests_total", "upstream");
@@ -1232,6 +1254,8 @@ pub fn build_serving_sample(
         ttft_p50_ms,
         ttft_p95_ms,
         tpot_p95_ms,
+        stream_tps_p50,
+        stream_tps_p05,
         cache_hit_pct,
         // The caller fills this in: the engine fallback needs the engine
         // scrapes, which are not available at this layer.
@@ -2601,6 +2625,35 @@ mod tests {
         assert_eq!(second.cached_tps, Some(100.0));
         assert_eq!(second.gen_tps, Some(100.0));
         assert_eq!(second.cache_hit_pct, Some(50.0));
+    }
+
+    #[test]
+    fn build_serving_sample_surfaces_per_stream_decode_quantiles() {
+        let mut rates = RateTracker::default();
+        let mut histograms = HistogramWindows::default();
+        let body_at = |b60: u64, b120: u64, inf: u64| {
+            format!(
+                concat!(
+                    "ramjet_decode_tokens_per_second_bucket{{endpoint=\"chat\",le=\"60\"}} {}\n",
+                    "ramjet_decode_tokens_per_second_bucket{{endpoint=\"chat\",le=\"120\"}} {}\n",
+                    "ramjet_decode_tokens_per_second_bucket{{endpoint=\"chat\",le=\"+Inf\"}} {}\n",
+                ),
+                b60, b120, inf
+            )
+        };
+        let map = parse_prometheus_text(&body_at(0, 0, 0));
+        let first = build_serving_sample(&map, 1_000, &mut rates, &mut histograms);
+        assert_eq!(first.stream_tps_p50, None);
+        assert_eq!(first.stream_tps_p05, None);
+        // 100 requests land in the window: 10 below 60 tok/s, 90 in 60-120.
+        let map = parse_prometheus_text(&body_at(10, 100, 100));
+        let second = build_serving_sample(&map, 6_000, &mut rates, &mut histograms);
+        let p50 = second.stream_tps_p50.expect("p50 after traffic");
+        let p05 = second.stream_tps_p05.expect("p05 after traffic");
+        // Median falls in the 60-120 bucket; the slow 5% inside 0-60.
+        assert!((60.0..=120.0).contains(&p50), "p50 {p50}");
+        assert!((0.0..=60.0).contains(&p05), "p05 {p05}");
+        assert!(p05 < p50, "tail must sit below the median");
     }
 
     #[test]

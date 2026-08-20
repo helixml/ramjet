@@ -31,6 +31,11 @@ export function StatTile({
   const hovered =
     hover != null && typeof hover.v === "number" && Number.isFinite(hover.v) ? hover : null
 
+  // The handler lives on a strip that shares the sparkline's horizontal
+  // bounds (`right-2.5 w-16`, full card height), so the cursor's x maps 1:1
+  // onto the drawn chart. Hanging it on the whole card measured the ratio
+  // against the card's width while the line rendered inside the 64px spark
+  // box — a crosshair and a hover line that never matched the cursor.
   function onMove(event: MouseEvent<HTMLDivElement>) {
     if (points.length === 0) return
     const rect = event.currentTarget.getBoundingClientRect()
@@ -40,11 +45,7 @@ export function StatTile({
 
   return (
     <Card aria-busy={loading || undefined}>
-      <CardContent
-        className={`relative overflow-hidden px-3.5 py-3 ${drawn.length >= 2 ? "cursor-crosshair" : ""}`}
-        onMouseMove={drawn.length >= 2 ? onMove : undefined}
-        onMouseLeave={drawn.length >= 2 ? () => setHoverIndex(null) : undefined}
-      >
+      <CardContent className="relative overflow-hidden px-3.5 py-3">
         <div className={drawn.length >= 2 ? "pr-[4.25rem]" : undefined}>
           <div className="text-muted-foreground truncate text-[11px]">{label}</div>
           {loading ? (
@@ -94,6 +95,13 @@ export function StatTile({
               />
             ) : null}
           </div>
+        ) : null}
+        {!loading && drawn.length >= 2 ? (
+          <div
+            className="absolute inset-y-0 right-2.5 w-16 cursor-crosshair"
+            onMouseMove={onMove}
+            onMouseLeave={() => setHoverIndex(null)}
+          />
         ) : null}
       </CardContent>
     </Card>

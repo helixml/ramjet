@@ -1,5 +1,22 @@
 # node06 experiment journal
 
+## 2026-08-20 — r128 LB-only deploy: honest Gen tok/s tile, per-stream decode quantiles
+
+Deployed `ghcr.io/helixml/ds4-loadbalancer:rust-r127-stream-tps-7e892b1`
+(LB-only recreate under the common lock, sglang topology file list unchanged;
+the tag says r127 but that number was already taken by the sleep-mode
+measurement below — treat this as r128). Motivation: during the four-agent
+soak the machine-view "Gen tok/s" tile read 11.7K with three requests in
+flight. The proxy books a request's entire completion usage at finish, so the
+tile's 30s-max-of-1s-deltas turned one big agent turn's completion tick into
+a rate the fleet never sustained. The tile now shows a 30s mean, and serving
+samples carry `stream_tps_p50`/`stream_tps_p05` — windowed quantiles over
+the existing per-request `ramjet_decode_tokens_per_second` histogram — with
+a "Stream tok/s" tile (median + slowest-5% tail). First live sample after
+the deploy read p50 150 / p05 123 tok/s, agreeing with the hand-measured
+~153 median through the LB. `ramjet_upstream_up` stayed 8/8 through the
+recreate. Machine view remains observation-only.
+
 ## 2026-08-20 — node06 switched to SGLang NVFP4 + DFlash2 (8x TP1)
 
 Following the repro below, the whole box now serves Qwen3.8-27B through the
