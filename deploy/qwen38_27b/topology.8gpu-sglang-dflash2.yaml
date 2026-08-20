@@ -69,6 +69,11 @@ x-sglang-command: &sglang-command
   # Block 8 is what the draft was trained for. 16 measured faster on code
   # (269 tok/s) but slower on prose; treat it as out-of-spec.
   - --speculative-num-draft-tokens=${DFLASH_DRAFT_TOKENS:-8}
+  # Without this, SGLang omits cached_tokens from response usage: prefix
+  # cache hits still happen but report as 0%, the LB's token-weighted
+  # cache-hit metric goes dark, and machine view falls back to the weaker
+  # engine-reported ratio.
+  - --enable-cache-report
   # Without the reasoning parser every client sees raw <think> output.
   - --reasoning-parser=qwen3
   # Qwen3.8's template emits <function=...><parameter=...> XML (what vLLM
