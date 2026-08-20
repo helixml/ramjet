@@ -1,5 +1,62 @@
 # node06 experiment journal
 
+## 2026-08-20 — node06 switched to SGLang NVFP4 + DFlash2 (8x TP1)
+
+Following the repro below, the whole box now serves Qwen3.8-27B through the
+new `topology.8gpu-sglang-dflash2.yaml`: eight single-GPU SGLang engines
+(NVFP4 target, DFlash2 block-8 draft) behind the unchanged
+`rust-r125-sleep-actuator-4d66605` LB. Same served name `qwen3.8-27b`, so no
+client changed. Zero-downtime phased roll: sglang e4-e7 on the freed GPUs,
+LB swing scoped to them, vLLM e0/e1 stopped, sglang e0-e3 up, final LB
+recreate on the full default render. `ramjet_upstream_up` 8/8.
+
+Two findings worth keeping:
+
+* SGLang's `qwen` tool-call parser is the Qwen2.5 JSON detector and silently
+  swallowed every Qwen3.8 tool call (26 completion tokens, empty content,
+  `tool_calls: null`). Qwen3.8's template emits `<function=...>` XML — vLLM's
+  `qwen3_xml` — and the SGLang equivalent is `qwen3_coder`. Verified through
+  the LB: proper `tool_calls` with `finish_reason: "tool_calls"`.
+* Through-LB batch-1 greedy: 125-216 tok/s, median 153 — identical to the
+  direct-engine numbers, so the LB path costs nothing measurable.
+
+The LB runs with `RJ_KV_EVENT_MODE=off` (SGLang publishes no vLLM KV events)
+and idle-drain stays in observe (no vLLM sleep endpoints). Reasoning parser
+`qwen3` confirmed working (clean `content`, populated `reasoning_tokens`).
+
+Rollback: the four vLLM containers `qwen38-e0..e3` are stopped, not removed;
+`docker start` them and recreate the LB from the previous file list
+(`topology.8gpu-tp2.yaml` in place of the sglang overlay) with the same
+pinned LB image. Not yet done: any aggregate-capacity qualification — the
+c64+ regime is unmeasured on this stack, and NVFP4 quality has no gate yet.
+Watch `minidynamo-rtx6000pro` per the checklist.
+
+### Helix end-to-end, and the cold-prefill cost of TP1 (same day)
+
+A real Helix agent session (`ses_01kzgrzwybcw3qcg8bj9jqbsyv`) exercised the
+stack through the full path. All requests returned 200 and the router did the
+right thing: the session's second turn hit 315/324 overlap blocks and stuck
+to its engine. Turn-level numbers from the route journal:
+
+| turn | prompt tokens | TTFT | decode |
+|---|---|---|---|
+| 1 (cold) | 196,521 | **56.8s** | 357 tok in 3.2s |
+| 2 (cached) | 201,926 | 4.1s | 1,104 tok @ ~86 tok/s |
+| 3 (cached) | 203,383 | 2.6s | 624 tok @ ~100 tok/s |
+
+The 56.8s cold first turn is the TP1 tradeoff, not a defect: prefill measured
+8.9K tok/s at 48K depth on one engine and decays with attention depth to
+~3.5K tok/s at 196K, and a single GPU carries all of it where the old TP2
+pair split it. A `--chunked-prefill-size 32768` candidate was A/B'd against
+the 8192 default on a live engine and measured slower (7.5-8.3K vs 8.9K
+tok/s at 48K), so the default stands and the candidate engine was restored
+to the canonical render. Decode at 200K context runs ~86-100 tok/s — below
+the short-context 150+ but above the vLLM+MTP class at the same depth.
+
+Watchlist: cold sessions are one 57s TTFT per agent workspace; if Helix
+traffic turns out to churn workspaces faster than it reuses them, that cost
+dominates and the TP2 vLLM recipe wins back interactive feel.
+
 ## 2026-08-20 — DFlash2 + NVFP4 repro: the 300s tok/s claim is H200 bandwidth, not a software trick
 
 A screenshot claimed "Qwen3.8-27B NVFP4 + DFlash2, 300s tok/s" (323 after,

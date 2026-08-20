@@ -5,7 +5,7 @@ Sequential single-request cells against an OpenAI-compatible endpoint.
 Decode tok/s = (completion_tokens - 1) / (last_token_time - first_token_time),
 tokens taken from the server's own usage object, never client-side counting.
 """
-import argparse, json, sys, time
+import argparse, json, os, sys, time
 import urllib.request
 
 PROMPTS = [
@@ -26,10 +26,14 @@ def run_cell(base, model, prompt, max_tokens, sampling, timeout):
         "chat_template_kwargs": {"enable_thinking": False},
     }
     body.update(sampling)
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("BENCH_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(
         base + "/v1/chat/completions",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     t0 = time.monotonic()
     t_first = None

@@ -1,0 +1,195 @@
+# Qwen3.8-27B NVFP4 on SGLang with DFlash2 speculative decoding.
+# Eight single-GPU engines behind the ramjet load balancer.
+#
+# Apply on top of the base file (the vLLM engine definitions there are
+# parked by profile, exactly like the generated vLLM topologies):
+#
+#   docker compose -f docker-compose.yaml \
+#     -f topology.8gpu-sglang-dflash2.yaml \
+#     -f machineview.override.yaml \
+#     -f docker-compose.idle-drain-observe.yaml up -d
+#
+# Why this shape: single-GPU TP1 engines maximise engine count (prefix-cache
+# partitioning, no allreduce), and the 2026-08-20 EXPERIMENTS.md entry
+# measured batch-1 decode on this exact stack at 57.4 tok/s without
+# speculation and 147-218 tok/s with DFlash2 block 8 -- against ~120 tok/s
+# for the vLLM FP8 TP2+MTP recipe this replaces. NVFP4 weights are 24.2GB
+# resident per GPU, leaving ~50GB for KV at the default mem fraction.
+#
+# What this recipe gives up versus the vLLM base file (see README.md):
+#   * No vLLM KV events: RJ_KV_EVENT_MODE is forced off. Shadow inventory,
+#     the digest index, and the snapshot companion do not apply to SGLang.
+#   * No vLLM sleep mode: idle-drain must stay in observe; the sleep
+#     actuator's /sleep + /wake_up endpoints do not exist here.
+#   * Quantization drops FP8 -> NVFP4 (4-bit). Run your own quality gate
+#     before promoting; throughput is not evidence of correctness.
+#
+# PINNING CAVEAT: DFlash2 draft support (`DFlash2DraftModel`) is newer than
+# the cookbook image, so this overlay bind-mounts an sglang source checkout
+# over the image's python tree. Pin the checkout to the qualified commit:
+#
+#   git -C /prod/src/sglang checkout 38b74d294
+#
+# Replace SGLANG_IMAGE with a self-contained pinned image and drop
+# SGLANG_SRC_DIR as soon as an upstream tag ships DFlash2 support.
+#
+# Checkpoints (HF): Inferact/Qwen3.8-27B-NVFP4 (target; keeps lm_head dense,
+# which the DFlash2 selector requires -- exports that quantize lm_head are
+# rejected at startup) and z-lab/Qwen3.8-27B-DFlash2 (draft, block size 8).
+
+x-sglang-engine: &sglang-engine
+  image: ${SGLANG_IMAGE:-lmsysorg/sglang:qwen38-27b}
+  entrypoint: ["python3", "-m", "sglang.launch_server"]
+  restart: unless-stopped
+  init: true
+  shm_size: 32gb
+  ulimits:
+    memlock: -1
+    stack: 67108864
+    nofile: {soft: 1048576, hard: 1048576}
+  volumes:
+    - ${NVFP4_MODEL_DIR:-/prod/models/Inferact/Qwen3.8-27B-NVFP4}:/workspace/model:ro
+    - ${DFLASH2_DRAFT_DIR:-/prod/models/z-lab/Qwen3.8-27B-DFlash2}:/workspace/draft:ro
+    - ${SGLANG_SRC_DIR:-/prod/src/sglang}/python/sglang:/sgl-workspace/sglang/python/sglang:ro
+    - ${SGLANG_CACHE_DIR:-/prod/engine-cache-sglang}:/root/.cache
+  environment:
+    CUDA_DEVICE_ORDER: PCI_BUS_ID
+
+x-sglang-command: &sglang-command
+  # Served name matches the vLLM recipe so clients need no change when the
+  # engine underneath moves. --api-key mirrors VLLM_API_KEY: the LB's
+  # admission probe and Caddy's forwarded bearer both keep working.
+  - --model-path=/workspace/model
+  - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-27b}
+  - --host=0.0.0.0
+  - --port=8000
+  - --api-key=${VLLM_API_KEY:-qwen-local}
+  - --speculative-algorithm=DFLASH
+  - --speculative-draft-model-path=/workspace/draft
+  # Block 8 is what the draft was trained for. 16 measured faster on code
+  # (269 tok/s) but slower on prose; treat it as out-of-spec.
+  - --speculative-num-draft-tokens=${DFLASH_DRAFT_TOKENS:-8}
+  # Without the reasoning parser every client sees raw <think> output.
+  - --reasoning-parser=qwen3
+  # Qwen3.8's template emits <function=...><parameter=...> XML (what vLLM
+  # parses as qwen3_xml); sglang's detector for that format is qwen3_coder.
+  # The tempting `qwen` name is the Qwen2.5 JSON detector and silently
+  # swallows every tool call.
+  - --tool-call-parser=${SGLANG_TOOL_CALL_PARSER:-qwen3_coder}
+  - --enable-metrics
+
+services:
+  ds4-loadbalancer:
+    environment:
+      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://qwen38-sg-e0:8000,http://qwen38-sg-e1:8000,http://qwen38-sg-e2:8000,http://qwen38-sg-e3:8000,http://qwen38-sg-e4:8000,http://qwen38-sg-e5:8000,http://qwen38-sg-e6:8000,http://qwen38-sg-e7:8000}
+      # SGLang does not publish vLLM's ZMQ KV-event streams. Off, not shadow:
+      # a shadow consumer pointed at nothing would log connect failures
+      # forever without ever becoming trusted.
+      RJ_KV_EVENT_MODE: "off"
+      RJ_KV_EVENT_LIVE_ENDPOINTS: ""
+      RJ_KV_EVENT_REPLAY_ENDPOINTS: ""
+
+  # The base file's fixed TP4 pair is parked so a stale container cannot
+  # hold GPUs while this topology starts.
+  qwen38-a:
+    profiles: ["base-pair-only"]
+  qwen38-b:
+    profiles: ["base-pair-only"]
+
+  qwen38-sg-e0:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e0
+    # GPUs 0-3 are local to NUMA node 0, 4-7 to node 1; first-touch
+    # allocation follows these CPUs (same split as the vLLM topologies).
+    cpuset: "0-11,24-35"
+    ports: ["127.0.0.1:8030:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["0"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e1:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e1
+    cpuset: "0-11,24-35"
+    ports: ["127.0.0.1:8031:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["1"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e2:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e2
+    cpuset: "0-11,24-35"
+    ports: ["127.0.0.1:8032:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["2"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e3:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e3
+    cpuset: "0-11,24-35"
+    ports: ["127.0.0.1:8033:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["3"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e4:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e4
+    cpuset: "12-23,36-47"
+    ports: ["127.0.0.1:8034:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["4"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e5:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e5
+    cpuset: "12-23,36-47"
+    ports: ["127.0.0.1:8035:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["5"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e6:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e6
+    cpuset: "12-23,36-47"
+    ports: ["127.0.0.1:8036:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["6"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e7:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e7
+    cpuset: "12-23,36-47"
+    ports: ["127.0.0.1:8037:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["7"], capabilities: [gpu]}
+    command: *sglang-command
