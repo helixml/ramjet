@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.4.0 — 2026-08-20
+
+### Idle drain grows an actuator
+
+- `RJ_IDLE_DRAIN_ACTUATOR=sleep` lets the LB carry out its own park decision
+  through vLLM sleep mode (`POST /sleep` / `POST /wake_up` with the upstream
+  token). Actuation is gated on `drain` mode; `observe` remains
+  consequence-free and `off` deployments are unaffected. A parked or waking
+  replica stays fenced from routing by a single conjunction applied in both
+  the publish and post-actuation paths, because a sleeping vLLM engine hangs
+  rather than refuses.
+- `RJ_IDLE_DRAIN_RELEASE=utilization` releases an individually quiet replica
+  while its peers serve, keyed to load pressure rather than request arrival.
+  `RJ_IDLE_DRAIN_MAX_PARKED` bounds host memory: level-1 sleep does not
+  return offloaded weights on wake, so read it as parks-per-container-
+  lifetime. The closed-loop `engine_park_simulation` test exercises burst
+  arrival at a parked replica, failed sleeps, and slow wakes against the same
+  fence function the proxy applies.
+
+### Serving recipes
+
+- `deploy/qwen38_27b/` documents two qualified stacks side by side: the vLLM
+  FP8+MTP topology family (full feature surface: KV events, sleep actuator,
+  guards) and a new SGLang NVFP4+DFlash2 overlay
+  (`topology.8gpu-sglang-dflash2.yaml`, eight single-GPU engines, fastest
+  single-stream decode). Both serve the same model name so clients never
+  change. The SGLang tool-call parser must be `qwen3_coder`; the tempting
+  `qwen` name is the Qwen2.5 JSON detector and silently swallows Qwen3.8's
+  XML tool calls.
+
+### Machine view
+
+- The Gen tok/s tile shows a 30s mean instead of a 30s max. The proxy books a
+  request's whole completion count in the sample where it finished, so the
+  max read one big agent turn's completion tick as thousands of tok/s the
+  fleet never sustained.
+- Serving samples carry `stream_tps_p50`/`stream_tps_p05`: windowed
+  per-request decode-rate quantiles from the existing
+  `ramjet_decode_tokens_per_second` histogram. A new Stream tok/s tile shows
+  the median with the slowest-5% tail — the number a user's stream actually
+  runs at, which the throughput counters could never answer.
+- Tile sparkline hover is confined to the chart's own bounds; the crosshair
+  and hover line no longer appear (mispositioned) from anywhere on the card.
+
 ## 0.3.0 — 2026-08-18
 
 ### Breaking
