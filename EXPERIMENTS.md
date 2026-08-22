@@ -1,5 +1,50 @@
 # node06 experiment journal
 
+## 2026-08-22 — megakernel floor probe: the endgame is +2.8% over CUDA graphs; closed
+
+Settles whether a Qwen3.8-shaped megakernel (the KernelBench-Mega
+kimi_linear_decode structure: persistent grid, one CTA per SM, atomic-spin
+grid barriers, fused streaming dequant-GEMV) is worth building for base
+decode. Method: a same-shapes bandwidth-floor probe on carved-out GPU 6 —
+the model's exact per-token streamed byte layout (from the safetensors
+headers: 64 layers of 209MB–1081MB plus the 2.54GB dense bf16 lm_head,
+23.84GB total; only the embedding table drops out) streamed through four
+arms with `__ldcs` 16B loads and ~1 FMA/byte. 188 SMs, 512 threads/CTA,
+`__launch_bounds__(512,1)` for guaranteed co-residency, medians of 20
+timed passes:
+
+| arm | ms/token | tok/s | effective GB/s |
+|---|---|---|---|
+| pure-read ceiling (no barriers) | 15.69 | 63.7 | 1,519 |
+| megakernel (1 launch, 65 barrier phases) | 15.79 | 63.3 | 1,510 |
+| naive multi-launch (449/token) | 16.33 | 61.2 | 1,460 |
+| CUDA-graphed multi-launch | 16.24 | 61.6 | 1,468 |
+
+Findings:
+
+* Achievable device bandwidth on this streaming pattern is 1,519 GB/s =
+  **95% of the 1,597 GB/s spec**. The honest base-decode ceiling is
+  therefore 63.7 tok/s, not the 67.0 computed from spec bandwidth.
+* Grid barriers are nearly free (0.6% over pure reads). The megakernel's
+  whole advantage over a CUDA-graphed multi-kernel pipeline — which is
+  what a production engine already runs — is **+2.8%** (63.3 vs 61.6).
+* The engine's 57.4 tok/s no-spec base is at **90% of the achievable
+  ceiling**; a perfect megakernel tops out at ~63.3 before subtracting
+  the KV/activation/norm traffic the probe does not model. Maximum
+  realistic prize: well under +10% base, i.e. a few tok/s before the
+  speculation multiplier.
+* Consequence for reading KernelBench-Mega: its 18–25x multipliers come
+  from the naive-eager reference, not from beating graphed pipelines.
+  The one structural lever it demonstrates that we can productionize —
+  fusion — is exactly what `--enable-torch-compile` already banks.
+
+Verdict: megakernel work for this model on this SKU is closed as not
+worth pursuing. Per-token streamed bytes (23.84GB) and the 95%-of-spec
+achievable-bandwidth figure are the reusable numbers for future roofline
+math. Probe ran in seconds on the freed GPU (no sustained load; outside
+guard scope), e6 restored on the compiled render (healthy ~230s), LB
+back to 8/8 from the five-file render.
+
 ## 2026-08-22 — torch.compile promoted fleet-wide; production render now includes the overlay
 
 The e7 canary held (healthy since morning, reasoning parser verified,
