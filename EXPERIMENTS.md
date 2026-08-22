@@ -1,5 +1,148 @@
 # node06 experiment journal
 
+## 2026-08-22 — six-GPU DFlash2 config sweep: torch.compile is the promotable lever, FP8 KV is a memory feature
+
+Follow-up to the 454-claim repro below, with authorization to hold six GPUs
+(production single-homed on e0/e1, LB render diff exactly the `RJ_UPSTREAM`
+line, engines e2–e7 stopped). Six standalone engines on GPUs 2–7 swept
+block size × KV dtype × draft/target attention backend × torch.compile ×
+acceptance knobs across six guarded waves (journals
+`.experiments/sweep-w*-thermal.jsonl`, all passed). Screening cells are
+15-rep greedy/official `dflash2_bench.py`; depth cells are an ~82K-token
+prompt decoding 512 tokens; aggregate cells are `qwen_concurrency.py`
+c1/c4/c8 repeated three rounds.
+
+Headline table (batch-1 decode tok/s, min/median/max over 15 cells):
+
+| config | greedy | official |
+|---|---|---|
+| b8 bf16 (production shape, control) | 148 / 149.8 / 214 | 138 / 155.7 / 213 |
+| b8 bf16 **+ torch.compile** | 135 / **167.8** / 243 | 120 / 155.4 / 214 |
+| b8 fp8 KV | 131 / 155.4 / 260 | 129 / 149.9 / 203 |
+| b12 fp8 KV | 127 / 157.5 / 317 | 119 / 145.0 / 249 |
+| b12 fp8 + compile | 125 / 164.6–166.3 / 272 | 125 / 151.3 / 255 |
+| b16 fp8 (GPU4 replicate of the repro) | 120 / 147.5 / 332 | — |
+
+Decode at 82K context: control 106–109; fp8 arms 93–104 (slightly *worse* —
+on this hybrid-attention model halved KV bytes do not buy depth speed, and
+fp8 numerics cost acceptance); compile arms 113–122 (**the only config
+class that wins at depth**). Aggregate c4/c8: compile neutral across three
+rounds (first-round c4 readings of 246-vs-357 flipped to 305/270-vs-244/249
+on repeat; these 3–5s sampled cells swing ±30%, do not read one round).
+
+Findings, strongest first:
+
+* **torch.compile (+ max-bs 8, mem-fraction 0.85) is the promotable win**:
+  +12% greedy median, +10–15% at 82K depth, official/aggregate neutral, and
+  no numerics-class change to outputs. Costs: startup ~90s → ~8min, and 2/6
+  first launches failed CUDA graph capture (`cudaErrorStreamCaptureInvalidated`)
+  at auto mem fraction — explicit `--mem-fraction-static 0.85` succeeded on
+  both retries and never failed first-try. Candidate overlay committed as
+  `deploy/qwen38_27b/torch-compile.override.yaml`; canary e7 first.
+* **FP8 KV is a capacity feature, not a speed feature**: halves both KV
+  pools (644K-token capacity confirmed) but trades ±5% medians and loses at
+  depth. Adopt if KV capacity ever binds, not for throughput.
+* **Draft-pool dtype and both flashinfer backends are noise** (three-way
+  ties at b8; fitarget 156.4–157.2 vs 156.9–157.5 at b12fp8).
+* **Block size trades median for max**: 8 → 12 → 16 moves the greedy code
+  max 214 → 317 → 332 while the median peaks at 12 (157.5) and the official
+  median falls monotonically. Compile *caps* the best-case cells (b16 max
+  332 → 254 with compile), so the record-number config (b16 fp8, no
+  compile, 332–335) and the best-median config (b8 bf16 + compile) are
+  different configs and cannot be combined.
+* **Dead ends on this pin**: `--speculative-adaptive` logs "only
+  EAGLE/EAGLE3" and falls back to static under DFLASH;
+  `--speculative-accept-threshold-acc 0.7` (lossy) gains nothing on greedy
+  (argmax path unaffected) and ~4% official — not worth a quality change.
+
+Cross-checks that keep the data honest: the GPU4 b16-fp8 replicate matched
+the previous day's GPU7 numbers (147.5/332 vs 148.9/335); the same-day
+control matched the 2026-08-20 table (149.8/214 vs 151–158/218); official
+medians carry ~8% day-to-day variance, so single-run official deltas under
+~10% are not findings.
+
+State restored: sweep containers removed, e2–e7 restarted (90s), LB back on
+the canonical 8-upstream render under the lock, 8/8 up, LB chat smoke green.
+
+**Canary live**: e7 was then recreated from the five-file render (canonical
+four plus `torch-compile.override.yaml`) under the lock; the render diff was
+exactly the three flags × 8 services with only e7 recreated. With the sweep's
+warm compile cache in `/prod/engine-cache-sglang` it was healthy in ~250s
+(vs ~8min cold), first-capture success at 0.85, `ramjet_upstream_up` 8/8,
+and a direct e7 smoke shows the reasoning parser working under compile
+(thinking separated, correct arithmetic). Watch Grafana
+`minidynamo-rtx6000pro` TTFT p95/5xx/upstream split before rolling e0–e6;
+rollback is the same targeted recreate from the canonical four-file list.
+
+## 2026-08-22 — 454 tok/s claim repro: block 16 + FP8 KV gets a 335 best cell; the rest is a workstation card
+
+A tweet (net_termina) claimed 454 tok/s single-stream on Qwen3.8-27B —
+"Mia's NVFP4 W4A4, SGLang + DFlash2 block-16 drafter, FP8 KV, single RTX 6000,
++6000 mem overclock". Reproduced the reproducible parts on node06 GPU 7 and
+decomposed the rest. Verdict: 454 is credible as a *best-case greedy code
+cell* on a workstation RTX PRO 6000, and two of its three ingredients are
+structurally unavailable on this box.
+
+Setup: production single-homed to 7 engines (LB render diff was exactly the
+`RJ_UPSTREAM` line; recreate under the common lock), `qwen38-sg-e7` stopped to
+free GPU 7. Standalone container per the 2026-08-20 repro recipe (same image,
+same sglang pin `38b74d294`, Inferact target, z-lab draft) plus the two tweet
+deltas that run here: `--speculative-num-draft-tokens 16` and
+`--kv-cache-dtype fp8_e4m3` (draft KV follows it; both pools confirmed
+`float8_e4m3fn` in the boot log, selector folded into the draft graph).
+Engine healthy in ~90s warm. Both bench runs under `node06_gpu_guard.py`
+(journals `.experiments/dflash2-b16-fp8kv-{greedy,official}-thermal.jsonl`,
+both passed; intake `FP_TEMP` 35C at preflight).
+
+Batch-1 decode, `dflash2_bench.py`, tok/s from response usage, GPU 7:
+
+| config (block 16 + FP8 KV) | min | median | max |
+|---|---|---|---|
+| greedy | 121.1 | 148.9 | 334.7 |
+| official sampling | 115.6 | 135.4 | 281.1 |
+
+Against the 2026-08-20 block-16/bf16-KV row (136/173/269): the code cell
+jumped 269 -> 334.7 while the prose median softened 173 -> 148.9 — FP8 KV
+changes target numerics, which moves borderline acceptance both ways.
+Acceptance under block 16 ran 2.7–4.2 of 16 drafted (the draft is trained for
+block 8; most of the block is wasted, as before).
+
+The two ingredients that do not transfer:
+
+* **+6000 memory overclock — locked out in hardware.** NVML
+  `nvmlDeviceGetClockOffsets` reports an admissible mem-offset range of
+  [0,0] at every pstate on these RTX PRO 6000 Blackwell **Server Edition**
+  boards, and the legacy `nvmlDeviceSetMemClkVfOffset(+100)` fails (rc 999)
+  without sticking. The tweet's card is the workstation SKU, whose vBIOS
+  admits offsets. Do not retry OC paths on this box; the vBIOS is the wall.
+* **True W4A4 target — rejected by the DFlash2 selector on this pin.** The
+  tweet's "Mia" recipe (MiaAI-Lab/Qwen3.8-27B-RTX-6000-PRO-SGLang-DSpark)
+  uses `RadixArk/Qwen3.8-27B-NVFP4` (21.9GB, quantized lm_head:
+  `lm_head.weight_scale*` present in the index). DFlash2's
+  `compute_candidates` matmuls through the *target's* lm_head (the drafter
+  has no head) and hard-raises "requires a dense FP16/BF16/FP32 target
+  lm_head" — same rejection as 2026-08-20. Inferact (24.2GB, dense head) is
+  the runnable target here, ~10% more weight bytes per decode step.
+
+The arithmetic closes without invoking anything mysterious: 334.7 (our best
+cell) × ~1.2 (a +6000 offset in Afterburner units on ~GDDR7 stock clocks)
+× ~1.1 (21.9 vs 24.2GB resident weights) ≈ 450. The claim is plausible on
+the claimant's hardware and is a max, not a median: the same config's
+*median* here is 149 greedy / 135 official, and the block-8 in-spec
+production recipe remains the right default. Also noted: Mia's own repo
+publishes "240+" as ratios projected from the drafter card, not a
+measurement ("re-measure on your unit").
+
+No block-16 Qwen3.8-27B drafter checkpoint exists publicly (incoai/z-lab
+config still `block_size: 8`; only Muse-Glimmer-30B-DFlash2 ships block 16),
+so "block-16 drafter" in the tweet is the block-8 draft run out of spec,
+same as here.
+
+State restored: experiment container removed, `qwen38-sg-e7` restarted
+(healthy in ~95s), LB recreated on the canonical 8-upstream render under the
+lock, `ramjet_upstream_up` 8/8, one LB chat smoke green. Mem clock offset was
+never applied (hardware refused); nothing to revert.
+
 ## 2026-08-20 — v0.4.0 SGLang stack benchmark suite, and the cache-report flag
 
 With the agents quiet, ran the standard suite against the released stack
