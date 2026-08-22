@@ -61,6 +61,24 @@ control matched the 2026-08-20 table (149.8/214 vs 151–158/218); official
 medians carry ~8% day-to-day variance, so single-run official deltas under
 ~10% are not findings.
 
+**Roofline correction to the 2026-08-20 entry.** That entry computed the
+57.4 tok/s no-spec base rate as "78% of the 1.79TB/s GDDR7 roofline". The
+1.79TB/s (1,792 GB/s) figure is the RTX PRO 6000 *Workstation Edition*
+bandwidth; the Server Edition boards in node06 are specified at
+**1,597 GB/s** (NVIDIA/Lenovo datasheets, and it reconciles exactly:
+1,597 GB/s ÷ 512-bit ÷ 2 = 12,477 MHz against the cards' reported
+12,481 MHz max mem clock). Redone: 57.4 tok/s × 24.2GB ≈ 1.39TB/s ≈ **87%
+of the actual roofline**, not 78%. Consequence: target-side kernel work
+(megakernels, deeper fusion) can recover at most ~15% of base decode on
+this SKU; the remaining single-stream headroom lives in speculation
+quality (accepted tokens per step) and draft-side cost, which is not
+roofline-bound. External corroboration that fusion is the right family of
+lever on this exact GPU: KernelBench-Mega's kimi_linear_decode problem
+(batch-1 quantized hybrid-attention decode on RTX PRO 6000) is won by
+persistent single-kernel-per-token designs — but its 18–25x multipliers
+are versus naive PyTorch eager, not versus a production engine; CUDA
+graphs plus torch.compile already capture most of that gap.
+
 State restored: sweep containers removed, e2–e7 restarted (90s), LB back on
 the canonical 8-upstream render under the lock, 8/8 up, LB chat smoke green.
 
