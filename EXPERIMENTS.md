@@ -1,5 +1,29 @@
 # node06 experiment journal
 
+## 2026-08-22 — fp8-quantized draft: the ~7% is real but the pin gives it back
+
+Follow-up to the roofline correction below: with base decode at ~87% of the
+Server Edition roofline, the draft's 3.8GB of bf16 weights (~14% of the
+~28GB read per speculation step) are the largest remaining non-roofline
+cost, worth ~7% of decode if halved. The pin supports online fp8 draft
+quantization (`--speculative-draft-model-quantization fp8`), so this was
+measured directly: e5/e6 carved out under the lock (LB scoped to six
+upstreams, e7 compile canary left serving), reference b8-bf16+compile vs
+the same plus fp8 draft, 15 cells each plus 82K probes, guarded
+(`.experiments/sweep-w7-thermal.jsonl`, passed).
+
+Result: a wash. Greedy 170.7 vs 168.4 median, official 149.8 vs 147.7 —
+both inside the ~8% variance band; 82K cells noisy in both directions.
+The mechanism is in the boot log: "DFLASH fused KV materialization
+disabled: quantized qkv_proj is not supported for this path
+(quant_method=Fp8LinearMethod)". Quantizing the draft halves its weight
+reads but silently disables the draft's fused-KV path, and the giveback
+cancels the gain. Do not ship fp8 draft quantization on this pin; recheck
+when an sglang upgrade supports fused KV materialization with a quantized
+qkv_proj — the bandwidth argument stands, the implementation debt is
+upstream. Production restored to 8/8 after the cells (e7 canary
+untouched throughout).
+
 ## 2026-08-22 — six-GPU DFlash2 config sweep: torch.compile is the promotable lever, FP8 KV is a memory feature
 
 Follow-up to the 454-claim repro below, with authorization to hold six GPUs
