@@ -54,12 +54,16 @@ memory offsets in vBIOS, and the W4A4 export's quantized lm_head is
 rejected by the DFlash2 selector.
 
 A 2026-08-22 six-GPU sweep (EXPERIMENTS.md) found one promotable lever:
-`--enable-torch-compile` lifts the greedy batch-1 median +12% and 82K-deep
-decode +10-15% with neutral official-sampling and aggregate numbers. The
-candidate overlay is `torch-compile.override.yaml` (canary e7 first; note
-the ~8min compile startup and the first-capture retry caveat in its
-header). FP8 KV (`--kv-cache-dtype fp8_e4m3`) halves KV memory but is a
-wash-to-loss on speed here; treat it as capacity headroom, not throughput.
+`--enable-torch-compile` lifts the greedy batch-1 median +12% (169.3
+measured through the LB fleet-wide) and 82K-deep decode +10-15% with
+neutral official-sampling and aggregate numbers. **Promoted 2026-08-22**:
+the production render now includes `torch-compile.override.yaml` as a
+fifth `-f` file — every recreate of any service must pass it (read the
+list from the LB container's `config_files` label, which names all
+five). Note the ~4min warm / ~8min cold compile startup and the
+first-capture retry caveat in the overlay header. FP8 KV
+(`--kv-cache-dtype fp8_e4m3`) halves KV memory but is a wash-to-loss on
+speed here; treat it as capacity headroom, not throughput.
 
 What this recipe gives up (details in the overlay header): vLLM KV events
 (forced `off`), the sleep actuator (observe-only idle drain), and FP8 -> NVFP4

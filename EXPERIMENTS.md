@@ -1,5 +1,35 @@
 # node06 experiment journal
 
+## 2026-08-22 — torch.compile promoted fleet-wide; production render now includes the overlay
+
+The e7 canary held (healthy since morning, reasoning parser verified,
+no capture failures), so the overlay was rolled across e0–e6, one engine
+at a time under the deployment lock, each from the five-file render
+(canonical four plus `torch-compile.override.yaml`). Every engine came
+healthy in 230–250s (warm compile cache in `/prod/engine-cache-sglang`),
+and the LB reported 8/8 after each roll. One operational note: the LB's
+re-admission probe lags an engine's own `/health_generate` by up to
+~30s; the first rollout attempt correctly halted on a 7/8 sample at e4
+before a retry loop on the LB count was added. No engine failed first
+capture at the overlay's pinned `--mem-fraction-static 0.85` (7/7).
+
+The LB was then force-recreated from the same five-file render — its
+service renders identically, but `up -d` had left the old container
+holding a four-file `config_files` label, and that label is exactly what
+the recreate discipline tells the next operator to trust; trusting it
+would have rendered engines without compile flags. The label now names
+all five files. **Any future recreate of any service in this deployment
+must include `torch-compile.override.yaml`.**
+
+Post-rollout verification through the production path (guarded,
+`.experiments/fleet-compile-verify-thermal.jsonl`, passed):
+`dflash2_bench` against the LB on :8006 measured **169.3 tok/s greedy
+median** (137.6 min / 243.7 max), matching the compiled single-engine
+class (167.8–170.7) against ~150 for the pre-rollout fleet. Watch
+Grafana `minidynamo-rtx6000pro` (TTFT p95, 5xx, upstream split);
+rollback is the same per-engine recreate from the canonical four-file
+list.
+
 ## 2026-08-22 — fp8-quantized draft: the ~7% is real but the pin gives it back
 
 Follow-up to the roofline correction below: with base decode at ~87% of the
