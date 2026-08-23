@@ -66,6 +66,12 @@ would have rendered engines without compile flags. The label now names
 all five files. **Any future recreate of any service in this deployment
 must include `torch-compile.override.yaml`.**
 
+> Superseded on 2026-08-23: the overlay stack was collapsed into a single
+> `deploy/qwen38_27b/docker-compose.yaml` and this file no longer exists.
+> The torch.compile flags it carried are now in that one file, and a
+> recreate is plain `docker compose up -d`. The measurement below stands;
+> only the `-f` instruction is obsolete. See the r133 entry.
+
 Post-rollout verification through the production path (guarded,
 `.experiments/fleet-compile-verify-thermal.jsonl`, passed):
 `dflash2_bench` against the LB on :8006 measured **169.3 tok/s greedy
