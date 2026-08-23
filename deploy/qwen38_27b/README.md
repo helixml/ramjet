@@ -35,9 +35,12 @@ Two settings in the command carry most of that and both have journal entries:
   regression (EXPERIMENTS.md 2026-08-23). Do **not** reach for
   `--max-mamba-cache-size` instead: raising it alone collapsed the KV pool from
   349,284 to 45,033 tokens.
-* `--enable-torch-compile` lifts the greedy batch-1 median +12% and 82K-deep
-  decode +10-15%, neutral elsewhere. It costs ~215s of startup per roll rather
-  than ~90s, so roll one or two engines at a time.
+* `--enable-torch-compile` lifts the greedy batch-1 median +12% (169.3 tok/s
+  measured through the LB fleet-wide) and 82K-deep decode +10-15%, neutral
+  elsewhere. It costs ~215s of startup per roll rather than ~90s, so roll one
+  or two engines at a time, and watch the first CUDA-graph capture — it can
+  need a retry at an auto memory fraction, which is why `--mem-fraction-static`
+  is pinned in the command.
 
 Headline numbers published for this stack elsewhere are best-case cells, not
 medians: with block 16 + FP8 KV this box measured a 334.7 tok/s best greedy
@@ -56,7 +59,6 @@ index and snapshot companion do not apply. Idle drain is observation-only —
 there is no `/sleep` endpoint here. The model also does not emit **parallel
 tool calls** on this stack: asked for two, it returns one, and that is the
 model rather than the parser (EXPERIMENTS.md 2026-08-23).
-
 The previous vLLM FP8 + MTP recipe and the generated topology overlays were
 removed on 2026-08-23. They remain in git history if the comparison is needed;
 its measured class was ~120 tok/s single-stream with MTP and ~7,800 tok/s at

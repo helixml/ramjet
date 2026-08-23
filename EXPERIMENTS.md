@@ -1,5 +1,104 @@
 # node06 experiment journal
 
+## 2026-08-22 — megakernel floor probe: the endgame is +2.8% over CUDA graphs; closed
+
+Settles whether a Qwen3.8-shaped megakernel (the KernelBench-Mega
+kimi_linear_decode structure: persistent grid, one CTA per SM, atomic-spin
+grid barriers, fused streaming dequant-GEMV) is worth building for base
+decode. Method: a same-shapes bandwidth-floor probe on carved-out GPU 6 —
+the model's exact per-token streamed byte layout (from the safetensors
+headers: 64 layers of 209MB–1081MB plus the 2.54GB dense bf16 lm_head,
+23.84GB total; only the embedding table drops out) streamed through four
+arms with `__ldcs` 16B loads and ~1 FMA/byte. 188 SMs, 512 threads/CTA,
+`__launch_bounds__(512,1)` for guaranteed co-residency, medians of 20
+timed passes:
+
+| arm | ms/token | tok/s | effective GB/s |
+|---|---|---|---|
+| pure-read ceiling (no barriers) | 15.69 | 63.7 | 1,519 |
+| megakernel (1 launch, 65 barrier phases) | 15.79 | 63.3 | 1,510 |
+| naive multi-launch (449/token) | 16.33 | 61.2 | 1,460 |
+| CUDA-graphed multi-launch | 16.24 | 61.6 | 1,468 |
+
+Findings:
+
+* Achievable device bandwidth on this streaming pattern is 1,519 GB/s =
+  **95% of the 1,597 GB/s spec**. The honest base-decode ceiling is
+  therefore 63.7 tok/s, not the 67.0 computed from spec bandwidth.
+* Grid barriers are nearly free (0.6% over pure reads). The megakernel's
+  whole advantage over a CUDA-graphed multi-kernel pipeline — which is
+  what a production engine already runs — is **+2.8%** (63.3 vs 61.6).
+* The engine's 57.4 tok/s no-spec base is at **90% of the achievable
+  ceiling**; a perfect megakernel tops out at ~63.3 before subtracting
+  the KV/activation/norm traffic the probe does not model. Maximum
+  realistic prize: well under +10% base, i.e. a few tok/s before the
+  speculation multiplier.
+* Consequence for reading KernelBench-Mega: its 18–25x multipliers come
+  from the naive-eager reference, not from beating graphed pipelines.
+  The one structural lever it demonstrates that we can productionize —
+  fusion — is exactly what `--enable-torch-compile` already banks.
+
+Verdict: megakernel work for this model on this SKU is closed as not
+worth pursuing. Per-token streamed bytes (23.84GB) and the 95%-of-spec
+achievable-bandwidth figure are the reusable numbers for future roofline
+math. Probe ran in seconds on the freed GPU (no sustained load; outside
+guard scope), e6 restored on the compiled render (healthy ~230s), LB
+back to 8/8 from the five-file render.
+
+## 2026-08-22 — torch.compile promoted fleet-wide; production render now includes the overlay
+
+The e7 canary held (healthy since morning, reasoning parser verified,
+no capture failures), so the overlay was rolled across e0–e6, one engine
+at a time under the deployment lock, each from the five-file render
+(canonical four plus `torch-compile.override.yaml`). Every engine came
+healthy in 230–250s (warm compile cache in `/prod/engine-cache-sglang`),
+and the LB reported 8/8 after each roll. One operational note: the LB's
+re-admission probe lags an engine's own `/health_generate` by up to
+~30s; the first rollout attempt correctly halted on a 7/8 sample at e4
+before a retry loop on the LB count was added. No engine failed first
+capture at the overlay's pinned `--mem-fraction-static 0.85` (7/7).
+
+The LB was then force-recreated from the same five-file render — its
+service renders identically, but `up -d` had left the old container
+holding a four-file `config_files` label, and that label is exactly what
+the recreate discipline tells the next operator to trust; trusting it
+would have rendered engines without compile flags. The label now names
+all five files. **Any future recreate of any service in this deployment
+must include `torch-compile.override.yaml`.**
+
+Post-rollout verification through the production path (guarded,
+`.experiments/fleet-compile-verify-thermal.jsonl`, passed):
+`dflash2_bench` against the LB on :8006 measured **169.3 tok/s greedy
+median** (137.6 min / 243.7 max), matching the compiled single-engine
+class (167.8–170.7) against ~150 for the pre-rollout fleet. Watch
+Grafana `minidynamo-rtx6000pro` (TTFT p95, 5xx, upstream split);
+rollback is the same per-engine recreate from the canonical four-file
+list.
+
+## 2026-08-22 — fp8-quantized draft: the ~7% is real but the pin gives it back
+
+Follow-up to the roofline correction below: with base decode at ~87% of the
+Server Edition roofline, the draft's 3.8GB of bf16 weights (~14% of the
+~28GB read per speculation step) are the largest remaining non-roofline
+cost, worth ~7% of decode if halved. The pin supports online fp8 draft
+quantization (`--speculative-draft-model-quantization fp8`), so this was
+measured directly: e5/e6 carved out under the lock (LB scoped to six
+upstreams, e7 compile canary left serving), reference b8-bf16+compile vs
+the same plus fp8 draft, 15 cells each plus 82K probes, guarded
+(`.experiments/sweep-w7-thermal.jsonl`, passed).
+
+Result: a wash. Greedy 170.7 vs 168.4 median, official 149.8 vs 147.7 —
+both inside the ~8% variance band; 82K cells noisy in both directions.
+The mechanism is in the boot log: "DFLASH fused KV materialization
+disabled: quantized qkv_proj is not supported for this path
+(quant_method=Fp8LinearMethod)". Quantizing the draft halves its weight
+reads but silently disables the draft's fused-KV path, and the giveback
+cancels the gain. Do not ship fp8 draft quantization on this pin; recheck
+when an sglang upgrade supports fused KV materialization with a quantized
+qkv_proj — the bandwidth argument stands, the implementation debt is
+upstream. Production restored to 8/8 after the cells (e7 canary
+untouched throughout).
+
 ## 2026-08-22 — six-GPU DFlash2 config sweep: torch.compile is the promotable lever, FP8 KV is a memory feature
 
 Follow-up to the 454-claim repro below, with authorization to hold six GPUs
@@ -60,6 +159,24 @@ the previous day's GPU7 numbers (147.5/332 vs 148.9/335); the same-day
 control matched the 2026-08-20 table (149.8/214 vs 151–158/218); official
 medians carry ~8% day-to-day variance, so single-run official deltas under
 ~10% are not findings.
+
+**Roofline correction to the 2026-08-20 entry.** That entry computed the
+57.4 tok/s no-spec base rate as "78% of the 1.79TB/s GDDR7 roofline". The
+1.79TB/s (1,792 GB/s) figure is the RTX PRO 6000 *Workstation Edition*
+bandwidth; the Server Edition boards in node06 are specified at
+**1,597 GB/s** (NVIDIA/Lenovo datasheets, and it reconciles exactly:
+1,597 GB/s ÷ 512-bit ÷ 2 = 12,477 MHz against the cards' reported
+12,481 MHz max mem clock). Redone: 57.4 tok/s × 24.2GB ≈ 1.39TB/s ≈ **87%
+of the actual roofline**, not 78%. Consequence: target-side kernel work
+(megakernels, deeper fusion) can recover at most ~15% of base decode on
+this SKU; the remaining single-stream headroom lives in speculation
+quality (accepted tokens per step) and draft-side cost, which is not
+roofline-bound. External corroboration that fusion is the right family of
+lever on this exact GPU: KernelBench-Mega's kimi_linear_decode problem
+(batch-1 quantized hybrid-attention decode on RTX PRO 6000) is won by
+persistent single-kernel-per-token designs — but its 18–25x multipliers
+are versus naive PyTorch eager, not versus a production engine; CUDA
+graphs plus torch.compile already capture most of that gap.
 
 State restored: sweep containers removed, e2–e7 restarted (90s), LB back on
 the canonical 8-upstream render under the lock, 8/8 up, LB chat smoke green.
