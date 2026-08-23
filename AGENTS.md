@@ -1457,9 +1457,10 @@ python3 bench/watchlist_scan.py --all    # current state of every source
 ```
 
 The scan prints `watch_for` beside each change so a result is triageable
-without opening anything. Set `GITHUB_TOKEN` in the environment (never argv) if
-you hit the 60-requests/hour anonymous GitHub limit. Add an `ignore` regex to
-any source that publishes nightlies, or the signal drowns.
+without opening anything. It authenticates to GitHub with `GITHUB_TOKEN` if set
+and otherwise with `gh auth token`, so the 60-requests/hour anonymous cap is
+not normally reached; never pass a token in argv. Add an `ignore` regex to any
+source that publishes nightlies, or the signal drowns.
 
 Adding a source is cheap; adding one without a concrete `watch_for` is worse
 than not adding it, and the test enforces that. Findings go in EXPERIMENTS.md

@@ -13,11 +13,12 @@ and that is noise rather than signal.
 
 State lives in watchlist/.last-scan.json (git-ignored). Delete it to re-baseline.
 
-Network access is read-only and unauthenticated by default. HuggingFace allows
-this; GitHub rate-limits anonymous callers to 60 requests/hour, so set
-GITHUB_TOKEN in the environment for a comfortable margin. The token is read
-from the environment only -- never pass it in argv, where it would land in
-shell history and process listings.
+Network access is read-only. HuggingFace needs no credential. GitHub
+rate-limits anonymous callers to 60 requests/hour, which a few scans exhaust,
+so the scanner uses GITHUB_TOKEN if set and otherwise borrows the credential
+from `gh auth token` when the CLI is already logged in. Either way the token is
+read from the environment or from gh -- never passed in argv, where it would
+land in shell history and process listings.
 """
 
 import argparse
@@ -27,6 +28,8 @@ import json
 import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -97,11 +100,43 @@ def load_sources(path=SOURCES):
         return validate_sources(yaml.safe_load(handle))
 
 
+_GH_TOKEN = None  # resolved once; None means "not looked up yet", "" means none
+
+
+def github_token():
+    """GITHUB_TOKEN if set, else whatever `gh` is already logged in with.
+
+    Anonymous GitHub allows 60 requests an hour, which a few scans exhaust. If
+    the operator already has gh authenticated there is no reason to make them
+    export anything, so borrow that credential rather than fail with a 403.
+    Resolved once per process and never logged or passed in argv.
+    """
+    global _GH_TOKEN
+    if _GH_TOKEN is not None:
+        return _GH_TOKEN
+    _GH_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+    if not _GH_TOKEN and shutil.which("gh"):
+        try:
+            result = subprocess.run(
+                ["gh", "auth", "token"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode == 0:
+                _GH_TOKEN = result.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            _GH_TOKEN = ""  # unauthenticated is a supported mode, not an error
+    return _GH_TOKEN
+
+
 def fetch(url, timeout=15):
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
-    token = os.environ.get("GITHUB_TOKEN")
-    if token and url.startswith(GH_API):
-        headers["Authorization"] = "Bearer " + token
+    if url.startswith(GH_API):
+        token = github_token()
+        if token:
+            headers["Authorization"] = "Bearer " + token
     request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))

@@ -4,9 +4,12 @@
 import contextlib
 import io
 import json
+import os
 import pathlib
 import tempfile
+import types
 import unittest
+import unittest.mock
 
 import watchlist_scan
 
@@ -101,6 +104,53 @@ class IgnoreFilterTests(unittest.TestCase):
         finally:
             watchlist_scan.fetch = real
         self.assertEqual([item["ref"] for item in result["items"]], ["ns/repo:v0.5.18"])
+
+
+class GithubTokenTests(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(setattr, watchlist_scan, "_GH_TOKEN", None)
+        watchlist_scan._GH_TOKEN = None
+
+    def test_environment_wins_and_gh_is_not_invoked(self):
+        called = []
+        real_run = watchlist_scan.subprocess.run
+        watchlist_scan.subprocess.run = lambda *a, **k: called.append(a) or real_run
+        self.addCleanup(setattr, watchlist_scan.subprocess, "run", real_run)
+        with unittest.mock.patch.dict(os.environ, {"GITHUB_TOKEN": "from-env"}):
+            self.assertEqual(watchlist_scan.github_token(), "from-env")
+        self.assertEqual(called, [])
+
+    def test_falls_back_to_gh_when_env_is_unset(self):
+        real_run, real_which = watchlist_scan.subprocess.run, watchlist_scan.shutil.which
+        watchlist_scan.shutil.which = lambda name: "/usr/bin/gh"
+        watchlist_scan.subprocess.run = lambda *a, **k: types.SimpleNamespace(
+            returncode=0, stdout="from-gh\n"
+        )
+        self.addCleanup(setattr, watchlist_scan.subprocess, "run", real_run)
+        self.addCleanup(setattr, watchlist_scan.shutil, "which", real_which)
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(watchlist_scan.github_token(), "from-gh")
+
+    def test_unauthenticated_is_a_supported_mode(self):
+        # No gh, no env: the scan must still run, just against the 60/hour cap.
+        real_which = watchlist_scan.shutil.which
+        watchlist_scan.shutil.which = lambda name: None
+        self.addCleanup(setattr, watchlist_scan.shutil, "which", real_which)
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(watchlist_scan.github_token(), "")
+
+    def test_a_broken_gh_does_not_raise(self):
+        real_run, real_which = watchlist_scan.subprocess.run, watchlist_scan.shutil.which
+        watchlist_scan.shutil.which = lambda name: "/usr/bin/gh"
+
+        def explode(*args, **kwargs):
+            raise OSError("gh is broken")
+
+        watchlist_scan.subprocess.run = explode
+        self.addCleanup(setattr, watchlist_scan.subprocess, "run", real_run)
+        self.addCleanup(setattr, watchlist_scan.shutil, "which", real_which)
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(watchlist_scan.github_token(), "")
 
 
 class NormalizeTests(unittest.TestCase):

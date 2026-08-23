@@ -9,24 +9,29 @@ python3 bench/watchlist_scan.py --since 2026-08-01
 python3 bench/watchlist_scan.py --all      # ignore state, show current state of everything
 ```
 
-The scan queries the HuggingFace and GitHub APIs concurrently and prints only
+The scan queries the HuggingFace, GitHub and Docker Hub APIs concurrently and
+prints only
 what moved, with the `watch_for` line next to each change so you can triage
 without opening anything. First run records a baseline and reports nothing —
 on a fresh state file every source is "new", which is noise. State lives in
 `.last-scan.json` (git-ignored); delete it to re-baseline.
 
-No credentials needed. GitHub rate-limits anonymous callers to 60 requests an
-hour, which the current registry fits inside; export `GITHUB_TOKEN` if you add
-many more. Never pass a token in argv.
+No setup needed. HuggingFace and Docker Hub want no credential. GitHub
+rate-limits anonymous callers to 60 requests an hour — a few scans exhaust that
+— so the scanner uses `GITHUB_TOKEN` if set and otherwise borrows the
+credential from `gh auth token` when the CLI is already logged in. Running
+unauthenticated still works; you just get 403s on the GitHub sources, which are
+reported and skipped rather than failing the scan. Never pass a token in argv.
 
 ## Adding an entry
 
 ```yaml
   - name: short human label
-    kind: hf-org | hf-repo | gh-repo | site
-    id: z-lab | owner/model | owner/repo | https://...
+    kind: hf-org | hf-repo | gh-repo | docker-hub | site
+    id: z-lab | owner/model | owner/repo | namespace/image | https://...
     why: what this source has already given us
     watch_for: what a new artefact would have to be to matter
+    ignore: optional regex dropping refs that change constantly
 ```
 
 `watch_for` is the field that makes this useful, and `bench/test_watchlist_scan.py`
