@@ -195,7 +195,7 @@ class ScanBehaviourTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = pathlib.Path(self.tmp.name)
-        self.sources = root / "sources.yaml"
+        self.sources = root / "sources.toml"
         self.state = root / "state.json"
         self.sources.write_text(
             "[[sources]]\n"
