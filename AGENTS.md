@@ -454,7 +454,7 @@ cargo test --locked engine_park
 cargo test --locked utilization_tests
 cargo test --locked --test engine_park_simulation
 cargo test --locked proxy::tests::a_parked
-python3 -m unittest bench.test_render_topology
+python3 -m unittest bench.test_machineview_agent
 ```
 
 `RJ_IDLE_DRAIN_ACTUATOR=sleep` is the first configuration in which the LB
@@ -525,8 +525,9 @@ residency. Those need one engine and a maintenance window, not a soak.
 The engine half costs a restart: `--enable-sleep-mode` and
 `VLLM_SERVER_DEV_MODE=1` are both startup-time, and the second registers vLLM's
 whole dev route group. Render them with
-`render_topology.py --sleep-mode`, never by hand-editing a generated topology,
-and keep those ports on the Compose network.
+the single Compose file, and keep those ports on the Compose network. The
+qwen38 sleep-mode and topology overlays were removed on 2026-08-23 along with
+their generator; see "One Compose file per deployment".
 
 `snapshot_reconnect` is the LB-side owner around the consumer. Normal attempts
 are serial; only an explicit bounded replacement may overlap a second session.
@@ -684,12 +685,12 @@ tar czf /tmp/md.tgz --exclude=.git --exclude=target . && scp /tmp/md.tgz node06:
 ssh node06 'rm -rf /tmp/md && mkdir /tmp/md && tar xzf /tmp/md.tgz -C /tmp/md \
   && cd /tmp/md && docker build -t ghcr.io/helixml/ramjet:<tag> .'
 
-# swap the LB (engines untouched; ~4s, LB-only). COMPOSE_FILES below is the
-# complete -f list from the running container; see the warning that follows.
+# swap the LB (engines untouched; ~4s, LB-only). The qwen38 deployment is a
+# single Compose file, so there is no -f list to get wrong.
 ssh node06 'cd /home/luke/inference/qwen38_27b \
   && flock --nonblock /run/lock/ramjet-node06-deployment.lock \
     env LB_IMAGE=ghcr.io/helixml/ramjet:<tag> \
-    docker compose $COMPOSE_FILES up -d --no-deps ds4-loadbalancer'
+    docker compose up -d --no-deps ds4-loadbalancer'
 
 # verify
 ssh node06 'docker logs ds4-loadbalancer --tail 1; curl -s :8007/metrics | grep ramjet_upstream_up'
@@ -716,8 +717,8 @@ Then diff the rendered baseline against the rendered candidate before mutating.
 The only difference should be the image line:
 
 ```bash
-diff <(LB_IMAGE=<current> docker compose $COMPOSE_FILES config) \
-     <(LB_IMAGE=<candidate> docker compose $COMPOSE_FILES config)
+diff <(LB_IMAGE=<current> docker compose config) \
+     <(LB_IMAGE=<candidate> docker compose config)
 ```
 
 Reading the label and then not building the command from it is not a control.
@@ -1442,6 +1443,42 @@ EXPERIMENTS.md — add yours there too):
    mirror. Never hand-edit the infra copy.
 9. **Watch after promote**: Grafana `minidynamo-rtx6000pro` for 10-15 min
    (5xx, TTFT p95, upstream split) — rollback is one `LB_IMAGE` flip.
+
+## One Compose file per deployment — no overlays
+
+`deploy/qwen38_27b/docker-compose.yaml` is the entire deployment. Deploying it
+is `docker compose up -d`, with no `-f` list. It carries the best known
+configuration and there is deliberately no second file holding a worse one.
+
+**Do not add overlay files.** Not `topology.*.yaml`, not `*.override.yaml`, not
+a `docker-compose.<variant>.yaml`. Two production incidents on 2026-08-23 came
+from the overlay stack this replaced, and both are structural to overlays
+rather than mistakes to be more careful about:
+
+* **A stale on-box default silently downgraded production.** The v0.4.0
+  promotion updated the repository's `LB_IMAGE` default and deployed by
+  explicit digest, but nobody synced the file to node06. Every later recreate
+  that did not pass `LB_IMAGE` re-rendered the box's older default and ran
+  v0.3.0. It went unnoticed until the missing `stream_tps` metric family was
+  spotted. A `-f` list makes "which file am I actually rendering" a question
+  with a wrong answer available.
+* **A restated command list silently dropped a flag.** Compose cannot append to
+  a `command:`, so the torch.compile overlay restated the engine command in
+  full. A flag added to the topology file alone never reached the engine,
+  because that overlay was always applied and always won.
+
+To try an alternative configuration, change the single file on a branch, or use
+an environment variable — every tunable has a `${VAR:-default}` form. To keep a
+result, change the default in the file and record the measurement in
+EXPERIMENTS.md. A configuration that lost is recorded in the journal, not
+retained as a file someone can accidentally render.
+
+If you are about to write a second Compose file, the answer is a branch, an
+env var, or a journal entry.
+
+`deploy/dspark_0731/` still carries an overlay stack. It is not the live
+deployment and has not been consolidated; do not treat it as the pattern to
+copy.
 
 ## Guardrails
 

@@ -1,71 +1,66 @@
-# Qwen3.8-27B serving recipes
+# Qwen3.8-27B serving on node06
 
-Two qualified ways to serve Qwen3.8-27B behind the ramjet load balancer on an
-8x RTX PRO 6000 Blackwell box. Both advertise the same model name
-(`qwen3.8-27b`), so clients do not change when the engine underneath does.
-
-## Recipe 1 — vLLM, FP8 weights, MTP speculation (the full-feature stack)
-
-The base file plus a generated topology. `render_topology.py` produces the
-overlay for any (engines x tensor-parallel) split; see `docs/models.md` for
-the selection table.
+The deployment is one Compose file. `docker compose up -d` is the whole
+command; there is no `-f` list and no overlay. See AGENTS.md "One Compose file
+per deployment" for why, and change the file on a branch rather than adding a
+second one.
 
 ```bash
-./render_topology.py --gpus 8 --tensor-parallel 2 -o topology.8gpu-tp2.yaml
-docker compose -f docker-compose.yaml -f topology.8gpu-tp2.yaml \
-  -f machineview.override.yaml up -d
+git -C /prod/src/sglang checkout 38b74d294   # see PINNING CAVEAT in the file
+docker compose up -d
 ```
 
-Weights: `Qwen/Qwen3.8-27B-FP8` (~28GiB). The checkpoint ships its own MTP
-draft head, enabled in the topology files
-(`--speculative-config={"method":"mtp","num_speculative_tokens":2}`).
+## What is deployed
 
-This is the recipe that supports the whole ramjet feature surface: vLLM
-KV-event streams (`RJ_KV_EVENT_MODE=shadow`, the digest index, the snapshot
-companion), the idle-drain sleep actuator (`topology.8gpu-tp2.sleep.yaml`),
-DSpark guards, and the identity/attestation stack.
+Eight single-GPU SGLang engines with DFlash2 block-8 speculation, behind the
+ramjet load balancer. Weights: `Inferact/Qwen3.8-27B-NVFP4` (24.2GB resident;
+keeps `lm_head` dense, which the DFlash2 selector requires) plus the
+`z-lab/Qwen3.8-27B-DFlash2` draft.
 
-Measured single-stream class on this hardware (EXPERIMENTS.md 2026-08-14):
-~77 tok/s base, ~120 tok/s with MTP; aggregate ~7,800 tok/s at c256.
+Measured on this hardware:
 
-## Recipe 2 — SGLang, NVFP4 weights, DFlash2 speculation (fastest single-stream)
+| | |
+|---|---:|
+| batch-1 decode, DFlash2 block 8 | 147-218 tok/s (57.4 unspeculated) |
+| aggregate, c192 | **7,882.6 tok/s** |
+| concurrent slots | 200 (25 per engine) |
+| KV pool per engine | 342,647 tokens |
 
-One overlay, eight single-GPU engines:
+Two settings in the command carry most of that and both have journal entries:
 
-```bash
-git -C /prod/src/sglang checkout 38b74d294   # see PINNING CAVEAT in the overlay
-docker compose -f docker-compose.yaml -f topology.8gpu-sglang-dflash2.yaml \
-  -f machineview.override.yaml up -d
-```
+* `--mamba-ssm-dtype=bfloat16` halves the linear-attention state, which is what
+  actually caps concurrency on this hybrid model — 12 running per engine
+  becomes 25, and the fleet's aggregate ceiling roughly doubled. Gated against
+  long-context recall to 199,482 tokens and multi-turn tool sessions with no
+  regression (EXPERIMENTS.md 2026-08-23). Do **not** reach for
+  `--max-mamba-cache-size` instead: raising it alone collapsed the KV pool from
+  349,284 to 45,033 tokens.
+* `--enable-torch-compile` lifts the greedy batch-1 median +12% and 82K-deep
+  decode +10-15%, neutral elsewhere. It costs ~215s of startup per roll rather
+  than ~90s, so roll one or two engines at a time.
 
-Weights: `Inferact/Qwen3.8-27B-NVFP4` (24.2GB resident; keeps `lm_head`
-dense, which the DFlash2 selector requires) plus the
-`z-lab/Qwen3.8-27B-DFlash2` block-diffusion draft.
+Headline numbers published for this stack elsewhere are best-case cells, not
+medians: with block 16 + FP8 KV this box measured a 334.7 tok/s best greedy
+code cell against a 149 median (EXPERIMENTS.md 2026-08-22), and the 300-450+
+claims additionally need either HBM-class bandwidth (H200) or a
+workstation-SKU memory overclock plus a W4A4 target — the Server Edition
+boards here lock memory offsets in vBIOS, and the W4A4 export's quantized
+lm_head is rejected by the DFlash2 selector. FP8 KV (`--kv-cache-dtype
+fp8_e4m3`) halves KV memory but is a wash-to-loss on speed here; treat it as
+capacity headroom, not throughput.
 
-Measured batch-1 decode on this hardware (EXPERIMENTS.md 2026-08-20):
-57.4 tok/s without speculation, 147-218 tok/s with DFlash2 block 8 —
-roughly 1.5-2x the vLLM recipe where users feel it. Headline numbers
-published for this stack elsewhere are best-case cells, not medians: with
-block 16 + FP8 KV this box measured a 334.7 tok/s best greedy code cell
-against a 149 median (EXPERIMENTS.md 2026-08-22), and the 300-450+ claims
-additionally need either HBM-class bandwidth (H200) or a workstation-SKU
-memory overclock plus a W4A4 target — the Server Edition boards here lock
-memory offsets in vBIOS, and the W4A4 export's quantized lm_head is
-rejected by the DFlash2 selector.
+## What this stack gives up
 
-A 2026-08-22 six-GPU sweep (EXPERIMENTS.md) found one promotable lever:
-`--enable-torch-compile` lifts the greedy batch-1 median +12% and 82K-deep
-decode +10-15% with neutral official-sampling and aggregate numbers. The
-candidate overlay is `torch-compile.override.yaml` (canary e7 first; note
-the ~8min compile startup and the first-capture retry caveat in its
-header). FP8 KV (`--kv-cache-dtype fp8_e4m3`) halves KV memory but is a
-wash-to-loss on speed here; treat it as capacity headroom, not throughput.
+vLLM KV events are forced `off` (SGLang publishes no ZMQ stream), so the digest
+index and snapshot companion do not apply. Idle drain is observation-only —
+there is no `/sleep` endpoint here. The model also does not emit **parallel
+tool calls** on this stack: asked for two, it returns one, and that is the
+model rather than the parser (EXPERIMENTS.md 2026-08-23).
 
-What this recipe gives up (details in the overlay header): vLLM KV events
-(forced `off`), the sleep actuator (observe-only idle drain), and FP8 -> NVFP4
-quantization headroom. Speculative decoding also inverts at high concurrency
-(the MTP data shows +112% at c8 becoming -12.5% at c256); qualify aggregate
-capacity for your own traffic before assuming both wins at once.
+The previous vLLM FP8 + MTP recipe and the generated topology overlays were
+removed on 2026-08-23. They remain in git history if the comparison is needed;
+its measured class was ~120 tok/s single-stream with MTP and ~7,800 tok/s at
+c256.
 
 Single-GPU engines also pay for **cold long-context prefill**: a real Helix
 agent session's 196K-token first turn measured 56.8s TTFT (about 3.5K tok/s

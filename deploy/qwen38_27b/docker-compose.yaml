@@ -1,35 +1,85 @@
 # Canonical source: helixml/ramjet/deploy/qwen38_27b/docker-compose.yaml
-# Qwen3.8-27B-FP8 (vision-language) on 8x RTX PRO 6000 Blackwell (SM120), x86.
 #
-# Two TP4 engines behind the ramjet load balancer, mirroring the
-# DeepSeek-V4-Flash topology: A on GPUs 0-3 (:8012), B on GPUs 4-7 (:8013).
+# Qwen3.8-27B-NVFP4 on 8x RTX PRO 6000 Blackwell (SM120), x86: eight
+# single-GPU SGLang engines with the DFlash2 block-8 draft, behind the ramjet
+# load balancer.
 #
-# This file is the eight-GPU default, not the only option. The topology is
-# (engines x tensor-parallel size), and render_topology.py generates the
-# overlay for any valid combination down to a single GPU:
+# THIS IS THE WHOLE DEPLOYMENT. One file, no overlays, no `-f` stack:
 #
-#   ./render_topology.py --gpus 4 --tensor-parallel 2 -o topology.4gpu-tp2.yaml
-#   docker compose -f docker-compose.yaml -f topology.4gpu-tp2.yaml up -d
+#     docker compose up -d                      # whole stack
+#     docker compose up -d --no-deps ds4-loadbalancer   # LB only
 #
-# On this hardware four TP2 engines measured up to 25% better than this pair
-# for shared-prefix traffic, because engines partition the prefix cache and
-# tensor parallelism costs an allreduce per layer. See docs/models.md for the
-# selection table and the VRAM each topology needs.
+# It carries the best known configuration. There is deliberately no second
+# file holding a worse one. Two production incidents came from the overlay
+# stack this replaces:
 #
-# Qwen3.8-27B declares architectures ["Qwen3_5ForConditionalGeneration"] and is
-# already supported by the pinned r34 image, so this reuses that engine image
-# rather than introducing a new one. It deliberately does NOT use the
-# serve-ds4-flash.sh launcher: that wrapper is DeepSeek/DSpark-specific
-# (MODE=dspark, BACKEND=b12x-a16, speculative depth). Qwen runs plain
-# `vllm serve` with an explicit argv so every setting is visible here.
+#   * The on-box copy of this file drifted to an older LB_IMAGE default. Any
+#     recreate that did not pass LB_IMAGE explicitly silently downgraded the
+#     load balancer to v0.3.0 and stayed there unnoticed until the missing
+#     stream_tps metrics were spotted. (EXPERIMENTS.md 2026-08-23)
+#   * Compose cannot append to a command list, so a torch.compile overlay had
+#     to restate the engine command in full. A flag added to the topology file
+#     alone was silently dropped, because that overlay was always applied.
+#
+# Both failure modes are structural to overlays, not mistakes to be more
+# careful about. If you need to try an alternative, change this file on a
+# branch, or pass an environment variable -- every tunable below has a
+# ${VAR:-default} form. Do not add another Compose file.
 #
 # The model is a hybrid stack -- Gated DeltaNet linear attention in three of
 # every four layers, full attention in the fourth (`layer_types` in
-# config.json). Prefix caching and KV-cache-event semantics under that layout
-# are NOT assumed; they are measured. See EXPERIMENTS.md.
+# config.json). Its concurrency ceiling comes from the mamba state cache, not
+# KV or the GPU; see the --mamba-ssm-dtype note on the command below.
 #
-# FP8 weights are ~31GB total and modules_to_not_convert keeps the 27 visual
-# blocks in BF16, so the vision tower is unquantized.
+# Checkpoints (HF): Inferact/Qwen3.8-27B-NVFP4 (target; keeps lm_head dense,
+# which the DFlash2 selector requires -- exports that quantize lm_head are
+# rejected at startup) and z-lab/Qwen3.8-27B-DFlash2 (draft, block size 8).
+#
+# PINNING CAVEAT: DFlash2 draft support (`DFlash2DraftModel`) is newer than the
+# cookbook image, so this bind-mounts an sglang source checkout over the
+# image's python tree. Pin the checkout to the qualified commit:
+#
+#   git -C /prod/src/sglang checkout 38b74d294
+#
+# Replace SGLANG_IMAGE with a self-contained pinned image and drop
+# SGLANG_SRC_DIR as soon as an upstream tag ships DFlash2 support.
+
+x-sglang-engine: &sglang-engine
+  image: ${SGLANG_IMAGE:-lmsysorg/sglang:qwen38-27b}
+  entrypoint: ["python3", "-m", "sglang.launch_server"]
+  restart: unless-stopped
+  init: true
+  shm_size: 32gb
+  ulimits:
+    memlock: -1
+    stack: 67108864
+    nofile: {soft: 1048576, hard: 1048576}
+  volumes:
+    - ${NVFP4_MODEL_DIR:-/prod/models/Inferact/Qwen3.8-27B-NVFP4}:/workspace/model:ro
+    - ${DFLASH2_DRAFT_DIR:-/prod/models/z-lab/Qwen3.8-27B-DFlash2}:/workspace/draft:ro
+    - ${SGLANG_SRC_DIR:-/prod/src/sglang}/python/sglang:/sgl-workspace/sglang/python/sglang:ro
+    - ${SGLANG_CACHE_DIR:-/prod/engine-cache-sglang}:/root/.cache
+  environment:
+    CUDA_DEVICE_ORDER: PCI_BUS_ID
+
+x-sglang-command: &sglang-command
+  - --model-path=/workspace/model
+  - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-27b}
+  - --host=0.0.0.0
+  - --port=8000
+  - --api-key=${VLLM_API_KEY:-qwen-local}
+  - --speculative-algorithm=DFLASH
+  - --speculative-draft-model-path=/workspace/draft
+  - --speculative-num-draft-tokens=${DFLASH_DRAFT_TOKENS:-8}
+  - --enable-cache-report
+  - --reasoning-parser=qwen3
+  - --tool-call-parser=${SGLANG_TOOL_CALL_PARSER:-qwen3_coder}
+  - --mamba-ssm-dtype=${MAMBA_SSM_DTYPE:-bfloat16}
+  - --enable-metrics
+  - --enable-torch-compile
+  - --torch-compile-max-bs=8
+  - --mem-fraction-static=0.85
+
 services:
   ds4-loadbalancer:
     # Container name is retained so existing bench scripts, the deployment
@@ -51,8 +101,12 @@ services:
     ports:
       - "127.0.0.1:8006:8000"
       - "127.0.0.1:8007:9090"
+      # node06 publishes the observation-only machine view on Tailscale.
+      - "100.89.187.17:8007:9090"
+    volumes:
+      - /var/lib/ramjet-machineview:/machineview
     environment:
-      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://qwen38-a:8000,http://qwen38-b:8000}
+      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://qwen38-sg-e0:8000,http://qwen38-sg-e1:8000,http://qwen38-sg-e2:8000,http://qwen38-sg-e3:8000,http://qwen38-sg-e4:8000,http://qwen38-sg-e5:8000,http://qwen38-sg-e6:8000,http://qwen38-sg-e7:8000}
       RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:-qwen-local}
       RJ_ADVERTISE_CTX_MARGIN: ${RJ_ADVERTISE_CTX_MARGIN:-8192}
       RJ_ROUTE_ALPHA: ${RJ_ROUTE_ALPHA:-4}
@@ -66,93 +120,132 @@ services:
       RJ_TOKENIZER_PROFILE: ${RJ_TOKENIZER_PROFILE:-qwen3.8-27b}
       RJ_EXACT_ROUTE_MODE: ${RJ_EXACT_ROUTE_MODE:-off}
       RJ_UPSTREAM_ADMISSION_MODE: ${RJ_UPSTREAM_ADMISSION_MODE:-http}
-      # Native KV inventory is observation-only. Whether a hybrid
-      # linear-attention model emits usable events is the open question this
-      # deployment exists to answer -- do not promote past shadow on a guess.
-      RJ_KV_EVENT_MODE: ${RJ_KV_EVENT_MODE:-shadow}
-      RJ_KV_EVENT_LIVE_ENDPOINTS: ${RJ_KV_EVENT_LIVE_ENDPOINTS:-tcp://qwen38-a:5557,tcp://qwen38-b:5557}
-      RJ_KV_EVENT_REPLAY_ENDPOINTS: ${RJ_KV_EVENT_REPLAY_ENDPOINTS:-tcp://qwen38-a:5558,tcp://qwen38-b:5558}
-      RJ_KV_EVENT_TOPIC: "${RJ_KV_EVENT_TOPIC:-}"
-      RJ_KV_EVENT_REPLAY_LIMIT: ${RJ_KV_EVENT_REPLAY_LIMIT:-8192}
-      RJ_KV_EVENT_TIMEOUT_MS: ${RJ_KV_EVENT_TIMEOUT_MS:-180000}
+      # SGLang publishes no ZMQ KV-event stream. Off, not shadow: a shadow
+      # consumer pointed at nothing logs connect failures forever without ever
+      # becoming trusted. The snapshot companion and digest index do not apply
+      # to this engine either.
+      RJ_KV_EVENT_MODE: "off"
+      RJ_KV_EVENT_LIVE_ENDPOINTS: ""
+      RJ_KV_EVENT_REPLAY_ENDPOINTS: ""
 
-  qwen38-a: &engine
-    image: ${IMAGE:-voipmonitor/vllm:gilded-gnosis-v20-vllm4d006a4-b12xcd3ce19-fi1ac6942-cu132-20260810-r34}
-    container_name: qwen38-a
-    entrypoint: ["/opt/venv/bin/vllm", "serve", "/workspace/model"]
-    restart: unless-stopped
-    ipc: host
-    init: true
-    shm_size: 32gb
-    # GPUs 0-3 are local to NUMA node 0; first-touch allocation follows these
-    # CPUs and avoids cross-socket host/PCIe traffic.
+      # Machine view is observation-only and publishes on the metrics listener.
+      # The host agent stays loopback; the LB reaches it via this project's
+      # bridge gateway.
+      RJ_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
+      RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json
+
+      # Idle drain stays in observe: it publishes what it *would* park and
+      # fences nothing. Observe is consequence-free by construction -- the
+      # binary refuses to actuate outside drain mode -- so the actuator setting
+      # is inert here. Promote only after a quiet window shows
+      # ramjet_idle_drain_state reaching 2 on exactly one replica and returning
+      # to 0 on traffic, with safe_to_stop and engine_park_state pinned at 0.
+      RJ_IDLE_DRAIN_MODE: ${RJ_IDLE_DRAIN_MODE:-observe}
+      RJ_IDLE_DRAIN_RELEASE: ${RJ_IDLE_DRAIN_RELEASE:-fleet-idle}
+      RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS: ${RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS:-600}
+      RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA: ${RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA:-4}
+      # Deliberately long: parking too eagerly costs a wake latency on live
+      # traffic, parking too late costs a few hundred watt-minutes.
+      RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS: "900"
+      RJ_IDLE_DRAIN_MIN_WARM: "1"
+      RJ_IDLE_DRAIN_COOLDOWN_SECONDS: "300"
+      RJ_IDLE_DRAIN_GRACE_SECONDS: "30"
+      RJ_IDLE_DRAIN_INTERVAL_SECONDS: "15"
+
+  qwen38-sg-e0:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e0
+    # GPUs 0-3 are local to NUMA node 0, 4-7 to node 1; first-touch
+    # allocation follows these CPUs (same split as the vLLM topologies).
     cpuset: "0-11,24-35"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-      nofile:
-        soft: 1048576
-        hard: 1048576
-    ports:
-      - "127.0.0.1:8012:8000"
-    volumes:
-      - ${QWEN_MODEL_DIR:-/prod/models/Qwen/Qwen3.8-27B-FP8}:/workspace/model:ro
-      - /prod/engine-cache:/root/.cache
+    ports: ["127.0.0.1:8030:8000"]
     deploy:
       resources:
         reservations:
           devices:
-            - driver: nvidia
-              device_ids: ["0", "1", "2", "3"]
-              capabilities: [gpu]
-    environment:
-      CUDA_DEVICE_ORDER: PCI_BUS_ID
-      NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-0}
-      VLLM_API_KEY: ${VLLM_API_KEY:-qwen-local}
-    command:
-      - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-27b}
-      - --host=0.0.0.0
-      - --port=8000
-      - --tensor-parallel-size=4
-      # The first boot measured a 4,642,861-token GPU KV cache at TP4, so the
-      # model's native 262144 window costs roughly 17 full-length sequences
-      # worth of residency and is affordable here.
-      - --max-model-len=${MAX_MODEL_LEN:-262144}
-      # 64 was the throughput limiter: two engines capped the stack at 128
-      # concurrent sequences, and c256 saturated at ~5950 tok/s with the
-      # surplus queued rather than batched. Raising it to 256 measured
-      # ~7800 tok/s at c256, +32%, with no errors. A --max-num-batched-tokens
-      # override was tested alongside it at 8192 and 16384 and made no
-      # difference beyond noise, so it is deliberately not set here.
-      - --max-num-seqs=${MAX_NUM_SEQS:-256}
-      - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
-      - --enable-prefix-caching
-      # Without a reasoning parser the model's <think> block is emitted inside
-      # `content`, so every client sees raw chain-of-thought. The parser is
-      # registered lazily in this image under the name `qwen3`.
-      - --reasoning-parser=qwen3
-      - --tool-call-parser=${TOOL_CALL_PARSER:-qwen3_xml}
-      - --enable-auto-tool-choice
-      # Vision limits are explicit so a malformed request cannot make one
-      # prompt consume an unbounded share of the encoder.
-      - --limit-mm-per-prompt={"image":${MM_IMAGE_LIMIT:-4},"video":${MM_VIDEO_LIMIT:-1}}
-      - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
-      # Qwen3.8 ships generation_config.json defaults; pin top_p so callers
-      # that omit it do not sample the full tail, matching the DeepSeek stack's
-      # rationale for the same override.
-      - --override-generation-config={"top_p":0.95}
+            - {driver: nvidia, device_ids: ["0"], capabilities: [gpu]}
+    command: *sglang-command
 
-  qwen38-b:
-    <<: *engine
-    container_name: qwen38-b
-    # GPUs 4-7 are local to NUMA node 1.
-    cpuset: "12-23,36-47"
-    ports:
-      - "127.0.0.1:8013:8000"
+  qwen38-sg-e1:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e1
+    cpuset: "0-11,24-35"
+    ports: ["127.0.0.1:8031:8000"]
     deploy:
       resources:
         reservations:
           devices:
-            - driver: nvidia
-              device_ids: ["4", "5", "6", "7"]
-              capabilities: [gpu]
+            - {driver: nvidia, device_ids: ["1"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e2:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e2
+    cpuset: "0-11,24-35"
+    ports: ["127.0.0.1:8032:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["2"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e3:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e3
+    cpuset: "0-11,24-35"
+    ports: ["127.0.0.1:8033:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["3"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e4:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e4
+    cpuset: "12-23,36-47"
+    ports: ["127.0.0.1:8034:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["4"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e5:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e5
+    cpuset: "12-23,36-47"
+    ports: ["127.0.0.1:8035:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["5"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e6:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e6
+    cpuset: "12-23,36-47"
+    ports: ["127.0.0.1:8036:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["6"], capabilities: [gpu]}
+    command: *sglang-command
+
+  qwen38-sg-e7:
+    <<: *sglang-engine
+    container_name: qwen38-sg-e7
+    cpuset: "12-23,36-47"
+    ports: ["127.0.0.1:8037:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["7"], capabilities: [gpu]}
+    command: *sglang-command

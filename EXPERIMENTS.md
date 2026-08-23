@@ -7920,3 +7920,101 @@ agent workloads rather than synthetic corpora.
 State restored after each round: e7 recreated on the canonical render (62 slots,
 12 running, no mamba flags), LB back to eight upstreams on the v0.4.0 pin, chat
 smoke 200, temporary overlays removed.
+
+## 2026-08-23 — r133: bf16 SSM promoted fleet-wide; aggregate ceiling doubles; deployment collapsed to one Compose file
+
+Promotion of the candidate gated in r129/r131/r132, plus removal of the overlay
+stack that caused two incidents in the same day.
+
+### Result
+
+The fleet's concurrency ceiling moved from 96 to 200 running requests and
+aggregate throughput roughly doubled at the concurrency where it was previously
+queueing.
+
+| cell | before (96 slots) | after (200 slots) | change |
+|---|---|---|---|
+| c64 | 1,658.7 tok/s | 1,793.2 | +8% |
+| c128 | 4,071.2 | 5,677.5 | +39% |
+| c192 | 3,833.2 | **7,882.6** | **+106%** |
+| c256 | 4,256.3 | 7,154.6 | +68% |
+
+Slot sampling during the ladder (`.experiments/r133-post-promote-slots.csv`)
+confirms the mechanism rather than inferring it: `run_total` peaked at exactly
+**200** with 25 running on every engine, and queue depth at c256 was 56, which
+is precisely 256 − 200. Before the change the same sampler showed a hard
+plateau at 96 with 12 per engine.
+
+TTFT collapsed where the queue used to be: c128 p95 went 3.99s → **0.221s**,
+c192 p95 ~6s → 0.271s. All 640 requests across the ladder succeeded.
+
+**The saturation gap to the vLLM stack is now closed.** RESULTS.md recorded
+SGLang's ceiling at 4,256.3 tok/s against vLLM MTP-off's 7,890.9 — 54%. At
+c192 this stack now measures 7,882.6, within 0.1% of that reference, while
+keeping roughly 2x the per-stream decode. The trade that entry described no
+longer exists in the aggregate direction.
+
+### Rollout
+
+`--mamba-ssm-dtype=bfloat16` added to the engine command; fleet rolled two
+engines at a time under the common deployment lock, waiting for both to report
+ready and for `ramjet_upstream_up` to return to 8 before the next pair. The LB
+never dropped below 6/8. Every engine came up at 126 mamba slots, 25
+`max_running_requests`, 342,647 KV tokens — identical to the fenced canary.
+Four waves, about 20 minutes total.
+
+Post-promotion acceptance through the LB, both sampling profiles, 64 requests:
+
+| corpus | deterministic | agentic |
+|---|---|---|
+| v1.jsonl | 80.0% | 80.0% |
+| v2_sessions.jsonl | 100% | 100% |
+| v2_deep_context.jsonl | 100% | 100% |
+
+Identical to the pre-promotion baseline, including the known v1
+`parallel-required-stream` gap, which is a model property of this stack and not
+a promotion effect.
+
+### The deployment is now one Compose file
+
+`deploy/qwen38_27b/docker-compose.yaml` is the whole stack: `docker compose
+up -d`, no `-f` list. Removed: four active overlays (topology, machineview,
+idle-drain-observe, torch-compile), nine inactive topology/variant files, the
+`render_topology.py` generator that produced them, and its test.
+
+Verified before switching. Rendered from the deployment directory so `.env` and
+the project name matched, the consolidated file differed from the five-file
+stack by exactly two things, both inert: three `RJ_KV_EVENT_*` tuning variables
+that do nothing while `RJ_KV_EVENT_MODE=off`, and a duplicate `x-` anchor block
+with no runtime effect. Every engine service and the LB's functional
+configuration rendered identically. `docker compose up -d --dry-run` then
+confirmed all eight engines stayed `Running` and only the LB recreated, so
+consolidation cost one 4-second LB restart rather than a second fleet roll.
+Engine restart counts stayed 0 across the switch.
+
+This closes two failure modes observed earlier the same day, both structural to
+overlays rather than mistakes to be more careful about:
+
+* **A stale on-box default silently downgraded production.** node06's copy of
+  the base file still defaulted `LB_IMAGE` to v0.3.0. Every recreate that did
+  not pass `LB_IMAGE` explicitly re-rendered that default and ran the old LB.
+* **A restated command list silently dropped a flag.** Compose cannot append to
+  a `command:`, so the torch.compile overlay restated the engine command in
+  full; a flag added to the topology file alone never reached an engine. The
+  bf16 flag had to be written into both files for exactly this reason, which is
+  what made the trap visible.
+
+The rule is recorded in AGENTS.md under "One Compose file per deployment". A
+configuration that lost belongs in this journal, not in a file someone can
+accidentally render. `deploy/dspark_0731/` still carries an overlay stack; it
+is not the live deployment and was left alone.
+
+### What is still unmeasured
+
+Sustained production traffic over hours rather than bounded cells, and quality
+on real agent workloads rather than synthetic corpora — `bench/agent_trace.py`
+is the tool for the latter under its privacy contract. Watch Grafana
+`minidynamo-rtx6000pro` for 5xx, TTFT p95, and upstream split. Rollback is a
+one-line revert of `--mamba-ssm-dtype` in the single file plus a paired roll;
+the pre-promotion configuration is in git history and in
+`.superseded-overlays/` on the box.
