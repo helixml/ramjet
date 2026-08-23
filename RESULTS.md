@@ -25,6 +25,18 @@ The vLLM FP8 rows below remain the reference for that stack; the two Qwen
 stacks trade per-stream decode (roughly 2× better here) against saturation
 ceiling (7,890.9 tok/s there vs 4,256.3 here) and cold long-context prefill.
 
+**Read the top of that ladder as queueing, not saturation.** Each engine is
+capped at 12 concurrent requests by the mamba state cache, not by KV or by the
+GPU, so the fleet runs at most 96 at once. Measured 2026-08-23: at c128 the LB
+had all 128 dispatched while the engines ran 96 and queued 32; at c192, 96 ran
+and 96 queued, and aggregate throughput *fell* to 3,833 tok/s. The c128/c256
+rungs are therefore the same plateau with more waiting. The ceiling is a
+memory trade rather than a misconfiguration -- each concurrent request costs
+about 1.85GB of linear-attention state, roughly the KV a slot can use -- but
+`--mamba-ssm-dtype=bfloat16` doubles the slots for a 1.9% KV cost and measured
++57.5% per-engine throughput at c24. It changes numerics and is unpromoted
+pending a correctness gate; see EXPERIMENTS.md 2026-08-23.
+
 ## Current node06 production snapshot
 
 The historical router study below remains reproducible, but the production

@@ -7565,3 +7565,180 @@ The observe-mode sampler unit `ramjet-r125-observe` has been stopped; its
 journal remains at `.experiments/r125-observe-soak.jsonl`. Its records are
 evidence only for the fleet shape that existed while it ran, which changed
 underneath it.
+
+## 2026-08-22 — qwen3.8-27b reasoning-cap probe (direct engine, no deploy)
+
+Claim under test: "qwen 3.8 27B overthinks; fix it by putting reasoning into
+structured output plus dynamic logit bias to cap thinking tokens." Probed
+directly against the idle SGLang engine `qwen38-sg-e5` (`127.0.0.1:8035`,
+DFLASH, `--reasoning-parser=qwen3`, xgrammar backend), c1 sequential, temp
+0.6/top_p 0.95, two synthetic state-action prompts. `<think>`/`</think>` token
+ids in this vocab are 248068/248069. Fleet was fully idle (0 inflight, 8/8
+up); no config, engine, or LB was touched.
+
+Hard planning-step prompt (correct action objectively derivable), n=2-3 per
+cell:
+
+| cell | wall | completion tok | correct |
+|---|---|---|---|
+| baseline (default thinking) | 3.0-4.5s | 431-661 | yes |
+| `logit_bias {248069: +3/+8/+15}` | 2.9-4.4s | 492-615 | yes |
+| `chat_template_kwargs {enable_thinking:false}` | 0.10s | 5 | yes |
+| nothink + json_schema, `reasoning` maxLength 300 + action enum | 1.0-1.4s | 112-133 | yes |
+| two-pass budget: cap 128 tok, force-append `</think>`, `continue_final_message` | 0.84s total | 133 | yes |
+
+Findings:
+
+- The overthinking is real: ~450-660 thinking tokens for a one-token action
+  decision, ~3-4.5s per step at c1.
+- Static `logit_bias` on `</think>` is weak and non-monotonic here (even +15
+  trimmed only ~25% on the hard prompt; +5 did nothing on the easy one). This
+  build has no *dynamic* (position-conditioned) bias, and the probed
+  `thinking_budget`/`max_reasoning_tokens` request fields are silently
+  ignored — no native server-side thinking budget in
+  `0.0.0.dev0+qwen38.27b.g561c8f3`. A strong static bias also risks emitting
+  `</think>` inside the visible answer on longer outputs.
+- Structured output alone (thinking left on) is counterproductive: xgrammar
+  constrains only post-`</think>` text, so the model thinks in full *and then*
+  re-reasons inside the JSON field — 3.68s / 200 tok vs 0.73s baseline on the
+  easy prompt. Grammar decode also ran at roughly half the tok/s (DFLASH +
+  xgrammar interplay, unquantified).
+- The claim done right is nothink + schema: `enable_thinking:false` with a
+  json_schema whose `reasoning` field is maxLength-bounded and whose `action`
+  is an enum. The grammar *is* the dynamic logit masking — the cap is hard,
+  the action is machine-parseable, and you keep a bounded audit trail.
+  1.0-1.4s, correct on both prompts.
+- Fastest correct configuration is plain `enable_thinking:false` (0.10s, 5
+  tok). The two-pass client-side budget (first call `max_tokens=N`, on
+  `finish_reason=length` re-send with the truncated thinking closed via
+  assistant prefill and `continue_final_message:true`, which this build
+  accepts) preserves genuine think-mode under a hard token cap at ~0.84s.
+
+Caveats: tiny n, two prompts, single idle engine, behavioral not a benchmark;
+per-step quality on genuinely hard steps under nothink was not measured. All
+capping is per-request (Helix-side policy); the LB must not rewrite caller
+settings. No promotion decision attached.
+
+## 2026-08-23 — the 96-slot mamba ceiling: c128 was measuring queueing, and bf16 SSM state doubles it
+
+Prompted by re-reading Mia's single-GPU recipe
+(`MiaAI-Lab/Qwen3.8-27B-RTX-6000-PRO-SGLang-DSpark`, already decomposed in the
+454-claim entry below). Nothing in that recipe transfers — its flags are
+either swept and rejected here (fp8 KV, flashinfer backends), redundant
+(`--sampling-defaults model` is already this pin's default, confirmed at
+`server_args.py:1435`), or wrong for a fleet (`--max-running-requests 8`).
+The useful finding came from reading our own boot logs to answer the
+comparison.
+
+**Every engine logs a cap we never configured:**
+`max_running_requests is capped to 12 by the mamba state cache
+(max_mamba_cache_size=62, 5 state slots per request)`. The fleet's real
+concurrency ceiling is 8 x 12 = 96, not 256.
+
+### Confirmed: c128 and c192 are measuring queueing (r129 slot cell)
+
+Guarded (`.experiments/r129-c128-thermal.jsonl`, passed), fleet idle, fresh
+salt, sampling LB dispatch against per-engine `sglang:num_running_reqs` /
+`num_queue_reqs` at 0.5s (`.experiments/r129-c128-slots.csv`):
+
+| cell | LB dispatched | engines running | engines queued | output tok/s |
+|---|---|---|---|---|
+| c64 | 64 | 64 | 0 | 1,658.7 (cold first cell, TTFT p50 4.46s) |
+| c128 | 128 | **96** | **32** | 4,071.2 |
+| c192 | 192 | **96** | **96** | 3,833.2 |
+
+All eight engines pinned at exactly 12 running, never 13.
+`ramjet_upstream_inflight` tracked full concurrency at every rung, so the LB
+dispatches everything and the queue forms inside SGLang's scheduler. c192 is
+*slower* than c128, so the published c256 4,256.3 figure is this same plateau
+with more waiting, not more throughput.
+
+### The cap is a memory trade, not a misconfiguration
+
+Swept on e7, fenced out of `RJ_UPSTREAM` (LB recreated under the common lock;
+render diff was exactly the `RJ_UPSTREAM` line):
+
+| config | mamba slots | max_running | KV pool tokens |
+|---|---|---|---|
+| baseline | 62 | 12 | 349,284 |
+| `--max-mamba-cache-size=128` | 128 | 25 | **45,033** |
+| `--mamba-ssm-dtype=bfloat16` | 126 | 25 | 342,647 |
+
+Raising the cache size alone is a trap: 66 extra slots consumed 24.38GB of KV
+(27.98 -> 3.60GB), about **369MB per slot**, 5 slots/request = **~1.85GB of
+linear-attention state per concurrent request**. At 12,483 KV tokens/GB one
+extra running request costs ~23,000 KV tokens, while the baseline gives
+349,284/12 = ~29,000 tokens per running request. An added slot costs about as
+much KV as a slot can use, so the shipped 12/349K point sits near the natural
+balance for ~29K-token requests. Our agent traffic (18.5K prompts, 200K
+cached turns) wants more KV per request, not more slots. **Do not raise
+`--max-mamba-cache-size`.**
+
+### `--mamba-ssm-dtype=bfloat16` is the real lever (candidate, NOT promoted)
+
+Halving the SSM state doubles slots for a 1.9% KV cost: 62 -> 126 slots,
+12 -> 25 running, KV 349,284 -> 342,647. Matched direct cells, both engines
+warm, concurrent on separate GPUs, guarded
+(`.experiments/r129-ssm-throughput-thermal.jsonl`, passed), 256-token outputs:
+
+| c | e7 bf16 SSM (25 slots) | e0 baseline (12 slots) | delta |
+|---|---|---|---|
+| 8 | 399.8 | 370.8 | +7.8% |
+| 16 | 749.9 | 518.3 | +44.7% |
+| 24 | **999.0** | 634.3 | **+57.5%** |
+| 32 | 953.1 | 620.1 | +53.7% |
+
+TTFT p95 at c24 was 0.344s against 4.808s — a 14x tail-latency improvement,
+which is the more defensible half of this result.
+
+**Blocking caveat: it changes outputs.** A greedy nothink A/B on 8 checkable
+prompts (`bench/engine_greedy_ab.py`, guarded) returned 6/8 identical; of the two
+divergences one was a benign open-ended completion and one was a counting
+task the baseline got right and bf16 got wrong (6/8 vs 7/8 correct). That is
+n=1 per prompt and nowhere near a gate, but it is not a clean pass. This is a
+numerics change to the linear-attention state and must clear a real agent
+correctness matrix before promotion; `agentbench.py` is not currently mirrored
+to this stack's directory. Do not promote on the throughput table alone.
+Other caveats: different GPUs (no crossover round), synthetic 256-token
+outputs with no shared prefix, and the long-context case where KV pressure
+actually bites was not measured.
+
+### Refuted: persisting the torch.compile caches (reverted)
+
+Hypothesis was that torch.compile's ~8 minute startup came from inductor
+landing in `/tmp/torchinductor_root` inside the container's writable layer,
+wiped on every recreate. Both `TORCHINDUCTOR_CACHE_DIR` and
+`TRITON_CACHE_DIR` were indeed unset. Pointing them at the mounted
+`/prod/engine-cache-sglang` volume populated 181MB inductor + 281MB triton
+and **changed nothing measurable**: warm roll 218.0s against a baseline
+boot->ready spread of 214/216/215/214/241/219s across e0-e6 (median ~215).
+The first roll onto the empty ZFS-backed cache cost **795s**, 3.3x the
+baseline. Change reverted locally and on node06.
+
+Two corrections fall out of this. The compile overlay's real cost is **~215s
+boot->ready, not "~8 minutes"** — that figure came from the sweep's
+standalone containers, not a fleet roll, so compile costs ~125s over the ~90s
+non-compile baseline. And startup is dominated by weight load, CUDA-graph
+capture across 51 decode batch sizes, and flashinfer autotune; inductor
+codegen is small enough that eliminating it entirely is invisible.
+
+### Tooling committed with this run
+
+`bench/slot_sampler.py` polls LB dispatch against per-engine
+`sglang:num_running_reqs`/`num_queue_reqs` and is what makes the ceiling
+finding reproducible: it distinguishes "the LB dispatched 128" from "the
+engines are running 96". `bench/engine_greedy_ab.py` is the greedy
+same-prompt comparator used for the bf16 state check; it prints only identity
+and correctness booleans, never completion text, so it is safe against a
+production-adjacent engine. Both are mirrored to
+`/home/luke/inference/qwen38_27b/`. `bench/test_slot_sampler.py` covers the
+metric parser, including that a longer metric sharing a prefix
+(`num_grammar_queue_reqs`) is not folded into `num_queue_reqs` -- that bug
+would manufacture exactly the queueing signal this entry reports.
+
+### Incidental
+
+The deployed LB is `ghcr.io/helixml/ramjet:v0.3.0@sha256:2489110a...` — the
+v0.4.0 entry's *rollback* pin — while canonical Compose defaults to v0.4.0.
+Every recreate here pinned the running digest explicitly so production was
+not silently upgraded. Unexplained by the journal; needs reconciling.
