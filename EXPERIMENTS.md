@@ -7742,3 +7742,99 @@ The deployed LB is `ghcr.io/helixml/ramjet:v0.3.0@sha256:2489110a...` — the
 v0.4.0 entry's *rollback* pin — while canonical Compose defaults to v0.4.0.
 Every recreate here pinned the running digest explicitly so production was
 not silently upgraded. Unexplained by the journal; needs reconciling.
+
+## 2026-08-23 — r130: agentbench ported to the SGLang stack; bf16 SSM clears the correctness gate; the LB "rollback" was stale-mirror drift
+
+Follow-up to r129. Three results: the LB version mystery is a config-drift bug
+with a general lesson, `agentbench` had a real portability defect, and the
+`--mamba-ssm-dtype=bfloat16` candidate now has a matched correctness gate that
+it passes.
+
+### The v0.3.0 LB was never a rollback
+
+node06's `docker-compose.yaml` was a stale mirror of the canonical repo file:
+its `LB_IMAGE` default was still
+`v0.3.0@sha256:2489110a...`. The v0.4.0 promotion on 2026-08-20 updated the
+repository copy and deployed by explicit digest, but nobody synced the file to
+the box. Any later recreate that did not pass `LB_IMAGE` therefore re-rendered
+v0.3.0 and silently downgraded the LB; the 2026-08-22 fleet compile rollout is
+the likely occasion. Confirmed by the absent `ramjet_decode_tokens_per_second`
+family, a v0.4.0 metric.
+
+The `-f` file-list discipline in AGENTS.md has an exact analogue for image
+defaults: **a recreate that does not pin `LB_IMAGE` inherits whatever the
+on-box file says, which is not necessarily what the repository says.** Diffing
+the rendered baseline against the rendered candidate catches this, because the
+image line is exactly where the difference shows up.
+
+Fixed by syncing the canonical file (render diff was the image line alone) and
+recreating on `v0.4.0@sha256:467e7edf...` under the common lock. 8/8 upstreams,
+chat smoke 200. `ramjet_decode_tokens_per_second` and
+`ramjet_time_per_output_token_seconds` populate only when a streaming request
+sets `stream_options.include_usage` — without usage the LB has no completion
+count and cannot compute a decode rate. That is expected behaviour, not a
+v0.4.0 defect, and it is why a bare streaming smoke leaves the family empty.
+
+### `node06_agent_metadata.sh` aborted against any non-vLLM engine
+
+The script runs under `set -euo pipefail`, and its revision probe was
+`docker exec "$c" pgrep -af 'vllm serve' | awk ...`. On the SGLang stack pgrep
+matches nothing and exits 1; pipefail propagates that and `set -e` killed the
+script before it wrote any metadata. This was not a Qwen quirk — it would
+abort against a stopped vLLM engine too. Replaced with a `probe_revision`
+helper that tolerates no-match, tries the vLLM and SGLang launchers in turn,
+and otherwise falls through to the model-root identity rather than inventing a
+revision. `agentbench.py`, `engine_metrics.py`, and `agent_cases/` are now
+mirrored to `/home/luke/inference/qwen38_27b/`.
+
+### This stack does not emit parallel tool calls
+
+The committed corpus case `parallel-required-stream` requires two calls to
+`read_metric`. Baseline `qwen38-sg-e0` returns exactly one, 5/5 runs. Ruled
+out three explanations: it is not streaming reassembly (non-streaming also
+returns one), not prompt sensitivity (an explicit "emit exactly TWO tool
+calls" system prompt still returns one, as does an enumerated variant), and
+not a parser limit (SGLang's `Qwen3CoderDetector.detect_and_parse` uses
+`findall` over multiple call blocks). The model does not generate the second
+call. **If any Helix agent depends on parallel tool calls it is silently
+receiving one**; that is worth checking independently of this experiment. For
+gating purposes it is a baseline property affecting both arms, so the gate is
+"no worse than baseline", not "100% valid".
+
+### bf16 SSM state clears the matched gate
+
+Candidate `--mamba-ssm-dtype=bfloat16` on fenced e7 (126 slots, 25 running,
+342,647 KV — reproduced exactly), baseline e0 unmodified. All cells guarded.
+
+| check | baseline e0 | candidate e7 |
+|---|---|---|
+| agentbench deterministic, 25 requests | 80.0% valid | 80.0%, identical per case |
+| agentbench agentic, 25 requests | 80.0% valid | 80.0%, same finish-reason mix |
+| greedy A/B, 3 passes | 7/8 correct | 7/8 correct |
+
+Per-case deterministic pass rates were identical across all five cases
+(4 cases 5/5, `parallel-required-stream` 0/5 on both).
+
+**This corrects r129.** That entry recorded a single greedy A/B showing 6/8
+identical with one counting task the baseline got right and bf16 got wrong.
+Repeated three times against a fresh bf16 incarnation, the two engines score
+equally (7/8 each) and the counting divergence does not reproduce. The r129
+observation was one sample, and the disagreement between the two rounds is
+itself the finding: temp-0 output on this stack is not stable across engine
+incarnations, so a single greedy pass cannot resolve a small quality delta.
+
+What the gate does establish: no protocol regression across 50 matched
+requests in two sampling profiles, and no correctness delta on the checkable
+corpus. What it does not establish: anything about long-context behaviour,
+multi-turn agent sessions, or a quality shift too small for eight prompts to
+see. The candidate remains unpromoted pending that judgement; promotion means
+rolling all eight engines, and mixing SSM dtypes across a prefix-routed fleet
+would make identical prompts answer differently depending on placement.
+
+Candidate TTFT p95 read 978ms against baseline 77.4ms in the deterministic
+cell. That is a cold-start artifact — e7 had just been recreated while e0 was
+warm — not a candidate property; the agentic cells run later show 188.5 vs
+194.0 output tok/s.
+
+State restored: e7 recreated on the canonical render, LB back to eight
+upstreams on the v0.4.0 pin, temporary overlays removed.

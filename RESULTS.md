@@ -34,8 +34,12 @@ rungs are therefore the same plateau with more waiting. The ceiling is a
 memory trade rather than a misconfiguration -- each concurrent request costs
 about 1.85GB of linear-attention state, roughly the KV a slot can use -- but
 `--mamba-ssm-dtype=bfloat16` doubles the slots for a 1.9% KV cost and measured
-+57.5% per-engine throughput at c24. It changes numerics and is unpromoted
-pending a correctness gate; see EXPERIMENTS.md 2026-08-23.
++57.5% per-engine throughput at c24. It changes numerics, but cleared a matched
+correctness gate on 2026-08-23 -- no protocol or correctness delta against an
+unmodified engine across 50 agentbench requests in two sampling profiles plus
+three greedy passes. It remains unpromoted: promotion means rolling all eight
+engines, since mixing SSM dtypes behind a prefix router would make identical
+prompts answer differently by placement. See EXPERIMENTS.md 2026-08-23.
 
 ## Current node06 production snapshot
 
