@@ -37,9 +37,14 @@ about 1.85GB of linear-attention state, roughly the KV a slot can use -- but
 +57.5% per-engine throughput at c24. It changes numerics, but cleared a matched
 correctness gate on 2026-08-23 -- no protocol or correctness delta against an
 unmodified engine across 50 agentbench requests in two sampling profiles plus
-three greedy passes. It remains unpromoted: promotion means rolling all eight
-engines, since mixing SSM dtypes behind a prefix router would make identical
-prompts answer differently by placement. See EXPERIMENTS.md 2026-08-23.
+three greedy passes. It was re-gated on 2026-08-23 against long-context recall and
+multi-turn tool sessions: 79 matched agentbench requests across four corpora and
+two sampling profiles, with no regression on any case, turn, or depth, including
+five facts recalled from 199,482 tokens at 1/25/50/75/99% depth. It remains
+unpromoted: promotion means rolling all eight engines, since mixing SSM dtypes
+behind a prefix router would make identical prompts answer differently by
+placement, and sustained production traffic is still unmeasured. See
+EXPERIMENTS.md 2026-08-23.
 
 ## Current node06 production snapshot
 

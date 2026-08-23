@@ -7838,3 +7838,85 @@ warm — not a candidate property; the agentic cells run later show 188.5 vs
 
 State restored: e7 recreated on the canonical render, LB back to eight
 upstreams on the v0.4.0 pin, temporary overlays removed.
+
+## 2026-08-23 — r131/r132: agentbench schema v2 (long-context recall, multi-turn sessions); bf16 SSM clears both to 199K tokens
+
+r130's gate covered protocol shape and eight short prompts, which is not what a
+linear-attention state-dtype change threatens. Schema v2 adds the two missing
+axes and the `--mamba-ssm-dtype=bfloat16` candidate now passes both.
+
+### What schema v2 adds
+
+`v2_sessions.jsonl` and `v2_deep_context.jsonl` are separate corpora so `v1.jsonl`
+and its goldens stay frozen. v1 cases load unchanged; a v1 case using a v2 field
+is rejected.
+
+* **`context`** builds a salt-namespaced filler document and plants `[RECORD]`
+  facts at fractional depths, prepending it to the case's user turn. The
+  required answer fragments are *derived* from the needles rather than restated
+  in the corpus: a hand-maintained copy drifts from the planted values and turns
+  a recall regression into a green run. Depth matters more than size on this
+  hybrid model, whose linear attention carries long range in a fixed-size state.
+* **`turns`** drives a real session. Each later turn replays the assistant
+  message with its tool calls intact, appends one `tool` message per call
+  quoting the **real `tool_call_id`**, optionally appends a `user` message, and
+  applies a `request` patch (`tool_choice`, `max_tokens` — never `model`,
+  `messages`, or `stream`). Binding results to call ids is the part of a session
+  that actually breaks, so the ids come from the response rather than invented.
+  Each turn emits its own record; a failing turn still runs its successors,
+  because a session that recovers is a different outcome from one that derails.
+
+### Two harness bugs found by building it, both of which would have faked a result
+
+* **Exact substring matching scored a correct answer as a failure.** Asked to
+  report two tool results, the model replied `Engine A: 27,604 / Engine B:
+  83,521` — correct — and `content_contains_all: ["27604","83521"]` did not
+  match. A gate that trips on digit grouping is worse than a missing gate: it
+  blocks good candidates and buries real regressions in formatting noise.
+  `content_contains` now strips digit-group separators (comma, underscore,
+  NBSP, narrow NBSP, thin space) **only between digits**, so `27,604` matches
+  `27604` while `a,b` still does not match `ab`, an ordinary space is not
+  stripped, and a different number still fails. Eight semantics locked in tests.
+* **Derived fragments attached to the wrong turn.** For a case carrying both
+  `context` and `turns`, the recall answer lands in the final turn, but the
+  fragments were attached to the case expectation — turn 0, a tool call with no
+  content. Every correct run of the combined case would have failed. They now
+  attach to the last turn, with tests asserting earlier expectations stay clean.
+
+### Matched results, baseline e0 versus fenced e7 on bf16 SSM
+
+Identical salt in both arms, so the long-context documents are byte-identical.
+All cells guarded; e7 confirmed at 126 slots / 25 running / 342,647 KV.
+
+| case | prompt tokens | baseline | candidate |
+|---|---|---|---|
+| longctx-recall-32k | 13,314 | 3/3 | 3/3 |
+| longctx-recall-128k | 52,634 | 3/3 | 3/3 |
+| session-tool-then-answer (2 turns) | 403 / 178 | 3/3 each | 3/3 each |
+| session-multiturn-recall (3 turns) | 400 / 487 / 277 | 3/3 each | 3/3 each |
+| longctx-depth-ladder-256k | 99,873 | 2/2 | 2/2 |
+| longctx-depth-ladder-512k | **199,482** | 2/2 | 2/2 |
+| longctx-session-under-load (2 turns) | 50,262 / 50,083 | 2/2 each | 2/2 each |
+
+Both v2 corpora returned 100% protocol validity on both engines. The 512KiB
+cell places five facts at 1/25/50/75/99% depth in 199,482 tokens — 76% of the
+262,144 window — and both engines recalled all five, twice. Wall-time medians
+were equivalent (512k: 52,414ms baseline vs 50,857ms candidate).
+
+### Where the bf16 candidate now stands
+
+Cumulative matched evidence: 79 agentbench requests across four corpora and two
+sampling profiles, plus 24 greedy prompts, with no regression on any case, turn,
+or depth. Combined with r129's +57.5% per-engine throughput at c24 and 14x
+better TTFT p95, this is a substantially stronger position than r130's.
+
+Still not promoted, and the remaining objection is no longer correctness
+coverage but blast radius: promotion means rolling all eight engines, because
+mixing SSM dtypes behind a prefix router makes identical prompts answer
+differently depending on placement. What remains unmeasured is sustained
+production traffic over hours rather than bounded cells, and quality on real
+agent workloads rather than synthetic corpora.
+
+State restored after each round: e7 recreated on the canonical render (62 slots,
+12 running, no mamba flags), LB back to eight upstreams on the v0.4.0 pin, chat
+smoke 200, temporary overlays removed.
