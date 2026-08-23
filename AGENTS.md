@@ -1444,6 +1444,28 @@ EXPERIMENTS.md — add yours there too):
 9. **Watch after promote**: Grafana `minidynamo-rtx6000pro` for 10-15 min
    (5xx, TTFT p95, upstream split) — rollback is one `LB_IMAGE` flip.
 
+## Watchlist — what other people ship
+
+`watchlist/sources.yaml` tracks the checkpoints, engines, kernels and recipes
+whose next release could change how we serve. Each entry records what it has
+already given us and, more importantly, `watch_for`: what a new artefact would
+have to be to matter.
+
+```bash
+python3 bench/watchlist_scan.py          # only what moved since the last scan
+python3 bench/watchlist_scan.py --all    # current state of every source
+```
+
+The scan prints `watch_for` beside each change so a result is triageable
+without opening anything. Set `GITHUB_TOKEN` in the environment (never argv) if
+you hit the 60-requests/hour anonymous GitHub limit. Add an `ignore` regex to
+any source that publishes nightlies, or the signal drowns.
+
+Adding a source is cheap; adding one without a concrete `watch_for` is worse
+than not adding it, and the test enforces that. Findings go in EXPERIMENTS.md
+like any other result — the watchlist answers "what is new", the journal
+answers "did it work".
+
 ## One Compose file per deployment — no overlays
 
 `deploy/qwen38_27b/docker-compose.yaml` is the entire deployment. Deploying it

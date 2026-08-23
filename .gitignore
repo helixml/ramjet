@@ -5,3 +5,6 @@ __pycache__/
 /.drone-publish-plan*
 .env
 /.drone-release-plan*
+
+# Watchlist scan state (local, per-machine)
+watchlist/.last-scan.json
