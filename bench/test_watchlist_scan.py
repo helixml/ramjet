@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Tests for the watchlist registry and its scanner."""
 
+import ast
 import contextlib
 import io
 import json
 import os
 import pathlib
+import sys
 import tempfile
 import types
 import unittest
@@ -40,6 +42,22 @@ class CommittedRegistryTests(unittest.TestCase):
         # reader sees "this repo moved" and cannot decide whether to care.
         for source in watchlist_scan.load_sources():
             self.assertGreater(len(source["watch_for"].strip()), 30, source["name"])
+
+
+class NoThirdPartyDependencyTests(unittest.TestCase):
+    def test_the_scanner_imports_nothing_outside_the_standard_library(self):
+        # Every other tool in bench/ and deploy/ runs on the stdlib alone and
+        # the CI image installs no packages; a third-party import here fails
+        # the whole agent-protocol step at collection time.
+        tree = ast.parse(pathlib.Path(watchlist_scan.__file__).read_text())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".")[0])
+        outside = sorted(imported - sys.stdlib_module_names)
+        self.assertEqual(outside, [], f"non-stdlib imports: {outside}")
 
 
 class ValidationTests(unittest.TestCase):
@@ -180,12 +198,12 @@ class ScanBehaviourTests(unittest.TestCase):
         self.sources = root / "sources.yaml"
         self.state = root / "state.json"
         self.sources.write_text(
-            "sources:\n"
-            "  - name: example\n"
-            "    kind: gh-repo\n"
-            "    id: owner/repo\n"
-            "    why: a sufficiently long reason string\n"
-            "    watch_for: a sufficiently long trigger string\n"
+            "[[sources]]\n"
+            'name = "example"\n'
+            'kind = "gh-repo"\n'
+            'id = "owner/repo"\n'
+            'why = "a sufficiently long reason string"\n'
+            'watch_for = "a sufficiently long trigger string"\n'
         )
         self.pushed = "2026-08-01T00:00:00Z"
         real_fetch = watchlist_scan.fetch

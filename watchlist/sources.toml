@@ -1,0 +1,232 @@
+# Who to watch for things that would change how we serve models.
+#
+# Contract and workflow: watchlist/README.md
+# Scan it with:            python3 bench/watchlist_scan.py
+#
+# Every entry needs a `why` (what this source gave us) and a `watch_for` (what
+# a new artefact from them would have to be to matter). An entry without a
+# concrete `watch_for` becomes noise on the next scan, because nobody can tell
+# whether the thing that changed is interesting.
+#
+# Kinds:
+#   hf-org     HuggingFace author page; scan lists models sorted by last change
+#   hf-repo    a single HuggingFace model repo we depend on directly
+#   gh-repo    a GitHub repository; scan reports pushes and latest release
+#   docker-hub a Docker Hub repository; scan reports newly published tags
+#
+# Optional per-source `ignore`: a regex dropping refs that change constantly
+# (nightlies, wheel-only images) before they reach the state file.
+#
+#   site       no machine-readable feed, listed so it gets checked by hand
+
+[[sources]]
+name = "z-lab"
+kind = "hf-org"
+id = "z-lab"
+why = """
+  Publishes the DFlash2 draft checkpoints. z-lab/Qwen3.8-27B-DFlash2 is the
+  block-8 drafter in production on node06 and carries our single-stream
+  decode.
+  """
+watch_for = """
+  A block-16 Qwen3.8-27B drafter. We measured block 16 as faster on code
+  (334.7 tok/s best greedy cell) but it is out of spec today because the
+  published draft is trained for block 8, so most of the block is wasted:
+  acceptance ran 2.7-4.2 of 16 drafted. An in-spec block-16 draft would be a
+  straight win. Also: any Qwen3.8 draft retrained on a newer target.
+  """
+
+[[sources]]
+name = "Inferact"
+kind = "hf-repo"
+id = "Inferact/Qwen3.8-27B-NVFP4"
+why = """
+  Our production target. It is the runnable NVFP4 export because it keeps
+  lm_head dense, which the DFlash2 selector requires.
+  """
+watch_for = """
+  Re-exports against a newer base, or a variant that shrinks the 24.2GB
+  resident weight while keeping the dense head. Every GB of weights is
+  bandwidth per decode step.
+  """
+
+[[sources]]
+name = "RadixArk"
+kind = "hf-org"
+id = "RadixArk"
+why = """
+  Publishes RadixArk/Qwen3.8-27B-NVFP4, the true W4A4 export at 21.9GB that
+  the widely-shared single-GPU recipes use. We cannot run it: DFlash2's
+  compute_candidates matmuls through the target's lm_head and hard-rejects a
+  quantized one.
+  """
+watch_for = """
+  A W4A4 export that leaves lm_head dense. That is ~10% fewer weight bytes
+  per decode step than Inferact with no other change, and it is the single
+  cheapest speedup still on the table for us.
+  """
+
+[[sources]]
+name = "Qwen"
+kind = "hf-org"
+id = "Qwen"
+why = "Upstream for the model family we serve, including the FP8 checkpoint."
+watch_for = """
+  Point releases of Qwen3.8-27B, and any change to the hybrid layer layout.
+  Our concurrency ceiling is set by the linear-attention state size, so a
+  revision that changes state dimensions changes our slot budget directly.
+  """
+
+[[sources]]
+name = "deepseek-ai"
+kind = "hf-org"
+id = "deepseek-ai"
+why = "DeepSeek-V4-Flash is the model behind the dspark_0731 stack."
+watch_for = "Refreshes of V4-Flash, and any successor with a bundled draft head."
+
+[[sources]]
+name = "sgl-project/sglang"
+kind = "gh-repo"
+id = "sgl-project/sglang"
+why = """
+  The engine in production. We bind-mount a source checkout pinned to
+  38b74d294 because DFlash2 draft support is newer than the cookbook image.
+  """
+watch_for = """
+  A tagged release that ships DFlash2 support, which would let us drop the
+  source bind-mount and pin a self-contained image. Also anything touching
+  the mamba state cache sizing (max_mamba_cache_size, mamba_ssm_dtype,
+  mamba_full_memory_ratio) -- that pool is our concurrency ceiling. And
+  DFLASH support in --speculative-adaptive, which currently falls back to
+  static with an "only EAGLE/EAGLE3" log line.
+  """
+
+[[sources]]
+name = "lmsysorg/sglang images"
+kind = "docker-hub"
+id = "lmsysorg/sglang"
+why = """
+  The sglang cookbook images our engine container is built from. We pin
+  lmsysorg/sglang:qwen38-27b and bind-mount a newer source tree over it.
+  """
+watch_for = """
+  A tag that already contains DFlash2 draft support, which would let us drop
+  the source bind-mount and run a self-contained pinned image. Tags built
+  for SM120/Blackwell specifically.
+  """
+ignore = 'nightly-|rocm|cann|-cu12|latest-|blackwell-b200'
+
+[[sources]]
+name = "voipmonitor/vllm images"
+kind = "docker-hub"
+id = "voipmonitor/vllm"
+why = """
+  Publisher of the pinned vLLM+SparkInfer/B12X engine images behind the
+  dspark_0731 stack; we currently run the r34 image by digest.
+  """
+watch_for = """
+  New r-images for cu132/SM120. Each has carried meaningful engine fixes,
+  and every candidate needs the registry-metadata check plus a correctness
+  gate before it touches GPUs -- r11 shipped a CUTLASS_DSL_VERSION that
+  disagreed with its own provenance label.
+  """
+ignore = 'flashinfer-wheels|-wheels-\b'
+
+[[sources]]
+name = "vllm-project/vllm"
+kind = "gh-repo"
+id = "vllm-project/vllm"
+why = """
+  The other engine we run. It is the reference for aggregate saturation and
+  the only one of the two that publishes ZMQ KV-cache events, which the
+  digest index and snapshot companion are built on.
+  """
+watch_for = """
+  Hybrid/linear-attention scheduling work, KV-event schema changes, and
+  sleep-mode fixes -- level-1 sleep frees VRAM but did not return ~38GiB of
+  host memory on wake when we measured it.
+  """
+
+[[sources]]
+name = "flashinfer-ai/flashinfer"
+kind = "gh-repo"
+id = "flashinfer-ai/flashinfer"
+why = "Attention and sampling backend for both engines on SM120."
+watch_for = """
+  SM120 kernel work and autotune changes. Backend choice measured as noise
+  for us at block 8, so only a real kernel change is worth a re-run.
+  """
+
+[[sources]]
+name = "LMCache/LMCache"
+kind = "gh-repo"
+id = "LMCache/LMCache"
+why = "Present in the engine image tree; currently disabled in our launcher."
+watch_for = """
+  Anything that would make offloaded KV worth enabling given that our KV
+  pool, not host memory, is the binding constraint.
+  """
+
+[[sources]]
+name = "MiaAI-Lab RTX 6000 PRO recipe"
+kind = "gh-repo"
+id = "MiaAI-Lab/Qwen3.8-27B-RTX-6000-PRO-SGLang-DSpark"
+why = """
+  The single-GPU recipe behind the widely-shared 454 tok/s claim. We
+  decomposed it: credible as a best-case greedy code cell on a workstation
+  SKU, and two of its three ingredients do not transfer to Server Edition
+  boards (vBIOS locks memory offsets; W4A4 target is rejected).
+  """
+watch_for = """
+  Updated flags or a re-measured number on Server Edition hardware. Treat
+  published figures as best-case cells until a median is shown.
+  """
+
+[[sources]]
+name = "local-inference-lab"
+kind = "gh-repo"
+id = "local-inference-lab/blackwell-llm-docker"
+why = "Blackwell/SM120 container recipes for this class of box."
+watch_for = "New base images for SM120, and CUDA/Torch pin bumps."
+
+[[sources]]
+name = "ai-dynamo/dynamo"
+kind = "gh-repo"
+id = "ai-dynamo/dynamo"
+why = """
+  Prior art for the routing problem ramjet solves -- prefix-aware placement
+  across engine replicas.
+  """
+watch_for = """
+  Placement policies that use KV inventory rather than load, and any
+  published measurement of prefix-cache-aware routing gains.
+  """
+
+[[sources]]
+name = "MoonshotAI/Kimi-K3"
+kind = "gh-repo"
+id = "MoonshotAI/Kimi-K3"
+why = "Named base of the vendor engine image used by the dspark stack."
+watch_for = "Base image changes that would alter our pinned launcher contract."
+
+[[sources]]
+name = "Muse-Glimmer-30B-DFlash2 (block-16 drafter)"
+kind = "site"
+id = "https://huggingface.co/models?search=DFlash2"
+why = """
+  As of 2026-08-23 the only published block-16 DFlash2 drafter is for
+  Muse-Glimmer-30B, not Qwen3.8. This search is the cheapest way to notice
+  when that changes.
+  """
+watch_for = "Any DFlash2 draft with block_size 16 whose target is Qwen3.8-27B."
+
+[[sources]]
+name = "DwarfStar (ds4)"
+kind = "gh-repo"
+id = "antirez/ds4"
+why = """
+  Our first engine on this hardware. Its pipeline parallelism lost badly on
+  Blackwell (122 tok/s aggregate) but the project is active.
+  """
+watch_for = "Tensor-parallel support, or speculative decoding."
+

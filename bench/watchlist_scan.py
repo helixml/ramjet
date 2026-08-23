@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report what changed among the sources in watchlist/sources.yaml.
+"""Report what changed among the sources in watchlist/sources.toml.
 
 The point is a scan you will actually run: it prints what moved since you last
 looked, not a list of everything that exists. First run records a baseline and
@@ -31,13 +31,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 import urllib.error
 import urllib.request
 
-import yaml
-
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCES = ROOT / "watchlist" / "sources.yaml"
+SOURCES = ROOT / "watchlist" / "sources.toml"
 STATE = ROOT / "watchlist" / ".last-scan.json"
 
 HF_API = "https://huggingface.co/api"
@@ -54,10 +53,10 @@ class SourceError(ValueError):
 def validate_sources(document):
     """Validate the registry. A bad entry fails here, not mid-scan."""
     if not isinstance(document, dict) or not isinstance(document.get("sources"), list):
-        raise SourceError("sources.yaml must contain a `sources` list")
+        raise SourceError("sources.toml must contain a `sources` list")
     entries = document["sources"]
     if not entries:
-        raise SourceError("sources.yaml is empty")
+        raise SourceError("sources.toml is empty")
     seen = set()
     for entry in entries:
         if not isinstance(entry, dict):
@@ -96,8 +95,12 @@ def validate_sources(document):
 
 
 def load_sources(path=SOURCES):
-    with open(path, encoding="utf-8") as handle:
-        return validate_sources(yaml.safe_load(handle))
+    # tomllib is stdlib from 3.11. The registry is prose-heavy, so it wants a
+    # format with multi-line strings -- but every other tool in bench/ and
+    # deploy/ runs on the standard library alone, and the CI image has no
+    # third-party packages. TOML satisfies both.
+    with open(path, "rb") as handle:
+        return validate_sources(tomllib.load(handle))
 
 
 _GH_TOKEN = None  # resolved once; None means "not looked up yet", "" means none

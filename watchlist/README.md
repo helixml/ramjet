@@ -25,14 +25,20 @@ reported and skipped rather than failing the scan. Never pass a token in argv.
 
 ## Adding an entry
 
-```yaml
-  - name: short human label
-    kind: hf-org | hf-repo | gh-repo | docker-hub | site
-    id: z-lab | owner/model | owner/repo | namespace/image | https://...
-    why: what this source has already given us
-    watch_for: what a new artefact would have to be to matter
-    ignore: optional regex dropping refs that change constantly
+```toml
+[[sources]]
+name = "short human label"
+kind = "hf-org | hf-repo | gh-repo | docker-hub | site"
+id = "z-lab | owner/model | owner/repo | namespace/image | https://..."
+why = "what this source has already given us"
+watch_for = "what a new artefact would have to be to matter"
+ignore = 'optional regex dropping refs that change constantly'
 ```
+
+TOML rather than YAML because the registry is prose-heavy and wants multi-line
+strings, but every tool in `bench/` and `deploy/` runs on the standard library
+alone — the CI image installs no packages. `tomllib` is stdlib from 3.11 and
+satisfies both. A test asserts the scanner imports nothing outside it.
 
 `watch_for` is the field that makes this useful, and `bench/test_watchlist_scan.py`
 enforces that it is substantive. A scan that says "sgl-project/sglang was

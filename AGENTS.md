@@ -1446,7 +1446,7 @@ EXPERIMENTS.md — add yours there too):
 
 ## Watchlist — what other people ship
 
-`watchlist/sources.yaml` tracks the checkpoints, engines, kernels and recipes
+`watchlist/sources.toml` tracks the checkpoints, engines, kernels and recipes
 whose next release could change how we serve. Each entry records what it has
 already given us and, more importantly, `watch_for`: what a new artefact would
 have to be to matter.
