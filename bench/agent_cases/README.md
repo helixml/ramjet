@@ -158,3 +158,62 @@ prove that identical choice-scoped tool-call IDs do not merge alternative
 choices' names or arguments. They deliberately do not join `v1.jsonl`:
 replaying already-shaped frontend responses should not spend GPU time in the
 candidate gate.
+
+## Schema v2: long-context recall and multi-turn sessions
+
+`v2_sessions.jsonl` is a separate corpus so `v1.jsonl` and its goldens stay
+frozen; run it with `--corpus`. Schema v2 adds two optional case fields. A v1
+case that uses either is rejected, and v1 cases load unchanged.
+
+### `context` — needle-in-a-haystack recall
+
+```json
+"context": {
+  "filler_kib": 128,
+  "needles": [{"depth": 0.02, "key": "ALPHA", "value": "51907"}],
+  "probe_keys": ["ALPHA"]
+}
+```
+
+The runner builds a salt-namespaced filler document, plants each `[RECORD]`
+line at its fractional `depth`, and prepends the document to the case's user
+message. `expected.content_contains_all` is **derived** from the needles
+(narrowed by `probe_keys` when present) rather than restated in the corpus: a
+hand-maintained copy drifts from the planted values and turns a recall
+regression into a green run.
+
+Depth matters more than size here. This model is a hybrid stack whose linear
+attention carries long-range information in a fixed-size state, so a change to
+that state's dtype is far likelier to cost recall at 98% depth than at 2%.
+Keep needles at both ends and the middle.
+
+The filler is salt-namespaced for the same reason as `add_prefix`: two runs
+sharing a prompt prefix let the second be served from the first's radix cache.
+
+### `turns` — real multi-turn sessions
+
+```json
+"turns": [
+  {"tool_results": {"read_metric": "{\"value\":27604}"},
+   "user": "Now read queue_depth for engine B.",
+   "request": {"tool_choice": "none"},
+   "expected": {"mode": "text", "content_contains_all": ["27604"]}}
+]
+```
+
+Turn 0 uses the case's `request`/`expected`. Each later turn replays the
+previous assistant message with its tool calls intact, appends one `tool`
+message per call quoting the real `tool_call_id`, optionally appends a `user`
+message, applies a `request` patch, and validates the new response against that
+turn's `expected`. Binding results to call ids is the part of a session that
+actually breaks, so the ids are taken from the response rather than invented.
+
+A `request` patch may change `tool_choice` or `max_tokens` but never `model`,
+`messages`, or `stream` — those are the identity of the conversation being
+continued. `tool_results` payloads are parsed at corpus-validation time so a
+malformed one fails locally instead of becoming a confusing model failure
+mid-session. `"*"` matches any tool name.
+
+Each turn emits its own record carrying a `turn` index, and a failing turn
+still runs its successors: a session that recovers after a bad turn is a
+different outcome from one that derails, and collapsing them hides it.

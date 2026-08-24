@@ -66,6 +66,12 @@ would have rendered engines without compile flags. The label now names
 all five files. **Any future recreate of any service in this deployment
 must include `torch-compile.override.yaml`.**
 
+> Superseded on 2026-08-23: the overlay stack was collapsed into a single
+> `deploy/qwen38_27b/docker-compose.yaml` and this file no longer exists.
+> The torch.compile flags it carried are now in that one file, and a
+> recreate is plain `docker compose up -d`. The measurement below stands;
+> only the `-f` instruction is obsolete. See the r133 entry.
+
 Post-rollout verification through the production path (guarded,
 `.experiments/fleet-compile-verify-thermal.jsonl`, passed):
 `dflash2_bench` against the LB on :8006 measured **169.3 tok/s greedy
@@ -7682,3 +7688,456 @@ The observe-mode sampler unit `ramjet-r125-observe` has been stopped; its
 journal remains at `.experiments/r125-observe-soak.jsonl`. Its records are
 evidence only for the fleet shape that existed while it ran, which changed
 underneath it.
+
+## 2026-08-22 — qwen3.8-27b reasoning-cap probe (direct engine, no deploy)
+
+Claim under test: "qwen 3.8 27B overthinks; fix it by putting reasoning into
+structured output plus dynamic logit bias to cap thinking tokens." Probed
+directly against the idle SGLang engine `qwen38-sg-e5` (`127.0.0.1:8035`,
+DFLASH, `--reasoning-parser=qwen3`, xgrammar backend), c1 sequential, temp
+0.6/top_p 0.95, two synthetic state-action prompts. `<think>`/`</think>` token
+ids in this vocab are 248068/248069. Fleet was fully idle (0 inflight, 8/8
+up); no config, engine, or LB was touched.
+
+Hard planning-step prompt (correct action objectively derivable), n=2-3 per
+cell:
+
+| cell | wall | completion tok | correct |
+|---|---|---|---|
+| baseline (default thinking) | 3.0-4.5s | 431-661 | yes |
+| `logit_bias {248069: +3/+8/+15}` | 2.9-4.4s | 492-615 | yes |
+| `chat_template_kwargs {enable_thinking:false}` | 0.10s | 5 | yes |
+| nothink + json_schema, `reasoning` maxLength 300 + action enum | 1.0-1.4s | 112-133 | yes |
+| two-pass budget: cap 128 tok, force-append `</think>`, `continue_final_message` | 0.84s total | 133 | yes |
+
+Findings:
+
+- The overthinking is real: ~450-660 thinking tokens for a one-token action
+  decision, ~3-4.5s per step at c1.
+- Static `logit_bias` on `</think>` is weak and non-monotonic here (even +15
+  trimmed only ~25% on the hard prompt; +5 did nothing on the easy one). This
+  build has no *dynamic* (position-conditioned) bias, and the probed
+  `thinking_budget`/`max_reasoning_tokens` request fields are silently
+  ignored — no native server-side thinking budget in
+  `0.0.0.dev0+qwen38.27b.g561c8f3`. A strong static bias also risks emitting
+  `</think>` inside the visible answer on longer outputs.
+- Structured output alone (thinking left on) is counterproductive: xgrammar
+  constrains only post-`</think>` text, so the model thinks in full *and then*
+  re-reasons inside the JSON field — 3.68s / 200 tok vs 0.73s baseline on the
+  easy prompt. Grammar decode also ran at roughly half the tok/s (DFLASH +
+  xgrammar interplay, unquantified).
+- The claim done right is nothink + schema: `enable_thinking:false` with a
+  json_schema whose `reasoning` field is maxLength-bounded and whose `action`
+  is an enum. The grammar *is* the dynamic logit masking — the cap is hard,
+  the action is machine-parseable, and you keep a bounded audit trail.
+  1.0-1.4s, correct on both prompts.
+- Fastest correct configuration is plain `enable_thinking:false` (0.10s, 5
+  tok). The two-pass client-side budget (first call `max_tokens=N`, on
+  `finish_reason=length` re-send with the truncated thinking closed via
+  assistant prefill and `continue_final_message:true`, which this build
+  accepts) preserves genuine think-mode under a hard token cap at ~0.84s.
+
+Caveats: tiny n, two prompts, single idle engine, behavioral not a benchmark;
+per-step quality on genuinely hard steps under nothink was not measured. All
+capping is per-request (Helix-side policy); the LB must not rewrite caller
+settings. No promotion decision attached.
+
+## 2026-08-23 — the 96-slot mamba ceiling: c128 was measuring queueing, and bf16 SSM state doubles it
+
+Prompted by re-reading Mia's single-GPU recipe
+(`MiaAI-Lab/Qwen3.8-27B-RTX-6000-PRO-SGLang-DSpark`, already decomposed in the
+454-claim entry below). Nothing in that recipe transfers — its flags are
+either swept and rejected here (fp8 KV, flashinfer backends), redundant
+(`--sampling-defaults model` is already this pin's default, confirmed at
+`server_args.py:1435`), or wrong for a fleet (`--max-running-requests 8`).
+The useful finding came from reading our own boot logs to answer the
+comparison.
+
+**Every engine logs a cap we never configured:**
+`max_running_requests is capped to 12 by the mamba state cache
+(max_mamba_cache_size=62, 5 state slots per request)`. The fleet's real
+concurrency ceiling is 8 x 12 = 96, not 256.
+
+### Confirmed: c128 and c192 are measuring queueing (r129 slot cell)
+
+Guarded (`.experiments/r129-c128-thermal.jsonl`, passed), fleet idle, fresh
+salt, sampling LB dispatch against per-engine `sglang:num_running_reqs` /
+`num_queue_reqs` at 0.5s (`.experiments/r129-c128-slots.csv`):
+
+| cell | LB dispatched | engines running | engines queued | output tok/s |
+|---|---|---|---|---|
+| c64 | 64 | 64 | 0 | 1,658.7 (cold first cell, TTFT p50 4.46s) |
+| c128 | 128 | **96** | **32** | 4,071.2 |
+| c192 | 192 | **96** | **96** | 3,833.2 |
+
+All eight engines pinned at exactly 12 running, never 13.
+`ramjet_upstream_inflight` tracked full concurrency at every rung, so the LB
+dispatches everything and the queue forms inside SGLang's scheduler. c192 is
+*slower* than c128, so the published c256 4,256.3 figure is this same plateau
+with more waiting, not more throughput.
+
+### The cap is a memory trade, not a misconfiguration
+
+Swept on e7, fenced out of `RJ_UPSTREAM` (LB recreated under the common lock;
+render diff was exactly the `RJ_UPSTREAM` line):
+
+| config | mamba slots | max_running | KV pool tokens |
+|---|---|---|---|
+| baseline | 62 | 12 | 349,284 |
+| `--max-mamba-cache-size=128` | 128 | 25 | **45,033** |
+| `--mamba-ssm-dtype=bfloat16` | 126 | 25 | 342,647 |
+
+Raising the cache size alone is a trap: 66 extra slots consumed 24.38GB of KV
+(27.98 -> 3.60GB), about **369MB per slot**, 5 slots/request = **~1.85GB of
+linear-attention state per concurrent request**. At 12,483 KV tokens/GB one
+extra running request costs ~23,000 KV tokens, while the baseline gives
+349,284/12 = ~29,000 tokens per running request. An added slot costs about as
+much KV as a slot can use, so the shipped 12/349K point sits near the natural
+balance for ~29K-token requests. Our agent traffic (18.5K prompts, 200K
+cached turns) wants more KV per request, not more slots. **Do not raise
+`--max-mamba-cache-size`.**
+
+### `--mamba-ssm-dtype=bfloat16` is the real lever (candidate, NOT promoted)
+
+Halving the SSM state doubles slots for a 1.9% KV cost: 62 -> 126 slots,
+12 -> 25 running, KV 349,284 -> 342,647. Matched direct cells, both engines
+warm, concurrent on separate GPUs, guarded
+(`.experiments/r129-ssm-throughput-thermal.jsonl`, passed), 256-token outputs:
+
+| c | e7 bf16 SSM (25 slots) | e0 baseline (12 slots) | delta |
+|---|---|---|---|
+| 8 | 399.8 | 370.8 | +7.8% |
+| 16 | 749.9 | 518.3 | +44.7% |
+| 24 | **999.0** | 634.3 | **+57.5%** |
+| 32 | 953.1 | 620.1 | +53.7% |
+
+TTFT p95 at c24 was 0.344s against 4.808s — a 14x tail-latency improvement,
+which is the more defensible half of this result.
+
+**Blocking caveat: it changes outputs.** A greedy nothink A/B on 8 checkable
+prompts (`bench/engine_greedy_ab.py`, guarded) returned 6/8 identical; of the two
+divergences one was a benign open-ended completion and one was a counting
+task the baseline got right and bf16 got wrong (6/8 vs 7/8 correct). That is
+n=1 per prompt and nowhere near a gate, but it is not a clean pass. This is a
+numerics change to the linear-attention state and must clear a real agent
+correctness matrix before promotion; `agentbench.py` is not currently mirrored
+to this stack's directory. Do not promote on the throughput table alone.
+Other caveats: different GPUs (no crossover round), synthetic 256-token
+outputs with no shared prefix, and the long-context case where KV pressure
+actually bites was not measured.
+
+### Refuted: persisting the torch.compile caches (reverted)
+
+Hypothesis was that torch.compile's ~8 minute startup came from inductor
+landing in `/tmp/torchinductor_root` inside the container's writable layer,
+wiped on every recreate. Both `TORCHINDUCTOR_CACHE_DIR` and
+`TRITON_CACHE_DIR` were indeed unset. Pointing them at the mounted
+`/prod/engine-cache-sglang` volume populated 181MB inductor + 281MB triton
+and **changed nothing measurable**: warm roll 218.0s against a baseline
+boot->ready spread of 214/216/215/214/241/219s across e0-e6 (median ~215).
+The first roll onto the empty ZFS-backed cache cost **795s**, 3.3x the
+baseline. Change reverted locally and on node06.
+
+Two corrections fall out of this. The compile overlay's real cost is **~215s
+boot->ready, not "~8 minutes"** — that figure came from the sweep's
+standalone containers, not a fleet roll, so compile costs ~125s over the ~90s
+non-compile baseline. And startup is dominated by weight load, CUDA-graph
+capture across 51 decode batch sizes, and flashinfer autotune; inductor
+codegen is small enough that eliminating it entirely is invisible.
+
+### Tooling committed with this run
+
+`bench/slot_sampler.py` polls LB dispatch against per-engine
+`sglang:num_running_reqs`/`num_queue_reqs` and is what makes the ceiling
+finding reproducible: it distinguishes "the LB dispatched 128" from "the
+engines are running 96". `bench/engine_greedy_ab.py` is the greedy
+same-prompt comparator used for the bf16 state check; it prints only identity
+and correctness booleans, never completion text, so it is safe against a
+production-adjacent engine. Both are mirrored to
+`/home/luke/inference/qwen38_27b/`. `bench/test_slot_sampler.py` covers the
+metric parser, including that a longer metric sharing a prefix
+(`num_grammar_queue_reqs`) is not folded into `num_queue_reqs` -- that bug
+would manufacture exactly the queueing signal this entry reports.
+
+### Incidental
+
+The deployed LB is `ghcr.io/helixml/ramjet:v0.3.0@sha256:2489110a...` — the
+v0.4.0 entry's *rollback* pin — while canonical Compose defaults to v0.4.0.
+Every recreate here pinned the running digest explicitly so production was
+not silently upgraded. Unexplained by the journal; needs reconciling.
+
+## 2026-08-23 — r130: agentbench ported to the SGLang stack; bf16 SSM clears the correctness gate; the LB "rollback" was stale-mirror drift
+
+Follow-up to r129. Three results: the LB version mystery is a config-drift bug
+with a general lesson, `agentbench` had a real portability defect, and the
+`--mamba-ssm-dtype=bfloat16` candidate now has a matched correctness gate that
+it passes.
+
+### The v0.3.0 LB was never a rollback
+
+node06's `docker-compose.yaml` was a stale mirror of the canonical repo file:
+its `LB_IMAGE` default was still
+`v0.3.0@sha256:2489110a...`. The v0.4.0 promotion on 2026-08-20 updated the
+repository copy and deployed by explicit digest, but nobody synced the file to
+the box. Any later recreate that did not pass `LB_IMAGE` therefore re-rendered
+v0.3.0 and silently downgraded the LB; the 2026-08-22 fleet compile rollout is
+the likely occasion. Confirmed by the absent `ramjet_decode_tokens_per_second`
+family, a v0.4.0 metric.
+
+The `-f` file-list discipline in AGENTS.md has an exact analogue for image
+defaults: **a recreate that does not pin `LB_IMAGE` inherits whatever the
+on-box file says, which is not necessarily what the repository says.** Diffing
+the rendered baseline against the rendered candidate catches this, because the
+image line is exactly where the difference shows up.
+
+Fixed by syncing the canonical file (render diff was the image line alone) and
+recreating on `v0.4.0@sha256:467e7edf...` under the common lock. 8/8 upstreams,
+chat smoke 200. `ramjet_decode_tokens_per_second` and
+`ramjet_time_per_output_token_seconds` populate only when a streaming request
+sets `stream_options.include_usage` — without usage the LB has no completion
+count and cannot compute a decode rate. That is expected behaviour, not a
+v0.4.0 defect, and it is why a bare streaming smoke leaves the family empty.
+
+### `node06_agent_metadata.sh` aborted against any non-vLLM engine
+
+The script runs under `set -euo pipefail`, and its revision probe was
+`docker exec "$c" pgrep -af 'vllm serve' | awk ...`. On the SGLang stack pgrep
+matches nothing and exits 1; pipefail propagates that and `set -e` killed the
+script before it wrote any metadata. This was not a Qwen quirk — it would
+abort against a stopped vLLM engine too. Replaced with a `probe_revision`
+helper that tolerates no-match, tries the vLLM and SGLang launchers in turn,
+and otherwise falls through to the model-root identity rather than inventing a
+revision. `agentbench.py`, `engine_metrics.py`, and `agent_cases/` are now
+mirrored to `/home/luke/inference/qwen38_27b/`.
+
+### This stack does not emit parallel tool calls
+
+The committed corpus case `parallel-required-stream` requires two calls to
+`read_metric`. Baseline `qwen38-sg-e0` returns exactly one, 5/5 runs. Ruled
+out three explanations: it is not streaming reassembly (non-streaming also
+returns one), not prompt sensitivity (an explicit "emit exactly TWO tool
+calls" system prompt still returns one, as does an enumerated variant), and
+not a parser limit (SGLang's `Qwen3CoderDetector.detect_and_parse` uses
+`findall` over multiple call blocks). The model does not generate the second
+call. **If any Helix agent depends on parallel tool calls it is silently
+receiving one**; that is worth checking independently of this experiment. For
+gating purposes it is a baseline property affecting both arms, so the gate is
+"no worse than baseline", not "100% valid".
+
+### bf16 SSM state clears the matched gate
+
+Candidate `--mamba-ssm-dtype=bfloat16` on fenced e7 (126 slots, 25 running,
+342,647 KV — reproduced exactly), baseline e0 unmodified. All cells guarded.
+
+| check | baseline e0 | candidate e7 |
+|---|---|---|
+| agentbench deterministic, 25 requests | 80.0% valid | 80.0%, identical per case |
+| agentbench agentic, 25 requests | 80.0% valid | 80.0%, same finish-reason mix |
+| greedy A/B, 3 passes | 7/8 correct | 7/8 correct |
+
+Per-case deterministic pass rates were identical across all five cases
+(4 cases 5/5, `parallel-required-stream` 0/5 on both).
+
+**This corrects r129.** That entry recorded a single greedy A/B showing 6/8
+identical with one counting task the baseline got right and bf16 got wrong.
+Repeated three times against a fresh bf16 incarnation, the two engines score
+equally (7/8 each) and the counting divergence does not reproduce. The r129
+observation was one sample, and the disagreement between the two rounds is
+itself the finding: temp-0 output on this stack is not stable across engine
+incarnations, so a single greedy pass cannot resolve a small quality delta.
+
+What the gate does establish: no protocol regression across 50 matched
+requests in two sampling profiles, and no correctness delta on the checkable
+corpus. What it does not establish: anything about long-context behaviour,
+multi-turn agent sessions, or a quality shift too small for eight prompts to
+see. The candidate remains unpromoted pending that judgement; promotion means
+rolling all eight engines, and mixing SSM dtypes across a prefix-routed fleet
+would make identical prompts answer differently depending on placement.
+
+Candidate TTFT p95 read 978ms against baseline 77.4ms in the deterministic
+cell. That is a cold-start artifact — e7 had just been recreated while e0 was
+warm — not a candidate property; the agentic cells run later show 188.5 vs
+194.0 output tok/s.
+
+State restored: e7 recreated on the canonical render, LB back to eight
+upstreams on the v0.4.0 pin, temporary overlays removed.
+
+## 2026-08-23 — r131/r132: agentbench schema v2 (long-context recall, multi-turn sessions); bf16 SSM clears both to 199K tokens
+
+r130's gate covered protocol shape and eight short prompts, which is not what a
+linear-attention state-dtype change threatens. Schema v2 adds the two missing
+axes and the `--mamba-ssm-dtype=bfloat16` candidate now passes both.
+
+### What schema v2 adds
+
+`v2_sessions.jsonl` and `v2_deep_context.jsonl` are separate corpora so `v1.jsonl`
+and its goldens stay frozen. v1 cases load unchanged; a v1 case using a v2 field
+is rejected.
+
+* **`context`** builds a salt-namespaced filler document and plants `[RECORD]`
+  facts at fractional depths, prepending it to the case's user turn. The
+  required answer fragments are *derived* from the needles rather than restated
+  in the corpus: a hand-maintained copy drifts from the planted values and turns
+  a recall regression into a green run. Depth matters more than size on this
+  hybrid model, whose linear attention carries long range in a fixed-size state.
+* **`turns`** drives a real session. Each later turn replays the assistant
+  message with its tool calls intact, appends one `tool` message per call
+  quoting the **real `tool_call_id`**, optionally appends a `user` message, and
+  applies a `request` patch (`tool_choice`, `max_tokens` — never `model`,
+  `messages`, or `stream`). Binding results to call ids is the part of a session
+  that actually breaks, so the ids come from the response rather than invented.
+  Each turn emits its own record; a failing turn still runs its successors,
+  because a session that recovers is a different outcome from one that derails.
+
+### Two harness bugs found by building it, both of which would have faked a result
+
+* **Exact substring matching scored a correct answer as a failure.** Asked to
+  report two tool results, the model replied `Engine A: 27,604 / Engine B:
+  83,521` — correct — and `content_contains_all: ["27604","83521"]` did not
+  match. A gate that trips on digit grouping is worse than a missing gate: it
+  blocks good candidates and buries real regressions in formatting noise.
+  `content_contains` now strips digit-group separators (comma, underscore,
+  NBSP, narrow NBSP, thin space) **only between digits**, so `27,604` matches
+  `27604` while `a,b` still does not match `ab`, an ordinary space is not
+  stripped, and a different number still fails. Eight semantics locked in tests.
+* **Derived fragments attached to the wrong turn.** For a case carrying both
+  `context` and `turns`, the recall answer lands in the final turn, but the
+  fragments were attached to the case expectation — turn 0, a tool call with no
+  content. Every correct run of the combined case would have failed. They now
+  attach to the last turn, with tests asserting earlier expectations stay clean.
+
+### Matched results, baseline e0 versus fenced e7 on bf16 SSM
+
+Identical salt in both arms, so the long-context documents are byte-identical.
+All cells guarded; e7 confirmed at 126 slots / 25 running / 342,647 KV.
+
+| case | prompt tokens | baseline | candidate |
+|---|---|---|---|
+| longctx-recall-32k | 13,314 | 3/3 | 3/3 |
+| longctx-recall-128k | 52,634 | 3/3 | 3/3 |
+| session-tool-then-answer (2 turns) | 403 / 178 | 3/3 each | 3/3 each |
+| session-multiturn-recall (3 turns) | 400 / 487 / 277 | 3/3 each | 3/3 each |
+| longctx-depth-ladder-256k | 99,873 | 2/2 | 2/2 |
+| longctx-depth-ladder-512k | **199,482** | 2/2 | 2/2 |
+| longctx-session-under-load (2 turns) | 50,262 / 50,083 | 2/2 each | 2/2 each |
+
+Both v2 corpora returned 100% protocol validity on both engines. The 512KiB
+cell places five facts at 1/25/50/75/99% depth in 199,482 tokens — 76% of the
+262,144 window — and both engines recalled all five, twice. Wall-time medians
+were equivalent (512k: 52,414ms baseline vs 50,857ms candidate).
+
+### Where the bf16 candidate now stands
+
+Cumulative matched evidence: 79 agentbench requests across four corpora and two
+sampling profiles, plus 24 greedy prompts, with no regression on any case, turn,
+or depth. Combined with r129's +57.5% per-engine throughput at c24 and 14x
+better TTFT p95, this is a substantially stronger position than r130's.
+
+Still not promoted, and the remaining objection is no longer correctness
+coverage but blast radius: promotion means rolling all eight engines, because
+mixing SSM dtypes behind a prefix router makes identical prompts answer
+differently depending on placement. What remains unmeasured is sustained
+production traffic over hours rather than bounded cells, and quality on real
+agent workloads rather than synthetic corpora.
+
+State restored after each round: e7 recreated on the canonical render (62 slots,
+12 running, no mamba flags), LB back to eight upstreams on the v0.4.0 pin, chat
+smoke 200, temporary overlays removed.
+
+## 2026-08-23 — r133: bf16 SSM promoted fleet-wide; aggregate ceiling doubles; deployment collapsed to one Compose file
+
+Promotion of the candidate gated in r129/r131/r132, plus removal of the overlay
+stack that caused two incidents in the same day.
+
+### Result
+
+The fleet's concurrency ceiling moved from 96 to 200 running requests and
+aggregate throughput roughly doubled at the concurrency where it was previously
+queueing.
+
+| cell | before (96 slots) | after (200 slots) | change |
+|---|---|---|---|
+| c64 | 1,658.7 tok/s | 1,793.2 | +8% |
+| c128 | 4,071.2 | 5,677.5 | +39% |
+| c192 | 3,833.2 | **7,882.6** | **+106%** |
+| c256 | 4,256.3 | 7,154.6 | +68% |
+
+Slot sampling during the ladder (`.experiments/r133-post-promote-slots.csv`)
+confirms the mechanism rather than inferring it: `run_total` peaked at exactly
+**200** with 25 running on every engine, and queue depth at c256 was 56, which
+is precisely 256 − 200. Before the change the same sampler showed a hard
+plateau at 96 with 12 per engine.
+
+TTFT collapsed where the queue used to be: c128 p95 went 3.99s → **0.221s**,
+c192 p95 ~6s → 0.271s. All 640 requests across the ladder succeeded.
+
+**The saturation gap to the vLLM stack is now closed.** RESULTS.md recorded
+SGLang's ceiling at 4,256.3 tok/s against vLLM MTP-off's 7,890.9 — 54%. At
+c192 this stack now measures 7,882.6, within 0.1% of that reference, while
+keeping roughly 2x the per-stream decode. The trade that entry described no
+longer exists in the aggregate direction.
+
+### Rollout
+
+`--mamba-ssm-dtype=bfloat16` added to the engine command; fleet rolled two
+engines at a time under the common deployment lock, waiting for both to report
+ready and for `ramjet_upstream_up` to return to 8 before the next pair. The LB
+never dropped below 6/8. Every engine came up at 126 mamba slots, 25
+`max_running_requests`, 342,647 KV tokens — identical to the fenced canary.
+Four waves, about 20 minutes total.
+
+Post-promotion acceptance through the LB, both sampling profiles, 64 requests:
+
+| corpus | deterministic | agentic |
+|---|---|---|
+| v1.jsonl | 80.0% | 80.0% |
+| v2_sessions.jsonl | 100% | 100% |
+| v2_deep_context.jsonl | 100% | 100% |
+
+Identical to the pre-promotion baseline, including the known v1
+`parallel-required-stream` gap, which is a model property of this stack and not
+a promotion effect.
+
+### The deployment is now one Compose file
+
+`deploy/qwen38_27b/docker-compose.yaml` is the whole stack: `docker compose
+up -d`, no `-f` list. Removed: four active overlays (topology, machineview,
+idle-drain-observe, torch-compile), nine inactive topology/variant files, the
+`render_topology.py` generator that produced them, and its test.
+
+Verified before switching. Rendered from the deployment directory so `.env` and
+the project name matched, the consolidated file differed from the five-file
+stack by exactly two things, both inert: three `RJ_KV_EVENT_*` tuning variables
+that do nothing while `RJ_KV_EVENT_MODE=off`, and a duplicate `x-` anchor block
+with no runtime effect. Every engine service and the LB's functional
+configuration rendered identically. `docker compose up -d --dry-run` then
+confirmed all eight engines stayed `Running` and only the LB recreated, so
+consolidation cost one 4-second LB restart rather than a second fleet roll.
+Engine restart counts stayed 0 across the switch.
+
+This closes two failure modes observed earlier the same day, both structural to
+overlays rather than mistakes to be more careful about:
+
+* **A stale on-box default silently downgraded production.** node06's copy of
+  the base file still defaulted `LB_IMAGE` to v0.3.0. Every recreate that did
+  not pass `LB_IMAGE` explicitly re-rendered that default and ran the old LB.
+* **A restated command list silently dropped a flag.** Compose cannot append to
+  a `command:`, so the torch.compile overlay restated the engine command in
+  full; a flag added to the topology file alone never reached an engine. The
+  bf16 flag had to be written into both files for exactly this reason, which is
+  what made the trap visible.
+
+The rule is recorded in AGENTS.md under "One Compose file per deployment". A
+configuration that lost belongs in this journal, not in a file someone can
+accidentally render. `deploy/dspark_0731/` still carries an overlay stack; it
+is not the live deployment and was left alone.
+
+### What is still unmeasured
+
+Sustained production traffic over hours rather than bounded cells, and quality
+on real agent workloads rather than synthetic corpora — `bench/agent_trace.py`
+is the tool for the latter under its privacy contract. Watch Grafana
+`minidynamo-rtx6000pro` for 5xx, TTFT p95, and upstream split. Rollback is a
+one-line revert of `--mamba-ssm-dtype` in the single file plus a paired roll;
+the pre-promotion configuration is in git history and in
+`.superseded-overlays/` on the box.

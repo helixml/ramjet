@@ -34,10 +34,24 @@ config_sha256=$(
     \( -name config.json -o -name generation_config.json -o -name tokenizer_config.json -o -name encoding_dsv4.py \) \
     -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
 )
-detected_revision=$(
-  docker exec "$first_engine" pgrep -af 'vllm serve' | awk \
+# Probe a launcher's argv for an explicit --revision. pgrep exits non-zero
+# when nothing matches and this script runs under `set -o pipefail`, so the
+# probe must swallow that: an engine that is not vLLM is an ordinary case
+# here, not a failure. Without the guard the script aborts before writing any
+# metadata, which is how it failed against the SGLang Qwen3.8 stack.
+#
+# vLLM carries --revision. SGLang on that stack serves a bind-mounted model
+# directory with no revision flag, so it legitimately finds nothing and falls
+# through to the model-root identity below, which is the honest answer rather
+# than an invented one.
+probe_revision() {
+  local pattern=$1
+  { docker exec "$first_engine" pgrep -af "$pattern" || true; } | awk \
     '{for (field = 1; field <= NF; field++) if ($field == "--revision") {print $(field + 1); exit}}'
-)
+}
+detected_revision=$(probe_revision 'vllm serve')
+[[ -n $detected_revision ]] || detected_revision=$(probe_revision 'sglang.launch_server')
+
 model_revision=${BENCH_MODEL_REVISION:-${detected_revision:-$(basename "$model_root")@$config_sha256}}
 
 jq -n \

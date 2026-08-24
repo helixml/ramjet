@@ -15,15 +15,32 @@ otherwise idle box, every request-generating cell under the thermal guard:
 | Gate | Result |
 |---|---:|
 | batch-1 decode (streaming client) | **144 tok/s sampled / ~153 greedy median; 126–218 range** |
-| concurrency ladder c1/8/32/64/128/256, max256 | **97.9 / 707 / 1,984 / 2,938 / 3,797 / 4,256.3 tok/s; 489/489 requests** |
+| concurrency ladder c64/128/192/256, max256 | **1,793 / 5,677 / 7,882.6 / 7,155 tok/s; 640/640 requests** |
+| concurrent slots (mamba state cache) | **200 (25 per engine)** |
 | locality 3×4×2 (`--enable-cache-report`) | **87.3% cached prompt tokens; 24/24** |
 | same-app c12/max256 | **714 tok/s; spread across 7 of 8 engines; 12/12** |
 | 196K cold prefill (single GPU) | **56.8s TTFT (~3.5K tok/s at depth; 8.9K tok/s at 48K)** |
 | 200K prefix-cached turns (live agent traffic) | **2.6–4.1s TTFT; ~86–100 tok/s decode at depth** |
 
-The vLLM FP8 rows below remain the reference for that stack; the two Qwen
-stacks trade per-stream decode (roughly 2× better here) against saturation
-ceiling (7,890.9 tok/s there vs 4,256.3 here) and cold long-context prefill.
+The vLLM FP8 rows below remain the reference for that stack. **The saturation
+gap closed on 2026-08-23.** These two stacks used to trade per-stream decode
+(roughly 2× better here) against saturation ceiling (7,890.9 tok/s there vs
+4,256.3 here); promoting `--mamba-ssm-dtype=bfloat16` fleet-wide lifted c192 to
+7,882.6 tok/s, within 0.1% of the vLLM reference, while keeping the per-stream
+advantage. Cold long-context prefill remains the vLLM stack's win.
+
+**That ladder used to top out on queueing rather than saturation.** Each engine
+was capped at 12 concurrent requests by the mamba state cache — not by KV, not
+by the GPU — so the fleet ran at most 96 at once and everything above waited:
+at c192, 96 ran while 96 queued and throughput *fell* to 3,833 tok/s.
+`--mamba-ssm-dtype=bfloat16` halves the linear-attention state, doubling the cap
+to 25 per engine (200 fleet-wide) for 1.9% of the KV pool. Promoted to all eight
+engines on 2026-08-23 after a matched gate covering long-context recall to
+199,482 tokens and multi-turn tool sessions with no regression on any case,
+turn, or depth. Slot sampling after the roll shows `run_total` pinned at 200
+with 25 on every engine; c128 TTFT p95 went 3.99s → 0.221s. Do not reach for
+`--max-mamba-cache-size` instead: raising it alone collapsed the KV pool from
+349,284 to 45,033 tokens. See EXPERIMENTS.md 2026-08-23.
 
 ## Current node06 production snapshot
 

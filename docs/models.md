@@ -172,14 +172,15 @@ requests carry ~6000 prompt tokens each even when cached.
 ### Running on fewer GPUs
 
 The topology is (number of engines) x (tensor-parallel size), and both come
-out of how many GPUs you have. `deploy/qwen38_27b/render_topology.py` generates
-the Compose overlay for any valid combination, so you are not limited to the
-eight-GPU layouts:
+out of how many GPUs you have. The node06 deployment is a single Compose file
+carrying the qualified eight-engine shape
+(`deploy/qwen38_27b/docker-compose.yaml`); change it on a branch to try another
+topology rather than generating an overlay. The `render_topology.py` generator
+and its committed topology files were removed on 2026-08-23 — see AGENTS.md
+"One Compose file per deployment".
 
 ```bash
-cd deploy/qwen38_27b
-./render_topology.py --gpus 2 --tensor-parallel 1 -o topology.2gpu-tp1.yaml
-docker compose -f docker-compose.yaml -f topology.2gpu-tp1.yaml up -d
+docker compose up -d
 ```
 
 `--json` prints the plan without writing anything, including how much VRAM each
