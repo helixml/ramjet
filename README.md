@@ -71,7 +71,7 @@ point recorded for that stack, not a shared concurrency level.
 | --- | --- | ---: | ---: | --- | --- |
 | DeepSeek-V4-Flash (sparse MoE) | `deepseek-v4-flash` | 245.1 tok/s | 1,891.2 tok/s | 2× TP4, c24/max256 | [`deploy/dspark_0731`](deploy/dspark_0731/docker-compose.yaml) |
 | Qwen3.8-27B FP8 (dense, vLLM) | `qwen3.8-27b` | 77 tok/s · 121 with MTP | 7,890.9 tok/s | 2× TP4, c256/max256, MTP off | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
-| Qwen3.8-27B NVFP4 (dense, SGLang + DFlash2) | `qwen3.8-27b` | 144–153 tok/s | 7,882.6 tok/s | 8× TP1, c192/max256, bf16 SSM, DFlash2 on | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
+| Qwen3.8-27B NVFP4 (dense, SGLang + DFlash2) | `qwen3.8-27b` | 169.3 tok/s greedy median | 7,882.6 tok/s | 8× TP1, c192/max256, bf16 SSM, DFlash2 on | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
 
 Neither model — and neither Qwen stack — is simply better. Single-stream
 decode is what an interactive user feels; the full-box figure is a capacity
