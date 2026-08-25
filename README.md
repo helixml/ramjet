@@ -71,7 +71,7 @@ point recorded for that stack, not a shared concurrency level.
 | --- | --- | ---: | ---: | --- | --- |
 | DeepSeek-V4-Flash (sparse MoE) | `deepseek-v4-flash` | 245.1 tok/s | 1,891.2 tok/s | 2× TP4, c24/max256 | [`deploy/dspark_0731`](deploy/dspark_0731/docker-compose.yaml) |
 | Qwen3.8-27B FP8 (dense, vLLM) | `qwen3.8-27b` | 77 tok/s · 121 with MTP | 7,890.9 tok/s | 2× TP4, c256/max256, MTP off | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
-| Qwen3.8-27B NVFP4 (dense, SGLang + DFlash2) | `qwen3.8-27b` | 144–153 tok/s | 4,256.3 tok/s | 8× TP1, c256/max256, DFlash2 on | [`deploy/qwen38_27b` (overlay)](deploy/qwen38_27b/topology.8gpu-sglang-dflash2.yaml) |
+| Qwen3.8-27B NVFP4 (dense, SGLang + DFlash2) | `qwen3.8-27b` | 144–153 tok/s | 7,882.6 tok/s | 8× TP1, c192/max256, bf16 SSM, DFlash2 on | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
 
 Neither model — and neither Qwen stack — is simply better. Single-stream
 decode is what an interactive user feels; the full-box figure is a capacity
@@ -79,8 +79,10 @@ landmark for a saturated agent fleet. These maxima come from separate
 model-specific workloads, so they are not a matched head-to-head benchmark.
 The vLLM row's saturation result has MTP off because speculation improves
 low-concurrency latency but wastes rejected drafts once the batch saturates
-the GPU — the same trade that caps the DFlash2 row's full-box figure while
-roughly doubling its per-stream decode. On the SGLang stack the same
+the GPU. The SGLang row keeps DFlash2 on and reaches within 0.1% of that
+aggregate ceiling while roughly doubling per-stream decode. Its bf16 SSM
+state expands fleet concurrency from 96 to 200 slots; at c128, TTFT p95 fell
+from 3.99s to 0.221s. On the SGLang stack the same
 3-app × 4-session × 2-turn locality run measured **87.3% cached prompt
 tokens**, and 12 concurrent same-app requests spread across 7 of 8 engines
 at 714 tok/s. Its cost is cold long-context prefill: a 196K-token first
@@ -115,8 +117,8 @@ The example pins a released image by immutable digest; see
 Safe defaults enable locality/load routing and keep tokenizer, raw KV-event,
 exact-placement, and snapshot paths off. See the complete
 [configuration table](docs/configuration.md), or start from the
-[four-replica Compose stack](deploy/qwen38_27b/docker-compose.yaml) currently
-running in production, which generates its topology for 1 to 8 GPUs. The
+[eight-replica Compose stack](deploy/qwen38_27b/docker-compose.yaml) currently
+running in production. The
 [two-replica DeepSeek-V4-Flash stack](deploy/dspark_0731/docker-compose.yaml)
 is the previous deployment, kept as a reviewed alternative and rollback
 record.
