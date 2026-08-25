@@ -5,12 +5,11 @@ description: Deploy or upgrade ramjet and OpenAI-compatible GPU engines on a Lin
 
 # Deploy ramjet
 
-For node06, the 2026-08-14 cooling/AC moratorium permits planning and GPU-free
-image/manifest/Compose validation only. Do not mutate its deployment, send a
-verification request, start/restart an engine, load a model, or run JIT/warmup
-even if the host returns. Resume only when the user authorizes a specific
-supervised window after the AC repair. Other explicitly authorized nodes retain
-the generic procedure below.
+Node06's 2026-08-14 cooling/AC moratorium was retired on 2026-08-25 after the
+operator confirmed the repair. Deployments no longer need a separate
+authorization token, but they still require the repository's intake-air
+thermal guard, bounded runtime, common deployment lock, exact Compose
+authority, one-engine canary, and verified rollback path.
 
 Deploy a reproducible stack without assuming that an arbitrary node has the
 reference node06 topology.

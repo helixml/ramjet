@@ -71,7 +71,7 @@ point recorded for that stack, not a shared concurrency level.
 | --- | --- | ---: | ---: | --- | --- |
 | DeepSeek-V4-Flash (sparse MoE) | `deepseek-v4-flash` | 245.1 tok/s | 1,891.2 tok/s | 2× TP4, c24/max256 | [`deploy/dspark_0731`](deploy/dspark_0731/docker-compose.yaml) |
 | Qwen3.8-27B FP8 (dense, vLLM) | `qwen3.8-27b` | 77 tok/s · 121 with MTP | 7,890.9 tok/s | 2× TP4, c256/max256, MTP off | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
-| Qwen3.8-27B NVFP4 (dense, SGLang + DFlash2) | `qwen3.8-27b` | 169.3 tok/s greedy median | 7,882.6 tok/s | 8× TP1, c192/max256, bf16 SSM, DFlash2 on | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
+| Qwen3.8-27B NVFP4/BF16 head (dense, SGLang + DFlash2) | `qwen3.8-27b` | 153.3 tok/s greedy median · +7.5% matched A/B | Not yet requalified (former Inferact target: 7,882.6 tok/s) | 8× TP1, 208 slots, bf16 SSM, DFlash2 on | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
 
 Neither model — and neither Qwen stack — is simply better. Single-stream
 decode is what an interactive user feels; the full-box figure is a capacity
@@ -79,10 +79,15 @@ landmark for a saturated agent fleet. These maxima come from separate
 model-specific workloads, so they are not a matched head-to-head benchmark.
 The vLLM row's saturation result has MTP off because speculation improves
 low-concurrency latency but wastes rejected drafts once the batch saturates
-the GPU. The SGLang row keeps DFlash2 on and reaches within 0.1% of that
-aggregate ceiling while roughly doubling per-stream decode. Its bf16 SSM
-state expands fleet concurrency from 96 to 200 slots; at c128, TTFT p95 fell
-from 3.99s to 0.221s. On the SGLang stack the same
+the GPU. The current SGLang production target is RadixArk's immutable
+BF16-`lm_head` checkpoint. Its matched one-engine canary measured 153.3 tok/s
+against 142.6 for the former Inferact target (+7.5%), with the same 7/8
+objective answers and 20/25 deterministic agent-protocol cases. The smaller
+target exposes 26 running slots and 582,246 KV tokens per engine: 208 slots
+across the fleet. Full-box saturation has not yet been requalified on these
+weights; the former Inferact target reached 7,882.6 tok/s, within 0.1% of the
+vLLM reference. On that earlier SGLang stack, bf16 SSM state reduced c128 TTFT
+p95 from 3.99s to 0.221s. The same
 3-app × 4-session × 2-turn locality run measured **87.3% cached prompt
 tokens**, and 12 concurrent same-app requests spread across 7 of 8 engines
 at 714 tok/s. Its cost is cold long-context prefill: a 196K-token first

@@ -17,14 +17,11 @@ class Node06OperationalMoratoriumTests(unittest.TestCase):
             "cooling_ac_failure_2026_08_14",
         )
 
-    def test_default_state_is_armed(self):
-        # The flag is global: a stale False is standing permission for every
-        # caller, not just the run it was lifted for. Both 2026-08-14 windows
-        # are closed, so armed is the committed default and any future run
-        # needs its own reviewed lift.
-        self.assertTrue(moratorium.MORATORIUM_ACTIVE)
-        with self.assertRaises(moratorium.MoratoriumError):
+    def test_default_state_is_retired(self):
+        self.assertFalse(moratorium.MORATORIUM_ACTIVE)
+        self.assertIsNone(
             moratorium.require_active_work_permitted("gpu-workload.rc6-gate")
+        )
 
     def test_only_reviewed_inactive_state_permits_bounded_operation(self):
         with mock.patch.object(moratorium, "MORATORIUM_ACTIVE", False):
@@ -44,18 +41,20 @@ class Node06OperationalMoratoriumTests(unittest.TestCase):
 
 
 class AuthorizedWindowTests(unittest.TestCase):
-    def test_an_unnamed_environment_still_fails_closed(self):
+    def test_an_unnamed_environment_is_irrelevant_after_retirement(self):
         with mock.patch.dict("os.environ", {}, clear=True):
-            with self.assertRaises(moratorium.MoratoriumError):
+            self.assertIsNone(
                 moratorium.require_active_work_permitted("gpu-workload.smoke")
+            )
 
-    def test_an_unknown_window_name_fails_closed(self):
+    def test_an_unknown_window_name_is_irrelevant_after_retirement(self):
         with mock.patch.dict(
             "os.environ", {moratorium.ENV_AUTHORIZATION: "made-up"}, clear=True
         ):
             self.assertIsNone(moratorium.active_authorization())
-            with self.assertRaises(moratorium.MoratoriumError):
+            self.assertIsNone(
                 moratorium.require_active_work_permitted("gpu-workload.smoke")
+            )
 
     def test_a_reviewed_window_permits_the_run_and_carries_its_bounds(self):
         with mock.patch.dict(

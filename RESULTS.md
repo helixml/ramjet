@@ -5,12 +5,36 @@ Hardware: node06, 2× vLLM+DSpark TP4 instances (DeepSeek-V4-Flash-0731),
 router). Candidate = `1.1.0-rc1` (overlap+load router, `alpha=4`).
 Method: `bench/locality_bench.sh` + a concurrent-same-app harness.
 
-## v0.4.0 SGLang NVFP4 + DFlash2 snapshot (2026-08-20)
+## v0.4.0 RadixArk BF16-head production snapshot (2026-08-25)
 
-The box now serves Qwen3.8-27B NVFP4 on eight single-GPU SGLang engines with
-the DFlash2 block-8 draft (`deploy/qwen38_27b/topology.8gpu-sglang-dflash2.yaml`)
-behind the released `v0.4.0` LB. Landmarks, all through the LB on an
-otherwise idle box, every request-generating cell under the thermal guard:
+All eight single-GPU SGLang engines now serve
+`RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead` at immutable revision
+`009632fef96dd349150baa780c984e62e70e91fe`, with the DFlash2 block-8 draft
+behind the released v0.4.0 LB. The matched isolated canary changed only target
+weights and ran under the node06 thermal guard:
+
+| Gate | Inferact rollback baseline | RadixArk BF16 head |
+|---|---:|---:|
+| greedy objective answers | 7/8 | 7/8 |
+| deterministic agent protocol | 20/25 | 20/25 |
+| batch-1 greedy decode median | 142.6 tok/s | **153.3 tok/s (+7.5%)** |
+| native SGLang requests | 25/25 | 25/25 |
+| concurrent slots | 25/engine, 200 fleet | **26/engine, 208 fleet** |
+| KV pool per engine | 342,647 tokens | **582,246 tokens** |
+
+The server and client generation-token totals reconciled exactly and DFlash
+verification was active on both targets. Aggregate c192 has not been
+requalified on the new weights; the 7,882.6 tok/s landmark below belongs to
+the former Inferact checkpoint. See `EXPERIMENTS.md` 2026-08-25 for rollout,
+thermal, rollback, and production-smoke evidence.
+
+## v0.4.0 Inferact NVFP4 + DFlash2 rollback baseline (2026-08-20)
+
+The prior production stack served Qwen3.8-27B NVFP4 on eight single-GPU
+SGLang engines with the DFlash2 block-8 draft. Its old topology overlay has
+since been consolidated into `deploy/qwen38_27b/docker-compose.yaml`.
+Landmarks were measured through the LB on an otherwise idle box, with every
+request-generating cell under the thermal guard:
 
 | Gate | Result |
 |---|---:|

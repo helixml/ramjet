@@ -5,26 +5,15 @@ description: Execute guarded, reproducible load tests against a ramjet GPU infer
 
 # Load-test a ramjet node
 
-## Current node06 moratorium
+## Node06 access
 
-Do not run this skill's request-generating workflow on node06. The 2026-08-14
-cooling/AC failure is an active operational moratorium even if SSH, containers,
-or every GPU becomes reachable again. Do not start or restart either vLLM
-engine, load a model, run JIT/warmup, execute a candidate rollout, or send
-benchmark/correctness traffic. A cooling repair report by itself does not lift
-the moratorium. Resume only when the user gives explicit authorization for a
-specific supervised run after the AC repair, with a supervisor present for the
-complete startup, workload, and rollback interval.
-
-While the moratorium is active, this skill may be used only to prepare GPU-free
-work: inspect public/local image metadata, pull or build images on a non-GPU
-development host, validate manifests and runtime receipts, render Compose in
-dry-run mode, improve harnesses/tests, and review historical results. Do not
-connect to node06 merely to see whether it has returned. Stop after preparation
-and report the exact command plan that still requires supervised authorization.
-The GPU guard contains a static fail-closed moratorium. Do not bypass or patch
-it during operational work. A reviewed repository change may lift it only after
-the user explicitly authorizes a supervised post-repair window.
+The 2026-08-14 cooling/AC moratorium was retired on 2026-08-25 after the
+operator confirmed the repair. Request-generating work no longer needs a
+separate authorization token. Every run must still use the intake-air thermal
+guard, its 25-minute continuous-inference cap, fresh owner-only evidence,
+the common deployment lock for mutations, isolated candidate traffic, and an
+exact rollback path. A future cooling incident may re-arm the compatibility
+stop before telemetry or workload startup.
 
 Run the smallest load test that answers the question, preserve production, and
 leave an identity-bound experiment record. Treat node06 as a live serving box,
@@ -51,8 +40,7 @@ development machine:
 bash bench/capture_node06.sh node06
 ```
 
-After the current moratorium is explicitly lifted for a supervised run, inspect
-all GPU temperatures, reported
+Before load, inspect all GPU temperatures, reported
 slowdown/shutdown thresholds, power, utilization, memory, topology, container
 identity/restarts, ramjet upstream health, driver throttling, and available
 BMC/facility cooling evidence. The watchdog's 78C ceiling is an operational

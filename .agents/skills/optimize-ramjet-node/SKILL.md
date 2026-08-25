@@ -5,15 +5,12 @@ description: Measure and tune a ramjet GPU inference node using controlled, repr
 
 # Optimize a ramjet node
 
-## Current node06 moratorium
+## Node06 access
 
-For node06, do not benchmark, send inference requests, start/restart an engine,
-load a model, run JIT/warmup, or apply a candidate deployment even if the host
-returns. AC repair alone is insufficient. Until the user authorizes a specific
-supervised window after the repair, work only from existing results and run
-GPU-free local/CI tests, image/manifest inspection, receipt validation, and
-dry-run Compose rendering. The experimental procedure below is future guidance,
-not current node06 execution authority.
+The 2026-08-14 cooling/AC moratorium was retired on 2026-08-25 after the
+operator confirmed the repair. Optimization work is admitted through the
+intake-air thermal guard, bounded runtime, isolated candidate traffic, common
+deployment lock, and exact rollback authority described in `AGENTS.md`.
 
 Optimize from evidence, with one attributable change at a time. Read
 `AGENTS.md` for the current benchmark contract and `RESULTS.md` for the metric

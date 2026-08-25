@@ -55,15 +55,39 @@ name = "RadixArk"
 kind = "hf-org"
 id = "RadixArk"
 why = """
-  Publishes RadixArk/Qwen3.8-27B-NVFP4, the true W4A4 export at 21.9GB that
-  the widely-shared single-GPU recipes use. We cannot run it: DFlash2's
-  compute_candidates matmuls through the target's lm_head and hard-rejects a
-  quantized one.
+  Publishes the two documented Qwen3.8 NVFP4 exports: the original 21.9GB
+  FP4-head checkpoint and the 23.75GB BF16-head checkpoint that arrived on
+  2026-08-24. The latter delivered the dense-head variant this watchlist was
+  waiting for and became our node06 production target on 2026-08-25. It is
+  also the MiaAI-Lab default and the measured dense-head option in SGLang's
+  RTX PRO 6000 cookbook.
   """
 watch_for = """
-  A W4A4 export that leaves lm_head dense. That is ~10% fewer weight bytes
-  per decode step than Inferact with no other change, and it is the single
-  cheapest speedup still on the table for us.
+  New Qwen3.8 checkpoint variants and revisions, especially independently
+  comparable accuracy results or a still-smaller dense-head export. The
+  BF16-head checkpoint is about 10% smaller on disk than our former Inferact
+  target and passed our 2026-08-25 correctness/throughput gate; any new
+  revision must be treated as another candidate rather than an in-place
+  refresh of production weights.
+  """
+ignore = '^RadixArk/Qwen3\.8-27B-NVFP4-BF16-LMHead$'
+
+[[sources]]
+name = "RadixArk Qwen3.8 NVFP4 BF16 lm_head"
+kind = "hf-repo"
+id = "RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead"
+why = """
+  Current node06 production target: an NVFP4/FP8 body with the original BF16
+  lm_head, compatible with our DFlash2 path and 2.63GB smaller on disk than
+  the former Inferact/Qwen3.8-27B-NVFP4 target. SGLang's cookbook measures its
+  deployment pins against this checkpoint and MiaAI-Lab made it the RTX PRO
+  6000 default.
+  """
+watch_for = """
+  Weight, quantization-metadata, calibration-scale, or evaluation revisions.
+  In particular, watch for a reproducible same-protocol accuracy comparison
+  against both the FP4-head RadixArk export and our Inferact target, plus any
+  DFlash2 compatibility or performance qualification on SM120.
   """
 
 [[sources]]
@@ -91,6 +115,9 @@ id = "sgl-project/sglang"
 why = """
   The engine in production. We bind-mount a source checkout pinned to
   38b74d294 because DFlash2 draft support is newer than the cookbook image.
+  Its model cookbooks are also upstream serving guidance: the 2026-08-24
+  Qwen3.8 update split the NVFP4 choice by lm_head precision and made the
+  BF16-head checkpoint an explicit measured option.
   """
 watch_for = """
   A tagged release that ships DFlash2 support, which would let us drop the
@@ -98,7 +125,9 @@ watch_for = """
   the mamba state cache sizing (max_mamba_cache_size, mamba_ssm_dtype,
   mamba_full_memory_ratio) -- that pool is our concurrency ceiling. And
   DFLASH support in --speculative-adaptive, which currently falls back to
-  static with an "only EAGLE/EAGLE3" log line.
+  static with an "only EAGLE/EAGLE3" log line. Track Qwen3.8 checkpoint or
+  precision defaults, accuracy qualifications, FP8-KV guidance, and DFlash2
+  selector changes as deployment inputs rather than treating docs as prose.
   """
 
 [[sources]]
@@ -175,11 +204,14 @@ why = """
   The single-GPU recipe behind the widely-shared 454 tok/s claim. We
   decomposed it: credible as a best-case greedy code cell on a workstation
   SKU, and two of its three ingredients do not transfer to Server Edition
-  boards (vBIOS locks memory offsets; W4A4 target is rejected).
+  boards (vBIOS locks memory offsets; the original W4A4 target was rejected
+  by our pinned DFlash2 path). On 2026-08-24 it changed its default to the
+  RadixArk BF16-lm_head checkpoint.
   """
 watch_for = """
-  Updated flags or a re-measured number on Server Edition hardware. Treat
-  published figures as best-case cells until a median is shown.
+  Checkpoint-default or launch-flag changes, a same-protocol accuracy A/B, or
+  a re-measured number on Server Edition hardware. Treat published figures as
+  best-case cells until a median is shown.
   """
 
 [[sources]]
@@ -229,4 +261,3 @@ why = """
   Blackwell (122 tok/s aggregate) but the project is active.
   """
 watch_for = "Tensor-parallel support, or speculative decoding."
-

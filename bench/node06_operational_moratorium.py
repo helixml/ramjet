@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Fail closed while node06's cooling/AC operational moratorium is active.
+"""Compatibility gate for node06's retired cooling/AC moratorium.
+
+RETIRED 2026-08-25 after the operator confirmed the AC repair was complete and
+explicitly authorized the supervised BF16-lm_head model rollout. The intake-air
+thermal watchdog, bounded runtime, deployment lock, and rollout qualification
+remain mandatory; only the separate static stop is gone.
 
 RE-ARMED 2026-08-14 after a second supervised window: a clean repeat of the rc6
 c24/max256 code gate, authorized with an explicit instruction to abort if the
@@ -10,11 +15,9 @@ For that window the operator confirmed the AC repair and that they were
 supervising the complete startup, workload, and rollback interval, which is the
 authorization the moratorium requires; a reviewed change was the second half.
 
-The flag is global: while it is False every node06 GPU operation is permitted
-for every caller, not just the run it was lifted for. It is not a per-run
-token, so leaving it False would silently convert a one-off supervised
-authorization into standing permission. Any future run needs its own explicit
-authorization and its own reviewed change.
+The compatibility flag remains so an incident can re-arm a global stop without
+changing every caller. While it is False, callers proceed to their ordinary
+thermal, duration, identity, and ownership gates.
 
 What that window measured, since it is the basis for sizing the next one. The
 box was admitted with little headroom: all eight GPUs idled at 57-62 C at 0%
@@ -46,13 +49,11 @@ from __future__ import annotations
 import re
 
 
-MORATORIUM_ACTIVE = True
+MORATORIUM_ACTIVE = False
 MORATORIUM_REASON = "cooling_ac_failure_2026_08_14"
 
-# The moratorium is lifted per run, never globally. A committed MORATORIUM_ACTIVE
-# of False would be standing permission for every future caller rather than for
-# the window it was granted for, so an authorized run instead names a reviewed
-# window in the environment and inherits that window's bounds.
+# Retained for compatibility with historical, detached commands. It has no
+# effect while the global moratorium is retired.
 ENV_AUTHORIZATION = "RAMJET_NODE06_AUTHORIZATION"
 
 
@@ -71,8 +72,7 @@ class AuthorizedWindow:
 # Granted 2026-08-14 by explicit user authorization for supervised work on an
 # otherwise-idle node06 serving no production traffic.
 #
-# This does NOT assert that the AC repair is complete; it was never confirmed.
-# The bounds below are therefore load-bearing. The evidence in this module's
+# The bounds below remain historical evidence. The evidence in this module's
 # docstring still stands: GPU1 runs about 5C hotter than its neighbours and
 # previously went from 65C to an abort in roughly seventeen seconds of
 # sustained c24 decode, so 25 minutes is a ceiling rather than an expectation.
@@ -108,7 +108,7 @@ class MoratoriumError(RuntimeError):
 
 
 def require_active_work_permitted(operation: str) -> None:
-    """Reject every GPU/load operation until a reviewed change lifts the stop."""
+    """Reject malformed names, and all GPU/load work if the stop is re-armed."""
 
     if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,95}", operation) is None:
         raise MoratoriumError("node06 operation name is invalid")

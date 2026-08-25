@@ -5,12 +5,10 @@ description: Diagnose a ramjet GPU inference node by checking NVIDIA GPUs, Docke
 
 # Troubleshoot a ramjet node
 
-For node06, the 2026-08-14 cooling/AC moratorium overrides the synthetic-test
-and mutation steps below. Read-only health, metrics, bounded logs, inventory,
-and image metadata checks are permitted when actually needed for diagnosis, but
-do not poll merely because the host may have returned. Do not send inference
-requests or start/restart an engine until the user authorizes a specific
-supervised window after AC repair.
+Node06's 2026-08-14 cooling/AC moratorium was retired on 2026-08-25 after the
+operator confirmed the repair. Synthetic tests and requested fixes are now
+admitted through the ordinary intake-air thermal, duration, deployment-lock,
+identity, and rollback controls in `AGENTS.md`.
 
 Diagnose first. Do not restart, recreate, reconfigure, or delete anything unless
 the user also asks for a fix. Keep all output bounded and redact credentials,
@@ -66,9 +64,6 @@ docker compose -f COMPOSE_FILE logs --since 15m --tail 300 ENGINE_SERVICE \
 ```
 
 ## Run basic synthetic tests
-
-Skip this entire section on node06 while the operational moratorium is active.
-Healthy control-plane reads do not authorize inference traffic.
 
 Use a synthetic prompt and obtain the bearer token without printing it. First
 query `/v1/models`, then send a deterministic request with at most eight output

@@ -6,8 +6,9 @@ GPU-free admission material for
 
 Upstream notes: [ds4dspark-infernal-invocation-r12.md](https://github.com/local-inference-lab/rtx6kpro/blob/master/models/ds4dspark-infernal-invocation-r12.md).
 
-**Nothing here has run on node06.** These are admission artifacts only, produced
-entirely from registry metadata while the cooling moratorium is active.
+**Nothing here has run on node06.** These are admission artifacts only,
+originally produced from registry metadata during the now-retired cooling
+moratorium.
 
 ## What r12 actually changes
 
@@ -78,11 +79,12 @@ warm. The second renders base+overlay and proves the LB is single-homed on
 engine A, engine A is untouched, and the candidate stays on GPUs 4-7 at port
 8013.
 
-## What still needs a supervised window
+## What still needs a guarded candidate window
 
-Everything below requires the cooling moratorium to be lifted, and a sustained
-run additionally has to survive the ~15-20s c24 thermal ceiling recorded in
-EXPERIMENTS.md:
+The global moratorium is retired, but everything below still needs the normal
+candidate isolation, deployment lock, rollback, and intake-air thermal guard.
+A sustained run additionally has to survive the ~15-20s c24 historical thermal
+ceiling recorded in EXPERIMENTS.md:
 
 1. Pull r12 once, outside benchmark timing, with r11 still present.
 2. `bench/serving_runtime_image_probe.py --validate-engine-args` against this

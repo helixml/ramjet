@@ -288,7 +288,10 @@ def process_snapshot() -> dict[int, ProcessIdentity]:
                 parent_pid=int(fields[1]),
                 start_ticks=int(fields[19]),
             )
-        except (FileNotFoundError, PermissionError, UnicodeError, ValueError):
+        # A procfs task can disappear after directory enumeration but before
+        # stat is read. Linux may surface that race as ENOENT or ESRCH
+        # (`ProcessLookupError`), depending on which procfs lookup lost it.
+        except (OSError, UnicodeError, ValueError):
             continue
     return result
 

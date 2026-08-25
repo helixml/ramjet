@@ -31,9 +31,12 @@
 # config.json). Its concurrency ceiling comes from the mamba state cache, not
 # KV or the GPU; see the --mamba-ssm-dtype note on the command below.
 #
-# Checkpoints (HF): Inferact/Qwen3.8-27B-NVFP4 (target; keeps lm_head dense,
-# which the DFlash2 selector requires -- exports that quantize lm_head are
-# rejected at startup) and z-lab/Qwen3.8-27B-DFlash2 (draft, block size 8).
+# Checkpoints (HF): RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead at immutable
+# revision 009632fef96dd349150baa780c984e62e70e91fe (target; NVFP4/FP8 body,
+# dense BF16 lm_head required by the DFlash2 selector on this qualified pin)
+# and z-lab/Qwen3.8-27B-DFlash2 (draft, block size 8). Keep the target's
+# revision in both the host-directory name and the container labels below;
+# changing a mutable Hub main revision in place is not a production rollout.
 #
 # PINNING CAVEAT: DFlash2 draft support (`DFlash2DraftModel`) is newer than the
 # cookbook image, so this bind-mounts an sglang source checkout over the
@@ -46,6 +49,9 @@
 
 x-sglang-engine: &sglang-engine
   image: ${SGLANG_IMAGE:-lmsysorg/sglang:qwen38-27b}
+  labels:
+    ai.ramjet.model.repository: RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead
+    ai.ramjet.model.revision: 009632fef96dd349150baa780c984e62e70e91fe
   entrypoint: ["python3", "-m", "sglang.launch_server"]
   restart: unless-stopped
   init: true
@@ -55,7 +61,7 @@ x-sglang-engine: &sglang-engine
     stack: 67108864
     nofile: {soft: 1048576, hard: 1048576}
   volumes:
-    - ${NVFP4_MODEL_DIR:-/prod/models/Inferact/Qwen3.8-27B-NVFP4}:/workspace/model:ro
+    - ${NVFP4_MODEL_DIR:-/prod/models/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead-009632fef96d}:/workspace/model:ro
     - ${DFLASH2_DRAFT_DIR:-/prod/models/z-lab/Qwen3.8-27B-DFlash2}:/workspace/draft:ro
     - ${SGLANG_SRC_DIR:-/prod/src/sglang}/python/sglang:/sgl-workspace/sglang/python/sglang:ro
     - ${SGLANG_CACHE_DIR:-/prod/engine-cache-sglang}:/root/.cache

@@ -137,6 +137,21 @@ class Node06GpuGuardTests(unittest.TestCase):
         )
         self.assertLessEqual(guard.DEFAULT_ABORT_C, guard.MAX_ABORT_C)
 
+    def test_process_snapshot_ignores_a_task_that_exits_during_stat_read(self):
+        class VanishedTask:
+            name = "123"
+
+            def __truediv__(self, _name):
+                return self
+
+            def read_text(self, **_kwargs):
+                raise ProcessLookupError(3, "No such process")
+
+        proc = mock.Mock()
+        proc.iterdir.return_value = [VanishedTask()]
+        with mock.patch.object(guard.pathlib, "Path", return_value=proc):
+            self.assertEqual(guard.process_snapshot(), {})
+
     def test_an_abort_threshold_above_the_ceiling_is_rejected(self):
         parsed = guard.parser().parse_args(
             ["--output", "/tmp/x.jsonl", "--abort-c", "95", "--", "/bin/true"]

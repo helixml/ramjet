@@ -1,5 +1,128 @@
 # node06 experiment journal
 
+## 2026-08-25 — RadixArk BF16-lm_head checkpoint promoted on all eight Qwen engines
+
+The AC repair was operator-confirmed, so the 2026-08-14 node06 operational
+moratorium was retired while retaining the compatibility re-arm mechanism.
+Every startup, request-generating qualification, rollback, and production
+smoke remained under `node06_gpu_guard.py`, the common deployment lock, an
+isolated engine/LB fence, and an exact rollback archive. Intake air remained
+35–36C. Successful rollout intervals peaked at 70C GPU silicon; the one failed
+e4 observer/recovery interval reached 81C, below the 85C throttle onset, with
+35C intake and no active clock-event reason. The guard still decides on intake
+air rather than silicon.
+
+The immutable target is
+`RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead` revision
+`009632fef96dd349150baa780c984e62e70e91fe`, downloaded atomically to
+`/prod/models/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead-009632fef96d`.
+The model index declares 23,749,063,264 bytes across three shards. Canonical
+and on-box Compose SHA-256 is
+`358bfbe7ec412d00041c92ef4d3654c0e599f9101301036ce993a242cae9345e`;
+the SGLang source bind remains exact commit
+`38b74d294b21ec5d64c85d84e8e11a58f64f5784`. The prior Compose is preserved
+on node06 as `.docker-compose.yaml.pre-radix-009632-20260825` (SHA-256
+`f04b88ec961fb6724fe9d001a88611d252ee93ac5bdab4d761480ddf123b0451`),
+and the Inferact checkpoint remains available for per-engine rollback.
+
+The isolated e7 gate changed only target weights. Evidence is under
+`.experiments/20260825T080152Z-radix-bf16-lmhead-qualify` and its passing
+thermal journal `20260825t080151z-radix-bf16-qualify3-thermal.jsonl`:
+
+| gate | Inferact baseline | RadixArk BF16 head | decision |
+|---|---:|---:|---|
+| greedy objective answers | 7/8 | 7/8 | no regression |
+| byte-identical greedy completions | — | 6/8 | expected weight change |
+| deterministic agent protocol | 20/25 | 20/25 | no regression; the same known `parallel-required-stream` case fails |
+| native SGLang requests | 25 | 25 | exact client/server reconciliation |
+| native generation tokens | 1,946 | 1,853 | exact agreement with each client's usage total |
+| speculative verify calls | 329 | 320 | DFlash active on both |
+| batch-1 greedy decode median | 142.6 tok/s | 153.3 tok/s | +7.5%, above the declared 90% floor |
+
+The first two qualification attempts were retained as negative harness
+evidence: `--warmup` incorrectly hard-gated the known 80%-valid legacy corpus,
+and the vLLM-oriented speculation adapter reported SGLang's counters as
+unavailable. The admitted run removed the incompatible warmup and reconciled
+SGLang's own request, generation-token, and speculative-verify counters
+directly. This local corpus demonstrates no observed regression and a decode
+improvement; it does not turn the upstream social post into a general proof of
+significant accuracy improvement.
+
+After e7 admission, e6 through e0 rolled one at a time, always leaving seven
+healthy LB upstreams. Passing candidate startup times were e6 724s, e5 793s,
+e4 823s, e3 692s, e2 698s, e1 694s, and e0 688s. e4 exposed two operational
+issues without an outage: the guard lost a `/proc/<pid>/stat` race to a
+short-lived readiness `sleep` and raised `ProcessLookupError`; after that was
+fixed and covered by a focused regression, an intentionally conservative log
+gate mistook a nonfatal Triton autotune `PassManager::run failed` traceback for
+server failure. SGLang completed both CUDA graphs, passed its startup
+generation, and returned health 200. The controller nevertheless completed
+the exact rollback before retrying with fatal-only OOM/device/NCCL/process
+markers. All 35 focused guard tests pass with the procfs race fix.
+
+Final audit: e0–e7 all carry the exact model revision label and revision-named
+mount, are running with restart count zero, and report 8/8 LB health. All GPUs
+reported no active clock-event reason. Every engine reports 26 running slots
+and a 582,246-token KV pool, for 208 slots fleet-wide. A final production-path
+chat completion passed under guard journal
+`20260825t095125z-radix-final-smoke-thermal.jsonl` (run ID
+`9fdf7fdb0d213d06aca7bb35e164046f`).
+
+## 2026-08-25 — RadixArk BF16-lm_head checkpoint is a real candidate, not yet a proved accuracy win
+
+Source review only; no node06 rollout or GPU test. MiaAI-Lab commit
+`a0743929ee2b` changed its RTX PRO 6000 recipe default from
+`RadixArk/Qwen3.8-27B-NVFP4` to
+`RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`, and SGLang commit
+`5030637c65ba` split the Qwen3.8 cookbook's NVFP4 cells by `lm_head`
+precision. The SGLang recipes were measured against the BF16-head export;
+the FP4-head export inherits the same memory pins because it is smaller.
+
+The checkpoint at Hugging Face revision
+`009632fef96dd349150baa780c984e62e70e91fe` is materially interesting to
+this deployment:
+
+* Its index declares 23,749,063,264 bytes, 1,827,635,192 more than the
+  21,921,428,072-byte RadixArk FP4-head export but 2,632,186,048 (10.0%)
+  fewer than the 26,381,249,312-byte Inferact dense-head checkpoint in
+  production. RadixArk says the two RadixArk exports differ only in
+  `lm_head`; MLP is NVFP4, attention projections are FP8, and `lm_head`, MTP,
+  and vision remain BF16 in the new export.
+* It therefore satisfies the compatibility shape the watchlist asked for:
+  fewer streamed target bytes than Inferact without a quantized `lm_head`.
+  That makes it a local correctness/throughput A/B candidate, not authority
+  to replace production weights.
+* The public evidence does **not** substantiate the social post's
+  "significant accuracy improvement" as a general result. The current model
+  card reports GSM8K 96.13% (1,268/1,319) for the BF16 head versus 96.36%
+  (1,271/1,319) for the FP4 head on the same protocol, explicitly calling
+  the delta single-run sampling noise. Its Terminal-Bench 2.1 number uses a
+  different task/run protocol from the FP4-head card, so the two published
+  percentages are not an A/B.
+* The machine-readable qualification artefacts need scrutiny before pinning:
+  `qualification.json` and `tensor-audit.json` still declare the old
+  21,921,428,072-byte payload rather than the current 23,749,063,264-byte
+  index. Treat the model-card description and the actual weights/index as
+  current, but do not treat those copied audit files as proof of the final
+  BF16-head payload.
+
+The watchlist now tracks the checkpoint itself, expands the existing RadixArk
+entry, and broadens the already-present `sgl-project/sglang` source to treat
+cookbook checkpoint/precision defaults, accuracy qualifications, FP8-KV
+guidance, and DFlash2 selector changes as deployment inputs.
+
+Deployment preparation later the same day changed the canonical Compose
+default to the full revision above, a revision-named host directory, and
+inspectable model repository/revision labels; the infra mirror was synced.
+Read-only node06 preflight found that the target directory is not staged yet
+and all eight live engines still carry their retired five-file overlay labels,
+whose four overlays are no longer present on the host. Their inspect-derived
+command, mounts, CPU/GPU placement, ports, image, and SGLang source pin match
+the consolidated one-file baseline, but the missing old render means rollback
+must preserve that runtime contract explicitly before the first recreate.
+No node06 file, container, model, or request path was mutated in this step; the
+live fleet remains on Inferact pending an admitted canary window.
+
 ## 2026-08-22 — megakernel floor probe: the endgame is +2.8% over CUDA graphs; closed
 
 Settles whether a Qwen3.8-shaped megakernel (the KernelBench-Mega

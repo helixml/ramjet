@@ -7,6 +7,20 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "deploy" / "qwen38_27b"
 SYNC = SOURCE / "sync-compose.sh"
+MODEL_REPOSITORY = "RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead"
+MODEL_REVISION = "009632fef96dd349150baa780c984e62e70e91fe"
+
+
+class QwenComposeContractTests(unittest.TestCase):
+    def test_target_checkpoint_is_revision_named_and_labelled(self):
+        compose = (SOURCE / "docker-compose.yaml").read_text()
+        self.assertIn(f"ai.ramjet.model.repository: {MODEL_REPOSITORY}", compose)
+        self.assertIn(f"ai.ramjet.model.revision: {MODEL_REVISION}", compose)
+        self.assertIn(
+            "/prod/models/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead-009632fef96d",
+            compose,
+        )
+        self.assertNotIn("/prod/models/Inferact/Qwen3.8-27B-NVFP4", compose)
 
 
 class QwenComposeSyncTests(unittest.TestCase):

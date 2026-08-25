@@ -1,4 +1,4 @@
 interface:
   display_name: "Load-test ramjet Node"
   short_description: "Admit or safely plan GPU inference load tests"
-  default_prompt: "Use $load-test-ramjet-node to check operational admission; if node06's moratorium is active, perform GPU-free planning and validation only."
+  default_prompt: "Use $load-test-ramjet-node to admit and run the smallest guarded, reproducible inference load test."

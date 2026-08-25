@@ -624,10 +624,11 @@ telemetry handling are engineering controls: they stop a run that is cooking
 the box, racing another deploy, or producing a contaminated number. They still
 apply to every run.
 
-`bench/node06_operational_moratorium.py` still fails closed in code and gates
-both `node06_gpu_guard.py` and the P2P harness. Until that module is changed,
-a guarded run needs `RAMJET_NODE06_AUTHORIZATION` to name a reviewed window
-(`supervised-2026-08-14`); an unnamed or unknown window is rejected.
+`bench/node06_operational_moratorium.py` remains as a compatibility stop but is
+retired by default after the operator confirmed the AC repair on 2026-08-25.
+Guarded runs no longer need `RAMJET_NODE06_AUTHORIZATION`. Re-arming its global
+flag after a future cooling incident still blocks both `node06_gpu_guard.py`
+and the P2P harness before telemetry or workload startup.
 
 For DSpark reliability changes, keep the GPU-free loop focused and exercise
 the real routing boundary with loopback upstreams:
