@@ -133,6 +133,7 @@ vllm:num_requests_running 7
             {"prefix_queries": None, "prefix_hits": None},
             {"prefix_queries": 10, "prefix_hits": 11},
             {"prefix_queries": -1, "prefix_hits": 0},
+            {"prefix_queries": 0, "prefix_hits": 0},
         ):
             with self.subTest(engine=engine):
                 result = cache_usage(100, 0, engine, "vllm-prefix")

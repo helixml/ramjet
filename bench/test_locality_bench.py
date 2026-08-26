@@ -14,6 +14,7 @@ class LocalityBenchTest(unittest.TestCase):
             fake_curl = root / "curl"
             fake_curl.write_text(
                 "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" > " + str(root / "curl-args") + "\n"
                 "printf '%s\\n' '{\"usage\":{\"prompt_tokens\":100,"
                 "\"prompt_tokens_details\":{\"cached_tokens\":40}}}'\n",
                 encoding="utf-8",
@@ -22,6 +23,7 @@ class LocalityBenchTest(unittest.TestCase):
             env = dict(os.environ)
             env.pop("CACHE_AUTHORITY", None)
             env.pop("ENGINE_METRICS_URLS", None)
+            env["MODEL"] = "qwen3.8-flash-next"
             env["PATH"] = f"{root}:{env['PATH']}"
             result = subprocess.run(
                 ["bash", "bench/locality_bench.sh", "http://unused", "1", "1", "1"],
@@ -32,10 +34,15 @@ class LocalityBenchTest(unittest.TestCase):
                 timeout=30,
                 check=False,
             )
+            curl_args = (root / "curl-args").read_text(encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines()[-1],
             "TOTAL prompt=100 cached=40 hit=40.0%",
+        )
+        self.assertIn(
+            '\"model\": \"qwen3.8-flash-next\"',
+            curl_args,
         )
 
     def test_native_cache_authority_aggregates_multiple_metrics_urls(self):
@@ -56,12 +63,15 @@ class LocalityBenchTest(unittest.TestCase):
                 def do_GET(self):
                     active = state.exists()
                     if self.path == "/a":
-                        queries, hits = (100, 80) if active else (0, 0)
+                        queries, hits, requests = (60, 50, 1) if active else (0, 0, 0)
                     else:
-                        queries, hits = (200, 150) if active else (0, 0)
+                        queries, hits, requests = (40, 30, 0) if active else (0, 0, 0)
                     body = (
                         f"vllm:prefix_cache_queries_total {queries}\n"
                         f"vllm:prefix_cache_hits_total {hits}\n"
+                        f"vllm:prompt_tokens_total {queries}\n"
+                        f"vllm:request_queue_time_seconds_count {requests}\n"
+                        f"vllm:request_prefill_time_seconds_count {requests}\n"
                     ).encode()
                     self.send_response(200)
                     self.send_header("Content-Length", str(len(body)))
@@ -107,7 +117,7 @@ class LocalityBenchTest(unittest.TestCase):
                 server.server_close()
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(
-                "TOTAL prompt=300 cached=230 hit=76.7% "
+                "TOTAL prompt=100 cached=80 hit=80.0% "
                 "authority=vllm_prefix_counters response_prompt=100 response_cached=0",
                 result.stdout,
             )

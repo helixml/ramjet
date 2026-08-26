@@ -238,6 +238,11 @@ def cache_usage(
         and cached is not None
         and prompt >= 0
         and 0 <= cached <= prompt
+        and not (
+            authority == "vllm-prefix"
+            and response_prompt_tokens > 0
+            and prompt == 0
+        )
     )
     return {
         "source": source,

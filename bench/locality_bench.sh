@@ -5,7 +5,8 @@
 # LB vs ramjet's overlap router with identical traffic.
 #   BENCH_TOKEN=<bearer> ./locality_bench.sh [base] [apps] [sessions] [turns]
 # For engines whose response cached_tokens is not authoritative:
-#   CACHE_AUTHORITY=vllm-prefix ENGINE_METRICS_URLS=url-a,url-b ...
+#   MODEL=qwen3.8-flash-next CACHE_AUTHORITY=vllm-prefix \
+#     ENGINE_METRICS_URLS=url-a,url-b ...
 set -euo pipefail
 BASE="${1:-http://127.0.0.1:8006}"
 APPS="${2:-2}"; SESSIONS="${3:-4}"; TURNS="${4:-3}"
@@ -13,6 +14,7 @@ TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CACHE_AUTHORITY="${CACHE_AUTHORITY:-response}"
 ENGINE_METRICS_URLS="${ENGINE_METRICS_URLS:-}"
+MODEL="${MODEL:-deepseek-v4-flash}"
 
 case "$CACHE_AUTHORITY" in
   response) ;;
@@ -54,8 +56,9 @@ turn() { # app session turn -> one request, print "cached prompt wall"
   done
   local start end
   start=$(date +%s.%N)
+  local model_json; model_json=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$MODEL")
   curl -s -m 300 -H "Authorization: Bearer ${BENCH_TOKEN:-none}" -H 'Content-Type: application/json' "$BASE/v1/chat/completions" -d "{
-    \"model\": \"deepseek-v4-flash\",
+    \"model\": $model_json,
     \"messages\": [{\"role\":\"system\",\"content\": $(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$sys")}$history,
       {\"role\":\"user\",\"content\":\"session $sess step $turn: describe part $turn briefly\"}],
     \"max_tokens\": 60, \"temperature\": 0
@@ -90,10 +93,19 @@ with open(sys.argv[2], encoding="utf-8") as source:
 usage = cache_usage(int(sys.argv[3]), int(sys.argv[4]), aggregate_deltas(before, after), "vllm-prefix")
 if not usage["available"]:
     raise SystemExit("native vLLM prefix counters are unavailable or invalid")
+delta = aggregate_deltas(before, after)
+expected_prompt = int(sys.argv[3])
+expected_requests = int(sys.argv[5])
+prompt_views = (delta["prompt_tokens"], delta["prefix_queries"])
+request_views = (delta["queue_samples"], delta["prefill_samples"])
+if any(value != expected_prompt for value in prompt_views) or any(
+    value != expected_requests for value in request_views
+):
+    raise SystemExit("native vLLM interval is contaminated or incomplete")
 print("{:g} {:g} {:.1f}".format(
     usage["prompt_tokens"], usage["cached_tokens"], usage["hit_pct"]
 ))
-' "$TMP/engine-before.json" "$TMP/engine-after.json" "$total_p" "$total_c")
+' "$TMP/engine-before.json" "$TMP/engine-after.json" "$total_p" "$total_c" "$((APPS * SESSIONS * TURNS))")
   read -r native_p native_c native_hit <<< "$native_fields"
   echo "TOTAL prompt=$native_p cached=$native_c hit=${native_hit}% authority=vllm_prefix_counters response_prompt=$total_p response_cached=$total_c"
 else

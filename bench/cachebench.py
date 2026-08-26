@@ -510,6 +510,17 @@ def summarize(
         record["cache_outcome"] for record in reuse_records
     )
     usage = cache_usage(prompt, cached, engine, authority=cache_authority)
+    response_authoritative = usage["response_usage_authoritative"]
+    response_request_reuse_pct = (
+        round(100 * (len(good) - outcomes["cold"]) / len(good), 2)
+        if good
+        else None
+    )
+    response_reuse_hit_pct = (
+        round(100 * reuse_cached / reuse_prompt, 2) if reuse_prompt else None
+    )
+    response_ttft_by_outcome = latency_by_outcome(good, "ttft_ms")
+    response_wall_by_outcome = latency_by_outcome(good, "wall_ms")
     return {
         "type": "cache_working_set",
         "apps": apps,
@@ -519,7 +530,10 @@ def summarize(
         "synthetic_working_set_mib": round(apps * prefix_kib / 1024, 2),
         "requests": len(records),
         "successful": len(good),
-        "outcomes": dict(sorted(outcomes.items())),
+        "outcomes": dict(sorted(outcomes.items())) if response_authoritative else None,
+        "response_outcomes": (
+            None if response_authoritative else dict(sorted(outcomes.items()))
+        ),
         "errors": dict(sorted(errors.items())),
         "route_split": dict(sorted(routes.items())),
         "prompt_tokens": prompt,
@@ -535,20 +549,41 @@ def summarize(
         "response_cache_observations_authoritative": (
             usage["response_usage_authoritative"]
         ),
-        "request_reuse_pct": round(100 * (len(good) - outcomes["cold"]) / len(good), 2)
-        if good
-        else None,
+        "request_reuse_pct": (
+            response_request_reuse_pct if response_authoritative else None
+        ),
+        "response_request_reuse_pct": (
+            None if response_authoritative else response_request_reuse_pct
+        ),
         "reuse_wave_requests": len(reuse_records),
-        "reuse_wave_outcomes": dict(sorted(reuse_outcomes.items())),
+        "reuse_wave_outcomes": (
+            dict(sorted(reuse_outcomes.items())) if response_authoritative else None
+        ),
+        "response_reuse_wave_outcomes": (
+            None if response_authoritative else dict(sorted(reuse_outcomes.items()))
+        ),
         "reuse_wave_cache_hit_pct": (
-            round(100 * reuse_cached / reuse_prompt, 2) if reuse_prompt else None
+            response_reuse_hit_pct if response_authoritative else None
+        ),
+        "response_reuse_wave_cache_hit_pct": (
+            None if response_authoritative else response_reuse_hit_pct
         ),
         "ttft_ms_p50": round(statistics.median(ttfts), 1) if ttfts else None,
         "ttft_ms_p95": percentile(ttfts, 0.95),
-        "ttft_ms_by_outcome": latency_by_outcome(good, "ttft_ms"),
+        "ttft_ms_by_outcome": (
+            response_ttft_by_outcome if response_authoritative else None
+        ),
+        "response_ttft_ms_by_outcome": (
+            None if response_authoritative else response_ttft_by_outcome
+        ),
         "wall_ms_p50": round(statistics.median(walls), 1) if walls else None,
         "wall_ms_p95": percentile(walls, 0.95),
-        "wall_ms_by_outcome": latency_by_outcome(good, "wall_ms"),
+        "wall_ms_by_outcome": (
+            response_wall_by_outcome if response_authoritative else None
+        ),
+        "response_wall_ms_by_outcome": (
+            None if response_authoritative else response_wall_by_outcome
+        ),
         "elapsed_seconds": round(elapsed, 3),
         "output_tok_s": round(completion / elapsed, 1) if elapsed else None,
         "total_tok_s": round((prompt + completion) / elapsed, 1) if elapsed else None,

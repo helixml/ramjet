@@ -320,6 +320,15 @@ ramjet_exact_route_projected_balance_total{endpoint="chat",outcome="would_balanc
         self.assertEqual(summary["response_cached_tokens"], 0)
         self.assertEqual(summary["cache_hit_pct"], 80)
         self.assertFalse(summary["response_cache_observations_authoritative"])
+        self.assertIsNone(summary["outcomes"])
+        self.assertEqual(summary["response_outcomes"], {"cold": 1})
+        self.assertIsNone(summary["request_reuse_pct"])
+        self.assertEqual(summary["response_request_reuse_pct"], 0)
+        self.assertIsNone(summary["ttft_ms_by_outcome"])
+        self.assertEqual(
+            summary["response_ttft_ms_by_outcome"],
+            {"cold": {"count": 1, "p50": 100, "p95": 100}},
+        )
         self.assertEqual(
             summary["cache_authority"]["source"], "vllm_prefix_counters"
         )
