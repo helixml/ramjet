@@ -1,6 +1,13 @@
 import unittest
 
-from engine_metrics import delta, metric_value, position_values, speculative_delta
+from engine_metrics import (
+    aggregate_deltas,
+    cache_usage,
+    delta,
+    metric_value,
+    position_values,
+    speculative_delta,
+)
 
 
 class EngineMetricsTest(unittest.TestCase):
@@ -70,6 +77,70 @@ vllm:num_requests_running 7
         result = delta(before, after)
         self.assertTrue(all(result[key] is None for key in before))
         self.assertIsNone(result["queue_ms_mean"])
+
+    def test_aggregate_deltas_sums_an_exact_multi_engine_interval(self):
+        keys = (
+            "preemptions",
+            "prompt_tokens",
+            "cached_prompt_tokens",
+            "prefix_queries",
+            "prefix_hits",
+            "queue_seconds_sum",
+            "queue_samples",
+            "prefill_seconds_sum",
+            "prefill_samples",
+        )
+        before = [{key: 10 for key in keys}, {key: 100 for key in keys}]
+        after = [{key: 30 for key in keys}, {key: 150 for key in keys}]
+        result = aggregate_deltas(before, after)
+        self.assertEqual(result["prefix_queries"], 70)
+        self.assertEqual(result["prefix_hits"], 70)
+        self.assertEqual(result["prefix_hit_pct"], 100)
+        self.assertEqual(result["queue_ms_mean"], 1000)
+        self.assertIsNone(aggregate_deltas(before, after[:1]))
+        reset = [dict(after[0]), dict(after[1])]
+        reset[1]["prefix_hits"] = 0
+        self.assertIsNone(aggregate_deltas(before, reset)["prefix_hits"])
+
+    def test_cache_usage_defaults_to_response_for_compatibility(self):
+        result = cache_usage(
+            100,
+            0,
+            {"prefix_queries": 100, "prefix_hits": 80},
+        )
+        self.assertEqual(result["source"], "response_usage")
+        self.assertTrue(result["response_usage_authoritative"])
+        self.assertEqual(result["cached_tokens"], 0)
+        self.assertEqual(result["hit_pct"], 0)
+
+    def test_cache_usage_can_select_native_prefix_counters(self):
+        result = cache_usage(
+            100,
+            0,
+            {"prefix_queries": 300, "prefix_hits": 230},
+            "vllm-prefix",
+        )
+        self.assertEqual(result["source"], "vllm_prefix_counters")
+        self.assertFalse(result["response_usage_authoritative"])
+        self.assertEqual(result["prompt_tokens"], 300)
+        self.assertEqual(result["cached_tokens"], 230)
+        self.assertEqual(result["hit_pct"], 76.67)
+        self.assertEqual(result["response_cached_tokens"], 0)
+
+    def test_native_cache_usage_fails_closed_without_valid_counters(self):
+        for engine in (
+            None,
+            {"prefix_queries": None, "prefix_hits": None},
+            {"prefix_queries": 10, "prefix_hits": 11},
+            {"prefix_queries": -1, "prefix_hits": 0},
+        ):
+            with self.subTest(engine=engine):
+                result = cache_usage(100, 0, engine, "vllm-prefix")
+                self.assertFalse(result["available"])
+                self.assertIsNone(result["cached_tokens"])
+                self.assertFalse(result["response_usage_authoritative"])
+        with self.assertRaises(ValueError):
+            cache_usage(1, 0, None, "invented")
 
     def test_speculative_delta_reports_fixed_k5_and_reconciles_client_work(self):
         before = {
