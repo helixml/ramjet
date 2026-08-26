@@ -1,3 +1,4 @@
+import threading
 import unittest
 from unittest import mock
 
@@ -27,6 +28,7 @@ class RouteConflictTests(unittest.TestCase):
     def config(self):
         return {
             "base": "http://engine",
+            "probe_base": "http://engine",
             "model": "model",
             "blockers": 2,
             "blocker_tokens": 32,
@@ -35,6 +37,8 @@ class RouteConflictTests(unittest.TestCase):
             "salt": "fresh",
             "context_tokens": 100,
             "probe_tokens": 8,
+            "blocker_tail_kib": 0,
+            "blocker_ready_mode": "headers",
             "metrics_urls": ["http://a/metrics", "http://b/metrics"],
             "require_reconciled": True,
             "settle_seconds": 0,
@@ -43,7 +47,18 @@ class RouteConflictTests(unittest.TestCase):
     def test_run_waits_for_every_blocker_and_retains_usage(self):
         calls = []
 
-        def fake_request(base, model, token, system, user, max_tokens, output, key, ready=None):
+        def fake_request(
+            base,
+            model,
+            token,
+            system,
+            user,
+            max_tokens,
+            output,
+            key,
+            ready=None,
+            ready_mode="headers",
+        ):
             calls.append(key)
             output[key] = {
                 "ok": True,
@@ -58,12 +73,175 @@ class RouteConflictTests(unittest.TestCase):
             if ready is not None:
                 ready.set()
 
-        with mock.patch("route_conflict.stream_request", side_effect=fake_request):
-            output, window = route_conflict.run_once(0, self.config())
+        with (
+            mock.patch("route_conflict.stream_request", side_effect=fake_request),
+            mock.patch("route_conflict.route_state_snapshot", return_value=[]),
+            mock.patch("route_conflict.engine_gauge_snapshot", return_value=[]),
+        ):
+            output, window, boundary = route_conflict.run_once(0, self.config())
         self.assertEqual({"warm", "blocker-0", "blocker-1", "probe"}, set(calls))
         self.assertEqual(32, output["blocker-0"]["completion_tokens"])
         self.assertEqual(32, output["blocker-1"]["completion_tokens"])
         self.assertGreater(window, 0)
+        self.assertEqual({"router": [], "engines": []}, boundary)
+
+    def test_probe_base_can_bypass_router_for_direct_oracle(self):
+        calls = []
+
+        def fake_request(
+            base,
+            model,
+            token,
+            system,
+            user,
+            max_tokens,
+            output,
+            key,
+            ready=None,
+            ready_mode="headers",
+        ):
+            calls.append((key, base))
+            output[key] = {
+                "ok": True,
+                "route": None,
+                "ttft_ms": 1,
+                "wall_ms": 2,
+                "prompt_tokens": 10,
+                "completion_tokens": 1,
+                "cached_tokens": 0,
+                "request_bytes": 100,
+            }
+            if ready is not None:
+                ready.set()
+
+        config = self.config()
+        config["probe_base"] = "http://direct-b"
+        with (
+            mock.patch("route_conflict.stream_request", side_effect=fake_request),
+            mock.patch("route_conflict.route_state_snapshot", return_value=[]),
+            mock.patch("route_conflict.engine_gauge_snapshot", return_value=[]),
+        ):
+            route_conflict.run_once(0, config)
+        self.assertEqual("http://direct-b", dict(calls)["probe"])
+        self.assertEqual("http://engine", dict(calls)["warm"])
+        self.assertEqual("http://engine", dict(calls)["blocker-0"])
+
+    def test_first_token_mode_does_not_signal_on_headers_or_role_only_delta(self):
+        ready = threading.Event()
+
+        class Response:
+            headers = {"X-Ramjet-Upstream": "0"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                self.assert_ready(False)
+                yield b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n'
+                self.assert_ready(False)
+                yield b'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n'
+                self.assert_ready(True)
+                yield b'data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":1}}\n'
+
+            @staticmethod
+            def assert_ready(expected):
+                if ready.is_set() != expected:
+                    raise AssertionError(f"ready={ready.is_set()}, expected={expected}")
+
+        output = {}
+        with mock.patch("route_conflict.urllib.request.urlopen", return_value=Response()):
+            route_conflict.stream_request(
+                "http://lb",
+                "model",
+                "token",
+                "system",
+                "user",
+                8,
+                output,
+                "request",
+                ready,
+                "first_token",
+            )
+        self.assertTrue(output["request"]["ok"])
+        self.assertTrue(ready.is_set())
+
+    def test_blocker_tail_is_unique_and_exactly_bounded(self):
+        config = self.config()
+        config["blocker_tail_kib"] = 2
+        first = route_conflict.blocker_user(config, 0, 0)
+        second = route_conflict.blocker_user(config, 0, 1)
+        self.assertNotEqual(first, second)
+        self.assertGreaterEqual(len(first.encode()), 2048)
+        self.assertLess(len(first.encode()), 2200)
+
+    def test_route_and_engine_boundary_snapshots_are_bounded(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        response = Response()
+        response.read = lambda: b""
+        with mock.patch(
+            "route_conflict.json.load",
+            return_value={
+                "replicas": [
+                    {"index": 0, "inflight": 2, "load_units": 16, "ignored": "value"},
+                    {"index": 1, "inflight": 0, "load_units": 0},
+                ]
+            },
+        ), mock.patch("route_conflict.urllib.request.urlopen", return_value=response):
+            self.assertEqual(
+                [
+                    {"upstream": 0, "inflight": 2, "load_units": 16},
+                    {"upstream": 1, "inflight": 0, "load_units": 0},
+                ],
+                route_conflict.route_state_snapshot("http://lb"),
+            )
+
+        with mock.patch(
+            "route_conflict.fetch_engine_metrics",
+            side_effect=[
+                {"running": 2, "waiting": 0, "kv_cache_usage": 0.25},
+                {"running": 0, "waiting": 0, "kv_cache_usage": 0.0},
+            ],
+        ):
+            self.assertEqual(
+                [
+                    {"running": 2, "waiting": 0, "kv_cache_usage": 0.25},
+                    {"running": 0, "waiting": 0, "kv_cache_usage": 0.0},
+                ],
+                route_conflict.engine_gauge_snapshot(["http://a", "http://b"]),
+            )
+
+    def test_phase_controls_are_typed_and_bounded(self):
+        with mock.patch.dict(
+            route_conflict.os.environ,
+            {"BENCH_TOKEN": "secret", "BLOCKER_READY_MODE": "first_byte"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(SystemExit, "headers or first_token"):
+                route_conflict.parse_config(["http://lb", "model"])
+        with mock.patch.dict(
+            route_conflict.os.environ,
+            {"BENCH_TOKEN": "secret", "BLOCKER_TAIL_KIB": "8193"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(SystemExit, "0 through 8192"):
+                route_conflict.parse_config(["http://lb", "model"])
+        with mock.patch.dict(
+            route_conflict.os.environ,
+            {"BENCH_TOKEN": "secret", "PROBE_BASE": "http://direct-b/"},
+            clear=True,
+        ):
+            config = route_conflict.parse_config(["http://lb/", "model"])
+        self.assertEqual("http://lb", config["base"])
+        self.assertEqual("http://direct-b", config["probe_base"])
 
     def test_aggregate_engine_delta_sums_two_engines_and_derived_metrics(self):
         before = [ordinary_snapshot(), ordinary_snapshot()]
@@ -209,7 +387,13 @@ class RouteConflictTests(unittest.TestCase):
                 ),
             ],
         )
-        result = route_conflict.summarize_runs(config, outputs, [1000], (before, after))
+        result = route_conflict.summarize_runs(
+            config,
+            outputs,
+            [1000],
+            [{"router": [], "engines": []}],
+            (before, after),
+        )
         self.assertEqual(60.0, result["blocker_aggregate_output_tok_s"])
         self.assertEqual(20, result["blocker_ttft_ms_p95"])
         self.assertEqual(40, result["blocker_prompt_tokens"])

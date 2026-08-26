@@ -24,13 +24,14 @@ LB_IMAGE = (
     "467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b"
 )
 ROUTING_SHAPE = {
+    "RJ_AFFINITY": "prefix",
     "RJ_ROUTE_ALPHA": "4",
     "RJ_ROUTE_CHUNK_BYTES": "2048",
     "RJ_ROUTE_MAX_PREFIX_BYTES": "2097152",
     "RJ_ROUTE_MAX_OVERLAP_BLOCKS": "32",
     "RJ_ROUTE_LOAD_UNIT_BYTES": "32768",
     "RJ_ROUTE_MAX_LOAD_UNITS": "8",
-    "RJ_ROUTE_PHASE_AWARE_LOAD": "false",
+    "RJ_ROUTE_PHASE_AWARE_LOAD": "true",
 }
 ENGINE_SHAPE = {
     "qwen38flashnext-a": {

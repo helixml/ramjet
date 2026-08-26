@@ -124,16 +124,24 @@ claiming the same warm route.
 
 The approximate routing shape is pinned explicitly in Compose: 2KiB chunks, a
 2MiB fingerprint window, a 32-block affinity cap, 32KiB load units, and an
-eight-unit request cap. Phase-aware load accounting remains off but is exposed
-as a default-preserving Compose variable for an isolated future A/B. A guarded
-alpha 4/2/2/4 crossover found that alpha 2 raised native prefix hits while
-regressing returning-probe TTFT by 15%, blocker TTFT p95 by 25%, and completed
-output throughput by 7%; alpha 4 therefore remains the qualified value.
+eight-unit request cap. Phase-aware load accounting is enabled: once an
+upstream emits its first semantic token, ramjet releases the size-weighted
+prefill reservation and retains one decode unit. A guarded 3-run ABBA conflict
+cell reduced returning-probe TTFT from 2,496ms to 287ms (88.5%) while retaining
+99.1% of blocker throughput. A separate c32 ABBA improved aggregate throughput
+from 2,640 to 2,712 tok/s (2.7%); TTFT p95 rose 7.3%, within the 10% guard. All
+432 requests completed with exact native speculative reconciliation and zero
+preemptions. A guarded alpha 4/2/2/4 crossover found that alpha 2 raised native
+prefix hits while regressing returning-probe TTFT by 15%, blocker TTFT p95 by
+25%, and completed output throughput by 7%; alpha 4 therefore remains the
+qualified value.
 
 The checked-in Compose default follows the repository-wide released-image
 policy. The node06 production render supplies the separately qualified r133
 override explicitly until these Flash-Next changes are included in a tagged
-release.
+release. Every node06 `docker compose` invocation, including rollback and
+cleanup traps, must therefore carry the exact `LB_IMAGE` override; restoring
+the Compose file alone would select the older released default.
 
 The load balancer joins both the Flash serving network and the existing
 `qwen38_27b_default` bridge. The latter is observation-only: node06's host
