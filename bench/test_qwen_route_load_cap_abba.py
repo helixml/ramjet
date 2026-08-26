@@ -88,6 +88,13 @@ mutated=1
 timeout() {{ printf 'timeout %s\\n' "$*" >>"$experiment_dir/calls"; return {timeout_result}; }}
 rollback_wait_for_lb() {{ printf 'wait %s\\n' "$1" >>"$experiment_dir/calls"; return {health_result}; }}
 record_engines_unchanged() {{ printf 'engines %s\\n' "$1" >>"$experiment_dir/calls"; return {engine_result}; }}
+jq() {{
+  local result=unknown
+  while (($#)); do
+    if [[ $1 == --arg && $2 == result ]]; then result=$3; shift 3; else shift; fi
+  done
+  printf '{{"result": "%s"}}\\n' "$result"
+}}
 {rollback}
 trap rollback EXIT
 trap 'exit 130' INT
@@ -164,6 +171,13 @@ timeout() {{
 }}
 rollback_wait_for_lb() {{ printf 'wait %s\\n' "$1" >>"$experiment_dir/calls"; return 0; }}
 record_engines_unchanged() {{ printf 'engines %s\\n' "$1" >>"$experiment_dir/calls"; return 0; }}
+jq() {{
+  local result=unknown
+  while (($#)); do
+    if [[ $1 == --arg && $2 == result ]]; then result=$3; shift 3; else shift; fi
+  done
+  printf '{{"result": "%s"}}\\n' "$result"
+}}
 {rollback}
 {remaining}
 {run_cell}
@@ -253,8 +267,39 @@ print(json.dumps({'services': {'ds4-loadbalancer': {'image': 'exact', 'environme
 }}}}))
 """
             )
+            jq_mock = root / "jq"
+            jq_mock.write_text(
+                """#!/usr/bin/env python3
+import json, re, sys
+
+if '-n' in sys.argv:
+    position = sys.argv.index('normalized_sha256')
+    print(json.dumps({
+        'only_route_max_load_units_varies': True,
+        'normalized_sha256': sys.argv[position + 1],
+    }))
+    raise SystemExit
+
+def sanitize(value):
+    if isinstance(value, dict):
+        return {
+            key: ('<redacted>' if re.search(r'(token|secret|password|authorization|api[_-]?key)', key, re.I)
+                  else sanitize(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize(item) for item in value]
+    return value
+
+document = sanitize(json.load(sys.stdin))
+document['services']['ds4-loadbalancer']['environment']['RJ_ROUTE_MAX_LOAD_UNITS'] = '<candidate>'
+print(json.dumps(document, sort_keys=True))
+"""
+            )
+            jq_mock.chmod(0o700)
             shell = f"""
 set -euo pipefail
+PATH={shlex.quote(directory)}:$PATH
 experiment_dir={shlex.quote(directory)}
 compose_file=/not-used
 compose_environment=(python3 {shlex.quote(str(mock))})
