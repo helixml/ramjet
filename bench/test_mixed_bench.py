@@ -59,7 +59,10 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions" or not self.state.serves_requests:
             self.send_error(404)
             return
-        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        request = json.loads(
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        )
+        prompt = request["messages"][0]["content"]
         self.state.add_request()
         events = (
             {"choices": [{"delta": {"content": "x"}}]},
@@ -81,7 +84,8 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Ramjet-Upstream", "primary")
+        route = "secondary" if prompt.startswith("[mixed decoder ") else "primary"
+        self.send_header("X-Ramjet-Upstream", route)
         self.end_headers()
         self.wfile.write(body)
 
@@ -229,6 +233,18 @@ class MixedBenchTest(unittest.TestCase):
         self.assertEqual(report["engine_metric_peaks"]["kv_cache_usage"], 0.75)
         self.assertEqual(report["speculative"]["engine_finished_requests"], 2)
         self.assertEqual(report["speculative"]["engine_generation_tokens"], 4)
+        self.assertEqual(
+            report["run_route_relationships"],
+            [
+                {
+                    "run": 0,
+                    "prefill_route": "primary",
+                    "decoder_same_route": 0,
+                    "decoder_other_route": 1,
+                    "decoder_unknown_route": 0,
+                }
+            ],
+        )
         self.assertNotIn("measurement_error", report)
 
     def test_each_native_authority_mismatch_fails_closed(self):
