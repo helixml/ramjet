@@ -4,7 +4,7 @@
 # Backward-compatible default:
 #   bash bench/capture_node06.sh node06
 #
-# Qwen3.8-Flash-Next direct candidate:
+# Qwen3.8-Flash-Next promoted TP4 pair:
 #   bash bench/capture_node06.sh --profile qwen38-flash-next node06
 #
 # Explicit deployment/container selection:
@@ -71,6 +71,7 @@ remote_capture() {
   local deployment_dir=$1 compose_file=$2 lb_container=$3
   local lb_metrics_url=$4 direct_candidate=$5
   shift 5
+  [[ $direct_candidate == - ]] && direct_candidate=
   local -a engines=("$@")
   local compose_path
 
@@ -303,7 +304,7 @@ case $profile in
     ;;
   qwen38-flash-next)
     deployment_dir=${deployment_dir:-/home/luke/inference/qwen38_flash_next}
-    default_engines=(qwen38flashnext-b)
+    default_engines=(qwen38flashnext-a qwen38flashnext-b)
     ;;
   *) fail "unknown profile: $profile" ;;
 esac
@@ -313,15 +314,13 @@ if ((${#requested_engines[@]})); then
   engines=("${requested_engines[@]}")
 else
   engines=("${default_engines[@]}")
-  if [[ $profile == qwen38-flash-next && -z $direct_candidate ]]; then
-    direct_candidate=qwen38flashnext-b
-  fi
 fi
 
 if ((local_capture)); then
   remote_capture "$deployment_dir" "$compose_file" "$lb_container" \
     "$lb_metrics_url" "$direct_candidate" "${engines[@]}"
 else
+  remote_direct_candidate=${direct_candidate:--}
   ssh "$target" bash -s -- --remote "$deployment_dir" "$compose_file" \
-    "$lb_container" "$lb_metrics_url" "$direct_candidate" "${engines[@]}" <"$0"
+    "$lb_container" "$lb_metrics_url" "$remote_direct_candidate" "${engines[@]}" <"$0"
 fi

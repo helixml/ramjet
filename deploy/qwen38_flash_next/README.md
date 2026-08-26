@@ -14,34 +14,23 @@ The checkpoint and image are immutable inputs:
 
 The day-zero vLLM image config labels its source/build revision as `unknown`.
 The digest makes the bytes immutable, but it does not supply source provenance;
-keep it a candidate until runtime/package capture, correctness, and performance
-qualification are recorded. Do not turn the recipe page into an authority claim.
+the recorded runtime/package capture, correctness, and performance qualification
+establish this deployment without inventing missing image-source provenance.
+Do not turn the recipe page into an authority claim.
 
-The qualified candidate uses GPUs 4-7 while production remains single-homed on
-the current Qwen3.8-27B engines on GPUs 0-3. `node06-canary.sh` holds
-`/run/lock/ramjet-node06-deployment.lock` across the complete routing change,
-engine stop/start and verification interval. The conservative mode starts only
-the named candidate service and restores the eight-engine baseline on failure:
+Production now uses both TP4 engines: A on GPUs 0-3 and B on GPUs 4-7. The
+load balancer is owned by this Compose project and reports 2/2 HTTP admission.
+Both engines independently passed direct identity, deterministic agent/tool,
+code-decode, prefix-cache, long-context, and multimodal gates before pair
+admission. The temporary canary controller was removed after promotion so an
+obsolete action cannot silently restore the retired baseline.
 
-```bash
-./node06-canary.sh start-b
-```
-
-The active fast-iteration lane keeps production fixed at 4/4 on GPUs 0-3 and
-leaves the retired engines on GPUs 4-7 stopped. It starts the candidate without
-restoring those retired engines after a failure:
-
-```bash
-./node06-canary.sh iterate-b
-```
-
-The startup path samples all GPU telemetry plus the intake-air sensor and
-retains an owner-only evidence file below `.experiments/`.
-
-Do not start this file's load balancer until both TP4 engines have independently
-passed direct health, model identity, deterministic correctness, tool calling,
-and a guarded performance scout. In the fast-iteration lane a failed candidate
-is removed while production remains single-homed at 4/4.
+Every future mutation must hold `/run/lock/ramjet-node06-deployment.lock` and
+retain an owner-only evidence journal below `.experiments/`. Roll back one TP4
+half at a time: single-home the healthy Flash engine, stop the peer, recover the
+old engines on that GPU half, move traffic only after they are healthy, then
+repeat for the other half. Never start old single-GPU engines underneath a
+running TP4 process.
 
 The initial configuration deliberately keeps PLE CPU offload disabled because
 node06 does not have 51 GiB of uncommitted host RAM while the production stack
@@ -94,9 +83,9 @@ An attempted 85% boot measured -0.27 GiB available for KV blocks after warmup
 and correctly failed before serving. Each scheduler limit is raised
 independently only after observed cache and memory telemetry shows room.
 
-## Qualified TP4 cell
+## Qualified TP4 pair
 
-The active direct candidate is healthy with restart count zero. With MTP3 it
+Both active engines are healthy with restart count zero. With MTP3 each
 reports a 2,667,258-token GPU KV pool, enough for 10.17 native 262K contexts;
 the non-speculative baseline reported 3,033,380 tokens. A guarded request with
 251,009 actual prompt tokens completed, and the identical-prefix warm TTFT was
@@ -134,8 +123,9 @@ fingerprints, preventing requests with different rendered prefixes from
 claiming the same warm route.
 
 The checked-in Compose default follows the repository-wide released-image
-policy. `node06-canary.sh` supplies the separately qualified r133 override
-explicitly until these Flash-Next changes are included in a tagged release.
+policy. The node06 production render supplies the separately qualified r133
+override explicitly until these Flash-Next changes are included in a tagged
+release.
 
 The load balancer joins both the Flash serving network and the existing
 `qwen38_27b_default` bridge. The latter is observation-only: node06's host

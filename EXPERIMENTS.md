@@ -1,14 +1,15 @@
 # node06 experiment journal
 
-## 2026-08-26 — Qwen3.8-Flash-Next FP8 TP4 is live; fixed KV and QSA index reuse qualified
+## 2026-08-26 — Qwen3.8-Flash-Next FP8 is live on two TP4 engines; fixed KV and QSA index reuse qualified
 
-The official `Qwen/Qwen3.8-Flash-Next-FP8` checkpoint is running as one
-direct TP4+EP candidate on node06 GPUs 4–7. Production deliberately remains
-single-homed at 4/4 on the existing GPUs 0–3; retired engines e4–e7 remain
-stopped, the new candidate is not yet in the production LB, and no failed
-iteration restores the retired baseline. The candidate is healthy with zero
-restarts. Its canonical one-file Compose SHA-256 is
-`8ca7671063e87d57cffff675f79a730384aa563c84a1c7a7f56fd2ef5c62e551`.
+The official `Qwen/Qwen3.8-Flash-Next-FP8` checkpoint now serves production
+on all eight node06 GPUs as two NUMA-local TP4+EP engines. A owns GPUs 0–3, B
+owns GPUs 4–7, and the canonical Flash Compose owns the r133 ramjet load
+balancer at 2/2 HTTP admission. Both engines have restart policy
+`unless-stopped`, restart count zero, the exact same serving argv, and
+2,667,258 KV tokens each. The old single-GPU engines are stopped. Canonical
+and on-box Compose SHA-256 is
+`0356b7db003c498285c55dca0c206177862cc9810c187de7c5af2f799392566f`.
 
 Immutable inputs are model revision
 `bcd9f01ddc9cff2316eb84281bebcd5b058bddce` (185,502,232,570 indexed bytes
@@ -106,23 +107,58 @@ Host offload is intentionally rejected. The recipe's simple CPU KV connector
 asks for 236,223,201,280 bytes per rank—about 880 GiB for one TP4 engine—on a
 125 GiB host. Mooncake and LMCache require a real external memory tier, while
 `VLLM_PLE_CPU_OFFLOAD=1` concerns the separate 51B N-gram table and needs at
-least 51 GiB plus runtime headroom. The live mixed stack has 39 GiB available,
-so both KV and PLE remain on GPU. Final state was LB 4/4, candidate health 200,
-restart count zero, 39C intake, no fatal/OOM/NCCL markers, and 39 GiB host
-memory available.
+least 51 GiB plus runtime headroom. The final two-engine stack has about 50
+GiB available before allowing for safety headroom, so both KV and PLE remain
+on GPU.
 
 Ramjet image `rust-r133-qwen38-flash-next-df01c18` was built from commit
 `df01c18` in 108.625s after a cold builder-cache fill and transferred to
 node06 in 6.571s. Its 15,800,890-byte runtime image was published and pinned as
 `sha256:78f13c87fcc928552593a8055293479dbbc2569d0b7a4b754d89e0d32a278385`.
-An LB-only rollout kept the same four production Qwen3.8-27B upstreams and
-returned to 4/4 HTTP admission in seconds. A guarded production-path smoke
-then returned HTTP 200 with authoritative 58 prompt and 27 completion tokens;
-evidence is under `.experiments/20260826T172416Z-r133-lb-smoke/`. The direct
-Flash-Next candidate remained unrouted. Final deployment-aware capture at
-17:24Z reported 40.2 GiB host memory available, 39C intake, zero candidate
-restarts, and the exact r133 LB image. Pull request #224 carries the source,
-deployment, validation, and experiment record.
+An LB-only rollout first kept the same four production Qwen3.8-27B upstreams
+and returned to 4/4 HTTP admission in seconds. A guarded production-path smoke
+returned HTTP 200 with authoritative 58 prompt and 27 completion tokens;
+evidence is under `.experiments/20260826T172416Z-r133-lb-smoke/`.
+
+Promotion then used qualified B as the serving anchor. B passed a guarded
+ramjet smoke before the old GPU 0–3 engines stopped. A reached health in 540s
+without restarting and matched B's immutable image, model revision, argv SHA
+`3961c1dd661d0627c268b648cc2b2834d599eb003e611ecfaa6f4ac5d74bf2d0`,
+and 10.17-context KV capacity. Its direct five-case gate passed 5/5 with exact
+speculation reconciliation and 90.39% strict acceptance. Its two-run scouts
+measured 194.4, 870.7, and 1,727.3 aggregate tok/s at c1/c8/c32 with 82/82
+requests successful. A's 33,556-token cold prefix measured 7.38s TTFT versus
+1.25s warm; the 199K five-depth case passed with 139 reconciled completion
+tokens and 97.22% strict acceptance. The deterministic in-memory red-square
+multimodal probe passed with 227ms TTFT, authoritative usage, and exact native
+reconciliation. Evidence is under
+`.experiments/20260826T175100Z-engine-a-agent-gate-r2/`,
+`.experiments/20260826T175200Z-engine-a-code-scout/`,
+`.experiments/20260826T175400Z-engine-a-prefix-32k/`,
+`.experiments/20260826T175500Z-engine-a-longctx-199k/`, and
+`.experiments/20260826T180200Z-engine-a-multimodal/`. The first A agent-gate
+attempt used `/v1` twice and returned immediate HTTP 404; it is retained as
+negative harness evidence separately from the corrected run.
+
+A then passed the same five cases through ramjet before pair admission. The
+transition pair served a guarded c64 cell at 3,340.5 aggregate tok/s with
+128/128 requests, an exact 64/64 route split, and exact combined native
+speculation reconciliation. This is 1.93x A's c32 result. Evidence is under
+`.experiments/20260826T175800Z-engine-a-ramjet-gate/` and
+`.experiments/20260826T180000Z-pair-c64-transition/`.
+
+The final LB migration explicitly retained the old bridge only for the host
+machine-view agent while serving A/B on the Flash network. The first attempt
+reached 2/2 but a diagnostic assertion omitted the agent URL's `/sample`
+suffix; it automatically restored the proven transition LB at 2/2. The
+corrected migration preserved fresh host telemetry and the final guarded
+five-case gate passed 5/5 with requests split 2/3. The temporary engine links
+to the old network were then removed. Final capture at 18:03Z reported 2/2,
+41C intake, 50.3 GiB host memory available, 5.0/8.0 GiB swap used, zero
+inflight, zero engine restarts, and fresh machine view for eight GPUs and two
+engines. Evidence is under
+`.experiments/20260826T180600Z-canonical-pair-lb-r2/`. Pull request #224
+carries the source, deployment, validation, and complete rollout record.
 
 ## 2026-08-25 — RadixArk BF16-lm_head checkpoint promoted on all eight Qwen engines
 

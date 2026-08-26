@@ -22,7 +22,7 @@ class CaptureNode06Tests(unittest.TestCase):
     def test_shell_syntax(self):
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
 
-    def test_qwen_profile_selects_direct_candidate_without_remote_secrets(self):
+    def test_qwen_profile_selects_promoted_pair_without_remote_secrets(self):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             self.executable(
@@ -44,6 +44,7 @@ class CaptureNode06Tests(unittest.TestCase):
                 check=True,
             )
             self.assertIn("/home/luke/inference/qwen38_flash_next", result.stdout)
+            self.assertIn("qwen38flashnext-a", result.stdout)
             self.assertIn("qwen38flashnext-b", result.stdout)
             self.assertNotIn("VLLM_API_KEY", result.stdout)
 
