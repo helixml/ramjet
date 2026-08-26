@@ -8,7 +8,7 @@ single-homed at 4/4 on the existing GPUs 0–3; retired engines e4–e7 remain
 stopped, the new candidate is not yet in the production LB, and no failed
 iteration restores the retired baseline. The candidate is healthy with zero
 restarts. Its canonical one-file Compose SHA-256 is
-`f8ef22bd53edfbe264b78f0d3f24e4fec1432103c97ac6d7ba899e28048a1553`.
+`8ca7671063e87d57cffff675f79a730384aa563c84a1c7a7f56fd2ef5c62e551`.
 
 Immutable inputs are model revision
 `bcd9f01ddc9cff2316eb84281bebcd5b058bddce` (185,502,232,570 indexed bytes
