@@ -22,6 +22,12 @@ class QwenComposeContractTests(unittest.TestCase):
         )
         self.assertNotIn("/prod/models/Inferact/Qwen3.8-27B-NVFP4", compose)
 
+    def test_lb_handoff_can_preserve_flash_next_output_budgets(self):
+        compose = (SOURCE / "docker-compose.yaml").read_text()
+        self.assertIn(
+            "RJ_MAX_TOKENS_STRIP: ${RJ_MAX_TOKENS_STRIP:-100000}", compose
+        )
+
 
 class QwenComposeSyncTests(unittest.TestCase):
     def setUp(self):

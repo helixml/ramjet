@@ -115,6 +115,10 @@ services:
       RJ_UPSTREAM: ${RJ_UPSTREAM:-http://qwen38-sg-e0:8000,http://qwen38-sg-e1:8000,http://qwen38-sg-e2:8000,http://qwen38-sg-e3:8000,http://qwen38-sg-e4:8000,http://qwen38-sg-e5:8000,http://qwen38-sg-e6:8000,http://qwen38-sg-e7:8000}
       RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:-qwen-local}
       RJ_ADVERTISE_CTX_MARGIN: ${RJ_ADVERTISE_CTX_MARGIN:-8192}
+      # Explicitly parameterized so a qualified replacement model can preserve
+      # six-figure output budgets during a one-engine handoff. The 27B default
+      # retains ramjet's legacy compatibility sentinel.
+      RJ_MAX_TOKENS_STRIP: ${RJ_MAX_TOKENS_STRIP:-100000}
       RJ_ROUTE_ALPHA: ${RJ_ROUTE_ALPHA:-4}
       RJ_ROUTE_LOAD_UNIT_BYTES: ${RJ_ROUTE_LOAD_UNIT_BYTES:-32768}
       RJ_ROUTE_MAX_LOAD_UNITS: ${RJ_ROUTE_MAX_LOAD_UNITS:-8}
