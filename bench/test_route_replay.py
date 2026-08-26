@@ -1,7 +1,14 @@
+import argparse
 import unittest
 from unittest import mock
 
-from route_replay import choose, records, replay, session_affinity_choice
+from route_replay import (
+    choose,
+    parse_projected_loads,
+    records,
+    replay,
+    session_affinity_choice,
+)
 
 
 def start(chosen=0, rotation=0, left=(40, 0), right=(0, 0)):
@@ -45,6 +52,7 @@ class RouteReplayTest(unittest.TestCase):
         rows = replay(parsed, {}, [4], [32])
         self.assertEqual(rows[0]["agreement_pct"], 100.0)
         self.assertEqual(rows[0]["counterfactual_migrations"], 0)
+        self.assertNotIn("projected_load", rows[0])
 
     def test_v3_through_v9_journal_records_are_accepted(self):
         record = start()
@@ -130,12 +138,41 @@ class RouteReplayTest(unittest.TestCase):
         record["candidates"][0]["request_load_units"] = 1
         record["candidates"][1]["request_load_units"] = 32
 
+        self.assertEqual(choose(record, alpha=4, cap=32), 1)
         self.assertEqual(choose(record, alpha=4, cap=32, projected_load=False), 1)
-        self.assertEqual(choose(record, alpha=4, cap=32), 0)
         self.assertEqual(choose(record, alpha=4, cap=32, projected_load=True), 0)
 
-        record["candidates"][1]["request_load_units"] = 0
-        self.assertIsNone(choose(record, alpha=4, cap=32))
+    def test_projected_load_fails_closed_on_invalid_request_load(self):
+        for invalid in (None, 0, -1, True, 1.0, "1"):
+            with self.subTest(invalid=invalid):
+                record = start()
+                if invalid is None:
+                    del record["candidates"][0]["request_load_units"]
+                else:
+                    record["candidates"][0]["request_load_units"] = invalid
+                with self.assertRaisesRegex(
+                    ValueError, "positive integer request_load_units"
+                ):
+                    choose(record, alpha=4, cap=32, projected_load=True)
+
+    def test_projected_load_parser_is_explicit_and_deduplicated(self):
+        self.assertEqual(parse_projected_loads("off,on,ON"), [False, True])
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "subset of off,on"):
+            parse_projected_loads("observed")
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "include off or on"):
+            parse_projected_loads(",")
+
+    def test_replay_only_adds_projected_dimension_when_requested(self):
+        record = start(chosen=1, left=(512, 9), right=(0, 0))
+        record["candidates"][0]["request_load_units"] = 1
+        record["candidates"][1]["request_load_units"] = 32
+
+        legacy = replay([record], {}, [4], [32])
+        swept = replay([record], {}, [4], [32], projected_loads=[False, True])
+
+        self.assertNotIn("projected_load", legacy[0])
+        self.assertEqual([row["projected_load"] for row in swept], [False, True])
+        self.assertEqual([row["route_counts"] for row in swept], [{"1": 1}, {"0": 1}])
 
     def test_session_affinity_replay_matches_weight_overlap_and_rotation(self):
         record = start(chosen=0, rotation=0, left=(5, 0), right=(0, 0))
@@ -319,6 +356,51 @@ class RouteReplayTest(unittest.TestCase):
                 0,
             )
         self.assertIn("       1", output.getvalue())
+
+    def test_cli_projected_load_sweep_labels_rows(self):
+        record = start(chosen=1, left=(512, 9), right=(0, 0))
+        record["candidates"][0]["request_load_units"] = 1
+        record["candidates"][1]["request_load_units"] = 32
+        lines = __import__("json").dumps(record)
+        with mock.patch("sys.stdin", __import__("io").StringIO(lines)), mock.patch(
+            "sys.stdout", new_callable=__import__("io").StringIO
+        ) as output:
+            from route_replay import main
+
+            self.assertEqual(
+                main(
+                    [
+                        "-",
+                        "--alphas",
+                        "4",
+                        "--caps",
+                        "32",
+                        "--projected-loads",
+                        "off,on",
+                        "--json",
+                    ]
+                ),
+                0,
+            )
+        rows = [
+            __import__("json").loads(line) for line in output.getvalue().splitlines()
+        ]
+        self.assertEqual([row["projected_load"] for row in rows], [False, True])
+        self.assertEqual([row["requests"] for row in rows], [1, 1])
+
+    def test_cli_projected_load_fails_before_any_output(self):
+        record = start()
+        del record["candidates"][1]["request_load_units"]
+        lines = __import__("json").dumps(record)
+        with mock.patch("sys.stdin", __import__("io").StringIO(lines)), mock.patch(
+            "sys.stdout", new_callable=__import__("io").StringIO
+        ) as output, mock.patch("sys.stderr", new_callable=__import__("io").StringIO):
+            from route_replay import main
+
+            with self.assertRaises(SystemExit) as raised:
+                main(["-", "--projected-loads", "on", "--json"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(output.getvalue(), "")
 
 
 if __name__ == "__main__":

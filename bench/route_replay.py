@@ -4,6 +4,7 @@
 Usage:
   docker logs ds4-loadbalancer 2>&1 | python3 route_replay.py -
   python3 route_replay.py trace.log --alphas 1,2,4,8 --caps 8,16,32,64
+  python3 route_replay.py trace.log --projected-loads off,on
 
 The journal deliberately excludes prompts and fingerprints. Replay therefore
 holds each observed cache-overlap/load snapshot fixed and asks which upstream
@@ -26,6 +27,25 @@ def parse_numbers(raw, cast):
     values = [cast(item.strip()) for item in raw.split(",") if item.strip()]
     if not values or any(not math.isfinite(float(value)) or value < 0 for value in values):
         raise argparse.ArgumentTypeError("values must be finite and non-negative")
+    return values
+
+
+def parse_projected_loads(raw):
+    labels = {"off": False, "on": True}
+    values = []
+    for item in raw.split(","):
+        label = item.strip().lower()
+        if not label:
+            continue
+        if label not in labels:
+            raise argparse.ArgumentTypeError(
+                "projected loads must be a comma-separated subset of off,on"
+            )
+        value = labels[label]
+        if value not in values:
+            values.append(value)
+    if not values:
+        raise argparse.ArgumentTypeError("projected loads must include off or on")
     return values
 
 
@@ -177,43 +197,41 @@ def session_affinity_choice(record, alpha=None, bonus_blocks=None, max_load_delt
     return _session_affinity_decision(record, alpha, bonus_blocks, max_load_delta)[0]
 
 
-def choose(record, alpha, cap, tie_break=None, projected_load=None):
+def choose(record, alpha, cap, tie_break=None, projected_load=False):
     candidates = record["candidates"]
     rotation = record.get("rotation", 0)
     count = len(candidates)
     if count == 0:
         return None
     tie_break = tie_break or record.get("score_tie_break", "load-neutral")
-    projected_load = (
-        record.get("projected_load", False) if projected_load is None else projected_load
-    )
-    if type(projected_load) is not bool:
-        return None
-    if projected_load and any(
-        type(candidate.get("request_load_units")) is not int
-        or candidate["request_load_units"] < 1
-        for candidate in candidates
-    ):
-        return None
+    scored_loads = {}
+    for candidate in candidates:
+        load = candidate["load_units"]
+        if projected_load:
+            request_load = candidate.get("request_load_units")
+            if type(request_load) is not int or request_load <= 0:
+                raise ValueError(
+                    f"route-journal seq {record.get('seq', 'unknown')} candidate "
+                    f"{candidate.get('upstream', 'unknown')}: projected-load replay "
+                    "requires a positive integer request_load_units"
+                )
+            load += request_load - 1
+        scored_loads[candidate["upstream"]] = load
 
     def compare(left, right):
         left_healthy = bool(left["healthy"])
         right_healthy = bool(right["healthy"])
         if left_healthy != right_healthy:
             return -1 if left_healthy else 1
-        left_load = left["load_units"] + (
-            left["request_load_units"] - 1 if projected_load else 0
-        )
-        right_load = right["load_units"] + (
-            right["request_load_units"] - 1 if projected_load else 0
-        )
+        left_load = scored_loads[left["upstream"]]
+        right_load = scored_loads[right["upstream"]]
         left_score = min(left["overlap_blocks"], cap) - alpha * left_load
         right_score = min(right["overlap_blocks"], cap) - alpha * right_load
         if left_score != right_score:
             return -1 if left_score > right_score else 1
         if (
             left["overlap_blocks"] != right["overlap_blocks"]
-            and (tie_break == "overlap" or left["load_units"] == right["load_units"])
+            and (tie_break == "overlap" or left_load == right_load)
         ):
             return -1 if left["overlap_blocks"] > right["overlap_blocks"] else 1
         left_rotation = (left["upstream"] + rotation) % count
@@ -231,9 +249,9 @@ def replay(
     alphas,
     caps,
     tie_break=None,
-    projected_load=None,
     session_bonus_blocks=None,
     session_max_load_delta=None,
+    projected_loads=None,
 ):
     paired_records = [
         (record, finishes[record["seq"]])
@@ -281,43 +299,49 @@ def replay(
         return round(100 * cached_tokens / prompt_tokens, 1) if prompt_tokens else None
 
     rows = []
+    policies = [None] if projected_loads is None else projected_loads
     for alpha in alphas:
         for cap in caps:
-            choices = []
-            agreements = 0
-            overlaps = []
-            loads = []
-            for record in starts:
-                selected = choose(record, alpha, cap, tie_break, projected_load)
-                if selected is None:
-                    continue
-                choices.append(selected)
-                agreements += selected == record.get("chosen")
-                candidate = next(item for item in record["candidates"] if item["upstream"] == selected)
-                overlaps.append(candidate["overlap_blocks"])
-                loads.append(candidate["load_units"])
-            route_counts = {str(route): choices.count(route) for route in sorted(set(choices))}
-            session_replayed = [
-                session_affinity_choice(
-                    record,
-                    alpha=alpha,
-                    bonus_blocks=session_bonus_blocks,
-                    max_load_delta=session_max_load_delta,
-                )
-                for record in starts
-            ]
-            session_record_replayed = [_session_affinity_decision(record) for record in starts]
-            paired = [finish for _, finish in paired_records]
-            complete = [finish for _, finish in complete_records]
-            durations = [record["duration_ms"] for record in complete if record.get("duration_ms") is not None]
-            prompt_tokens = sum(record.get("prompt_tokens") or 0 for record in complete)
-            cached_tokens = sum(record.get("cached_tokens") or 0 for record in complete)
-            rows.append(
-                {
+            for projected_load in policies:
+                choices = []
+                agreements = 0
+                overlaps = []
+                loads = []
+                for record in starts:
+                    selected = choose(
+                        record,
+                        alpha,
+                        cap,
+                        tie_break,
+                        projected_load=bool(projected_load),
+                    )
+                    if selected is None:
+                        continue
+                    choices.append(selected)
+                    agreements += selected == record.get("chosen")
+                    candidate = next(item for item in record["candidates"] if item["upstream"] == selected)
+                    overlaps.append(candidate["overlap_blocks"])
+                    loads.append(candidate["load_units"])
+                route_counts = {str(route): choices.count(route) for route in sorted(set(choices))}
+                session_replayed = [
+                    session_affinity_choice(
+                        record,
+                        alpha=alpha,
+                        bonus_blocks=session_bonus_blocks,
+                        max_load_delta=session_max_load_delta,
+                    )
+                    for record in starts
+                ]
+                session_record_replayed = [_session_affinity_decision(record) for record in starts]
+                paired = [finish for _, finish in paired_records]
+                complete = [finish for _, finish in complete_records]
+                durations = [record["duration_ms"] for record in complete if record.get("duration_ms") is not None]
+                prompt_tokens = sum(record.get("prompt_tokens") or 0 for record in complete)
+                cached_tokens = sum(record.get("cached_tokens") or 0 for record in complete)
+                row = {
                     "alpha": alpha,
                     "cap": cap,
                     "tie_break": tie_break or "observed",
-                    "projected_load": "observed" if projected_load is None else projected_load,
                     "requests": len(choices),
                     "agreement_pct": round(100 * agreements / len(choices), 1) if choices else None,
                     "counterfactual_migrations": len(choices) - agreements,
@@ -374,7 +398,9 @@ def replay(
                     "observed_warm_cache_hit_pct": cache_hit(warm_finishes),
                     "observed_cold_cache_hit_pct": cache_hit(cold_finishes),
                 }
-            )
+                if projected_load is not None:
+                    row["projected_load"] = projected_load
+                rows.append(row)
     return rows
 
 
@@ -429,10 +455,12 @@ def main(argv=None):
         help="score-equality policy; observed follows each journal version/record",
     )
     parser.add_argument(
-        "--projected-load",
-        choices=("observed", "off", "on"),
-        default="observed",
-        help="candidate request-cost policy; observed follows each journal version/record",
+        "--projected-loads",
+        type=parse_projected_loads,
+        help=(
+            "explicitly sweep off,on projected-load scoring; when on, score each "
+            "candidate with load_units + request_load_units - 1"
+        ),
     )
     parser.add_argument("--json", action="store_true", help="emit one JSON object per policy")
     args = parser.parse_args(argv)
@@ -470,31 +498,37 @@ def main(argv=None):
     if not starts:
         raise SystemExit("no v1 route-journal start records found")
     tie_break = None if args.tie_break == "observed" else args.tie_break
-    projected_load = {"observed": None, "off": False, "on": True}[
-        args.projected_load
-    ]
-    rows = replay(
-        starts,
-        finishes,
-        alphas,
-        caps,
-        tie_break,
-        projected_load,
-        args.session_bonus_blocks,
-        args.session_max_load_delta,
-    )
+    try:
+        rows = replay(
+            starts,
+            finishes,
+            alphas,
+            caps,
+            tie_break,
+            args.session_bonus_blocks,
+            args.session_max_load_delta,
+            args.projected_loads,
+        )
+    except ValueError as error:
+        parser.error(str(error))
     if args.json:
         for row in rows:
             print(json.dumps(row, sort_keys=True))
     else:
+        projected_header = " projected" if args.projected_loads is not None else ""
         print(
-            "alpha cap requests agree% moves routes mean_overlap mean_load paired "
-            "first_byte ttft_ms cache% warm/cold warm_ttft cold_ttft"
+            f"alpha cap{projected_header} requests agree% moves routes mean_overlap "
+            "mean_load paired first_byte ttft_ms cache% warm/cold warm_ttft cold_ttft"
         )
         for row in rows:
             routes = ",".join(f"{key}:{value}" for key, value in row["route_counts"].items())
+            projected_value = (
+                f" {'on' if row['projected_load'] else 'off':>9}"
+                if args.projected_loads is not None
+                else ""
+            )
             print(
-                f"{row['alpha']:>5g} {row['cap']:>3} {row['requests']:>8} "
+                f"{row['alpha']:>5g} {row['cap']:>3}{projected_value} {row['requests']:>8} "
                 f"{row['agreement_pct']:>6.1f} {row['counterfactual_migrations']:>5} {routes:>12} "
                 f"{row['mean_overlap_blocks']:>12.2f} {row['mean_observed_load_units']:>9.2f} "
                 f"{row['paired_finishes']:>6} "
