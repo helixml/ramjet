@@ -22,45 +22,59 @@ compose_timeout_seconds=60
 smoke_max_seconds=120
 full_max_seconds=300
 campaign_max_seconds=1800
+rollback_budget_seconds=180
+guard_kill_grace_seconds=30
+render_budget_seconds=255
+post_render_mutation_budget_seconds=135
 
 fail() {
   echo "qwen38 route-load cap A/B: $*" >&2
   exit 2
 }
 
-[[ $# == 1 ]] || fail "usage: $0 EXISTING-EXPERIMENT-DIRECTORY"
-[[ $(hostname) == node06 ]] || fail "this campaign may run only on node06"
-experiment_dir=$(realpath -e -- "$1")
-[[ $experiment_dir == "$deployment_dir/.experiments/"* ]] || \
-  fail "experiment directory is outside the Qwen deployment"
-[[ -d $experiment_dir && ! -L $experiment_dir ]] || \
-  fail "experiment directory is not a real directory"
-[[ $(stat -c '%u:%a' "$experiment_dir") == 0:700 ]] || \
-  fail "experiment directory must be root-owned mode 0700"
-expected_entries=$'capture_node06.sh\nengine_metrics.py\nmixed_bench.py\nnode06_gpu_guard.py\nnode06_operational_moratorium.py\nqwen38_route_load_cap_abba.sh'
-observed_entries=$(find "$experiment_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
-[[ $observed_entries == "$expected_entries" ]] || \
-  fail "experiment directory must contain only the staged authorities"
-for artifact in mixed_bench.py engine_metrics.py node06_gpu_guard.py \
-  node06_operational_moratorium.py capture_node06.sh; do
-  [[ -f $experiment_dir/$artifact && ! -L $experiment_dir/$artifact ]] || \
-    fail "missing experiment artifact: $artifact"
-done
-[[ $(sha256sum "$experiment_dir/mixed_bench.py" | awk '{print $1}') == "$mixed_bench_sha" ]] || \
-  fail "mixed benchmark bytes do not match the merged authority"
-[[ $(sha256sum "$experiment_dir/engine_metrics.py" | awk '{print $1}') == "$engine_metrics_sha" ]] || \
-  fail "engine metrics bytes do not match the merged authority"
-[[ $(sha256sum "$experiment_dir/node06_gpu_guard.py" | awk '{print $1}') == "$gpu_guard_sha" ]] || \
-  fail "GPU guard bytes do not match the qualified authority"
-[[ $(sha256sum "$experiment_dir/node06_operational_moratorium.py" | awk '{print $1}') == "$moratorium_sha" ]] || \
-  fail "operational policy bytes do not match the qualified authority"
-[[ $(sha256sum "$experiment_dir/capture_node06.sh" | awk '{print $1}') == "$capture_sha" ]] || \
-  fail "capture bytes do not match the qualified authority"
-[[ -r $compose_file && ! -L $compose_file ]] || fail "canonical Compose file is unavailable"
-[[ $(sha256sum "$compose_file" | awk '{print $1}') == "$compose_sha" ]] || \
-  fail "canonical Compose bytes drifted"
-# All later evidence creation is exclusive. A rerun must use a fresh directory.
-set -o noclobber
+preflight() {
+  [[ $# == 1 ]] || fail "usage: $0 EXISTING-EXPERIMENT-DIRECTORY"
+  [[ $(hostname) == node06 ]] || fail "this campaign may run only on node06"
+  experiment_dir=$(realpath -e -- "$1")
+  runner_path=$(realpath -e -- "$0")
+  [[ $experiment_dir == "$deployment_dir/.experiments/"* ]] || \
+    fail "experiment directory is outside the Qwen deployment"
+  [[ -d $experiment_dir && ! -L $experiment_dir ]] || \
+    fail "experiment directory is not a real directory"
+  [[ $(stat -c '%u:%a' "$experiment_dir") == 0:700 ]] || \
+    fail "experiment directory must be root-owned mode 0700"
+  [[ $runner_path == "$experiment_dir/qwen38_route_load_cap_abba.sh" ]] || \
+    fail "the staged campaign authority must be the executing runner"
+  [[ -f $0 && ! -L $0 && -f $runner_path && ! -L $runner_path ]] || \
+    fail "the campaign runner must be a regular non-symlink file"
+  expected_entries=$'capture_node06.sh\nengine_metrics.py\nmixed_bench.py\nnode06_gpu_guard.py\nnode06_operational_moratorium.py\nqwen38_route_load_cap_abba.sh'
+  observed_entries=$(find "$experiment_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+  [[ $observed_entries == "$expected_entries" ]] || \
+    fail "experiment directory must contain only the staged authorities"
+  for artifact in mixed_bench.py engine_metrics.py node06_gpu_guard.py \
+    node06_operational_moratorium.py capture_node06.sh; do
+    [[ -f $experiment_dir/$artifact && ! -L $experiment_dir/$artifact ]] || \
+      fail "missing experiment artifact: $artifact"
+  done
+  [[ $(sha256sum "$experiment_dir/mixed_bench.py" | awk '{print $1}') == "$mixed_bench_sha" ]] || \
+    fail "mixed benchmark bytes do not match the merged authority"
+  [[ $(sha256sum "$experiment_dir/engine_metrics.py" | awk '{print $1}') == "$engine_metrics_sha" ]] || \
+    fail "engine metrics bytes do not match the merged authority"
+  [[ $(sha256sum "$experiment_dir/node06_gpu_guard.py" | awk '{print $1}') == "$gpu_guard_sha" ]] || \
+    fail "GPU guard bytes do not match the qualified authority"
+  [[ $(sha256sum "$experiment_dir/node06_operational_moratorium.py" | awk '{print $1}') == "$moratorium_sha" ]] || \
+    fail "operational policy bytes do not match the qualified authority"
+  [[ $(sha256sum "$experiment_dir/capture_node06.sh" | awk '{print $1}') == "$capture_sha" ]] || \
+    fail "capture bytes do not match the qualified authority"
+  [[ -r $compose_file && ! -L $compose_file ]] || fail "canonical Compose file is unavailable"
+  [[ $(sha256sum "$compose_file" | awk '{print $1}') == "$compose_sha" ]] || \
+    fail "canonical Compose bytes drifted"
+  # All later evidence creation is exclusive. A rerun must use a fresh directory.
+  set -o noclobber
+  sha256sum "$runner_path" >"$experiment_dir/campaign-authority.sha256"
+}
+
+preflight "$@"
 
 mapfile -t bearer_headers < <(
   grep -Eo 'Bearer [A-Za-z0-9_-]+' /etc/caddy/Caddyfile
@@ -81,6 +95,12 @@ compose_environment=(
   RJ_ROUTE_LOAD_UNIT_BYTES=32768
   RJ_ROUTE_PHASE_AWARE_LOAD=true
   RJ_ROUTE_JOURNAL=true
+  RJ_ADVERTISE_CTX_MARGIN=8192
+  RJ_IDLE_DRAIN_MODE=observe
+  RJ_IDLE_DRAIN_RELEASE=fleet-idle
+  RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS=600
+  RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA=4
+  MACHINEVIEW_NETWORK=qwen38_27b_default
 )
 
 exec 9>"$lock_file"
@@ -92,15 +112,18 @@ engine_state() {
     "${engines[@]}"
 }
 
-require_engines_unchanged() {
+record_engines_unchanged() {
   local observed=$1
-  engine_state >"$observed"
-  cmp -s "$experiment_dir/engines.before.txt" "$observed" || \
-    fail "an engine changed during the LB-only campaign"
+  engine_state >"$observed" &&
+    cmp -s "$experiment_dir/engines.before.txt" "$observed"
+}
+
+require_engines_unchanged() {
+  record_engines_unchanged "$1" || fail "an engine changed during the LB-only campaign"
 }
 
 check_lb() {
-  local expected_cap=$1 health up_count up_sum config_files project live_environment
+  local expected_cap=$1 health up_count up_sum config_files project live_environment live_networks
   [[ $(docker inspect --format '{{.Config.Image}}' ds4-loadbalancer) == "$lb_image" ]] || \
     return 1
   [[ $(docker inspect --format '{{.Image}}' ds4-loadbalancer) == "$lb_image_id" ]] || \
@@ -125,9 +148,23 @@ check_lb() {
     RJ_ROUTE_LOAD_UNIT_BYTES=32768 \
     "RJ_ROUTE_MAX_LOAD_UNITS=$expected_cap" \
     RJ_ROUTE_PHASE_AWARE_LOAD=true \
-    RJ_ROUTE_JOURNAL=true; do
+    RJ_ROUTE_JOURNAL=true \
+    RJ_ADVERTISE_CTX_MARGIN=8192 \
+    RJ_IDLE_DRAIN_MODE=observe \
+    RJ_IDLE_DRAIN_RELEASE=fleet-idle \
+    RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS=600 \
+    RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA=4 \
+    RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS=900 \
+    RJ_IDLE_DRAIN_MIN_WARM=1 \
+    RJ_IDLE_DRAIN_COOLDOWN_SECONDS=300 \
+    RJ_IDLE_DRAIN_GRACE_SECONDS=30 \
+    RJ_IDLE_DRAIN_INTERVAL_SECONDS=15; do
     grep -Fx "$expected" <<<"$live_environment" >/dev/null || return 1
   done
+  live_networks=$(docker inspect --format '{{json .NetworkSettings.Networks}}' \
+    ds4-loadbalancer) || return 1
+  jq -e 'keys | sort == ["qwen38_27b_default", "qwen38_flash_next_default"]' \
+    <<<"$live_networks" >/dev/null || return 1
   health=$(curl -fsS --max-time 5 http://127.0.0.1:8006/health) || return 1
   jq -e '.status == "ok" and .healthy_replicas == 2 and .total_replicas == 2' \
     <<<"$health" >/dev/null || return 1
@@ -160,6 +197,21 @@ wait_for_idle() {
   done
 }
 
+campaign_remaining_before_rollback() {
+  local extra_reserve=${1:-0}
+  local remaining=$((campaign_started + campaign_max_seconds - SECONDS - rollback_budget_seconds - extra_reserve))
+  ((remaining >= 0)) || return 1
+  printf '%s\n' "$remaining"
+}
+
+require_campaign_budget() {
+  local required=$1 phase=$2 remaining
+  remaining=$(campaign_remaining_before_rollback) || \
+    fail "campaign exhausted its pre-rollback wall-time authority before $phase"
+  ((remaining >= required)) || \
+    fail "campaign lacks the bounded pre-rollback budget for $phase"
+}
+
 require_lb() {
   check_lb "$1" || fail "load balancer is not exact and healthy 2/2 at cap $1"
 }
@@ -173,18 +225,45 @@ wait_for_lb() {
   require_lb "$expected_cap"
 }
 
+rollback_wait_for_lb() {
+  local expected_cap=$1 deadline=$((SECONDS + 60))
+  until check_lb "$expected_cap" 2>/dev/null; do
+    ((SECONDS < deadline)) || return 1
+    sleep 1
+  done
+  check_lb "$expected_cap"
+}
+
 mutated=0
 rollback() {
-  local status=$?
+  local status=$? compose_ok=true health_ok=true engines_ok=true rollback_result=not-required
   trap - EXIT INT TERM HUP
   if ((mutated)); then
-    cd "$deployment_dir"
-    timeout --foreground "$compose_timeout_seconds" \
+    if ! cd "$deployment_dir"; then
+      compose_ok=false
+    elif ! timeout --foreground "$compose_timeout_seconds" \
       "${compose_environment[@]}" RJ_ROUTE_MAX_LOAD_UNITS=8 \
       docker compose -f "$compose_file" up -d --no-deps --force-recreate \
-        ds4-loadbalancer >"$experiment_dir/rollback.txt" 2>&1 || status=1
-    wait_for_lb 8 || status=1
-    require_engines_unchanged "$experiment_dir/rollback-engines.txt" || status=1
+        ds4-loadbalancer >"$experiment_dir/rollback.txt" 2>&1; then
+      compose_ok=false
+    fi
+    rollback_wait_for_lb 8 || health_ok=false
+    record_engines_unchanged "$experiment_dir/rollback-engines.txt" || engines_ok=false
+    if [[ $compose_ok == true && $health_ok == true && $engines_ok == true ]]; then
+      rollback_result=passed
+    else
+      rollback_result=failed
+      status=1
+    fi
+    jq -n \
+      --arg result "$rollback_result" \
+      --argjson compose "$compose_ok" \
+      --argjson healthy_exact_cap8 "$health_ok" \
+      --argjson engines_unchanged "$engines_ok" \
+      '{result: $result, compose: $compose,
+        healthy_exact_cap8: $healthy_exact_cap8,
+        engines_unchanged: $engines_unchanged}' \
+      >"$experiment_dir/rollback-status.json" || status=1
   fi
   exit "$status"
 }
@@ -194,12 +273,15 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 render_and_recreate() {
-  local cap=$1 label=$2 proof=$experiment_dir/$label-render-proof.json
+  local cap=$1 label=$2 proof
+  proof=$experiment_dir/$label-render-proof.json
   cd "$deployment_dir"
+  require_campaign_budget "$render_budget_seconds" "$label idle/render/recreate"
   wait_for_idle
   # The complete Compose render contains credential-expanded environment.
   # Validate it only in-memory and persist a reviewed, non-secret projection.
-  "${compose_environment[@]}" RJ_ROUTE_MAX_LOAD_UNITS="$cap" \
+  timeout --foreground "$compose_timeout_seconds" \
+    "${compose_environment[@]}" RJ_ROUTE_MAX_LOAD_UNITS="$cap" \
     docker compose -f "$compose_file" config --format json |
     jq -e --arg image "$lb_image" --arg cap "$cap" --arg upstreams "$upstreams" '
       .services["ds4-loadbalancer"] |
@@ -216,6 +298,7 @@ render_and_recreate() {
         upstream: .environment.RJ_UPSTREAM
       }
     ' >"$proof" || fail "render authority failed for $label"
+  require_campaign_budget "$post_render_mutation_budget_seconds" "$label mutation"
   mutated=1
   timeout --foreground "$compose_timeout_seconds" \
     "${compose_environment[@]}" RJ_ROUTE_MAX_LOAD_UNITS="$cap" \
@@ -237,9 +320,12 @@ prove_render_delta() {
     ) |
     .services["ds4-loadbalancer"].environment.RJ_ROUTE_MAX_LOAD_UNITS = "<candidate>";
     sanitize'
-  cap8=$("${compose_environment[@]}" RJ_ROUTE_MAX_LOAD_UNITS=8 \
+  require_campaign_budget "$post_render_mutation_budget_seconds" "render parity"
+  cap8=$(timeout --foreground "$compose_timeout_seconds" \
+    "${compose_environment[@]}" RJ_ROUTE_MAX_LOAD_UNITS=8 \
     docker compose -f "$compose_file" config --format json | jq -S "$filter")
-  cap32=$("${compose_environment[@]}" RJ_ROUTE_MAX_LOAD_UNITS=32 \
+  cap32=$(timeout --foreground "$compose_timeout_seconds" \
+    "${compose_environment[@]}" RJ_ROUTE_MAX_LOAD_UNITS=32 \
     docker compose -f "$compose_file" config --format json | jq -S "$filter")
   cap8_sha=$(sha256sum <<<"$cap8" | awk '{print $1}')
   cap32_sha=$(sha256sum <<<"$cap32" | awk '{print $1}')
@@ -252,19 +338,26 @@ prove_render_delta() {
 
 run_cell() {
   local label=$1 cap=$2 prefill=$3 decoders=$4 decode=$5 runs=$6 lead_ms=$7 max_seconds=$8
-  local started result thermal guard_stdout
+  local started result thermal guard_stdout available_seconds cell_runtime_seconds
   result=$experiment_dir/$label.json
   thermal=$experiment_dir/$label-thermal.jsonl
   guard_stdout=$experiment_dir/$label-guard.stdout
   [[ ! -e $result && ! -e $thermal && ! -e $guard_stdout ]] || \
     fail "$label evidence already exists"
-  ((SECONDS - campaign_started < campaign_max_seconds)) || \
-    fail "campaign exceeded its wall-time authority"
+  available_seconds=$(campaign_remaining_before_rollback "$guard_kill_grace_seconds") || \
+    fail "campaign exhausted its pre-rollback wall-time authority"
+  ((available_seconds >= 1)) || fail "campaign exhausted its guarded-cell wall-time authority"
+  if ((max_seconds < available_seconds)); then
+    cell_runtime_seconds=$max_seconds
+  else
+    cell_runtime_seconds=$available_seconds
+  fi
   started=$(date -u +%FT%TZ)
-  python3 "$experiment_dir/node06_gpu_guard.py" \
+  timeout --foreground --kill-after=45 "$available_seconds" \
+    python3 "$experiment_dir/node06_gpu_guard.py" \
     --output "$thermal" \
     --label "qwen38-$label" \
-    --max-runtime-seconds "$max_seconds" \
+    --max-runtime-seconds "$cell_runtime_seconds" \
     -- \
     env \
       METRICS_URLS="$metrics_urls" \
@@ -289,8 +382,15 @@ run_cell() {
   ' "$result" >/dev/null || fail "$label did not reconcile"
   jq -e 'select(.type == "final") | .status == "passed"' "$thermal" >/dev/null || \
     fail "$label thermal guard did not pass"
-  jq -e 'all(.run_route_relationships[]; .decoder_unknown_route == 0)' \
-    "$result" >/dev/null || fail "$label route authority was incomplete"
+  jq -e --argjson runs "$runs" --argjson decoders "$decoders" '
+    .runs == $runs and
+    .decoders == $decoders and
+    (.run_route_relationships | length) == $runs and
+    .decoder_requests_ok == ($decoders * $runs) and
+    .decoder_requests_failed == 0 and
+    .reconciliation.client.requests == (($decoders + 1) * $runs) and
+    all(.run_route_relationships[]; .decoder_unknown_route == 0)
+  ' "$result" >/dev/null || fail "$label route or plan authority was incomplete"
   for engine in "${engines[@]}"; do
     if docker logs --since "$started" "$engine" 2>&1 |
       grep -Eiq 'CUDA.*error|NCCL.*error|out of memory|Xid|Traceback|EngineCore.*fail|JIT|compil'; then
@@ -299,8 +399,7 @@ run_cell() {
   done
   require_lb "$cap"
   require_engines_unchanged "$experiment_dir/$label-engines-after.txt"
-  ((SECONDS - campaign_started < campaign_max_seconds)) || \
-    fail "campaign exceeded its wall-time authority"
+  require_campaign_budget 0 "$label completion"
 }
 
 campaign_started=$SECONDS
@@ -323,13 +422,14 @@ run_cell cap32-b2 32 128000 16 512 3 200 "$full_max_seconds"
 render_and_recreate 8 cap8-a2
 run_cell cap8-a2 8 128000 16 512 3 200 "$full_max_seconds"
 
-require_lb 8
-require_engines_unchanged "$experiment_dir/engines.after.txt"
-jq -n \
-  --slurpfile a1 "$experiment_dir/cap8-a1.json" \
-  --slurpfile a2 "$experiment_dir/cap8-a2.json" \
-  --slurpfile b1 "$experiment_dir/cap32-b1.json" \
-  --slurpfile b2 "$experiment_dir/cap32-b2.json" '
+finish_campaign() {
+  require_lb 8
+  require_engines_unchanged "$experiment_dir/engines.after.txt"
+  jq -n \
+    --slurpfile a1 "$experiment_dir/cap8-a1.json" \
+    --slurpfile a2 "$experiment_dir/cap8-a2.json" \
+    --slurpfile b1 "$experiment_dir/cap32-b1.json" \
+    --slurpfile b2 "$experiment_dir/cap32-b2.json" '
   def mean($left; $right): ($left + $right) / 2;
   mean($a1[0].decoder_ttft_ms_p95; $a2[0].decoder_ttft_ms_p95) as $a_ttft |
   mean($b1[0].decoder_ttft_ms_p95; $b2[0].decoder_ttft_ms_p95) as $b_ttft |
@@ -356,6 +456,9 @@ jq -n \
     remaining_promotion_guards: ["decode-first", "c32-code", "serial-cache"]
   }
 ' >"$experiment_dir/comparison.json"
-mutated=0
-trap - EXIT INT TERM HUP
-printf '%s\n' 'qwen38 route-load cap evidence captured; cap 8 remains live'
+  mutated=0
+  trap - EXIT INT TERM HUP
+  printf '%s\n' 'qwen38 route-load cap evidence captured; cap 8 remains live'
+}
+
+finish_campaign

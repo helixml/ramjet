@@ -41,7 +41,7 @@ class QwenRouteLoadCapAbbaTest(unittest.TestCase):
         )
         self.assertEqual(len(compose_calls), 2)
         self.assertEqual(
-            self.source.count('timeout --foreground "$compose_timeout_seconds"'), 2
+            self.source.count('timeout --foreground "$compose_timeout_seconds"'), 5
         )
         self.assertEqual(
             self.source.count('"${compose_environment[@]}" RJ_ROUTE_MAX_LOAD_UNITS='),
@@ -59,17 +59,20 @@ class QwenRouteLoadCapAbbaTest(unittest.TestCase):
         self.assertLess(armed, first_mutation)
         self.assertLess(final_engine_proof, disarmed)
         rollback = self.source[self.source.index("rollback() {") : self.source.index("render_and_recreate() {")]
-        self.assertIn('wait_for_lb 8', rollback)
+        self.assertIn('rollback_wait_for_lb 8', rollback)
         self.assertIn('rollback-engines.txt', rollback)
+        self.assertIn('rollback-status.json', rollback)
 
     def test_failure_signal_and_rollback_failure_all_execute_rollback(self):
         rollback = self.function("rollback")
         cases = (
-            ("exit 75", 0, 75),
-            ("kill -TERM $$", 0, 143),
-            ("exit 0", 1, 1),
+            ("exit 75", 0, 0, 0, 75, "passed"),
+            ("kill -TERM $$", 0, 0, 0, 143, "passed"),
+            ("exit 0", 1, 0, 0, 1, "failed"),
+            ("exit 0", 0, 1, 0, 1, "failed"),
+            ("exit 0", 0, 1, 1, 1, "failed"),
         )
-        for action, timeout_result, expected_status in cases:
+        for action, timeout_result, health_result, engine_result, expected_status, rollback_result in cases:
             with self.subTest(action=action, timeout_result=timeout_result):
                 with tempfile.TemporaryDirectory() as directory:
                     root = pathlib.Path(directory)
@@ -83,8 +86,8 @@ compose_environment=(env LB_IMAGE=exact-image)
 experiment_dir=$deployment_dir
 mutated=1
 timeout() {{ printf 'timeout %s\\n' "$*" >>"$experiment_dir/calls"; return {timeout_result}; }}
-wait_for_lb() {{ printf 'wait %s\\n' "$1" >>"$experiment_dir/calls"; return 0; }}
-require_engines_unchanged() {{ printf 'engines %s\\n' "$1" >>"$experiment_dir/calls"; return 0; }}
+rollback_wait_for_lb() {{ printf 'wait %s\\n' "$1" >>"$experiment_dir/calls"; return {health_result}; }}
+record_engines_unchanged() {{ printf 'engines %s\\n' "$1" >>"$experiment_dir/calls"; return {engine_result}; }}
 {rollback}
 trap rollback EXIT
 trap 'exit 130' INT
@@ -105,6 +108,126 @@ trap 'exit 129' HUP
                     self.assertIn("ds4-loadbalancer", calls)
                     self.assertIn("wait 8", calls)
                     self.assertIn("rollback-engines.txt", calls)
+                    rollback_status = (root / "rollback-status.json").read_text()
+                    self.assertIn(f'"result": "{rollback_result}"', rollback_status)
+                    self.assertNotIn("cap 8 remains live", result.stdout)
+
+    def test_preflight_failure_makes_no_compose_call(self):
+        preflight = self.function("preflight")
+        script = f"""
+set -euo pipefail
+deployment_dir=/not-used
+compose_file=/not-used/compose.yaml
+hostname() {{ printf 'wrong-node\\n'; }}
+docker() {{ printf 'unexpected compose call\\n'; }}
+fail() {{ exit 2; }}
+{preflight}
+preflight /not-used
+docker compose up
+"""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_campaign_timeout_returns_to_exact_cap8_rollback(self):
+        run_cell = self.function("run_cell")
+        rollback = self.function("rollback")
+        remaining = self.function("campaign_remaining_before_rollback")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            script = f"""
+set -euo pipefail
+experiment_dir={shlex.quote(directory)}
+deployment_dir={shlex.quote(directory)}
+compose_file=$deployment_dir/docker-compose.yaml
+compose_timeout_seconds=60
+campaign_max_seconds=25
+rollback_budget_seconds=10
+guard_kill_grace_seconds=5
+campaign_started=$((SECONDS - 5))
+metrics_urls=unused
+model=unused
+engines=(engine-a engine-b)
+compose_environment=(env)
+mutated=1
+fail() {{ printf 'fail %s\\n' "$*" >>"$experiment_dir/calls"; exit 2; }}
+timeout() {{
+  printf 'timeout %s\\n' "$*" >>"$experiment_dir/calls"
+  if [[ $* == *--kill-after=45* ]]; then return 124; fi
+  return 0
+}}
+rollback_wait_for_lb() {{ printf 'wait %s\\n' "$1" >>"$experiment_dir/calls"; return 0; }}
+record_engines_unchanged() {{ printf 'engines %s\\n' "$1" >>"$experiment_dir/calls"; return 0; }}
+{rollback}
+{remaining}
+{run_cell}
+trap rollback EXIT
+run_cell expiry 32 128000 16 512 3 200 300
+"""
+            result = subprocess.run(
+                ["bash", "-c", script],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 124, result.stderr)
+            calls = (root / "calls").read_text()
+            self.assertRegex(calls, r"timeout --foreground --kill-after=45 5 python3")
+            self.assertIn("RJ_ROUTE_MAX_LOAD_UNITS=8", calls)
+            self.assertLess(
+                calls.index("--kill-after=45"), calls.index("RJ_ROUTE_MAX_LOAD_UNITS=8")
+            )
+            rollback_status = (root / "rollback-status.json").read_text()
+            self.assertIn('"result": "passed"', rollback_status)
+
+    def test_near_deadline_refuses_render_before_any_mutation(self):
+        render = self.function("render_and_recreate")
+        require_budget = self.function("require_campaign_budget")
+        remaining = self.function("campaign_remaining_before_rollback")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            script = f"""
+set -euo pipefail
+experiment_dir={shlex.quote(directory)}
+deployment_dir={shlex.quote(directory)}
+compose_file=$deployment_dir/docker-compose.yaml
+compose_timeout_seconds=60
+campaign_max_seconds=300
+rollback_budget_seconds=180
+campaign_started=$((SECONDS - 119))
+render_budget_seconds=255
+post_render_mutation_budget_seconds=135
+lb_image=exact
+upstreams=http://a,http://b
+compose_environment=(env)
+mutated=0
+fail() {{ printf 'failed %s\\n' "$*"; exit 2; }}
+wait_for_idle() {{ printf 'unexpected idle\\n' >>"$experiment_dir/calls"; }}
+timeout() {{ printf 'unexpected mutation %s\\n' "$*" >>"$experiment_dir/calls"; }}
+wait_for_lb() {{ printf 'unexpected health\\n' >>"$experiment_dir/calls"; }}
+require_engines_unchanged() {{ printf 'unexpected engines\\n' >>"$experiment_dir/calls"; }}
+{remaining}
+{require_budget}
+{render}
+render_and_recreate 32 cap32-near-deadline
+"""
+            result = subprocess.run(
+                ["bash", "-c", script],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("lacks the bounded pre-rollback budget", result.stdout)
+            self.assertFalse((root / "calls").exists())
 
     def test_secret_bearing_render_is_never_persisted(self):
         self.assertNotRegex(
@@ -135,6 +258,9 @@ set -euo pipefail
 experiment_dir={shlex.quote(directory)}
 compose_file=/not-used
 compose_environment=(python3 {shlex.quote(str(mock))})
+compose_timeout_seconds=60
+post_render_mutation_budget_seconds=135
+require_campaign_budget() {{ :; }}
 fail() {{ echo "$*" >&2; exit 2; }}
 {function}
 prove_render_delta
@@ -162,7 +288,41 @@ prove_render_delta
         }
         self.assertLessEqual(values["smoke_max_seconds"] + 4 * values["full_max_seconds"], 1500)
         self.assertLessEqual(values["campaign_max_seconds"], 1800)
-        self.assertIn('--max-runtime-seconds "$max_seconds"', self.source)
+        self.assertIn('--max-runtime-seconds "$cell_runtime_seconds"', self.source)
+        self.assertIn('rollback_budget_seconds=180', self.source)
+        self.assertIn('guard_kill_grace_seconds=30', self.source)
+        self.assertIn('timeout --foreground --kill-after=45 "$available_seconds"', self.source)
+
+    def test_success_reproves_cap8_and_records_nonpromotion(self):
+        finish = self.function("finish_campaign")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            script = f"""
+set -euo pipefail
+experiment_dir={shlex.quote(directory)}
+mutated=1
+require_lb() {{ printf 'lb %s\\n' "$1" >>"$experiment_dir/calls"; }}
+require_engines_unchanged() {{ printf 'engines %s\\n' "$1" >>"$experiment_dir/calls"; }}
+jq() {{ printf '{{"promotion_applied":false}}\\n'; }}
+{finish}
+finish_campaign
+printf 'mutated=%s\\n' "$mutated" >>"$experiment_dir/calls"
+"""
+            result = subprocess.run(
+                ["bash", "-c", script],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = (root / "calls").read_text()
+            self.assertIn("lb 8", calls)
+            self.assertIn("engines.after.txt", calls)
+            self.assertIn("mutated=0", calls)
+            comparison = (root / "comparison.json").read_text()
+            self.assertIn('"promotion_applied":false', comparison)
+            self.assertIn("cap 8 remains live", result.stdout)
 
     def test_fresh_evidence_and_final_nonpromotion_are_explicit(self):
         self.assertIn('experiment directory must contain only the staged authorities', self.source)
@@ -171,6 +331,9 @@ prove_render_delta
         self.assertIn('wait_for_idle', self.source)
         self.assertIn('promotion_applied: false', self.source)
         self.assertIn('cap 8 remains live', self.source)
+        self.assertIn('campaign-authority.sha256', self.source)
+        self.assertIn('MACHINEVIEW_NETWORK=qwen38_27b_default', self.source)
+        self.assertIn('.decoder_requests_ok == ($decoders * $runs)', self.source)
         preflight = self.source.index("experiment directory must contain only the staged authorities")
         mutation_armed = self.source.index("mutated=0")
         self.assertLess(preflight, mutation_armed)
