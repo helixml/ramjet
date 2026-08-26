@@ -19,8 +19,8 @@ import urllib.error
 import urllib.request
 
 from agentbench import Assembly, SSEDecoder, percentile, token_counts
-from engine_metrics import COUNTERS as ENGINE_COUNTERS
-from engine_metrics import delta as engine_delta
+from engine_metrics import aggregate_deltas as aggregate_engine_deltas
+from engine_metrics import cache_usage
 from engine_metrics import fetch as fetch_engine_metrics
 from engine_metrics import metric_value
 
@@ -207,35 +207,8 @@ def nonnegative_delta(before, after, keys):
 
 
 def aggregate_engine_delta(before, after):
-    if not before or not after or len(before) != len(after):
-        return None
-    cells = [engine_delta(left, right) for left, right in zip(before, after)]
-    if any(cell is None for cell in cells):
-        return None
-    aggregate = {}
-    for key in ENGINE_COUNTERS:
-        values = [cell[key] for cell in cells]
-        aggregate[key] = None if any(value is None for value in values) else sum(values)
-    queue_samples = aggregate["queue_samples"]
-    prefill_samples = aggregate["prefill_samples"]
-    prefix_queries = aggregate["prefix_queries"]
-    prefix_hits = aggregate["prefix_hits"]
-    aggregate["queue_ms_mean"] = (
-        round(1000 * aggregate["queue_seconds_sum"] / queue_samples, 2)
-        if queue_samples and aggregate["queue_seconds_sum"] is not None
-        else None
-    )
-    aggregate["prefill_ms_mean"] = (
-        round(1000 * aggregate["prefill_seconds_sum"] / prefill_samples, 2)
-        if prefill_samples and aggregate["prefill_seconds_sum"] is not None
-        else None
-    )
-    aggregate["prefix_hit_pct"] = (
-        round(100 * prefix_hits / prefix_queries, 2)
-        if prefix_queries and prefix_hits is not None
-        else None
-    )
-    return aggregate
+    """Backward-compatible name for the shared multi-engine helper."""
+    return aggregate_engine_deltas(before, after)
 
 
 def cache_outcome(prompt, cached):
@@ -248,10 +221,24 @@ def cache_outcome(prompt, cached):
     return "partial"
 
 
-def reconcile(records, lb, engine, tolerance=0):
+def reconcile(records, lb, engine, tolerance=0, cache_authority="response"):
     good = [record for record in records if record["ok"]]
     response_prompt = sum(record["prompt_tokens"] for record in good)
     response_cached = sum(record["cached_tokens"] for record in good)
+    usage = cache_usage(
+        response_prompt, response_cached, engine, authority=cache_authority
+    )
+    if cache_authority == "response":
+        cached_views = {
+            "response_usage": response_cached,
+            "load_balancer": None if lb is None else lb["cached_prompt_tokens"],
+            "engine_cached": None if engine is None else engine["cached_prompt_tokens"],
+            "engine_prefix_hits": None if engine is None else engine["prefix_hits"],
+        }
+    else:
+        cached_views = {
+            "engine_prefix_hits": None if engine is None else engine["prefix_hits"]
+        }
     expected = {
         "prompt_tokens": {
             "response_usage": response_prompt,
@@ -259,12 +246,7 @@ def reconcile(records, lb, engine, tolerance=0):
             "engine_prompt": None if engine is None else engine["prompt_tokens"],
             "engine_prefix_queries": None if engine is None else engine["prefix_queries"],
         },
-        "cached_prompt_tokens": {
-            "response_usage": response_cached,
-            "load_balancer": None if lb is None else lb["cached_prompt_tokens"],
-            "engine_cached": None if engine is None else engine["cached_prompt_tokens"],
-            "engine_prefix_hits": None if engine is None else engine["prefix_hits"],
-        },
+        "cached_prompt_tokens": cached_views,
         "requests": {
             "responses": len(good),
             "load_balancer": None if lb is None else lb["cache_requests"],
@@ -273,7 +255,7 @@ def reconcile(records, lb, engine, tolerance=0):
             "engine_prefill_samples": None if engine is None else engine["prefill_samples"],
         },
     }
-    consistent = True
+    consistent = usage["available"]
     max_spread = 0
     for values in expected.values():
         present = [value for value in values.values() if value is not None]
@@ -287,6 +269,7 @@ def reconcile(records, lb, engine, tolerance=0):
         "consistent": consistent,
         "tolerance": tolerance,
         "max_spread": max_spread,
+        "cache_authority": usage,
         "values": expected,
     }
 
@@ -494,6 +477,7 @@ def summarize(
     engine,
     tolerance,
     replica_inventory=None,
+    cache_authority="response",
 ):
     good = [record for record in records if record["ok"]]
     prompt = sum(record["prompt_tokens"] for record in good)
@@ -525,6 +509,18 @@ def summarize(
     reuse_outcomes = collections.Counter(
         record["cache_outcome"] for record in reuse_records
     )
+    usage = cache_usage(prompt, cached, engine, authority=cache_authority)
+    response_authoritative = usage["response_usage_authoritative"]
+    response_request_reuse_pct = (
+        round(100 * (len(good) - outcomes["cold"]) / len(good), 2)
+        if good
+        else None
+    )
+    response_reuse_hit_pct = (
+        round(100 * reuse_cached / reuse_prompt, 2) if reuse_prompt else None
+    )
+    response_ttft_by_outcome = latency_by_outcome(good, "ttft_ms")
+    response_wall_by_outcome = latency_by_outcome(good, "wall_ms")
     return {
         "type": "cache_working_set",
         "apps": apps,
@@ -534,7 +530,10 @@ def summarize(
         "synthetic_working_set_mib": round(apps * prefix_kib / 1024, 2),
         "requests": len(records),
         "successful": len(good),
-        "outcomes": dict(sorted(outcomes.items())),
+        "outcomes": dict(sorted(outcomes.items())) if response_authoritative else None,
+        "response_outcomes": (
+            None if response_authoritative else dict(sorted(outcomes.items()))
+        ),
         "errors": dict(sorted(errors.items())),
         "route_split": dict(sorted(routes.items())),
         "prompt_tokens": prompt,
@@ -542,23 +541,49 @@ def summarize(
         "initial_prompt_tokens_mean": (
             round(initial_prompt / len(initial_records), 1) if initial_records else None
         ),
-        "cached_tokens": cached,
+        "cached_tokens": usage["cached_tokens"],
+        "response_cached_tokens": cached,
         "completion_tokens": completion,
-        "cache_hit_pct": round(100 * cached / prompt, 2) if prompt else None,
-        "request_reuse_pct": round(100 * (len(good) - outcomes["cold"]) / len(good), 2)
-        if good
-        else None,
+        "cache_hit_pct": usage["hit_pct"],
+        "cache_authority": usage,
+        "response_cache_observations_authoritative": (
+            usage["response_usage_authoritative"]
+        ),
+        "request_reuse_pct": (
+            response_request_reuse_pct if response_authoritative else None
+        ),
+        "response_request_reuse_pct": (
+            None if response_authoritative else response_request_reuse_pct
+        ),
         "reuse_wave_requests": len(reuse_records),
-        "reuse_wave_outcomes": dict(sorted(reuse_outcomes.items())),
+        "reuse_wave_outcomes": (
+            dict(sorted(reuse_outcomes.items())) if response_authoritative else None
+        ),
+        "response_reuse_wave_outcomes": (
+            None if response_authoritative else dict(sorted(reuse_outcomes.items()))
+        ),
         "reuse_wave_cache_hit_pct": (
-            round(100 * reuse_cached / reuse_prompt, 2) if reuse_prompt else None
+            response_reuse_hit_pct if response_authoritative else None
+        ),
+        "response_reuse_wave_cache_hit_pct": (
+            None if response_authoritative else response_reuse_hit_pct
         ),
         "ttft_ms_p50": round(statistics.median(ttfts), 1) if ttfts else None,
         "ttft_ms_p95": percentile(ttfts, 0.95),
-        "ttft_ms_by_outcome": latency_by_outcome(good, "ttft_ms"),
+        "ttft_ms_by_outcome": (
+            response_ttft_by_outcome if response_authoritative else None
+        ),
+        "response_ttft_ms_by_outcome": (
+            None if response_authoritative else response_ttft_by_outcome
+        ),
         "wall_ms_p50": round(statistics.median(walls), 1) if walls else None,
         "wall_ms_p95": percentile(walls, 0.95),
-        "wall_ms_by_outcome": latency_by_outcome(good, "wall_ms"),
+        "wall_ms_by_outcome": (
+            response_wall_by_outcome if response_authoritative else None
+        ),
+        "response_wall_ms_by_outcome": (
+            None if response_authoritative else response_wall_by_outcome
+        ),
         "elapsed_seconds": round(elapsed, 3),
         "output_tok_s": round(completion / elapsed, 1) if elapsed else None,
         "total_tok_s": round((prompt + completion) / elapsed, 1) if elapsed else None,
@@ -576,7 +601,9 @@ def summarize(
         ),
         "engine_metrics_delta": engine,
         "replica_exact_inventory": replica_inventory,
-        "reconciliation": reconcile(records, lb, engine, tolerance),
+        "reconciliation": reconcile(
+            records, lb, engine, tolerance, cache_authority=cache_authority
+        ),
     }
 
 
@@ -662,6 +689,7 @@ def run_cell(args, apps, token, extra_headers=None):
         engine,
         args.reconcile_tolerance,
         replica_inventory_change(inventory_before, inventory_after),
+        args.cache_authority,
     )
     summary["concurrency"] = args.concurrency
     summary["client_attempts_total"] = sum(
@@ -695,6 +723,15 @@ def parser():
     result.add_argument("--salt", default=str(time.time_ns()))
     result.add_argument("--metrics-url")
     result.add_argument("--engine-metrics", action="append", default=[])
+    result.add_argument(
+        "--cache-authority",
+        choices=("response", "vllm-prefix"),
+        default="response",
+        help=(
+            "cache-token authority; vllm-prefix requires native prefix counters "
+            "from every --engine-metrics URL"
+        ),
+    )
     result.add_argument("--timeout", type=float, default=300)
     result.add_argument("--request-retries", type=int, default=0)
     result.add_argument("--retry-delay-seconds", type=float, default=0.1)
@@ -730,6 +767,8 @@ def main():
             "retry-timeout-seconds must be positive; other retry/progress bounds "
             "must be nonnegative"
         )
+    if args.cache_authority == "vllm-prefix" and not args.engine_metrics:
+        raise SystemExit("--cache-authority vllm-prefix requires --engine-metrics")
     token = os.environ.get("BENCH_TOKEN") or os.environ.get("VLLM_API_KEY")
     if not token:
         raise SystemExit("set BENCH_TOKEN or VLLM_API_KEY")

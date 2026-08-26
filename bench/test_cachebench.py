@@ -252,6 +252,87 @@ ramjet_exact_route_projected_balance_total{endpoint="chat",outcome="would_balanc
         self.assertEqual(mismatch["max_spread"], 1)
         self.assertFalse(reconcile(records, None, engine)["consistent"])
 
+    def test_native_reconciliation_ignores_zero_response_cache_observation(self):
+        records = [{"ok": True, "prompt_tokens": 100, "cached_tokens": 0}]
+        lb = {
+            "prompt_tokens": 100,
+            "cached_prompt_tokens": 0,
+            "cache_requests": 1,
+            "cache_ttft_samples": 1,
+        }
+        engine = {
+            "prompt_tokens": 100,
+            "cached_prompt_tokens": 0,
+            "prefix_queries": 100,
+            "prefix_hits": 64,
+            "queue_samples": 1,
+            "prefill_samples": 1,
+        }
+        result = reconcile(
+            records, lb, engine, cache_authority="vllm-prefix"
+        )
+        self.assertTrue(result["consistent"])
+        self.assertEqual(
+            result["values"]["cached_prompt_tokens"],
+            {"engine_prefix_hits": 64},
+        )
+        self.assertFalse(
+            result["cache_authority"]["response_usage_authoritative"]
+        )
+
+    def test_native_summary_promotes_aggregate_engine_cache_not_response_zero(self):
+        records = [
+            {
+                "app": 0,
+                "session": 0,
+                "turn": 1,
+                "ok": True,
+                "route": "0",
+                "prompt_tokens": 100,
+                "cached_tokens": 0,
+                "completion_tokens": 2,
+                "cache_outcome": "cold",
+                "ttft_ms": 100,
+                "wall_ms": 200,
+            }
+        ]
+        engine = {
+            "prompt_tokens": 100,
+            "cached_prompt_tokens": 0,
+            "prefix_queries": 100,
+            "prefix_hits": 80,
+            "queue_samples": 1,
+            "prefill_samples": 1,
+        }
+        summary = summarize(
+            records,
+            1,
+            1,
+            1,
+            32,
+            1.0,
+            None,
+            engine,
+            0,
+            cache_authority="vllm-prefix",
+        )
+        self.assertEqual(summary["cached_tokens"], 80)
+        self.assertEqual(summary["response_cached_tokens"], 0)
+        self.assertEqual(summary["cache_hit_pct"], 80)
+        self.assertFalse(summary["response_cache_observations_authoritative"])
+        self.assertIsNone(summary["outcomes"])
+        self.assertEqual(summary["response_outcomes"], {"cold": 1})
+        self.assertIsNone(summary["request_reuse_pct"])
+        self.assertEqual(summary["response_request_reuse_pct"], 0)
+        self.assertIsNone(summary["ttft_ms_by_outcome"])
+        self.assertEqual(
+            summary["response_ttft_ms_by_outcome"],
+            {"cold": {"count": 1, "p50": 100, "p95": 100}},
+        )
+        self.assertEqual(
+            summary["cache_authority"]["source"], "vllm_prefix_counters"
+        )
+
     def test_latency_summary_stays_bounded_by_cache_outcome(self):
         records = [
             {"ok": True, "cache_outcome": "cold", "ttft_ms": 100},

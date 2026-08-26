@@ -181,6 +181,83 @@ def delta(before, after):
     return result
 
 
+def aggregate_deltas(before, after):
+    """Aggregate one counter interval across an exact set of engine snapshots."""
+    if not before or not after or len(before) != len(after):
+        return None
+    cells = [delta(left, right) for left, right in zip(before, after, strict=True)]
+    if any(cell is None for cell in cells):
+        return None
+    result = {}
+    for key in COUNTERS:
+        values = [cell[key] for cell in cells]
+        result[key] = None if any(value is None for value in values) else sum(values)
+    queue_samples = result["queue_samples"]
+    prefill_samples = result["prefill_samples"]
+    result["queue_ms_mean"] = (
+        round(1000 * result["queue_seconds_sum"] / queue_samples, 2)
+        if queue_samples and result["queue_seconds_sum"] is not None
+        else None
+    )
+    result["prefill_ms_mean"] = (
+        round(1000 * result["prefill_seconds_sum"] / prefill_samples, 2)
+        if prefill_samples and result["prefill_seconds_sum"] is not None
+        else None
+    )
+    prefix_queries = result["prefix_queries"]
+    prefix_hits = result["prefix_hits"]
+    result["prefix_hit_pct"] = (
+        round(100 * prefix_hits / prefix_queries, 2)
+        if prefix_queries and prefix_hits is not None
+        else None
+    )
+    return result
+
+
+def cache_usage(
+    response_prompt_tokens, response_cached_tokens, engine, authority="response"
+):
+    """Select the declared cache authority without silently falling back.
+
+    Some OpenAI-compatible responses, including Qwen3.8-Flash-Next on the
+    current vLLM preview, report cached_tokens=0 even when vLLM's native prefix
+    counters record reuse. Native mode therefore uses only the interval's
+    prefix query/hit counters. Missing, reset, or impossible native counters
+    make the result unavailable instead of promoting response usage again.
+    """
+    if authority not in {"response", "vllm-prefix"}:
+        raise ValueError(f"unsupported cache authority: {authority}")
+    source = "response_usage" if authority == "response" else "vllm_prefix_counters"
+    prompt = response_prompt_tokens
+    cached = response_cached_tokens
+    if authority == "vllm-prefix":
+        prompt = None if engine is None else engine.get("prefix_queries")
+        cached = None if engine is None else engine.get("prefix_hits")
+    available = (
+        prompt is not None
+        and cached is not None
+        and prompt >= 0
+        and 0 <= cached <= prompt
+        and not (
+            authority == "vllm-prefix"
+            and response_prompt_tokens > 0
+            and prompt == 0
+        )
+    )
+    return {
+        "source": source,
+        "available": available,
+        "prompt_tokens": prompt if available else None,
+        "cached_tokens": cached if available else None,
+        "hit_pct": (
+            round(100 * cached / prompt, 2) if available and prompt else None
+        ),
+        "response_usage_authoritative": authority == "response",
+        "response_prompt_tokens": response_prompt_tokens,
+        "response_cached_tokens": response_cached_tokens,
+    }
+
+
 class PeakSampler:
     """Poll low-cardinality engine gauges during one benchmark cell."""
 
