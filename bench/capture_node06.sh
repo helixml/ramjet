@@ -207,10 +207,13 @@ remote_capture() {
       "$engine" "$role" "$routing" "$status" "$restarts" "$started" \
       "$configured_image" "$image_id" "$cpus" "$mems" \
       "$model_repository" "$model_revision" "$argv_sha256"
-    # Extract reviewed numeric capacity fields from a bounded log tail. Never
+    # Extract reviewed numeric capacity fields from a bounded startup-sized
+    # log tail. Five thousand lines retains the boot record after a few
+    # hundred access-log entries without reading an unbounded container log.
+    # Never
     # replay even a matching raw line: launcher wrappers can append argv or
     # other operational text to it.
-    docker logs --tail 200 "$engine" 2>&1 | awk '
+    docker logs --tail 5000 "$engine" 2>&1 | awk '
       /GPU KV cache size/ {
         value=$0
         sub(/^.*GPU KV cache size[^0-9]*/, "", value)

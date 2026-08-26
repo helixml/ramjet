@@ -77,7 +77,10 @@ though response `cached_tokens` remained zero. Evidence is under
 `.experiments/20260826T165003Z-mtp3-indexshare-b-matrix/`,
 `.experiments/20260826T170322Z-mtp3-a2-crossover/`,
 `.experiments/20260826T171459Z-indexshare-b2-crossover/`, and
-`.experiments/20260826T171632Z-indexshare-deep-context/`.
+`.experiments/20260826T171632Z-indexshare-deep-context/`. The first 32K prefix
+attempt used the wrong base path and failed immediately with HTTP 404; the
+corrected passing evidence is retained separately under
+`.experiments/20260826T171811Z-indexshare-prefix-32k-r2/`.
 
 The fixed on-device KV pool also passed a guarded direct context frontier with
 one cold, one prime, and one identical-prefix warm request per size:
@@ -107,6 +110,19 @@ least 51 GiB plus runtime headroom. The live mixed stack has 39 GiB available,
 so both KV and PLE remain on GPU. Final state was LB 4/4, candidate health 200,
 restart count zero, 39C intake, no fatal/OOM/NCCL markers, and 39 GiB host
 memory available.
+
+Ramjet image `rust-r133-qwen38-flash-next-df01c18` was built from commit
+`df01c18` in 108.625s after a cold builder-cache fill and transferred to
+node06 in 6.571s. Its 15,800,890-byte runtime image was published and pinned as
+`sha256:78f13c87fcc928552593a8055293479dbbc2569d0b7a4b754d89e0d32a278385`.
+An LB-only rollout kept the same four production Qwen3.8-27B upstreams and
+returned to 4/4 HTTP admission in seconds. A guarded production-path smoke
+then returned HTTP 200 with authoritative 58 prompt and 27 completion tokens;
+evidence is under `.experiments/20260826T172416Z-r133-lb-smoke/`. The direct
+Flash-Next candidate remained unrouted. Final deployment-aware capture at
+17:24Z reported 40.2 GiB host memory available, 39C intake, zero candidate
+restarts, and the exact r133 LB image. Pull request #224 carries the source,
+deployment, validation, and experiment record.
 
 ## 2026-08-25 — RadixArk BF16-lm_head checkpoint promoted on all eight Qwen engines
 
