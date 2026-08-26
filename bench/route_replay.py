@@ -45,7 +45,7 @@ def records(lines):
         version = record.get("v")
         if (
             type(version) is int
-            and version in (1, 2, 3, 4, 5, 6, 7, 8)
+            and version in (1, 2, 3, 4, 5, 6, 7, 8, 9)
             and record.get("event") in ("start", "finish")
         ):
             yield record
@@ -177,21 +177,38 @@ def session_affinity_choice(record, alpha=None, bonus_blocks=None, max_load_delt
     return _session_affinity_decision(record, alpha, bonus_blocks, max_load_delta)[0]
 
 
-def choose(record, alpha, cap, tie_break=None):
+def choose(record, alpha, cap, tie_break=None, projected_load=None):
     candidates = record["candidates"]
     rotation = record.get("rotation", 0)
     count = len(candidates)
     if count == 0:
         return None
     tie_break = tie_break or record.get("score_tie_break", "load-neutral")
+    projected_load = (
+        record.get("projected_load", False) if projected_load is None else projected_load
+    )
+    if type(projected_load) is not bool:
+        return None
+    if projected_load and any(
+        type(candidate.get("request_load_units")) is not int
+        or candidate["request_load_units"] < 1
+        for candidate in candidates
+    ):
+        return None
 
     def compare(left, right):
         left_healthy = bool(left["healthy"])
         right_healthy = bool(right["healthy"])
         if left_healthy != right_healthy:
             return -1 if left_healthy else 1
-        left_score = min(left["overlap_blocks"], cap) - alpha * left["load_units"]
-        right_score = min(right["overlap_blocks"], cap) - alpha * right["load_units"]
+        left_load = left["load_units"] + (
+            left["request_load_units"] - 1 if projected_load else 0
+        )
+        right_load = right["load_units"] + (
+            right["request_load_units"] - 1 if projected_load else 0
+        )
+        left_score = min(left["overlap_blocks"], cap) - alpha * left_load
+        right_score = min(right["overlap_blocks"], cap) - alpha * right_load
         if left_score != right_score:
             return -1 if left_score > right_score else 1
         if (
@@ -214,6 +231,7 @@ def replay(
     alphas,
     caps,
     tie_break=None,
+    projected_load=None,
     session_bonus_blocks=None,
     session_max_load_delta=None,
 ):
@@ -270,7 +288,7 @@ def replay(
             overlaps = []
             loads = []
             for record in starts:
-                selected = choose(record, alpha, cap, tie_break)
+                selected = choose(record, alpha, cap, tie_break, projected_load)
                 if selected is None:
                     continue
                 choices.append(selected)
@@ -299,6 +317,7 @@ def replay(
                     "alpha": alpha,
                     "cap": cap,
                     "tie_break": tie_break or "observed",
+                    "projected_load": "observed" if projected_load is None else projected_load,
                     "requests": len(choices),
                     "agreement_pct": round(100 * agreements / len(choices), 1) if choices else None,
                     "counterfactual_migrations": len(choices) - agreements,
@@ -409,6 +428,12 @@ def main(argv=None):
         default="observed",
         help="score-equality policy; observed follows each journal version/record",
     )
+    parser.add_argument(
+        "--projected-load",
+        choices=("observed", "off", "on"),
+        default="observed",
+        help="candidate request-cost policy; observed follows each journal version/record",
+    )
     parser.add_argument("--json", action="store_true", help="emit one JSON object per policy")
     args = parser.parse_args(argv)
     if args.session_bonus_blocks is not None and args.session_bonus_blocks < 0:
@@ -445,12 +470,16 @@ def main(argv=None):
     if not starts:
         raise SystemExit("no v1 route-journal start records found")
     tie_break = None if args.tie_break == "observed" else args.tie_break
+    projected_load = {"observed": None, "off": False, "on": True}[
+        args.projected_load
+    ]
     rows = replay(
         starts,
         finishes,
         alphas,
         caps,
         tie_break,
+        projected_load,
         args.session_bonus_blocks,
         args.session_max_load_delta,
     )

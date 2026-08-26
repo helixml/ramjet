@@ -349,7 +349,7 @@ class ServingCostAuditTest(unittest.TestCase):
             bounded_output_limit(boolean_policy)["telemetry_state"], "invalid"
         )
         future = start(6, 1)
-        future.update(v=9, endpoint="chat", output_limit=output_limit())
+        future.update(v=10, endpoint="chat", output_limit=output_limit())
         self.assertEqual(bounded_output_limit(future)["telemetry_state"], "invalid")
 
     def test_output_limit_analysis_retains_unmatched_start_as_missing_finish(self):
@@ -457,6 +457,9 @@ class ServingCostAuditTest(unittest.TestCase):
         record = dict(start(1, 2), v=8, endpoint="chat", output_limit=output_limit())
         self.assertEqual(bounded_output_limit(record)["telemetry_state"], "valid")
         self.assertEqual(bounded_output_limit(record)["requested_bucket"], "65_256")
+
+        projected = dict(record, v=9, projected_load=True)
+        self.assertEqual(bounded_output_limit(projected)["telemetry_state"], "valid")
 
     def test_cli_accepts_prefixed_logs_and_emits_json(self):
         lines = "\n".join(

@@ -88,6 +88,9 @@ services:
       RJ_ROUTE_LOAD_UNIT_BYTES: ${RJ_ROUTE_LOAD_UNIT_BYTES:-32768}
       RJ_ROUTE_MAX_LOAD_UNITS: ${RJ_ROUTE_MAX_LOAD_UNITS:-8}
       RJ_ROUTE_PHASE_AWARE_LOAD: ${RJ_ROUTE_PHASE_AWARE_LOAD:-true}
+      # Default-off candidate: qualify warm long-prefix placement against
+      # stale-locality and MTP throughput guards before enabling it.
+      RJ_ROUTE_PROJECTED_LOAD: ${RJ_ROUTE_PROJECTED_LOAD:-false}
       RJ_ROUTE_JOURNAL: ${RJ_ROUTE_JOURNAL:-true}
       RJ_TOKENIZER_MODE: "off"
       RJ_TOKENIZER_PROFILE: qwen3.8-flash-next

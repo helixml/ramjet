@@ -294,6 +294,7 @@ mod tests {
             index_capacity: 100_000,
             load_unit_bytes: 32 << 10,
             max_load_units: 8,
+            projected_load: false,
             affinity: Affinity::Prefix,
         })
     }

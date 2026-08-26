@@ -2860,6 +2860,7 @@ mod tests {
             index_capacity: config.route_index_capacity,
             load_unit_bytes: config.route_load_unit_bytes,
             max_load_units: config.route_max_load_units,
+            projected_load: config.route_projected_load,
             affinity: config.affinity,
         }));
         Proxy::new(config, reqwest::Client::new(), metrics, router, inventories).unwrap()
@@ -3377,6 +3378,7 @@ mod tests {
             index_capacity: config.route_index_capacity,
             load_unit_bytes: config.route_load_unit_bytes,
             max_load_units: config.route_max_load_units,
+            projected_load: config.route_projected_load,
             affinity: config.affinity,
         }));
         let client = reqwest::Client::new();
@@ -3919,6 +3921,7 @@ mod tests {
             index_capacity: config.route_index_capacity,
             load_unit_bytes: config.route_load_unit_bytes,
             max_load_units: config.route_max_load_units,
+            projected_load: config.route_projected_load,
             affinity: config.affinity,
         }));
         let proxy = Proxy::new(

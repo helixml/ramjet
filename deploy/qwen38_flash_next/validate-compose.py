@@ -32,6 +32,7 @@ ROUTING_SHAPE = {
     "RJ_ROUTE_LOAD_UNIT_BYTES": "32768",
     "RJ_ROUTE_MAX_LOAD_UNITS": "8",
     "RJ_ROUTE_PHASE_AWARE_LOAD": "true",
+    "RJ_ROUTE_PROJECTED_LOAD": "false",
 }
 ENGINE_SHAPE = {
     "qwen38flashnext-a": {

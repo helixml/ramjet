@@ -46,7 +46,7 @@ class RouteReplayTest(unittest.TestCase):
         self.assertEqual(rows[0]["agreement_pct"], 100.0)
         self.assertEqual(rows[0]["counterfactual_migrations"], 0)
 
-    def test_v3_through_v8_journal_records_are_accepted(self):
+    def test_v3_through_v9_journal_records_are_accepted(self):
         record = start()
         record["v"] = 3
         record["score_tie_break"] = "overlap"
@@ -80,6 +80,7 @@ class RouteReplayTest(unittest.TestCase):
             },
         }
         admitted_load = {**record, "v": 8}
+        projected_load = {**record, "v": 9, "projected_load": True}
         parsed = list(
             records(
                 [
@@ -89,12 +90,21 @@ class RouteReplayTest(unittest.TestCase):
                     __import__("json").dumps(phase_aware),
                     __import__("json").dumps(output_limit),
                     __import__("json").dumps(admitted_load),
+                    __import__("json").dumps(projected_load),
                 ]
             )
         )
         self.assertEqual(
             parsed,
-            [record, canary, session, phase_aware, output_limit, admitted_load],
+            [
+                record,
+                canary,
+                session,
+                phase_aware,
+                output_limit,
+                admitted_load,
+                projected_load,
+            ],
         )
         row = replay([session], {}, [4], [32])[0]
         self.assertEqual(
@@ -107,12 +117,25 @@ class RouteReplayTest(unittest.TestCase):
 
     def test_boolean_and_future_journal_versions_are_not_accepted(self):
         boolean = {**start(), "v": True}
-        future = {**start(), "v": 9}
+        future = {**start(), "v": 10}
         self.assertEqual(
             list(records([__import__("json").dumps(boolean), __import__("json").dumps(future)])),
             [],
         )
         self.assertEqual(list(records(["[]", "true", '"string"'])), [])
+
+    def test_projected_load_replay_uses_candidate_request_cost(self):
+        record = start(chosen=1, left=(512, 9), right=(0, 0))
+        record.update(v=9, projected_load=True)
+        record["candidates"][0]["request_load_units"] = 1
+        record["candidates"][1]["request_load_units"] = 32
+
+        self.assertEqual(choose(record, alpha=4, cap=32, projected_load=False), 1)
+        self.assertEqual(choose(record, alpha=4, cap=32), 0)
+        self.assertEqual(choose(record, alpha=4, cap=32, projected_load=True), 0)
+
+        record["candidates"][1]["request_load_units"] = 0
+        self.assertIsNone(choose(record, alpha=4, cap=32))
 
     def test_session_affinity_replay_matches_weight_overlap_and_rotation(self):
         record = start(chosen=0, rotation=0, left=(5, 0), right=(0, 0))
