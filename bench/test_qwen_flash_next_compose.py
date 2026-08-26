@@ -1,6 +1,7 @@
 import copy
 import importlib.util
 import pathlib
+import shutil
 import unittest
 
 
@@ -13,6 +14,9 @@ validator = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(validator)
 
 
+@unittest.skipUnless(
+    shutil.which("docker"), "Docker Compose is validated in the deployment lane"
+)
 class QwenFlashNextComposeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

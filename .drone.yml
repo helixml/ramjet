@@ -76,7 +76,9 @@ steps:
       - python3 deploy/dspark_0731/validate-dspark-guard-compose.py
       - python3 deploy/dspark_0731/infernal-r11-candidate/validate-compose.py
       - python3 deploy/dspark_0731/infernal-r12-candidate/validate-compose.py
-      - python3 -m unittest bench.test_persistent_jit_cache_compose bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose
+      - bash -n deploy/qwen38_flash_next/node06-canary.sh
+      - python3 deploy/qwen38_flash_next/validate-compose.py
+      - python3 -m unittest bench.test_persistent_jit_cache_compose bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose bench.test_qwen_flash_next_compose
 
   - name: quality-complete
     image: alpine:3.23
@@ -295,7 +297,9 @@ steps:
       - python3 deploy/dspark_0731/validate-dspark-guard-compose.py
       - python3 deploy/dspark_0731/infernal-r11-candidate/validate-compose.py
       - python3 deploy/dspark_0731/infernal-r12-candidate/validate-compose.py
-      - python3 -m unittest bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose
+      - bash -n deploy/qwen38_flash_next/node06-canary.sh
+      - python3 deploy/qwen38_flash_next/validate-compose.py
+      - python3 -m unittest bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose bench.test_qwen_flash_next_compose
 
   - name: release-quality-complete
     image: alpine:3.23

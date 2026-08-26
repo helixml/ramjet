@@ -20,8 +20,8 @@ ENGINE_IMAGE = (
     "0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3"
 )
 LB_IMAGE = (
-    "ghcr.io/helixml/ramjet:rust-r133-qwen38-flash-next-df01c18@sha256:"
-    "78f13c87fcc928552593a8055293479dbbc2569d0b7a4b754d89e0d32a278385"
+    "ghcr.io/helixml/ramjet:v0.4.0@sha256:"
+    "467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b"
 )
 ENGINE_SHAPE = {
     "qwen38flashnext-a": {

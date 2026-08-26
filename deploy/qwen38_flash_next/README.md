@@ -9,7 +9,8 @@ The checkpoint and image are immutable inputs:
 - model revision: `bcd9f01ddc9cff2316eb84281bebcd5b058bddce`
 - model payload: 185,502,232,570 bytes across 131 safetensors shards
 - linux/amd64 vLLM image: `sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
-- ramjet image: `rust-r133-qwen38-flash-next-df01c18@sha256:78f13c87fcc928552593a8055293479dbbc2569d0b7a4b754d89e0d32a278385`
+- released ramjet Compose default: `v0.4.0@sha256:467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b`
+- node06-qualified profile override: `rust-r133-qwen38-flash-next-df01c18@sha256:78f13c87fcc928552593a8055293479dbbc2569d0b7a4b754d89e0d32a278385`
 
 The day-zero vLLM image config labels its source/build revision as `unknown`.
 The digest makes the bytes immutable, but it does not supply source provenance;
@@ -131,3 +132,7 @@ vLLM unchanged. Qwen template controls such as `chat_template_kwargs`,
 `preserve_thinking`, and multimodal processor kwargs participate in prefix
 fingerprints, preventing requests with different rendered prefixes from
 claiming the same warm route.
+
+The checked-in Compose default follows the repository-wide released-image
+policy. `node06-canary.sh` supplies the separately qualified r133 override
+explicitly until these Flash-Next changes are included in a tagged release.
