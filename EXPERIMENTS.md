@@ -218,6 +218,52 @@ subsequent forward, experiment, restore, and rollback Compose invocation
 carried the immutable r133 reference explicitly. The negative evidence is
 retained under `.experiments/20260826T194121Z-affinity-harness-rollout/`.
 
+### Scheduler batch cap 16,384 rejected
+
+The next engine-only cell bypassed ramjet and changed only B's
+`--max-num-batched-tokens` from 8,192 to 16,384. Production was single-homed
+on unchanged A for the whole comparison. A sanitized Compose render proved
+that the candidate changed only that one argv value, and the pinned runtime's
+`EngineArgs` preflight accepted it. B then reached authenticated readiness
+with restart count zero, the same 2,667,258-token KV pool, 4,240MiB free on
+each GPU, and no OOM, Xid, traceback, or EngineCore failure. Startup peaked at
+54C intake and never crossed the 55C facility limit.
+
+The direct-B 32K context comparison used three distinct cold prompts per arm,
+64 output tokens, and exact client/native request, prompt-token,
+generation-token, and MTP reconciliation. Response `cached_tokens` remained
+non-authoritative. Raising the cap produced no steady cold-prefill gain and a
+large tail regression:
+
+| direct B | cold TTFT mean | cold TTFT median | cold TTFT p95 | median decode |
+|---|---:|---:|---:|---:|
+| batch cap 8,192 | 3,838.1ms | 3,839.4ms | 3,842.2ms | 304.9 tok/s |
+| batch cap 16,384 | 4,963.6ms | 3,834.8ms | 7,233.8ms | 302.5 tok/s |
+
+Median TTFT changed by only -0.12%, while mean and p95 regressed 29.32% and
+88.27%. The candidate therefore failed the required 10% cold-TTFT improvement
+before the decode ladder was necessary. It was never admitted to ramjet. The
+pre-armed rollback recreated only B with 8,192, recovered the exact KV pool,
+and restored the immutable r133 LB to 2/2. Final A and B argv both use 8,192;
+both current incarnations have restart count zero.
+
+Evidence is under `.experiments/20260826T203510Z-mbt-ab/`. The baseline code
+guard also established the raw-vLLM reference at 172.7, 1,303.9, and 1,741.3
+tok/s for c1/c16/c32 with 149/149 measured requests and exact native MTP
+reconciliation. All three request guards passed; maximum intake was 53C and
+maximum GPU temperature was 79C. Two pre-workload harness mistakes are kept
+separate from model evidence: an uppercase guard label was rejected before a
+child existed, and an image preflight first asked for absent `python` instead
+of `python3`. A later comparison-report parser selected the guard's terminal
+status record rather than the preceding context record; strict shell exit
+there triggered the already-intended exact rollback, which completed before
+the pair was restored.
+
+Pull request #226 made the authority used here reusable: cache benchmarks can
+now opt into aggregate native vLLM prefix counters without silently trusting
+Qwen's zero response field, and context-frontier cells can require exact
+native request/token/speculation reconciliation and report mean TTFT.
+
 ## 2026-08-25 — RadixArk BF16-lm_head checkpoint promoted on all eight Qwen engines
 
 The AC repair was operator-confirmed, so the 2026-08-14 node06 operational
