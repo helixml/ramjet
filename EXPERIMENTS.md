@@ -8415,6 +8415,61 @@ configuration that lost belongs in this journal, not in a file someone can
 accidentally render. `deploy/dspark_0731/` still carries an overlay stack; it
 is not the live deployment and was left alone.
 
+## 2026-08-26 — Qwen3.8-Flash-Next ramjet alpha crossover: retain alpha 4
+
+The promoted two-TP4 Flash-Next stack was healthy and idle before this test:
+both exact FP8 engine incarnations had restart count zero, ramjet admitted 2/2,
+and intake air was 41C. The recent route journal was not useful for tuning: 38
+paired records had zero overlap and zero selected load, so alpha values from
+0.5 through 8 replayed identically. A live affinity-versus-load conflict was
+required.
+
+`bench/route_conflict.py` was strengthened before GPU work. Blockers now run to
+completion, output useful-work throughput and TTFT, sample both engine metrics,
+and reconcile request, prompt, prefill, queue, generation, and speculative
+counters. Qwen's response `cached_tokens=0` remains explicitly untrusted; only
+native prefix counters describe reuse. Eleven focused harness/metrics tests
+passed.
+
+The guarded LB-only crossover was alpha 4 -> 2 -> 2 -> 4. Each arm recreated
+only the exact r133 LB, primed five fresh 4K-token shared prefixes, then ran
+four completed 512-token blockers plus a 64-token returning probe per prefix:
+30 requests and 133,670 prompt tokens per arm. Both vLLM containers and their
+KV caches stayed resident. All four thermal journals passed with intake at
+41C, zero preemptions, zero request failures, and exact native speculation and
+token reconciliation.
+
+| policy / arm | probe TTFT median | blocker TTFT p95 | blocker output | native prefix hit | effective spec tokens/step |
+|---|---:|---:|---:|---:|---:|
+| alpha 4 / A1 | 918.5 ms | 974.0 ms | 431.9 tok/s | 35.91% | 2.461 |
+| alpha 2 / B1 | 1060.1 ms | 1316.3 ms | 398.8 tok/s | 47.88% | 2.473 |
+| alpha 2 / B2 | 1054.1 ms | 1106.7 ms | 403.1 tok/s | 47.88% | 2.471 |
+| alpha 4 / A2 | 918.9 ms | 972.0 ms | 433.2 tok/s | 35.91% | 2.485 |
+
+Averaged across the crossover, alpha 2 increased prefix hits but regressed the
+primary service metrics: probe TTFT +15.1%, blocker TTFT p95 +24.5%, and useful
+output throughput -7.3%. Speculation efficiency was unchanged. The candidate
+therefore fails both the >=20% TTFT-improvement promotion threshold and the 95%
+throughput / 110% TTFT guardrails. Production remains at alpha 4 with the 32KiB
+load quantum.
+
+Run IDs were `d135e0c2beb3778dee8b4be443340d37`,
+`3ca66b0840d35d6e820bdb3f6c484a8b`,
+`9a87c4b65b3b168db0a7608bff7ca0ac`, and
+`2ca1d7de2b0a23472fa8459e296cee2a`. Maximum GPU temperature was 74C; the
+facility-authoritative intake maximum remained 41C.
+
+After the negative result, the Qwen Compose file was hardened without changing
+effective policy: chunk size 2,048 bytes, prefix window 2MiB, overlap cap 32,
+load quantum 32KiB, load cap 8, and phase-aware accounting false are now
+explicit and validator-pinned. The first rollout attempt timed out and rolled
+back because the verification shell suppressed a malformed Python readiness
+expression; the candidate ramjet process itself was healthy. The corrected
+rollout passed at Compose SHA-256
+`5dad80d0f778489d6c0221618eeaeff253477ce31f714583ef85d705280bbc12`.
+Final state: exact r133 LB at alpha 4, 2/2 healthy; both engine start times and
+restart counts unchanged.
+
 ### What is still unmeasured
 
 Sustained production traffic over hours rather than bounded cells, and quality

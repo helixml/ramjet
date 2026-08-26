@@ -23,6 +23,15 @@ LB_IMAGE = (
     "ghcr.io/helixml/ramjet:v0.4.0@sha256:"
     "467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b"
 )
+ROUTING_SHAPE = {
+    "RJ_ROUTE_ALPHA": "4",
+    "RJ_ROUTE_CHUNK_BYTES": "2048",
+    "RJ_ROUTE_MAX_PREFIX_BYTES": "2097152",
+    "RJ_ROUTE_MAX_OVERLAP_BLOCKS": "32",
+    "RJ_ROUTE_LOAD_UNIT_BYTES": "32768",
+    "RJ_ROUTE_MAX_LOAD_UNITS": "8",
+    "RJ_ROUTE_PHASE_AWARE_LOAD": "false",
+}
 ENGINE_SHAPE = {
     "qwen38flashnext-a": {
         "cpuset": "0-11,24-35",
@@ -190,6 +199,9 @@ def validate(document: dict[str, Any]) -> None:
         fail("load balancer does not select the Flash-Next renderer profile")
     if environment.get("RJ_MAX_TOKENS_STRIP") != "0":
         fail("load balancer can silently strip a valid Flash-Next output budget")
+    for key, value in ROUTING_SHAPE.items():
+        if environment.get(key) != value:
+            fail(f"load balancer routing shape changed: {key}")
 
     if set(load_balancer.get("networks", {})) != {"default", "machineview-host"}:
         fail("load balancer lost its serving or host-telemetry network")

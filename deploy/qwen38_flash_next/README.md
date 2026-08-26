@@ -122,6 +122,14 @@ vLLM unchanged. Qwen template controls such as `chat_template_kwargs`,
 fingerprints, preventing requests with different rendered prefixes from
 claiming the same warm route.
 
+The approximate routing shape is pinned explicitly in Compose: 2KiB chunks, a
+2MiB fingerprint window, a 32-block affinity cap, 32KiB load units, and an
+eight-unit request cap. Phase-aware load accounting remains off but is exposed
+as a default-preserving Compose variable for an isolated future A/B. A guarded
+alpha 4/2/2/4 crossover found that alpha 2 raised native prefix hits while
+regressing returning-probe TTFT by 15%, blocker TTFT p95 by 25%, and completed
+output throughput by 7%; alpha 4 therefore remains the qualified value.
+
 The checked-in Compose default follows the repository-wide released-image
 policy. The node06 production render supplies the separately qualified r133
 override explicitly until these Flash-Next changes are included in a tagged

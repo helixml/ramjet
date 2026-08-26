@@ -5,6 +5,7 @@
 # instance (idle sibling). Overlap+load router: spreads by inflight.
 set -uo pipefail
 BASE=$1 N=$2 SALT=$3 TOK=$4
+MODEL=${BENCH_MODEL:-deepseek-v4-flash}
 KEY=${BENCH_TOKEN:-${VLLM_API_KEY:-}}
 if [ -z "$KEY" ]; then
   KEY=$(grep -o "Bearer [A-Za-z0-9_-]*" /etc/caddy/Caddyfile | head -1 | cut -d" " -f2)
@@ -19,8 +20,8 @@ for i in $(seq 1 $N); do
   curl -sS -m 300 -D "$WORK/$i.headers" -o "$WORK/$i.json" \
     -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$BASE/v1/chat/completions" -d "$(python3 -c "
 import json,sys
-print(json.dumps({'model':'deepseek-v4-flash','messages':[{'role':'system','content':sys.argv[1]},{'role':'user','content':f'session $i: solve subtask $i briefly'}],'max_tokens':$TOK,'temperature':0}))
-" "$SYS")" &
+print(json.dumps({'model':sys.argv[2],'messages':[{'role':'system','content':sys.argv[1]},{'role':'user','content':f'session $i: solve subtask $i briefly'}],'max_tokens':$TOK,'temperature':0}))
+" "$SYS" "$MODEL")" &
   pids+=("$!")
 done
 curl_failures=0
