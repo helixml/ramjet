@@ -388,6 +388,31 @@ speculative = speculative_delta(
     expected_enabled=True,
 )
 reconciliation = reconcile(requests, engine, speculative)
+run_route_relationships = []
+for index, run in enumerate(runs):
+    prefill_route = run.get("prefill", {}).get("route")
+    decoder_routes = [
+        item.get("route")
+        for key, item in run.items()
+        if key.startswith("decode-") and item.get("ok")
+    ]
+    same = sum(
+        route is not None and prefill_route is not None and route == prefill_route
+        for route in decoder_routes
+    )
+    other = sum(
+        route is not None and prefill_route is not None and route != prefill_route
+        for route in decoder_routes
+    )
+    run_route_relationships.append(
+        {
+            "run": index,
+            "prefill_route": prefill_route,
+            "decoder_same_route": same,
+            "decoder_other_route": other,
+            "decoder_unknown_route": len(decoder_routes) - same - other,
+        }
+    )
 
 result = {
     "label": os.environ.get("SWEEP_LABEL", "mixed"),
@@ -422,6 +447,9 @@ result = {
         route: sum(1 for item in decodes if item.get("route") == route)
         for route in sorted({item.get("route") for item in decodes if item.get("route") is not None})
     },
+    # Preserve the run-level relationship: aggregate route counts cannot show
+    # whether each decoder avoided the engine handling its concurrent prefill.
+    "run_route_relationships": run_route_relationships,
 }
 if errors:
     result["errors"] = errors
