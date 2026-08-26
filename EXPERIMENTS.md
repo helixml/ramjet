@@ -1,5 +1,165 @@
 # node06 experiment journal
 
+## 2026-08-26 — Qwen3.8-Flash-Next FP8 is live on two TP4 engines; fixed KV and QSA index reuse qualified
+
+The official `Qwen/Qwen3.8-Flash-Next-FP8` checkpoint now serves production
+on all eight node06 GPUs as two NUMA-local TP4+EP engines. A owns GPUs 0–3, B
+owns GPUs 4–7, and the canonical Flash Compose owns the r133 ramjet load
+balancer at 2/2 HTTP admission. Both engines have restart policy
+`unless-stopped`, restart count zero, the exact same serving argv, and
+2,667,258 KV tokens each. The old single-GPU engines are stopped. Canonical
+and on-box Compose SHA-256 is
+`0356b7db003c498285c55dca0c206177862cc9810c187de7c5af2f799392566f`.
+
+Immutable inputs are model revision
+`bcd9f01ddc9cff2316eb84281bebcd5b058bddce` (185,502,232,570 indexed bytes
+across 131 shards) and linux/amd64 image
+`vllm/vllm-openai@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`.
+The image contains vLLM `0.1.dev20073+g8e685d198`; its image labels do not
+identify a source revision, so the digest establishes byte identity but not
+source provenance. The official day-zero recipe and source were inspected at
+`https://recipes.vllm.ai/Qwen/Qwen3.8-Flash-Next` and vLLM recipes commit
+`8bb447dc1f6e937afae0af777e53b3e452977ee5`.
+
+The first 85%-utilization boot failed safely after weights and compilation:
+vLLM measured -0.27 GiB available for KV blocks. At 90%, the first successful
+automatic profile offered 38.32 GiB of KV, but an otherwise identical warm
+boot charged a 34.91 GiB activation peak and offered only 4.48 GiB. The
+qualified command therefore pins vLLM's first recommended
+`--kv-cache-memory=40190174004`. The non-speculative engine reported 3,033,380
+KV tokens (11.57 native 262K contexts); MTP3 uses extra draft state and reports
+2,667,258 tokens (10.17 contexts). Startup evidence and immutable runtime
+identity are under
+`.experiments/20260826T154442Z-fp8-vllm-startup-b/` on node06.
+
+All request-generating cells ran under the intake-air thermal guard. Intake
+stayed at 37–38C and every successful cell reconciled client usage with native
+vLLM speculative counters. The matched 512-token code-decode ladder shows why
+MTP3 is retained for the latency-oriented candidate but is not claimed as a
+universal throughput setting:
+
+| direct TP4 load | no MTP tok/s | MTP3 tok/s | change | MTP3 median TPOT |
+|---|---:|---:|---:|---:|
+| c1, 3 runs | 108.6 | 186.9 | +72.1% | 5.160ms |
+| c8, 3 runs | 628.3 | 866.9 | +38.0% | 8.233ms |
+| c16, 3 runs | 1,113.1 | 1,305.1 | +17.3% | 11.007ms |
+| c32, 2 runs | 1,844.1 | 1,759.2 | -4.6% | 16.502ms |
+
+MTP3 strict acceptance stayed at 53.6–54.5%, or 1.61–1.63 accepted draft
+tokens per target step. The deterministic five-case agent/tool/reasoning gate
+passed 5/5 and improved from 50.9 to 56.4 output tok/s. A guarded multimodal
+request against the supplied vLLM-recipe screenshot correctly returned the
+expected label with HTTP 200; its 115 completion tokens and one finished
+request reconciled exactly, despite the runtime warning that the draft path
+receives text-only inputs. The first 64-token vision attempt is retained as a
+negative harness result: it ended in reasoning at the artificial length cap;
+the 256-token rerun passed.
+
+The next isolated cell kept MTP3 and changed only
+`index_share_for_mtp_iteration=true`. The pinned NVIDIA Qwen implementation
+computes QSA's sparse top-k indices on draft step zero, compacts the final row
+for each request, and reuses those indices for steps one and two. A fresh
+MTP3 reference measured 874.0 tok/s at c8 and 1,744.4 tok/s at c32. The first
+three-run index-sharing matrix measured 198.4, 859.3, 1,327.8, and 1,770.0
+tok/s at c1/c8/c16/c32. Because the c8/c32 changes were below 5%, an A2/B2
+crossover was required: A2 measured 782.8/1,793.9 tok/s and B2 measured
+858.8/1,800.1 tok/s. Averaging the paired c8/c32 orders gives index sharing
+about +3.7% at c8 and +0.9% at c32; it is retained as a modest low/mid-batch
+optimization, not claimed as a high-concurrency breakthrough. Every cell had
+zero request failures and exact client/native speculative reconciliation.
+
+Index sharing also passed the five-case agent gate 5/5 at 59.2 output tok/s,
+then the complete deep-context gate 4/4 with 492 reconciled completion tokens
+and 94.57% strict MTP acceptance. A separate 33,553-token identical-prefix
+cell measured 3.84s cold versus 1.15s warm TTFT; native engine counters
+recorded 100,722 queried and 24,800 hit tokens across that guarded cell even
+though response `cached_tokens` remained zero. Evidence is under
+`.experiments/20260826T164842Z-mtp3-indexshare-b-gate/`,
+`.experiments/20260826T165003Z-mtp3-indexshare-b-matrix/`,
+`.experiments/20260826T170322Z-mtp3-a2-crossover/`,
+`.experiments/20260826T171459Z-indexshare-b2-crossover/`, and
+`.experiments/20260826T171632Z-indexshare-deep-context/`. The first 32K prefix
+attempt used the wrong base path and failed immediately with HTTP 404; the
+corrected passing evidence is retained separately under
+`.experiments/20260826T171811Z-indexshare-prefix-32k-r2/`.
+
+The fixed on-device KV pool also passed a guarded direct context frontier with
+one cold, one prime, and one identical-prefix warm request per size:
+
+| target | actual prompt | cold TTFT | warm TTFT | result |
+|---|---:|---:|---:|---|
+| 32K | 33,566 | 5.94s | 1.18s | passed |
+| 128K | 133,916 | 16.07s | 0.75s | passed |
+| 240K | 251,009 | 32.25s | 1.58s | passed |
+
+The usage object's `cached_tokens` field remained zero on this hybrid model,
+so it is not used as cache authority; the warm cells are reported only as
+identical-prefix latency observations. This frontier proves near-native-limit
+admission and prefix reuse behavior. Long-context correctness then passed the
+existing synthetic depth/session corpus: 4/4 requests were protocol-valid,
+including five needles at 1%, 25%, 50%, 75%, and 99% depth in both 99,875- and
+199,482-token prompts, plus a two-turn tool session over a 50K-token prompt.
+All 556 client completion tokens and four finished requests reconciled with
+native engine counters; MTP strict acceptance was 90.07%. Guard run ID was
+`d9e2df62c74cfe61adc9c3f046d20652`.
+
+Host offload is intentionally rejected. The recipe's simple CPU KV connector
+asks for 236,223,201,280 bytes per rank—about 880 GiB for one TP4 engine—on a
+125 GiB host. Mooncake and LMCache require a real external memory tier, while
+`VLLM_PLE_CPU_OFFLOAD=1` concerns the separate 51B N-gram table and needs at
+least 51 GiB plus runtime headroom. The final two-engine stack has about 50
+GiB available before allowing for safety headroom, so both KV and PLE remain
+on GPU.
+
+Ramjet image `rust-r133-qwen38-flash-next-df01c18` was built from commit
+`df01c18` in 108.625s after a cold builder-cache fill and transferred to
+node06 in 6.571s. Its 15,800,890-byte runtime image was published and pinned as
+`sha256:78f13c87fcc928552593a8055293479dbbc2569d0b7a4b754d89e0d32a278385`.
+An LB-only rollout first kept the same four production Qwen3.8-27B upstreams
+and returned to 4/4 HTTP admission in seconds. A guarded production-path smoke
+returned HTTP 200 with authoritative 58 prompt and 27 completion tokens;
+evidence is under `.experiments/20260826T172416Z-r133-lb-smoke/`.
+
+Promotion then used qualified B as the serving anchor. B passed a guarded
+ramjet smoke before the old GPU 0–3 engines stopped. A reached health in 540s
+without restarting and matched B's immutable image, model revision, argv SHA
+`3961c1dd661d0627c268b648cc2b2834d599eb003e611ecfaa6f4ac5d74bf2d0`,
+and 10.17-context KV capacity. Its direct five-case gate passed 5/5 with exact
+speculation reconciliation and 90.39% strict acceptance. Its two-run scouts
+measured 194.4, 870.7, and 1,727.3 aggregate tok/s at c1/c8/c32 with 82/82
+requests successful. A's 33,556-token cold prefix measured 7.38s TTFT versus
+1.25s warm; the 199K five-depth case passed with 139 reconciled completion
+tokens and 97.22% strict acceptance. The deterministic in-memory red-square
+multimodal probe passed with 227ms TTFT, authoritative usage, and exact native
+reconciliation. Evidence is under
+`.experiments/20260826T175100Z-engine-a-agent-gate-r2/`,
+`.experiments/20260826T175200Z-engine-a-code-scout/`,
+`.experiments/20260826T175400Z-engine-a-prefix-32k/`,
+`.experiments/20260826T175500Z-engine-a-longctx-199k/`, and
+`.experiments/20260826T180200Z-engine-a-multimodal/`. The first A agent-gate
+attempt used `/v1` twice and returned immediate HTTP 404; it is retained as
+negative harness evidence separately from the corrected run.
+
+A then passed the same five cases through ramjet before pair admission. The
+transition pair served a guarded c64 cell at 3,340.5 aggregate tok/s with
+128/128 requests, an exact 64/64 route split, and exact combined native
+speculation reconciliation. This is 1.93x A's c32 result. Evidence is under
+`.experiments/20260826T175800Z-engine-a-ramjet-gate/` and
+`.experiments/20260826T180000Z-pair-c64-transition/`.
+
+The final LB migration explicitly retained the old bridge only for the host
+machine-view agent while serving A/B on the Flash network. The first attempt
+reached 2/2 but a diagnostic assertion omitted the agent URL's `/sample`
+suffix; it automatically restored the proven transition LB at 2/2. The
+corrected migration preserved fresh host telemetry and the final guarded
+five-case gate passed 5/5 with requests split 2/3. The temporary engine links
+to the old network were then removed. Final capture at 18:03Z reported 2/2,
+41C intake, 50.3 GiB host memory available, 5.0/8.0 GiB swap used, zero
+inflight, zero engine restarts, and fresh machine view for eight GPUs and two
+engines. Evidence is under
+`.experiments/20260826T180600Z-canonical-pair-lb-r2/`. Pull request #224
+carries the source, deployment, validation, and complete rollout record.
+
 ## 2026-08-25 — RadixArk BF16-lm_head checkpoint promoted on all eight Qwen engines
 
 The AC repair was operator-confirmed, so the 2026-08-14 node06 operational
@@ -8254,6 +8414,61 @@ The rule is recorded in AGENTS.md under "One Compose file per deployment". A
 configuration that lost belongs in this journal, not in a file someone can
 accidentally render. `deploy/dspark_0731/` still carries an overlay stack; it
 is not the live deployment and was left alone.
+
+## 2026-08-26 — Qwen3.8-Flash-Next ramjet alpha crossover: retain alpha 4
+
+The promoted two-TP4 Flash-Next stack was healthy and idle before this test:
+both exact FP8 engine incarnations had restart count zero, ramjet admitted 2/2,
+and intake air was 41C. The recent route journal was not useful for tuning: 38
+paired records had zero overlap and zero selected load, so alpha values from
+0.5 through 8 replayed identically. A live affinity-versus-load conflict was
+required.
+
+`bench/route_conflict.py` was strengthened before GPU work. Blockers now run to
+completion, output useful-work throughput and TTFT, sample both engine metrics,
+and reconcile request, prompt, prefill, queue, generation, and speculative
+counters. Qwen's response `cached_tokens=0` remains explicitly untrusted; only
+native prefix counters describe reuse. Eleven focused harness/metrics tests
+passed.
+
+The guarded LB-only crossover was alpha 4 -> 2 -> 2 -> 4. Each arm recreated
+only the exact r133 LB, primed five fresh 4K-token shared prefixes, then ran
+four completed 512-token blockers plus a 64-token returning probe per prefix:
+30 requests and 133,670 prompt tokens per arm. Both vLLM containers and their
+KV caches stayed resident. All four thermal journals passed with intake at
+41C, zero preemptions, zero request failures, and exact native speculation and
+token reconciliation.
+
+| policy / arm | probe TTFT median | blocker TTFT p95 | blocker output | native prefix hit | effective spec tokens/step |
+|---|---:|---:|---:|---:|---:|
+| alpha 4 / A1 | 918.5 ms | 974.0 ms | 431.9 tok/s | 35.91% | 2.461 |
+| alpha 2 / B1 | 1060.1 ms | 1316.3 ms | 398.8 tok/s | 47.88% | 2.473 |
+| alpha 2 / B2 | 1054.1 ms | 1106.7 ms | 403.1 tok/s | 47.88% | 2.471 |
+| alpha 4 / A2 | 918.9 ms | 972.0 ms | 433.2 tok/s | 35.91% | 2.485 |
+
+Averaged across the crossover, alpha 2 increased prefix hits but regressed the
+primary service metrics: probe TTFT +15.1%, blocker TTFT p95 +24.5%, and useful
+output throughput -7.3%. Speculation efficiency was unchanged. The candidate
+therefore fails both the >=20% TTFT-improvement promotion threshold and the 95%
+throughput / 110% TTFT guardrails. Production remains at alpha 4 with the 32KiB
+load quantum.
+
+Run IDs were `d135e0c2beb3778dee8b4be443340d37`,
+`3ca66b0840d35d6e820bdb3f6c484a8b`,
+`9a87c4b65b3b168db0a7608bff7ca0ac`, and
+`2ca1d7de2b0a23472fa8459e296cee2a`. Maximum GPU temperature was 74C; the
+facility-authoritative intake maximum remained 41C.
+
+After the negative result, the Qwen Compose file was hardened without changing
+effective policy: chunk size 2,048 bytes, prefix window 2MiB, overlap cap 32,
+load quantum 32KiB, load cap 8, and phase-aware accounting false are now
+explicit and validator-pinned. The first rollout attempt timed out and rolled
+back because the verification shell suppressed a malformed Python readiness
+expression; the candidate ramjet process itself was healthy. The corrected
+rollout passed at Compose SHA-256
+`5dad80d0f778489d6c0221618eeaeff253477ce31f714583ef85d705280bbc12`.
+Final state: exact r133 LB at alpha 4, 2/2 healthy; both engine start times and
+restart counts unchanged.
 
 ### What is still unmeasured
 

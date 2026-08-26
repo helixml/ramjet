@@ -107,6 +107,7 @@ pub trait ModelProfile: Send + Sync + 'static {
 pub static PROFILES: &[&dyn ModelProfile] = &[
     &deepseek_v4::DEEPSEEK_V4_R34,
     &qwen3::QWEN38_27B,
+    &qwen3::QWEN38_FLASH_NEXT,
     &qwen3::QWEN38_2_4T_A95B,
 ];
 
@@ -395,6 +396,15 @@ mod tests {
             assert_eq!(profile.label(), label);
         }
         assert!(profile_for("no-such-model").is_none());
+    }
+
+    #[test]
+    fn flash_next_profile_is_registered_with_its_own_identity() {
+        let profile = profile_for("qwen3.8-flash-next").expect("Flash-Next profile registered");
+        assert_eq!(profile.family(), "qwen3.8");
+        assert_eq!(profile.formatter_source(), FormatterSource::HfChatTemplate);
+        assert_eq!(profile.modality(), Modality::Multimodal);
+        assert!(profile.thinking_can_be_disabled());
     }
 
     #[test]

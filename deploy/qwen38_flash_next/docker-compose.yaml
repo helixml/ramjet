@@ -1,0 +1,137 @@
+# Canonical source: helixml/ramjet/deploy/qwen38_flash_next/docker-compose.yaml
+#
+# Qwen3.8-Flash-Next-FP8 on 8x RTX PRO 6000 Blackwell (SM120): two NUMA-local
+# TP4 vLLM engines behind ramjet. This is the whole deployment; do not add an
+# overlay. During qualification, start only the explicitly named canary engine.
+
+x-vllm-engine: &vllm-engine
+  image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3}
+  labels:
+    ai.ramjet.model.repository: Qwen/Qwen3.8-Flash-Next-FP8
+    ai.ramjet.model.revision: bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+  entrypoint: ["vllm", "serve"]
+  restart: ${ENGINE_RESTART_POLICY:-unless-stopped}
+  ipc: host
+  init: true
+  shm_size: 32gb
+  ulimits:
+    memlock: -1
+    stack: 67108864
+    nofile: {soft: 1048576, hard: 1048576}
+  volumes:
+    - ${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}:/workspace/model:ro
+    - ${VLLM_CACHE_DIR:-/prod/engine-cache-vllm-qwen38flashnext}:/root/.cache
+  environment:
+    CUDA_DEVICE_ORDER: PCI_BUS_ID
+    CUDA_VISIBLE_DEVICES: "0,1,2,3"
+    # vLLM reads this directly. Keep bearer authority out of the process argv
+    # so identity capture and host process inspection remain privacy-safe.
+    VLLM_API_KEY: ${VLLM_API_KEY:-qwen-local}
+    # Host RAM is constrained on node06. Keep the 51B N-gram table on the
+    # GPUs for the first qualification; CPU PLE offload is a later A/B only.
+    VLLM_PLE_CPU_OFFLOAD: "0"
+  command: &vllm-command
+    - /workspace/model
+    - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-flash-next}
+    - --revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+    - --tokenizer-revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+    - --host=0.0.0.0
+    - --port=8000
+    - --tensor-parallel-size=4
+    - --enable-expert-parallel
+    - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
+    # Pin the first successful 90% boot's vLLM-recommended allocation. Auto
+    # profiling varied from 38.32 GiB to 4.48 GiB across identical warm boots.
+    - --kv-cache-memory=${KV_CACHE_MEMORY:-40190174004}
+    - --max-model-len=${MAX_MODEL_LEN:-262144}
+    - --max-num-seqs=${MAX_NUM_SEQS:-64}
+    - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}
+    # Candidate A/B: preserve MTP3 while reusing the step-0 QSA sparse indices
+    # on later draft steps. The pinned Qwen runtime implements this directly;
+    # it is the only variable relative to the qualified MTP3 reference.
+    - --speculative-config={"method":"mtp","num_speculative_tokens":3,"index_share_for_mtp_iteration":true}
+    - --enable-prefix-caching
+    - --no-enable-flashinfer-autotune
+    - --enable-auto-tool-choice
+    - --tool-call-parser=qwen3_coder
+    - --reasoning-parser=qwen3
+
+services:
+  ds4-loadbalancer:
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.4.0@sha256:467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b}
+    container_name: ds4-loadbalancer
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8006:8000"
+      - "127.0.0.1:8007:9090"
+      - "100.89.187.17:8007:9090"
+    volumes:
+      - /var/lib/ramjet-machineview:/machineview
+    # The host telemetry agent is intentionally bound only to the established
+    # node06 bridge gateway. Retain that observation-only path when Compose
+    # ownership moves from the old Qwen stack to this deployment.
+    networks:
+      - default
+      - machineview-host
+    environment:
+      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000}
+      RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:-qwen-local}
+      RJ_ADVERTISE_CTX_MARGIN: ${RJ_ADVERTISE_CTX_MARGIN:-8192}
+      # Flash-Next admits valid six-figure output budgets. Preserve the
+      # caller's limit instead of applying ramjet's legacy 100K sentinel shim.
+      RJ_MAX_TOKENS_STRIP: "0"
+      RJ_ROUTE_ALPHA: ${RJ_ROUTE_ALPHA:-4}
+      RJ_ROUTE_CHUNK_BYTES: ${RJ_ROUTE_CHUNK_BYTES:-2048}
+      RJ_ROUTE_MAX_PREFIX_BYTES: ${RJ_ROUTE_MAX_PREFIX_BYTES:-2097152}
+      RJ_ROUTE_MAX_OVERLAP_BLOCKS: ${RJ_ROUTE_MAX_OVERLAP_BLOCKS:-32}
+      RJ_ROUTE_LOAD_UNIT_BYTES: ${RJ_ROUTE_LOAD_UNIT_BYTES:-32768}
+      RJ_ROUTE_MAX_LOAD_UNITS: ${RJ_ROUTE_MAX_LOAD_UNITS:-8}
+      RJ_ROUTE_PHASE_AWARE_LOAD: ${RJ_ROUTE_PHASE_AWARE_LOAD:-false}
+      RJ_ROUTE_JOURNAL: ${RJ_ROUTE_JOURNAL:-true}
+      RJ_TOKENIZER_MODE: "off"
+      RJ_TOKENIZER_PROFILE: qwen3.8-flash-next
+      RJ_EXACT_ROUTE_MODE: "off"
+      RJ_UPSTREAM_ADMISSION_MODE: http
+      RJ_KV_EVENT_MODE: "off"
+      RJ_KV_EVENT_LIVE_ENDPOINTS: ""
+      RJ_KV_EVENT_REPLAY_ENDPOINTS: ""
+      RJ_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
+      RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json
+      RJ_IDLE_DRAIN_MODE: ${RJ_IDLE_DRAIN_MODE:-observe}
+      RJ_IDLE_DRAIN_RELEASE: ${RJ_IDLE_DRAIN_RELEASE:-fleet-idle}
+      RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS: ${RJ_IDLE_DRAIN_UPSTREAM_IDLE_AFTER_SECONDS:-600}
+      RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA: ${RJ_IDLE_DRAIN_RESUME_LOAD_PER_REPLICA:-4}
+      RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS: "900"
+      RJ_IDLE_DRAIN_MIN_WARM: "1"
+      RJ_IDLE_DRAIN_COOLDOWN_SECONDS: "300"
+      RJ_IDLE_DRAIN_GRACE_SECONDS: "30"
+      RJ_IDLE_DRAIN_INTERVAL_SECONDS: "15"
+
+  qwen38flashnext-a:
+    <<: *vllm-engine
+    container_name: qwen38flashnext-a
+    cpuset: "0-11,24-35"
+    ports: ["127.0.0.1:8040:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["0", "1", "2", "3"], capabilities: [gpu]}
+    command: *vllm-command
+
+  qwen38flashnext-b:
+    <<: *vllm-engine
+    container_name: qwen38flashnext-b
+    cpuset: "12-23,36-47"
+    ports: ["127.0.0.1:8041:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["4", "5", "6", "7"], capabilities: [gpu]}
+    command: *vllm-command
+
+networks:
+  machineview-host:
+    external: true
+    name: ${MACHINEVIEW_NETWORK:-qwen38_27b_default}

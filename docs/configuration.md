@@ -65,7 +65,7 @@ resolving across the rename.
 | `RJ_ROUTE_MAX_LOAD_UNITS` | `8` | Maximum size-weighted load reservation per request. |
 | `RJ_ROUTE_PHASE_AWARE_LOAD` | `false` | Experimental: after the first generated token on a streaming response, reduce the request's size-weighted prefill reservation to one decode unit. |
 | `RJ_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
-| `RJ_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary. |
+| `RJ_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary; `0` disables the legacy strip. |
 | `RJ_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
 | `RUST_LOG` | `info` | Standard tracing filter, for example `ramjet=debug`. |
 

@@ -96,9 +96,40 @@ kind = "hf-org"
 id = "Qwen"
 why = "Upstream for the model family we serve, including the FP8 checkpoint."
 watch_for = """
-  Point releases of Qwen3.8-27B, and any change to the hybrid layer layout.
-  Our concurrency ceiling is set by the linear-attention state size, so a
-  revision that changes state dimensions changes our slot budget directly.
+  Point releases of Qwen3.8-27B or Qwen3.8-Flash-Next, and any change to the
+  hybrid layer layout. Our concurrency ceiling is set by the linear-attention
+  state size, so a revision that changes state dimensions changes our slot
+  budget directly.
+  """
+
+[[sources]]
+name = "Qwen3.8-Flash-Next FP8"
+kind = "hf-repo"
+id = "Qwen/Qwen3.8-Flash-Next-FP8"
+why = """
+  Official 185.50GB block-FP8 checkpoint selected for the first node06 TP4
+  qualification. The initial immutable revision is
+  bcd9f01ddc9cff2316eb84281bebcd5b058bddce.
+  """
+watch_for = """
+  Weight, quantization-metadata, tokenizer, chat-template, generation-config,
+  or architecture revisions. Mutable Hub main is never an in-place production
+  update; every changed revision needs a fresh correctness and performance A/B.
+  """
+
+[[sources]]
+name = "RadixArk Qwen3.8-Flash-Next NVFP4"
+kind = "hf-repo"
+id = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+why = """
+  The first 135.20GB NVFP4 export of Qwen3.8-Flash-Next. It is small enough to
+  make TP2 on 96GB SM120 cards a valuable post-FP8 candidate if the unvalidated
+  RTX PRO kernel and tensor-parallel paths pass.
+  """
+watch_for = """
+  An RTX PRO 6000/SM120 qualification, TP2 recipe, dense-head variant, corrected
+  quantization metadata, or independently reproducible accuracy comparison to
+  the official FP8 checkpoint.
   """
 
 [[sources]]

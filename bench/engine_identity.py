@@ -16,6 +16,7 @@ CONTRACT_FLAGS = {
     "--max-num-batched-tokens",
     "--max-model-len",
     "--gpu-memory-utilization",
+    "--kv-cache-memory",
     "--revision",
     "--tokenizer-revision",
     "--attention-backend",

@@ -558,6 +558,12 @@ fn canonical_prompt(body: &[u8], object: Option<&Map<String, Value>>, max_bytes:
         leading += 1;
     }
     for key in [
+        "chat_template_kwargs",
+        "enable_thinking",
+        "preserve_thinking",
+        "mm_processor_kwargs",
+        "add_generation_prompt",
+        "continue_final_message",
         "tools",
         "functions",
         "tool_choice",
@@ -954,6 +960,68 @@ mod tests {
         let router = Router::new(config());
         let first = br#"{"messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"z":{"type":"integer"},"a":{"type":"string"}}}}}]}"#;
         let second = br#"{"tools":[{"function":{"parameters":{"properties":{"a":{"type":"string"},"z":{"type":"integer"}},"type":"object"},"name":"lookup"},"type":"function"}],"messages":[{"content":"hello","role":"user"}]}"#;
+        assert_eq!(router.fingerprints(first), router.fingerprints(second));
+    }
+
+    #[test]
+    fn fingerprints_include_prompt_rendering_controls() {
+        let cases = [
+            (
+                "chat_template_kwargs",
+                json!({"enable_thinking": true}),
+                json!({"enable_thinking": false}),
+            ),
+            ("enable_thinking", json!(true), json!(false)),
+            ("preserve_thinking", json!(true), json!(false)),
+            (
+                "mm_processor_kwargs",
+                json!({"max_pixels": 1_048_576}),
+                json!({"max_pixels": 2_097_152}),
+            ),
+            ("add_generation_prompt", json!(true), json!(false)),
+            ("continue_final_message", json!(true), json!(false)),
+        ];
+
+        for (key, first_value, second_value) in cases {
+            let router = Router::new(config());
+            let mut first = json!({
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            first
+                .as_object_mut()
+                .expect("request is an object")
+                .insert(key.to_owned(), first_value);
+            let mut second = json!({
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            second
+                .as_object_mut()
+                .expect("request is an object")
+                .insert(key.to_owned(), second_value);
+
+            let first_body = serde_json::to_vec(&first).unwrap();
+            let second_body = serde_json::to_vec(&second).unwrap();
+            let first_fingerprints = router.fingerprints(&first_body);
+            let second_fingerprints = router.fingerprints(&second_body);
+            assert_ne!(
+                first_fingerprints, second_fingerprints,
+                "{key} must affect the canonical prompt"
+            );
+
+            router.observe(0, &first_fingerprints);
+            let decision = router.route_prepared(second_body.len(), &second_fingerprints);
+            assert!(
+                decision.overlap_blocks < decision.total_blocks,
+                "a changed {key} must not claim the complete cached prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_rendering_control_object_order_is_canonical() {
+        let router = Router::new(config());
+        let first = br#"{"messages":[{"role":"user","content":"hello"}],"chat_template_kwargs":{"enable_thinking":true,"nested":{"z":1,"a":2}},"mm_processor_kwargs":{"max_pixels":1048576,"min_pixels":3136},"enable_thinking":true,"preserve_thinking":false,"add_generation_prompt":true,"continue_final_message":false}"#;
+        let second = br#"{"continue_final_message":false,"add_generation_prompt":true,"preserve_thinking":false,"enable_thinking":true,"mm_processor_kwargs":{"min_pixels":3136,"max_pixels":1048576},"chat_template_kwargs":{"nested":{"a":2,"z":1},"enable_thinking":true},"messages":[{"content":"hello","role":"user"}]}"#;
         assert_eq!(router.fingerprints(first), router.fingerprints(second));
     }
 
