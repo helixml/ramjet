@@ -12,6 +12,17 @@ Set BENCH_TOKEN (or VLLM_API_KEY). METRICS_URLS may contain comma-separated
 direct engine /metrics endpoints. BENCH_REQUIRE_RECONCILED_SPECULATION=1 makes
 native prompt/request/completion/speculation reconciliation a hard gate.
 
+BLOCKER_READY_MODE=first_token moves the probe boundary from upstream response
+headers to the first semantic content/reasoning/tool delta. Combine it with a
+positive BLOCKER_TAIL_KIB to give every blocker a distinct non-reusable tail;
+that is the controlled shape for RJ_ROUTE_PHASE_AWARE_LOAD because a fully
+warm request already reserves one unit and cannot be reduced further.
+
+PROBE_BASE may point the probe at a different endpoint from BASE. This permits
+an authoritative direct-engine oracle using the exact same workload: BASE is
+the warm, busy engine and PROBE_BASE is either that engine or its cold, idle
+peer. Leave it unset for the normal Ramjet routing experiment.
+
 Pair the result with route-journal replay to see which alpha/cap values would
 move the probe without changing production policy.
 """
@@ -49,7 +60,18 @@ def percentile(values, fraction):
     return values[math.ceil(fraction * len(values)) - 1]
 
 
-def stream_request(base, model, token, system, user, max_tokens, output, key, ready=None):
+def stream_request(
+    base,
+    model,
+    token,
+    system,
+    user,
+    max_tokens,
+    output,
+    key,
+    ready=None,
+    ready_mode="headers",
+):
     body = {
         "model": model,
         "messages": [
@@ -74,7 +96,7 @@ def stream_request(base, model, token, system, user, max_tokens, output, key, re
     try:
         with urllib.request.urlopen(request, timeout=900) as response:
             route = response.headers.get("X-Ramjet-Upstream")
-            if ready is not None:
+            if ready is not None and ready_mode == "headers":
                 ready.set()
             for raw in response:
                 line = raw.decode("utf-8", "ignore").strip()
@@ -90,6 +112,8 @@ def stream_request(base, model, token, system, user, max_tokens, output, key, re
                     for field in ("content", "reasoning", "reasoning_content", "tool_calls")
                 ):
                     first = first or time.perf_counter()
+                    if ready is not None and ready_mode == "first_token":
+                        ready.set()
                 usage = event.get("usage") or {}
                 prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
                 completion_tokens = usage.get("completion_tokens", completion_tokens)
@@ -120,6 +144,58 @@ def stream_request(base, model, token, system, user, max_tokens, output, key, re
             ready.set()
 
 
+def blocker_user(config, run_index, blocker_index):
+    instruction = (
+        f"blocker {blocker_index}: write a long production-quality Python module with tests"
+    )
+    target = config["blocker_tail_kib"] * 1024
+    if target == 0:
+        return instruction
+    header = f"[unique tail {config['salt']}/{run_index}/{blocker_index}] "
+    unit = "Inspect this private synthetic module record and preserve its ordering. "
+    tail = (header + unit * (target // len(unit) + 1))[:target]
+    return f"{instruction}\n{tail}"
+
+
+def route_state_snapshot(base):
+    try:
+        with urllib.request.urlopen(base + "/health", timeout=10) as response:
+            document = json.load(response)
+    except Exception:
+        return None
+    replicas = document.get("replicas") if isinstance(document, dict) else None
+    if not isinstance(replicas, list):
+        return None
+    result = []
+    for replica in replicas:
+        if not isinstance(replica, dict):
+            return None
+        index = replica.get("index")
+        inflight = replica.get("inflight")
+        load_units = replica.get("load_units")
+        if not all(type(value) is int and value >= 0 for value in (index, inflight, load_units)):
+            return None
+        result.append({"upstream": index, "inflight": inflight, "load_units": load_units})
+    return result
+
+
+def engine_gauge_snapshot(urls):
+    if not urls:
+        return None
+    try:
+        snapshots = [fetch_engine_metrics(url, timeout=10) for url in urls]
+    except Exception:
+        return None
+    return [
+        {
+            "running": snapshot.get("running"),
+            "waiting": snapshot.get("waiting"),
+            "kv_cache_usage": snapshot.get("kv_cache_usage"),
+        }
+        for snapshot in snapshots
+    ]
+
+
 def run_once(index, config):
     system = (
         f"[route-conflict {config['salt']}/{index}] "
@@ -137,7 +213,7 @@ def run_once(index, config):
         "warm",
     )
     if not output["warm"].get("ok"):
-        return output, 0.0
+        return output, 0.0, None
 
     ready = [threading.Event() for _ in range(config["blockers"])]
     threads = [
@@ -148,11 +224,12 @@ def run_once(index, config):
                 config["model"],
                 config["token"],
                 system,
-                f"blocker {blocker}: write a long production-quality Python module with tests",
+                blocker_user(config, index, blocker),
                 config["blocker_tokens"],
                 output,
                 f"blocker-{blocker}",
                 ready[blocker],
+                config["blocker_ready_mode"],
             ),
         )
         for blocker in range(config["blockers"])
@@ -164,8 +241,13 @@ def run_once(index, config):
     for event in ready:
         event.wait(max(0, deadline - time.monotonic()))
 
+    boundary = {
+        "router": route_state_snapshot(config["base"]),
+        "engines": engine_gauge_snapshot(config["metrics_urls"]),
+    }
+
     stream_request(
-        config["base"],
+        config["probe_base"],
         config["model"],
         config["token"],
         system,
@@ -180,7 +262,7 @@ def run_once(index, config):
     for thread in threads:
         thread.join()
     blocker_window_ms = (time.perf_counter() - blockers_started) * 1000
-    return output, blocker_window_ms
+    return output, blocker_window_ms, boundary
 
 
 def combine_speculative_snapshots(snapshots):
@@ -276,7 +358,7 @@ def build_reconciliation(records, engine, speculative):
     }
 
 
-def summarize_runs(config, run_outputs, blocker_windows_ms, snapshots):
+def summarize_runs(config, run_outputs, blocker_windows_ms, boundaries, snapshots):
     records = [record for output in run_outputs for record in output.values()]
     errors = [record["error"] for record in records if not record.get("ok")]
     probes = [output["probe"] for output in run_outputs if output.get("probe", {}).get("ok")]
@@ -307,9 +389,12 @@ def summarize_runs(config, run_outputs, blocker_windows_ms, snapshots):
     reconciliation = build_reconciliation(records, engine, speculative)
     result = {
         "base": config["base"],
+        "probe_base": config["probe_base"],
         "runs": config["runs"],
         "blockers": config["blockers"],
         "blocker_tokens": config["blocker_tokens"],
+        "blocker_tail_kib": config["blocker_tail_kib"],
+        "blocker_ready_mode": config["blocker_ready_mode"],
         "context_target_tokens": config["context_tokens"],
         "probe_tokens": config["probe_tokens"],
         "metrics_endpoints": len(config["metrics_urls"]),
@@ -319,6 +404,7 @@ def summarize_runs(config, run_outputs, blocker_windows_ms, snapshots):
             for output in run_outputs
         ],
         "probe_routes": [probe.get("route") for probe in probes],
+        "probe_boundaries": boundaries,
         # Backward-compatible observation only. See cached_tokens_authoritative.
         "probe_cached_tokens": [probe.get("cached_tokens") for probe in probes],
         "probe_request_bytes": [probe.get("request_bytes") for probe in probes],
@@ -369,10 +455,18 @@ def parse_config(argv):
         raise SystemExit("set BENCH_TOKEN or VLLM_API_KEY")
     context_tokens = int(os.environ.get("CONTEXT_TOKENS", "20000"))
     probe_tokens = int(os.environ.get("PROBE_TOKENS", "64"))
-    if min(blockers, blocker_tokens, runs, context_tokens, probe_tokens) <= 0:
+    blocker_tail_kib = int(os.environ.get("BLOCKER_TAIL_KIB", "0"))
+    if (
+        min(blockers, blocker_tokens, runs, context_tokens, probe_tokens) <= 0
+        or not 0 <= blocker_tail_kib <= 8 * 1024
+    ):
         raise SystemExit(
-            "blockers, blocker_tokens, runs, context, and probe tokens must be positive"
+            "blockers, blocker_tokens, runs, context, and probe tokens must be positive; "
+            "BLOCKER_TAIL_KIB must be from 0 through 8192"
         )
+    blocker_ready_mode = os.environ.get("BLOCKER_READY_MODE", "headers")
+    if blocker_ready_mode not in {"headers", "first_token"}:
+        raise SystemExit("BLOCKER_READY_MODE must be headers or first_token")
     require = os.environ.get("BENCH_REQUIRE_RECONCILED_SPECULATION", "0")
     if require not in {"0", "1"}:
         raise SystemExit("BENCH_REQUIRE_RECONCILED_SPECULATION must be 0 or 1")
@@ -388,6 +482,7 @@ def parse_config(argv):
         raise SystemExit("METRICS_SETTLE_SECONDS must be finite and non-negative")
     return {
         "base": argv[0].rstrip("/"),
+        "probe_base": os.environ.get("PROBE_BASE", argv[0]).rstrip("/"),
         "model": argv[1],
         "blockers": blockers,
         "blocker_tokens": blocker_tokens,
@@ -396,6 +491,8 @@ def parse_config(argv):
         "salt": os.environ.get("SALT") or str(time.time_ns()),
         "context_tokens": context_tokens,
         "probe_tokens": probe_tokens,
+        "blocker_tail_kib": blocker_tail_kib,
+        "blocker_ready_mode": blocker_ready_mode,
         "metrics_urls": metrics_urls,
         "require_reconciled": require == "1",
         "settle_seconds": settle_seconds,
@@ -406,11 +503,12 @@ def main(argv=None):
     config = parse_config(argv)
     before = metric_snapshot(config["metrics_urls"])
     run_results = [run_once(index, config) for index in range(config["runs"])]
-    run_outputs = [output for output, _ in run_results]
-    blocker_windows_ms = [window for _, window in run_results]
+    run_outputs = [output for output, _, _ in run_results]
+    blocker_windows_ms = [window for _, window, _ in run_results]
+    boundaries = [boundary for _, _, boundary in run_results]
     time.sleep(config["settle_seconds"])
     after = metric_snapshot(config["metrics_urls"])
-    result = summarize_runs(config, run_outputs, blocker_windows_ms, (before, after))
+    result = summarize_runs(config, run_outputs, blocker_windows_ms, boundaries, (before, after))
     measurement_ok = not config["require_reconciled"] or result["reconciliation"]["reconciled"]
     if not measurement_ok:
         result["measurement_error"] = "native_metrics_not_reconciled"

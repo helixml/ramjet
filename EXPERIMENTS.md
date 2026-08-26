@@ -1,6 +1,6 @@
 # node06 experiment journal
 
-## 2026-08-26 — Qwen3.8-Flash-Next FP8 is live on two TP4 engines; fixed KV and QSA index reuse qualified
+## 2026-08-26 — Qwen3.8-Flash-Next FP8 is live on two TP4 engines; fixed KV, QSA index reuse, and phase-aware routing qualified
 
 The official `Qwen/Qwen3.8-Flash-Next-FP8` checkpoint now serves production
 on all eight node06 GPUs as two NUMA-local TP4+EP engines. A owns GPUs 0–3, B
@@ -9,7 +9,7 @@ balancer at 2/2 HTTP admission. Both engines have restart policy
 `unless-stopped`, restart count zero, the exact same serving argv, and
 2,667,258 KV tokens each. The old single-GPU engines are stopped. Canonical
 and on-box Compose SHA-256 is
-`0356b7db003c498285c55dca0c206177862cc9810c187de7c5af2f799392566f`.
+`5cfcf93f9cb4ca552d3ae91cdb0b26b2740e43ac2768123ea014a4d197fb6e1a`.
 
 Immutable inputs are model revision
 `bcd9f01ddc9cff2316eb84281bebcd5b058bddce` (185,502,232,570 indexed bytes
@@ -159,6 +159,64 @@ inflight, zero engine restarts, and fresh machine view for eight GPUs and two
 engines. Evidence is under
 `.experiments/20260826T180600Z-canonical-pair-lb-r2/`. Pull request #224
 carries the source, deployment, validation, and complete rollout record.
+
+The follow-up first measured ramjet's HTTP-path cost independently of its
+routing value. Production was single-homed on B while direct A was compared
+with a temporary loopback-only exact-r133 ramjet targeting the same A. The
+order-balanced direct/proxy crossover measured 195.35/195.30 aggregate tok/s
+at c1 (-0.03%) and 1,321.7/1,318.55 tok/s at c16 (-0.24%). Proxy TTFT and TPOT
+were slightly better in both cells, confirming that the small throughput
+differences are noise rather than a measurable proxy tax. All 212 requests and
+native MTP counters reconciled. Thermal journals are the
+`.experiments/20260826T1934*-q38-oh-*` files on node06.
+
+The two-engine policy control then changed only `RJ_AFFINITY`: `load` disabled
+prefix overlap while preserving the same binary, proxy, engines, and load
+accounting. Prefix routing improved returning-probe median TTFT from 1,119ms to
+908ms (18.8%) and raised native prefix hits from 23.9% to 35.84%, but retained
+only 93.6% of blocker throughput. It therefore demonstrates cache-routing
+value without meeting the declared 20% TTFT and 95% throughput promotion
+gates. The Compose file now exposes `RJ_AFFINITY` with its existing `prefix`
+default so this control is reproducible without an overlay. Evidence is under
+`.experiments/20260826T194427Z-affinity-load-prefix-crossover/`.
+
+The next cell addressed the observed affinity/load conflict. The strengthened
+`route_conflict.py` can wait for the first semantic SSE delta, append bounded
+unique non-reusable blocker tails, capture the exact router/engine state at the
+probe boundary, and point the probe directly at a different engine. A direct
+oracle proved the warm-but-busy target was correct: 301ms probe TTFT versus
+2,481ms on the cold-idle peer. Under legacy accounting, two post-prefill
+blockers still reserved 16 load units, forcing the returning probe cold. With
+`RJ_ROUTE_PHASE_AWARE_LOAD=true`, their reservation fell to two decode units
+after first token and the probe stayed warm.
+
+The guarded three-run false/true/true/false crossover measured 2,496ms versus
+287ms probe TTFT (-88.5%). Phase-aware mode retained 99.1% of blocker output
+throughput, left blocker TTFT p95 flat, slightly improved effective speculative
+tokens per step, and recorded zero failures or preemptions. A separate c32
+false/true/true/false guard measured 2,639.9 versus 2,711.8 aggregate tok/s
+(+2.7%), 10.205 versus 9.942ms median TPOT (-2.6%), and a 7.3% TTFT-p95
+increase, inside the 10% guard. All 432 requests in the qualification matrices
+completed and reconciled exactly. Evidence is under
+`.experiments/20260826T194819Z-phase-aware-direct-oracle/`,
+`.experiments/20260826T195123Z-phase-aware-abba/`, and
+`.experiments/20260826T195744Z-phase-aware-c32-abba/`.
+
+Phase-aware load accounting is now the Compose default and is live on the
+exact r133 image. The LB-only promotion preserved both engine IDs, start times,
+and restart count zero, returned to 2/2 admission, and passed the deterministic
+agent corpus 5/5 with a 2/3 route split, 122.7ms TTFT p95, and 194.8 output
+tok/s. Evidence is under
+`.experiments/20260826T200009Z-phase-aware-promotion/`.
+
+One rollout-procedure defect was caught before benchmarking: the first
+automatic rollback restored the prior files but omitted the node-qualified
+`LB_IMAGE` override, so Compose started released v0.4.0. That binary rejected
+the Flash-Next renderer profile and restart-looped until exact r133 was
+restored about 19 seconds later; neither engine changed or restarted. Every
+subsequent forward, experiment, restore, and rollback Compose invocation
+carried the immutable r133 reference explicitly. The negative evidence is
+retained under `.experiments/20260826T194121Z-affinity-harness-rollout/`.
 
 ## 2026-08-25 — RadixArk BF16-lm_head checkpoint promoted on all eight Qwen engines
 
