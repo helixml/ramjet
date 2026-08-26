@@ -136,3 +136,10 @@ claiming the same warm route.
 The checked-in Compose default follows the repository-wide released-image
 policy. `node06-canary.sh` supplies the separately qualified r133 override
 explicitly until these Flash-Next changes are included in a tagged release.
+
+The load balancer joins both the Flash serving network and the existing
+`qwen38_27b_default` bridge. The latter is observation-only: node06's host
+machine-view agent listens on that bridge gateway, so dropping it would leave
+serving healthy while silently losing machine telemetry. It can be retired
+only after the host agent is deliberately rebound and the replacement URL is
+qualified from inside the final load-balancer container.

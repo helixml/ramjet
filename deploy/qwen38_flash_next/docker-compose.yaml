@@ -67,6 +67,12 @@ services:
       - "100.89.187.17:8007:9090"
     volumes:
       - /var/lib/ramjet-machineview:/machineview
+    # The host telemetry agent is intentionally bound only to the established
+    # node06 bridge gateway. Retain that observation-only path when Compose
+    # ownership moves from the old Qwen stack to this deployment.
+    networks:
+      - default
+      - machineview-host
     environment:
       RJ_UPSTREAM: ${RJ_UPSTREAM:-http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000}
       RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:-qwen-local}
@@ -120,3 +126,8 @@ services:
           devices:
             - {driver: nvidia, device_ids: ["4", "5", "6", "7"], capabilities: [gpu]}
     command: *vllm-command
+
+networks:
+  machineview-host:
+    external: true
+    name: ${MACHINEVIEW_NETWORK:-qwen38_27b_default}

@@ -83,6 +83,12 @@ class QwenFlashNextComposeTests(unittest.TestCase):
         with self.assertRaisesRegex(validator.ValidationError, "output budget"):
             validator.validate(changed)
 
+    def test_machineview_bridge_drift_fails(self):
+        changed = copy.deepcopy(self.document)
+        changed["networks"]["machineview-host"]["name"] = "unbound-bridge"
+        with self.assertRaisesRegex(validator.ValidationError, "host bridge"):
+            validator.validate(changed)
+
 
 if __name__ == "__main__":
     unittest.main()

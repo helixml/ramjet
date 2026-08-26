@@ -191,6 +191,16 @@ def validate(document: dict[str, Any]) -> None:
     if environment.get("RJ_MAX_TOKENS_STRIP") != "0":
         fail("load balancer can silently strip a valid Flash-Next output budget")
 
+    if set(load_balancer.get("networks", {})) != {"default", "machineview-host"}:
+        fail("load balancer lost its serving or host-telemetry network")
+    networks = document.get("networks", {})
+    machineview = networks.get("machineview-host", {})
+    if (
+        machineview.get("external") is not True
+        or machineview.get("name") != "qwen38_27b_default"
+    ):
+        fail("machine-view host bridge is not the admitted node06 network")
+
 
 def main() -> int:
     try:

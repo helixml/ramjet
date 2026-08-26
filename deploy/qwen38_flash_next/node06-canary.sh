@@ -10,7 +10,7 @@ model_dir=/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c
 candidate_image='vllm/vllm-openai@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3'
 lb_image='ghcr.io/helixml/ramjet:rust-r133-qwen38-flash-next-df01c18@sha256:78f13c87fcc928552593a8055293479dbbc2569d0b7a4b754d89e0d32a278385'
 old_compose_sha256=fe4275830c555ab59fd77c23e43a3ce53baa06a94577fdef68cc4c2ec117f242
-new_compose_sha256=f8ef22bd53edfbe264b78f0d3f24e4fec1432103c97ac6d7ba899e28048a1553
+new_compose_sha256=0356b7db003c498285c55dca0c206177862cc9810c187de7c5af2f799392566f
 single_upstreams='http://qwen38-sg-e0:8000,http://qwen38-sg-e1:8000,http://qwen38-sg-e2:8000,http://qwen38-sg-e3:8000'
 full_upstreams="${single_upstreams},http://qwen38-sg-e4:8000,http://qwen38-sg-e5:8000,http://qwen38-sg-e6:8000,http://qwen38-sg-e7:8000"
 
