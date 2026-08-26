@@ -18,6 +18,7 @@ pub struct RouterConfig {
     pub index_capacity: usize,
     pub load_unit_bytes: usize,
     pub max_load_units: usize,
+    pub projected_load: bool,
     pub affinity: Affinity,
 }
 
@@ -159,6 +160,7 @@ struct Score {
     overlap: usize,
     affinity: usize,
     load: usize,
+    request_load: usize,
     weighted: f64,
     healthy: bool,
 }
@@ -269,13 +271,21 @@ impl Router {
                     0
                 };
                 let affinity = overlap.min(self.config.max_overlap_blocks);
+                let request_load = self.load_estimator.estimate_blocks(body_bytes, overlap);
+                let additional_load = if self.config.projected_load {
+                    request_load.saturating_sub(1)
+                } else {
+                    0
+                };
+                let projected_load = state.load.saturating_add(additional_load);
                 Score {
                     index,
                     overlap,
                     affinity,
                     load: state.load,
+                    request_load,
                     #[allow(clippy::cast_precision_loss)]
-                    weighted: affinity as f64 - self.config.alpha * state.load as f64,
+                    weighted: affinity as f64 - self.config.alpha * projected_load as f64,
                     healthy: state.serving(),
                 }
             })
@@ -321,9 +331,7 @@ impl Router {
                 overlap_blocks: score.overlap,
                 affinity_blocks: score.affinity,
                 load_units: score.load,
-                request_load_units: self
-                    .load_estimator
-                    .estimate_blocks(body_bytes, score.overlap),
+                request_load_units: score.request_load,
                 healthy: score.healthy,
             })
             .collect();
@@ -333,9 +341,7 @@ impl Router {
             overlap_blocks: winner.overlap,
             total_blocks: fingerprints.len(),
             affinity_blocks: winner.affinity,
-            load_units: self
-                .load_estimator
-                .estimate_blocks(body_bytes, winner.overlap),
+            load_units: winner.request_load,
             rotation,
             outcome,
         }
@@ -682,6 +688,7 @@ mod tests {
             index_capacity: 100_000,
             load_unit_bytes: 32 << 10,
             max_load_units: 8,
+            projected_load: false,
             affinity: Affinity::Prefix,
         }
     }
@@ -749,6 +756,94 @@ mod tests {
         let _guard = router.acquire(prefill.candidates[0], prefill.load_units);
         let small = router.route(&chat("small", "x"));
         assert_ne!(small.candidates[0], prefill.candidates[0]);
+    }
+
+    #[test]
+    fn projected_load_preserves_all_cold_placement() {
+        let mut baseline_config = config();
+        baseline_config.max_load_units = 32;
+        let mut projected_config = baseline_config.clone();
+        projected_config.projected_load = true;
+        let baseline = Router::new(baseline_config);
+        let projected = Router::new(projected_config);
+        let cold = vec![b'x'; 1 << 20];
+
+        assert_eq!(
+            baseline.route(&cold).candidates,
+            projected.route(&cold).candidates
+        );
+    }
+
+    #[test]
+    fn projected_load_accounts_for_candidate_specific_uncached_work() {
+        let mut baseline_config = config();
+        baseline_config.max_load_units = 32;
+        let mut projected_config = baseline_config.clone();
+        projected_config.projected_load = true;
+        let baseline = Arc::new(Router::new(baseline_config));
+        let projected = Arc::new(Router::new(projected_config));
+        let prompt = vec![b'x'; 1 << 20];
+
+        for router in [&baseline, &projected] {
+            router.observe(0, &router.fingerprints(&prompt));
+        }
+        let _baseline_load = baseline.acquire(0, 9);
+        let _projected_load = projected.acquire(0, 9);
+
+        assert_eq!(baseline.route(&prompt).candidates[0], 1);
+        assert_eq!(projected.route(&prompt).candidates[0], 0);
+    }
+
+    #[test]
+    fn projected_load_does_not_change_single_unit_requests() {
+        let mut baseline_config = config();
+        baseline_config.max_load_units = 32;
+        let mut projected_config = baseline_config.clone();
+        projected_config.projected_load = true;
+        let baseline = Arc::new(Router::new(baseline_config));
+        let projected = Arc::new(Router::new(projected_config));
+        let prompt = vec![b'x'; 16 << 10];
+
+        for router in [&baseline, &projected] {
+            router.observe(0, &router.fingerprints(&prompt));
+        }
+        let _baseline_load = baseline.acquire(0, 9);
+        let _projected_load = projected.acquire(0, 9);
+
+        assert_eq!(
+            baseline.route(&prompt).candidates,
+            projected.route(&prompt).candidates
+        );
+    }
+
+    #[test]
+    fn projected_sort_retains_each_candidates_admission_reservation() {
+        let mut projected_config = config();
+        projected_config.max_load_units = 32;
+        projected_config.projected_load = true;
+        let router = Arc::new(Router::new(projected_config));
+        let prompt = vec![b'x'; 1 << 20];
+        router.observe(0, &router.fingerprints(&prompt));
+        let _warm_load = router.acquire(0, 9);
+
+        let decision = router.route(&prompt);
+        let warm = decision
+            .candidate_state
+            .iter()
+            .find(|candidate| candidate.index == 0)
+            .unwrap();
+        let cold = decision
+            .candidate_state
+            .iter()
+            .find(|candidate| candidate.index == 1)
+            .unwrap();
+        assert_eq!(warm.request_load_units, 1);
+        assert_eq!(cold.request_load_units, 32);
+        assert_eq!(decision.load_units, warm.request_load_units);
+
+        let cold_units = cold.request_load_units;
+        let _failover_load = router.acquire(1, cold_units);
+        assert_eq!(router.state(1).map(|state| state.1), Some(cold_units));
     }
 
     #[test]

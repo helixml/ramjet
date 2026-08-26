@@ -63,6 +63,7 @@ pub struct Config {
     pub route_load_unit_bytes: usize,
     pub route_max_load_units: usize,
     pub route_phase_aware_load: bool,
+    pub route_projected_load: bool,
     pub affinity: Affinity,
     pub session_affinity_mode: SessionAffinityMode,
     pub session_affinity_key: Option<SecretString>,
@@ -567,6 +568,7 @@ impl Config {
                 false,
                 "a boolean",
             )?,
+            route_projected_load: parse(&mut get, "RJ_ROUTE_PROJECTED_LOAD", false, "a boolean")?,
             affinity,
             session_affinity_mode: session_affinity.mode,
             session_affinity_key: session_affinity.key,
@@ -2103,6 +2105,7 @@ mod tests {
         assert_eq!(config.route_load_unit_bytes, 32 << 10);
         assert_eq!(config.route_max_load_units, 8);
         assert!(!config.route_phase_aware_load);
+        assert!(!config.route_projected_load);
         assert_eq!(config.affinity, Affinity::Prefix);
         assert_eq!(config.session_affinity_mode, SessionAffinityMode::Off);
         assert!(config.session_affinity_key.is_none());
@@ -2158,6 +2161,27 @@ mod tests {
         assert_eq!(config.snapshot_route_attempt_timeout_ms, 30_000);
         assert_eq!(config.snapshot_route_reconnect_min_ms, 250);
         assert_eq!(config.snapshot_route_reconnect_max_ms, 5_000);
+    }
+
+    #[test]
+    fn projected_route_load_is_explicit_and_default_off() {
+        let enabled = Config::from_lookup(|key| {
+            (key == "RJ_ROUTE_PROJECTED_LOAD").then(|| "true".to_owned())
+        })
+        .unwrap();
+        assert!(enabled.route_projected_load);
+
+        let error = Config::from_lookup(|key| {
+            (key == "RJ_ROUTE_PROJECTED_LOAD").then(|| "sometimes".to_owned())
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "RJ_ROUTE_PROJECTED_LOAD",
+                ..
+            }
+        ));
     }
 
     #[test]

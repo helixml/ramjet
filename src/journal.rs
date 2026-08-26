@@ -14,7 +14,7 @@ use crate::{
     usage::Accumulator,
 };
 
-const VERSION: u8 = 8;
+const VERSION: u8 = 9;
 
 pub struct RouteJournal {
     enabled: bool,
@@ -48,6 +48,7 @@ pub struct StartRecord<'a> {
     load_unit_bytes: usize,
     max_load_units: usize,
     phase_aware_load: bool,
+    projected_load: bool,
     score_tie_break: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     exact_canary: Option<CanaryAssignment>,
@@ -142,6 +143,7 @@ impl RouteJournal {
             load_unit_bytes: config.route_load_unit_bytes,
             max_load_units: config.route_max_load_units,
             phase_aware_load: config.route_phase_aware_load,
+            projected_load: config.route_projected_load,
             score_tie_break: "overlap",
             exact_canary: (annotations.exact_canary != CanaryAssignment::NotApplicable)
                 .then_some(annotations.exact_canary),
@@ -257,6 +259,7 @@ mod tests {
             index_capacity: 100_000,
             load_unit_bytes: 32 << 10,
             max_load_units: 8,
+            projected_load: false,
             affinity: Affinity::Prefix,
         });
         let prepared = PreparedRequest::new(
@@ -301,8 +304,9 @@ mod tests {
         }
         assert!(encoded.contains("\"chosen\":1"));
         assert!(encoded.contains("\"served_chosen\":1"));
-        assert!(encoded.contains("\"v\":8"));
+        assert!(encoded.contains("\"v\":9"));
         assert!(encoded.contains("\"phase_aware_load\":false"));
+        assert!(encoded.contains("\"projected_load\":false"));
         assert!(encoded.contains("\"exact_canary\":\"treatment\""));
         assert!(encoded.contains(
             "\"session_affinity\":{\"policy_version\":1,\"bonus_blocks\":4,\"max_load_delta\":0,\"outcome\":\"would_prefer_primary\",\"primary\":0,\"secondary\":1,\"target\":0}"
@@ -333,7 +337,7 @@ mod tests {
         };
 
         let encoded = serde_json::to_string(&record).unwrap();
-        assert!(encoded.contains("\"v\":8"));
+        assert!(encoded.contains("\"v\":9"));
         assert!(encoded.contains("\"upstream\":1"));
         assert!(encoded.contains("\"request_load_units\":4"));
         for forbidden in ["prompt_text", "token_ids", "fingerprint"] {

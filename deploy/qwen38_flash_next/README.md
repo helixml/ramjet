@@ -124,7 +124,9 @@ claiming the same warm route.
 
 The approximate routing shape is pinned explicitly in Compose: 2KiB chunks, a
 2MiB fingerprint window, a 32-block affinity cap, 32KiB load units, and an
-eight-unit request cap. Phase-aware load accounting is enabled: once an
+eight-unit request cap. Candidate-specific projected-load scoring remains
+explicitly off pending a guarded warm-long-prefix A/B. Phase-aware load
+accounting is enabled: once an
 upstream emits its first semantic token, ramjet releases the size-weighted
 prefill reservation and retains one decode unit. A guarded 3-run ABBA conflict
 cell reduced returning-probe TTFT from 2,496ms to 287ms (88.5%) while retaining

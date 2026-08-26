@@ -64,6 +64,7 @@ resolving across the rename.
 | `RJ_ROUTE_LOAD_UNIT_BYTES` | `32768` | Request bytes represented by one reserved load unit. |
 | `RJ_ROUTE_MAX_LOAD_UNITS` | `8` | Maximum size-weighted load reservation per request. |
 | `RJ_ROUTE_PHASE_AWARE_LOAD` | `false` | Experimental: after the first generated token on a streaming response, reduce the request's size-weighted prefill reservation to one decode unit. |
+| `RJ_ROUTE_PROJECTED_LOAD` | `false` | Experimental: include each candidate's extra request reservation beyond the one-unit decode floor in its approximate route score. |
 | `RJ_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
 | `RJ_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary; `0` disables the legacy strip. |
 | `RJ_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
@@ -74,6 +75,14 @@ reliability state, inflight work, load units, and index size. It returns `200 ok
 `200 degraded` when at least one can serve, and `503 unhealthy` when none can
 serve. Successful proxied responses include `X-Ramjet-Upstream` with an
 opaque replica ordinal.
+
+Projected-load scoring keeps all-cold and other equal-cost choices unchanged.
+When approximate overlap makes a request cheaper on one replica, its score uses
+`affinity - alpha * (active_load + request_load - 1)`. This can preserve a
+large warm prefix that the bounded affinity credit alone would spill cold, but
+it also strengthens stale approximate locality. Keep it off until a guarded
+cache/load conflict test proves service-time improvement rather than only more
+prefix hits.
 
 Serving admission fails open. A readiness probe competes with request traffic
 for the same engine capacity, so a saturated fleet stops answering probes
@@ -665,8 +674,11 @@ audit therefore prefers the finish value and falls back to the pre-route
 candidate estimate only for v1-v7 traces, where that fallback systematically
 over-reports warm requests under placement. It is a bounded integer and carries
 no prefix identity.
+Journal v9 adds the bounded `projected_load` policy bit to the start record so
+offline replay can reproduce whether candidate-specific request cost affected
+the approximate score.
 Journal v1-v6 records remain readable and are
-labelled `legacy`; missing or semantically impossible v7/v8 telemetry is
+labelled `legacy`; missing or semantically impossible v7-v9 telemetry is
 collapsed to `invalid` instead of propagating an arbitrary label. This is evidence
 collection only. No output bucket affects scoring, replica choice, or load
 admission.

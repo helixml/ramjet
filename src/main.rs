@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
         index_capacity: config.route_index_capacity,
         load_unit_bytes: config.route_load_unit_bytes,
         max_load_units: config.route_max_load_units,
+        projected_load: config.route_projected_load,
         affinity: config.affinity,
     }));
     let client = reqwest::Client::builder()
@@ -172,6 +173,7 @@ fn log_startup(config: &Config) {
         load_unit_bytes = config.route_load_unit_bytes,
         max_load_units = config.route_max_load_units,
         phase_aware_load = config.route_phase_aware_load,
+        projected_load = config.route_projected_load,
         session_affinity_mode = ?config.session_affinity_mode,
         session_affinity_bonus_blocks = config.session_affinity_bonus_blocks,
         session_affinity_max_load_delta = config.session_affinity_max_load_delta,
