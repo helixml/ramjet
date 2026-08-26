@@ -1,5 +1,113 @@
 # node06 experiment journal
 
+## 2026-08-26 — Qwen3.8-Flash-Next FP8 TP4 is live; fixed KV and QSA index reuse qualified
+
+The official `Qwen/Qwen3.8-Flash-Next-FP8` checkpoint is running as one
+direct TP4+EP candidate on node06 GPUs 4–7. Production deliberately remains
+single-homed at 4/4 on the existing GPUs 0–3; retired engines e4–e7 remain
+stopped, the new candidate is not yet in the production LB, and no failed
+iteration restores the retired baseline. The candidate is healthy with zero
+restarts. Its canonical one-file Compose SHA-256 is
+`f8ef22bd53edfbe264b78f0d3f24e4fec1432103c97ac6d7ba899e28048a1553`.
+
+Immutable inputs are model revision
+`bcd9f01ddc9cff2316eb84281bebcd5b058bddce` (185,502,232,570 indexed bytes
+across 131 shards) and linux/amd64 image
+`vllm/vllm-openai@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`.
+The image contains vLLM `0.1.dev20073+g8e685d198`; its image labels do not
+identify a source revision, so the digest establishes byte identity but not
+source provenance. The official day-zero recipe and source were inspected at
+`https://recipes.vllm.ai/Qwen/Qwen3.8-Flash-Next` and vLLM recipes commit
+`8bb447dc1f6e937afae0af777e53b3e452977ee5`.
+
+The first 85%-utilization boot failed safely after weights and compilation:
+vLLM measured -0.27 GiB available for KV blocks. At 90%, the first successful
+automatic profile offered 38.32 GiB of KV, but an otherwise identical warm
+boot charged a 34.91 GiB activation peak and offered only 4.48 GiB. The
+qualified command therefore pins vLLM's first recommended
+`--kv-cache-memory=40190174004`. The non-speculative engine reported 3,033,380
+KV tokens (11.57 native 262K contexts); MTP3 uses extra draft state and reports
+2,667,258 tokens (10.17 contexts). Startup evidence and immutable runtime
+identity are under
+`.experiments/20260826T154442Z-fp8-vllm-startup-b/` on node06.
+
+All request-generating cells ran under the intake-air thermal guard. Intake
+stayed at 37–38C and every successful cell reconciled client usage with native
+vLLM speculative counters. The matched 512-token code-decode ladder shows why
+MTP3 is retained for the latency-oriented candidate but is not claimed as a
+universal throughput setting:
+
+| direct TP4 load | no MTP tok/s | MTP3 tok/s | change | MTP3 median TPOT |
+|---|---:|---:|---:|---:|
+| c1, 3 runs | 108.6 | 186.9 | +72.1% | 5.160ms |
+| c8, 3 runs | 628.3 | 866.9 | +38.0% | 8.233ms |
+| c16, 3 runs | 1,113.1 | 1,305.1 | +17.3% | 11.007ms |
+| c32, 2 runs | 1,844.1 | 1,759.2 | -4.6% | 16.502ms |
+
+MTP3 strict acceptance stayed at 53.6–54.5%, or 1.61–1.63 accepted draft
+tokens per target step. The deterministic five-case agent/tool/reasoning gate
+passed 5/5 and improved from 50.9 to 56.4 output tok/s. A guarded multimodal
+request against the supplied vLLM-recipe screenshot correctly returned the
+expected label with HTTP 200; its 115 completion tokens and one finished
+request reconciled exactly, despite the runtime warning that the draft path
+receives text-only inputs. The first 64-token vision attempt is retained as a
+negative harness result: it ended in reasoning at the artificial length cap;
+the 256-token rerun passed.
+
+The next isolated cell kept MTP3 and changed only
+`index_share_for_mtp_iteration=true`. The pinned NVIDIA Qwen implementation
+computes QSA's sparse top-k indices on draft step zero, compacts the final row
+for each request, and reuses those indices for steps one and two. A fresh
+MTP3 reference measured 874.0 tok/s at c8 and 1,744.4 tok/s at c32. The first
+three-run index-sharing matrix measured 198.4, 859.3, 1,327.8, and 1,770.0
+tok/s at c1/c8/c16/c32. Because the c8/c32 changes were below 5%, an A2/B2
+crossover was required: A2 measured 782.8/1,793.9 tok/s and B2 measured
+858.8/1,800.1 tok/s. Averaging the paired c8/c32 orders gives index sharing
+about +3.7% at c8 and +0.9% at c32; it is retained as a modest low/mid-batch
+optimization, not claimed as a high-concurrency breakthrough. Every cell had
+zero request failures and exact client/native speculative reconciliation.
+
+Index sharing also passed the five-case agent gate 5/5 at 59.2 output tok/s,
+then the complete deep-context gate 4/4 with 492 reconciled completion tokens
+and 94.57% strict MTP acceptance. A separate 33,553-token identical-prefix
+cell measured 3.84s cold versus 1.15s warm TTFT; native engine counters
+recorded 100,722 queried and 24,800 hit tokens across that guarded cell even
+though response `cached_tokens` remained zero. Evidence is under
+`.experiments/20260826T164842Z-mtp3-indexshare-b-gate/`,
+`.experiments/20260826T165003Z-mtp3-indexshare-b-matrix/`,
+`.experiments/20260826T170322Z-mtp3-a2-crossover/`,
+`.experiments/20260826T171459Z-indexshare-b2-crossover/`, and
+`.experiments/20260826T171632Z-indexshare-deep-context/`.
+
+The fixed on-device KV pool also passed a guarded direct context frontier with
+one cold, one prime, and one identical-prefix warm request per size:
+
+| target | actual prompt | cold TTFT | warm TTFT | result |
+|---|---:|---:|---:|---|
+| 32K | 33,566 | 5.94s | 1.18s | passed |
+| 128K | 133,916 | 16.07s | 0.75s | passed |
+| 240K | 251,009 | 32.25s | 1.58s | passed |
+
+The usage object's `cached_tokens` field remained zero on this hybrid model,
+so it is not used as cache authority; the warm cells are reported only as
+identical-prefix latency observations. This frontier proves near-native-limit
+admission and prefix reuse behavior. Long-context correctness then passed the
+existing synthetic depth/session corpus: 4/4 requests were protocol-valid,
+including five needles at 1%, 25%, 50%, 75%, and 99% depth in both 99,875- and
+199,482-token prompts, plus a two-turn tool session over a 50K-token prompt.
+All 556 client completion tokens and four finished requests reconciled with
+native engine counters; MTP strict acceptance was 90.07%. Guard run ID was
+`d9e2df62c74cfe61adc9c3f046d20652`.
+
+Host offload is intentionally rejected. The recipe's simple CPU KV connector
+asks for 236,223,201,280 bytes per rank—about 880 GiB for one TP4 engine—on a
+125 GiB host. Mooncake and LMCache require a real external memory tier, while
+`VLLM_PLE_CPU_OFFLOAD=1` concerns the separate 51B N-gram table and needs at
+least 51 GiB plus runtime headroom. The live mixed stack has 39 GiB available,
+so both KV and PLE remain on GPU. Final state was LB 4/4, candidate health 200,
+restart count zero, 39C intake, no fatal/OOM/NCCL markers, and 39 GiB host
+memory available.
+
 ## 2026-08-25 — RadixArk BF16-lm_head checkpoint promoted on all eight Qwen engines
 
 The AC repair was operator-confirmed, so the 2026-08-14 node06 operational

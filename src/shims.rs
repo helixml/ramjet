@@ -78,7 +78,7 @@ pub(crate) fn sanitize_object(
         let oversized = object
             .get(field)
             .and_then(Value::as_i64)
-            .is_some_and(|value| value >= threshold);
+            .is_some_and(|value| threshold > 0 && value >= threshold);
         if oversized {
             object.remove(field);
             changed = true;
@@ -210,6 +210,15 @@ mod tests {
         assert_eq!(value["reasoning_effort"], "high");
         assert_eq!(value["max_tokens"], 256);
         assert_eq!(value["max_completion_tokens"], 512);
+    }
+
+    #[test]
+    fn zero_disables_the_legacy_max_tokens_compatibility_strip() {
+        let body = br#"{"messages":[],"max_tokens":131072,"max_completion_tokens":262144}"#;
+        let value: Value =
+            serde_json::from_slice(&sanitize_request(Endpoint::Chat, body, 0)).unwrap();
+        assert_eq!(value["max_tokens"], 131_072);
+        assert_eq!(value["max_completion_tokens"], 262_144);
     }
 
     #[test]

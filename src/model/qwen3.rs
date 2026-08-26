@@ -1,8 +1,8 @@
 //! The Qwen3.8 family.
 //!
-//! Both members share a chat template and reasoning vocabulary and differ only
-//! in modality and whether thinking may be turned off, so they are one struct
-//! with two registered instances.
+//! The registered members share a chat template and reasoning vocabulary and
+//! differ only in modality and whether thinking may be turned off, so they are
+//! one struct with separate, stable profile labels.
 //!
 //! Qwen ships no native Rust formatter in this renderer release, so these
 //! profiles render through the model's own `tokenizer_config.json`.
@@ -21,6 +21,19 @@ pub static QWEN38_27B: Qwen38 = Qwen38 {
     thinking_optional: true,
 };
 
+/// `Qwen/Qwen3.8-Flash-Next` — sparse `MoE`, vision-language, thinking optional.
+///
+/// The pinned Flash-Next tokenizer and chat-template artifacts qualified for
+/// this repository are byte-identical to the Qwen3.8-27B artifacts, so the two
+/// profiles deliberately share rendering semantics. This profile does not
+/// attest model weights or serving-runtime behavior; those remain separate
+/// manifest and live-engine checks.
+pub static QWEN38_FLASH_NEXT: Qwen38 = Qwen38 {
+    label: "qwen3.8-flash-next",
+    modality: Modality::Multimodal,
+    thinking_optional: true,
+};
+
 /// `Qwen/Qwen3.8-2.4T-A95B` — sparse `MoE`, text only, thinking mandatory.
 pub static QWEN38_2_4T_A95B: Qwen38 = Qwen38 {
     label: "qwen3.8-2.4t-a95b",
@@ -31,7 +44,7 @@ pub static QWEN38_2_4T_A95B: Qwen38 = Qwen38 {
 pub struct Qwen38 {
     label: &'static str,
     modality: Modality,
-    /// The 27B accepts `enable_thinking: false`; the 2.4T reasons
+    /// The 27B and Flash-Next accept `enable_thinking: false`; the 2.4T reasons
     /// unconditionally and silently ignores the request to stop.
     thinking_optional: bool,
 }
@@ -173,14 +186,17 @@ mod tests {
     }
 
     #[test]
-    fn the_27b_can_disable_thinking_and_the_2_4t_cannot() {
-        let mut mapped = args(&json!({ "enable_thinking": false }));
-        QWEN38_27B.apply_reasoning(&mut mapped).unwrap();
-        assert_eq!(mapped.get("enable_thinking"), Some(&Value::Bool(false)));
-        assert!(
-            !mapped.contains_key("reasoning_effort"),
-            "a non-thinking request carries no effort"
-        );
+    fn the_multimodal_members_can_disable_thinking_and_the_2_4t_cannot() {
+        for profile in [&QWEN38_27B, &QWEN38_FLASH_NEXT] {
+            let mut mapped = args(&json!({ "enable_thinking": false }));
+            profile.apply_reasoning(&mut mapped).unwrap();
+            assert_eq!(mapped.get("enable_thinking"), Some(&Value::Bool(false)));
+            assert!(
+                !mapped.contains_key("reasoning_effort"),
+                "a non-thinking request carries no effort for {}",
+                profile.label()
+            );
+        }
 
         let mut mapped = args(&json!({ "enable_thinking": false }));
         assert!(
@@ -201,8 +217,8 @@ mod tests {
     }
 
     #[test]
-    fn preserve_thinking_is_understood_by_both_members() {
-        for profile in [&QWEN38_27B, &QWEN38_2_4T_A95B] {
+    fn preserve_thinking_is_understood_by_every_member() {
+        for profile in [&QWEN38_27B, &QWEN38_FLASH_NEXT, &QWEN38_2_4T_A95B] {
             assert!(
                 profile.template_kwarg_keys().contains(&"preserve_thinking"),
                 "{} would push default agent traffic to the remote authority",
@@ -212,8 +228,34 @@ mod tests {
     }
 
     #[test]
-    fn only_the_27b_accepts_image_parts() {
+    fn only_the_vision_language_members_accept_image_parts() {
         assert!(QWEN38_27B.modality().accepts_non_text_parts());
+        assert!(QWEN38_FLASH_NEXT.modality().accepts_non_text_parts());
         assert!(!QWEN38_2_4T_A95B.modality().accepts_non_text_parts());
+    }
+
+    #[test]
+    fn flash_next_reuses_the_27b_rendering_contract() {
+        assert_eq!(
+            QWEN38_FLASH_NEXT.formatter_source(),
+            QWEN38_27B.formatter_source()
+        );
+        assert_eq!(
+            QWEN38_FLASH_NEXT.template_kwarg_keys(),
+            QWEN38_27B.template_kwarg_keys()
+        );
+        for input in [
+            json!({}),
+            json!({"reasoning_effort": "low"}),
+            json!({"reasoning_effort": "medium"}),
+            json!({"reasoning_effort": "xhigh"}),
+            json!({"enable_thinking": false}),
+        ] {
+            let mut flash = args(&input);
+            let mut dense = args(&input);
+            QWEN38_FLASH_NEXT.apply_reasoning(&mut flash).unwrap();
+            QWEN38_27B.apply_reasoning(&mut dense).unwrap();
+            assert_eq!(flash, dense, "rendering controls diverged for {input}");
+        }
     }
 }

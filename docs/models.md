@@ -32,6 +32,7 @@ attestation. Current profiles:
 |---|---|---|---|
 | `deepseek-v4-r34` | DeepSeek-V4-Flash (vLLM r34) | text | native Rust |
 | `qwen3.8-27b` | Qwen/Qwen3.8-27B | image + video | HF chat template |
+| `qwen3.8-flash-next` | Qwen/Qwen3.8-Flash-Next | image + video | HF chat template |
 | `qwen3.8-2.4t-a95b` | Qwen/Qwen3.8-2.4T-A95B | text | HF chat template |
 
 Profiles using an HF chat template additionally require
@@ -39,6 +40,16 @@ Profiles using an HF chat template additionally require
 digest-pinned for the same reason the tokenizer is: editing it changes the
 token IDs the renderer produces, silently invalidating every cached placement
 decision derived from them. Setting one without the other is a startup error.
+
+The Flash-Next profile deliberately shares the Qwen3.8-27B rendering
+implementation. At the Flash-Next revision qualified by this repository, its
+`tokenizer.json` and `tokenizer_config.json` are byte-identical to the reviewed
+Qwen3.8-27B artifacts, including the chat template and the
+`low`/`medium`/`xhigh` reasoning controls. That equivalence justifies sharing
+renderer behavior; it is not a model or runtime attestation. Local shadow mode
+still requires the exact tokenizer and template digests plus its own reviewed
+goldens, while model weights, engine arguments, packages, KV-event behavior,
+and live process identity remain separate deployment authorities.
 
 ## Adding a model
 
