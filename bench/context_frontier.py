@@ -6,7 +6,9 @@ Usage: context_frontier.py BASE MODEL [runs]
 Set BENCH_TOKEN (or VLLM_API_KEY). CONTEXT_TOKENS is a comma-separated target
 list (default: 2000,8000,32000,64000,128000), MAX_OUTPUT_TOKENS defaults to
 256. METRICS_URLS optionally lists comma-separated engine /metrics endpoints;
-METRICS_URL remains a supported single-endpoint alias.
+METRICS_URL remains a supported single-endpoint alias. Set
+BENCH_REQUIRE_RECONCILED_SPECULATION=1 to require exact client/native request,
+prompt-token, generation-token, and speculative-decoding reconciliation.
 
 Run this sequentially, preferably through the production router so its load
 reservation protects unrelated traffic. Every cold prompt diverges at block
@@ -19,11 +21,12 @@ effective rate rather than kernel throughput.
 import json
 import math
 import os
-import re
 import statistics
 import sys
 import time
 import urllib.request
+
+from engine_metrics import metric_value, speculative_delta
 
 
 BASE = sys.argv[1].rstrip("/")
@@ -45,19 +48,32 @@ METRICS_URLS = [
 ]
 SALT = os.environ.get("SALT") or str(time.time_ns())
 TIMEOUT = float(os.environ.get("BENCH_TIMEOUT", "900"))
+REQUIRE_RECONCILED = os.environ.get(
+    "BENCH_REQUIRE_RECONCILED_SPECULATION", "0"
+)
 
 if not TOKEN:
     raise SystemExit("set BENCH_TOKEN or VLLM_API_KEY")
 if RUNS <= 0 or MAX_OUTPUT_TOKENS <= 1 or not TARGETS or min(TARGETS) <= 0:
     raise SystemExit("runs and contexts must be positive; MAX_OUTPUT_TOKENS must exceed 1")
+if REQUIRE_RECONCILED not in {"0", "1"}:
+    raise SystemExit("BENCH_REQUIRE_RECONCILED_SPECULATION must be 0 or 1")
+REQUIRE_RECONCILED = REQUIRE_RECONCILED == "1"
+if REQUIRE_RECONCILED and not METRICS_URLS:
+    raise SystemExit(
+        "BENCH_REQUIRE_RECONCILED_SPECULATION=1 requires METRICS_URLS or METRICS_URL"
+    )
 
 FILLER = (
     "The subsystem records each transaction in an append-only ledger and "
     "reconciles the balance against the upstream snapshot on every commit. "
 )
 METRIC_NAMES = {
-    "drafts": "vllm:spec_decode_num_drafts_total",
-    "draft_tokens": "vllm:spec_decode_num_draft_tokens_total",
+    "prompt_tokens": "vllm:prompt_tokens_total",
+    "generation_tokens": "vllm:generation_tokens_total",
+    "finished_requests": "vllm:request_success_total",
+    "draft_steps": "vllm:spec_decode_num_drafts_total",
+    "proposed_tokens": "vllm:spec_decode_num_draft_tokens_total",
     "accepted_tokens": "vllm:spec_decode_num_accepted_tokens_total",
 }
 
@@ -163,19 +179,19 @@ def metric_snapshot():
         return None
     try:
         snapshot = {key: 0.0 for key in METRIC_NAMES}
+        available = {key: True for key in METRIC_NAMES}
         for metrics_url in METRICS_URLS:
             with urllib.request.urlopen(metrics_url, timeout=30) as response:
                 body = response.read().decode("utf-8", "replace")
             for key, name in METRIC_NAMES.items():
-                match = re.search(
-                    r"^" + re.escape(name) + r"\{[^\n]*\}\s+([0-9.eE+-]+)$",
-                    body,
-                    re.MULTILINE,
-                )
-                if not match:
-                    return None
-                snapshot[key] += float(match.group(1))
-        return snapshot
+                value = metric_value(body, name)
+                if value is None:
+                    available[key] = False
+                elif available[key]:
+                    snapshot[key] += value
+        return {
+            key: snapshot[key] if available[key] else None for key in METRIC_NAMES
+        }
     except Exception:
         return None
 
@@ -183,16 +199,65 @@ def metric_snapshot():
 def acceptance(before, after):
     if before is None or after is None:
         return None
-    delta = {key: after[key] - before[key] for key in before}
-    if min(delta.values()) < 0 or delta["draft_tokens"] <= 0 or delta["drafts"] <= 0:
+    keys = ("draft_steps", "proposed_tokens", "accepted_tokens")
+    if any(before.get(key) is None or after.get(key) is None for key in keys):
+        return None
+    delta = {key: after[key] - before[key] for key in keys}
+    if min(delta.values()) < 0 or delta["proposed_tokens"] <= 0 or delta["draft_steps"] <= 0:
         return None
     return {
-        "draft_steps": int(delta["drafts"]),
-        "draft_tokens": int(delta["draft_tokens"]),
+        "draft_steps": int(delta["draft_steps"]),
+        "draft_tokens": int(delta["proposed_tokens"]),
         "accepted_tokens": int(delta["accepted_tokens"]),
-        "draft_acceptance_pct": round(100 * delta["accepted_tokens"] / delta["draft_tokens"], 1),
-        "mean_accepted_per_draft": round(delta["accepted_tokens"] / delta["drafts"], 2),
-        "effective_tokens_per_step": round(1 + delta["accepted_tokens"] / delta["drafts"], 2),
+        "draft_acceptance_pct": round(100 * delta["accepted_tokens"] / delta["proposed_tokens"], 1),
+        "mean_accepted_per_draft": round(delta["accepted_tokens"] / delta["draft_steps"], 2),
+        "effective_tokens_per_step": round(1 + delta["accepted_tokens"] / delta["draft_steps"], 2),
+    }
+
+
+def reconcile(samples, before, after):
+    good = [sample for sample in samples if sample.get("ok")]
+    client = {
+        "requests": len(good),
+        "prompt_tokens": sum(sample["prompt_tokens"] for sample in good),
+        "generation_tokens": sum(sample["completion_tokens"] for sample in good),
+    }
+    speculative = speculative_delta(
+        before,
+        after,
+        client["generation_tokens"],
+        client["requests"],
+        expected_enabled=True,
+    )
+    engine = {key: None for key in client}
+    if before is not None and after is not None:
+        for client_key, engine_key in (
+            ("requests", "finished_requests"),
+            ("prompt_tokens", "prompt_tokens"),
+            ("generation_tokens", "generation_tokens"),
+        ):
+            left = before.get(engine_key)
+            right = after.get(engine_key)
+            if left is not None and right is not None and right >= left:
+                engine[client_key] = right - left
+    matches = {
+        key: None if engine[key] is None else engine[key] == client[key]
+        for key in client
+    }
+    comparisons = (*matches.values(), speculative.get("reconciled"))
+    if any(value is False for value in comparisons):
+        contaminated = True
+    elif all(value is True for value in comparisons):
+        contaminated = False
+    else:
+        contaminated = None
+    return {
+        "client": client,
+        "engine": engine,
+        "matches": matches,
+        "speculation": speculative,
+        "contaminated": contaminated,
+        "reconciled": contaminated is False,
     }
 
 
@@ -208,6 +273,7 @@ def summarize(samples):
         "requests_failed": len(samples) - len(good),
         "prompt_tokens_median": int(statistics.median([s["prompt_tokens"] for s in good])) if good else None,
         "cached_tokens_median": int(statistics.median([s["cached_tokens"] for s in good])) if good else None,
+        "ttft_ms_mean": round(statistics.mean([s["ttft_ms"] for s in good]), 1) if good else None,
         "ttft_ms_median": median([s["ttft_ms"] for s in good]),
         "ttft_ms_p95": round(percentile([s["ttft_ms"] for s in good], 0.95), 1) if good else None,
         "effective_uncached_prefill_tok_s_median": median(uncached_rates),
@@ -232,6 +298,7 @@ print(json.dumps({
     "targets": TARGETS,
     "max_output_tokens": MAX_OUTPUT_TOKENS,
     "metrics_endpoints": len(METRICS_URLS),
+    "require_reconciled_speculation": REQUIRE_RECONCILED,
     "salt": SALT,
 }, sort_keys=True), flush=True)
 
@@ -244,13 +311,17 @@ failed = False
 for target in TARGETS:
     cold_before = metric_snapshot()
     cold = [request(build_prompt(target, f"cold-{target}-{run}")) for run in range(RUNS)]
-    cold_acceptance = acceptance(cold_before, metric_snapshot())
+    cold_after = metric_snapshot()
+    cold_acceptance = acceptance(cold_before, cold_after)
+    cold_reconciliation = reconcile(cold, cold_before, cold_after)
 
     warm_prompt = build_prompt(target, f"warm-{target}")
     prime = request(warm_prompt, 16)
     warm_before = metric_snapshot()
     warm = [request(warm_prompt) for _ in range(RUNS)] if prime.get("ok") else []
-    warm_acceptance = acceptance(warm_before, metric_snapshot())
+    warm_after = metric_snapshot()
+    warm_acceptance = acceptance(warm_before, warm_after)
+    warm_reconciliation = reconcile(warm, warm_before, warm_after)
 
     result = {
         "event": "context",
@@ -260,11 +331,18 @@ for target in TARGETS:
         "prime_ok": prime.get("ok", False),
         "cold_dspark": cold_acceptance,
         "warm_dspark": warm_acceptance,
+        "cold_reconciliation": cold_reconciliation,
+        "warm_reconciliation": warm_reconciliation,
     }
     if not prime.get("ok"):
         result["prime_error"] = prime.get("error")
-    print(json.dumps(result, sort_keys=True), flush=True)
     if result["cold"]["requests_failed"] or result["warm"]["requests_failed"] or not prime.get("ok"):
         failed = True
+    if REQUIRE_RECONCILED and not (
+        cold_reconciliation["reconciled"] and warm_reconciliation["reconciled"]
+    ):
+        result["measurement_error"] = "native_metrics_not_reconciled"
+        failed = True
+    print(json.dumps(result, sort_keys=True), flush=True)
 
 raise SystemExit(1 if failed else 0)
