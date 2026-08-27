@@ -657,7 +657,7 @@ class Node06GpuGuardTests(unittest.TestCase):
         )
         guard.validate_args(parsed)
         self.assertEqual(parsed.expected_gpus, 8)
-        self.assertEqual(parsed.start_max_c, 40)
+        self.assertEqual(parsed.start_max_c, 46)
         self.assertEqual(parsed.abort_c, 50)
         self.assertEqual(parsed.command, ["true"])
 

@@ -61,7 +61,7 @@ python3 bench/node06_gpu_guard.py \
   -- COMMAND ARGUMENTS
 ```
 
-Use a fresh journal for every invocation. Do not raise the 40C cool-start or
+Use a fresh journal for every invocation. Do not raise the 46C cool-start or
 50C intake-abort defaults to make a run proceed. A telemetry failure, thermal
 abort, child failure, signal, or orphaned process is a failed interval.
 

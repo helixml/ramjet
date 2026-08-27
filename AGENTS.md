@@ -568,7 +568,9 @@ LB. Connect with the SSH alias (config already set up):
 
 The guard gates on **chassis intake-air temperature**, the same signal
 Grafana's `bunker-temps` dashboard plots. It stops request-generating work at
-**50C** and admits new work only after intake returns to **40C or below**. GPU
+**50C** and admits new work only after intake returns to **46C or below**
+(raised from 40C on 2026-08-27: node06's `FP_TEMP` idles at 42-43C with every
+GPU at 0%, so the 40C gate never admitted work). GPU
 and CPU temperatures are still recorded in the journal but no longer gate
 anything.
 
@@ -598,7 +600,7 @@ Note that node06's `FP_TEMP` reads higher than other hosts' `Inlet Temp` --
 43C against their 37C -- and the infra alert rules encode the same offset,
 warning at 62C for `FP_TEMP` against 55C for `Inlet Temp`. The previous 55C
 guard was already below infra's own warning level for this sensor; the current
-50C stop / 40C resume band is deliberately more conservative. The guard stops
+50C stop / 46C resume band is deliberately more conservative. The guard stops
 a benchmark, it does not page anyone. An active request workload is terminated
 rather than process-stopped: pausing a client would not pause already admitted
 GPU work and could strand in-flight requests. A subsequent run waits at
@@ -795,7 +797,7 @@ Run the 104-source/100K exact-route shadow soak only through
 through an SSH-attached `shadow_soak.py`. The thermal guard must observe all
 eight GPUs even when a workload intentionally uses only one TP4 pair. Its
 conservative defaults admit a workload only when chassis intake is at or below
-40C, start a nominal one-second poll with each query bounded to two seconds,
+46C, start a nominal one-second poll with each query bounded to two seconds,
 and terminate the complete benchmark descendant tree if intake reaches 50C or
 if intake, GPU, or process telemetry is lost. On an abort it gives
 request-generating descendants at most five seconds to cancel, escalating

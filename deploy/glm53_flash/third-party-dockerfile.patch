@@ -1,0 +1,15 @@
+diff --git a/Dockerfile b/Dockerfile
+index c324303..a9f59c1 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -62,8 +62,8 @@ CMD ["-m", "sglang.launch_server", \
+      "--speculative-eagle-topk", "1", \
+      "--speculative-num-draft-tokens", "6", \
+      "--speculative-adaptive", \
+-     "--media-url-max-file-size-mb", "1024",
+-     "--enable-multimodal",
++     "--media-url-max-file-size-mb", "1024", \
++     "--enable-multimodal", \
+      "--chat-template", "/chat-template.jinja", \
+      "--reasoning-parser", "glm45", \
+      "--tool-call-parser", "glm47", \

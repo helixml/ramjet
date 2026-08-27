@@ -8,7 +8,9 @@ At the final Qwen handoff capture (`2026-08-27T04:59:47Z`), its Compose project
 had zero containers, every GPU reported zero allocated memory and utilization,
 and chassis intake was 47C. No cap-8/cap-32 or projected-load GPU campaign ran
 after the thermal gate closed. The active guard policy is now a 50C intake
-stop with new work admitted only at 40C or below.
+stop with new work admitted only at 46C or below (the admission threshold was
+40C at the handoff capture and was raised to 46C later on 2026-08-27 because
+idle FP_TEMP sits at 42-43C, so the 40C gate never admitted work).
 
 The qualified serving shape was the official FP8 checkpoint on two independent
 NUMA-local TP4+EP engines: 262,144 native context, a fixed
@@ -1646,10 +1648,10 @@ engine directly, through the load balancer, and through Caddy. This is the
 path that the `flatten_content_parts` fix protects: before it, the sanitizer
 rewrote the forwarded body and the image was silently deleted.
 
-**Helix integration.** Caddy gained a `/qwen3.8-27b/*` route to the same
-balancer, validated and reloaded with the previous config backed up. Helix
-provider `qwen38-node06` (`pe_01m012yhxyrax456npd50esf5k`) points at
-`http://100.89.187.17/qwen3.8-27b/v1`, and app
+**Helix integration.** Caddy gained a model-named compatibility alias to the
+same balancer, validated and reloaded with the previous config backed up. Helix
+provider `qwen38-node06` (`pe_01m012yhxyrax456npd50esf5k`) used that now-legacy
+alias, and app
 `app_01m01302yyvrqawv7vwk715atw` binds it in `org_01kx8crck2r9j31kts1gbew9an`.
 A real `POST /api/v1/sessions/chat` returned "Tokyo" with `reasoning_content`
 correctly separated. Note that `POST /v1/chat/completions` without an org
@@ -8642,3 +8644,244 @@ is the tool for the latter under its privacy contract. Watch Grafana
 one-line revert of `--mamba-ssm-dtype` in the single file plus a paired roll;
 the pre-promotion configuration is in git history and in
 `.superseded-overlays/` on the box.
+
+## 2026-08-27 — GLM-5.3-Flash NVFP4 TP4 loader passes; inference thermally gated; node06 storage cleaned
+
+The first node06 GLM canary used the community `LibertAIDAI/GLM-5.3-Flash-NVFP4`
+checkpoint at `9e0d74e3cef17f634e84fb8e2223707e02616290` and an internal-only image built
+from `0xSero/glm53-flash-nvfp4-sm120-exact-docker` commit
+`8370bb04335bb07b6ee85907dd83cd1d300fa462`. The source repository has no
+detected license and replaces six SGLang files, so this is feasibility evidence,
+not a promotable or redistributable runtime. The six in-image patch hashes and
+all launch flags matched the reviewed manifest. Local image identity:
+`sha256:c3ded56b905cf9cc70b99ab75b3accabd591260ab373c7a3746de1cc715a748b`.
+
+The Hugging Face Xet downloader stalled after 4.6 GiB while holding about
+5.5 GiB RAM. Its resumable partials were preserved and the exact download was
+restarted with `HF_HUB_DISABLE_XET=1` and four HTTP workers; it sustained about
+80-110 MiB/s at roughly 200 MiB RAM. The fail-closed verifier then passed all
+120 shards, exactly 194,660,206,040 tensor bytes, no partials, and the four
+published metadata SHA-256 values.
+
+Before GPU work, a disk alert identified node06 (`212.82.90.212`). Root/Docker
+was 93% used with 27 GiB free; the ZFS `prod` pool was actually healthy at 39%
+capacity. Under the deployment lock, 15 stopped legacy inference containers,
+94 superseded image IDs, and all unused build cache were removed. Root became
+56% used with 167 GiB free. The stale partial Qwen Flash-Next NVFP4 downloader
+was stopped, and superseded DeepSeek/Qwen-27B models and caches were deleted.
+Only the Compose-pinned Qwen3.8-Flash-Next FP8 tree and this GLM tree remain;
+ZFS fell to 12% capacity with 2.19 TiB free. Both exact Compose image sets and
+the unrelated active Helix runner were verified afterward. Deleted artifacts
+require re-download/rebuild for recovery.
+
+The canary was `glm53-b`, GPUs 4-7, NUMA-1 CPUs `12-23,36-47`, TP4/EP4,
+262,144 context, four running requests, 90% static allocation, FP8 E4M3 KV,
+FlashInfer sparse MLA, CUTLASS MoE, and MTP off. It became healthy in 434 seconds
+with restart count zero, `OOMKilled=false`, and no CUDA/NCCL/Xid/runtime error.
+Native startup metrics were:
+
+| measurement | result |
+|---|---:|
+| weight load / scheduler / tokenizer readiness | 213.4s / 323.1s / 336.6s |
+| weights per rank | 44.9707 GiB |
+| KV per rank | 20.8026 GiB / 3,076,608 tokens |
+| KDA/Mamba per rank | ~18.7 GiB / 543 slots |
+| decode graph per rank | 0.4746 GiB |
+| post-start GPU margin per rank | 8.1552 GiB |
+| container memory / minimum host available | 48.88 GiB / 77.25 GiB |
+| startup intake / GPU / TP4 power peaks | 42C / 61C / 502W |
+
+Swap rose from 108 MiB to about 4 GiB during load, with negligible ongoing
+swap-out and only small swap-ins at steady state; it returned to 178 MiB after
+stop. This proves one TP4 fits 128 GB, not that two concurrent loaders are safe.
+SGLang also warned that the checkpoint supplies no FP8 KV scaling factors and
+used 1.0, making correctness a hard gate.
+
+The current intake policy admits a request only at 40C or below. Intake stayed
+42C for the full five-minute guard wait, which ended `failed / preflight_too_hot`
+with 0% GPU utilization before the smoke child launched. Therefore there are
+no GLM correctness, tool-call, cache-hit, MTP, c1, or c8 results in this entry.
+The idle engine was stopped to avoid spending roughly 400 W while unusable.
+It exceeded the explicit 60-second stop grace and exited 137 after Docker's
+kill, with `OOMKilled=false`; all VRAM and host pressure were reclaimed.
+
+Next gate: at a naturally cool intake, restart only B, run the bounded guarded
+text/tool smoke, then one low-reasoning batch each at c1, c8, and c16. Admit
+c24 only with the script's additional thermal headroom. Keep 90% allocation
+unless a measured frontier needs more. Test MTP 5/1/6 as a separate restart
+only after correctness; do not start A or Ramjet until B passes.
+
+### 2026-08-27 guarded live-test admission attempt: no workload launched
+
+The direct MTP-off test path was hardened before retrying: text and tool
+responses now use low reasoning via chat-template kwargs, and the smoke plus
+one-batch c1/c8/c16/c24 scouts reconcile client request/prompt/generation
+counts against native SGLang counters. The c1 cell is capped at 128 completion
+tokens; higher-concurrency cells are capped at 64 tokens. c24 additionally
+requires at most 44C intake and 70C GPU temperature after c16. The complete
+startup/test/stop process is one guarded tree; only `glm53-b` may start.
+
+Run `20260827t080151z-glm53-live` waited the full 900-second cool-start window
+and ended after 900.497 seconds with exit 75, `status=failed`, and
+`reason=preflight_too_hot`. FP_TEMP was 42C at the final trigger and peaked at
+43C. Across 657 telemetry samples all eight GPUs stayed at 0% utilization and
+0 MiB allocation, so Compose, inference, and the measurement cells never
+launched. The largest idle silicon reading was 52C and total idle GPU power
+peaked at 315.51W; neither gates admission under the intake-air policy.
+
+Post-attempt state was clean: `glm53-b` remained the prior stopped exit-137
+container, all GPU allocations were zero, host memory available was 91 GiB,
+swap use was 173 MiB, root had 166 GiB free, and `prod` had about 2.1 TiB free.
+This is a thermal non-admission, not a GLM correctness or performance result.
+The 40C admission requirement in this historical attempt was superseded later
+on 2026-08-27 by the operator's reviewed 46C admission / 50C abort policy.
+
+### 2026-08-27 GLM live baseline and adaptive-MTP scout
+
+The revised guard (`DEFAULT_START_MAX_C=46`, abort 50C) passed all 35 focused
+tests and was installed byte-for-byte on node06. The exact NVFP4 image/model,
+single `glm53-b` TP4/EP4 placement, 262K context, four running requests, 90%
+static allocation, FP8 KV, sparse-MLA, and CUTLASS MoE were unchanged. Both
+live intervals were complete guard children and stopped the engine afterward.
+
+MTP-off run `cd86d4e5071023bb2b43e7835fc5128e` passed deterministic text and the
+typed add-tool call. Its one-batch results were:
+
+| cell | requests / prompt / completion tokens | aggregate output | median per-stream decode | TTFT median / p95 |
+|---|---:|---:|---:|---:|
+| c1 max128 | 1 / 50 / 128 | 63.7 tok/s | 86.5 tok/s | 529.5 / 529.5 ms |
+| c8 max64 | 8 / 400 / 512 | 183.8 tok/s | 76.6 tok/s | 1,390.2 / 1,955.2 ms |
+| c16 max64 | 16 / 800 / 1,024 | 229.3 tok/s | 78.1 tok/s | 2,168.5 / 3,645.6 ms |
+| c24 max64 | 24 / 1,200 / 1,536 | 239.2 tok/s | 76.3 tok/s | 3,101.9 / 5,572.4 ms |
+
+Including smoke, all 51 requests, 2,657 prompt tokens, and 3,225 completion
+tokens reconciled exactly with native SGLang counters. c8 and above queued
+behind the intentional four-request limit, so this is a safe-profile scheduler
+curve, not a final box-capacity claim. The 323.628-second interval peaked at
+42C intake, 65C GPU, 1,174.1 W across all eight GPUs, and 89,819 MiB on the
+hottest-memory rank. There were no runtime/CUDA/NCCL/OOM/Xid markers.
+
+The first MTP attempt, run `2a5687c0c9d1e121215170d735049450`, failed before
+Docker because the safe-baseline validator saw the inherited experimental
+environment. The harness was corrected to validate MTP-off independently and
+then render/retain the explicit candidate; no GPU work occurred in that failed
+interval.
+
+Adaptive NEXTN 5-step/top-k-1/6-draft run
+`ceabfc898fadfaed556c6106a054cd78` then passed smoke, c1, and c8 only:
+
+| cell | requests / prompt / completion tokens | aggregate output | median per-stream decode | TTFT median / p95 |
+|---|---:|---:|---:|---:|
+| c1 max128 | 1 / 50 / 128 | 82.8 tok/s | 92.0 tok/s | 154.3 / 154.3 ms |
+| c8 max64 | 8 / 400 / 512 | 182.1 tok/s | 97.4 tok/s | 1,357.7 / 2,148.3 ms |
+
+All 11 requests, 657 prompt tokens, and 665 completion tokens reconciled.
+Native decode logs reported accept length/rate 2.65/0.55 at c1 and 2.88/0.63
+at c8, with adaptive switches between 5/6 and 3/4 steps/draft tokens. Relative
+to MTP-off, c1 aggregate improved 30.0% and c1 TTFT fell 70.9%; c8 aggregate
+regressed 0.9%, median TTFT improved 2.3%, and p95 TTFT regressed 9.9%. This is
+one short ordered comparison, so the c1 result may include run-order effects.
+
+MTP increased scheduler/tokenizer readiness from 255.78/265.47 seconds to
+347.25/356.95 seconds and peak rank allocation from 89,819 to 91,435 MiB.
+Mamba capacity fell from 543 to 234 slots; the main KV pool rose from 3,076,608
+to 3,911,104 tokens and the draft path allocated another 2.40 GiB KV per rank.
+The 431.795-second guard interval peaked at 42C intake, 63C GPU, and 1,172.0 W
+across all eight GPUs with no error markers. Both successful stops again ended
+137 with `OOMKilled=false`; all VRAM was reclaimed.
+
+Decision: retain MTP-off as the safe deployment default. MTP is promising for
+single-session latency but did not improve c8 aggregate throughput under the
+four-running-request cap. The next smallest experiment is MTP with only
+max-running requests and graph batch raised together from 4 to 8, capturing
+native speculation counters directly; do not run another full ladder first.
+
+### 2026-08-27 GLM API recovery behind Ramjet and Caddy
+
+The reported node06 outage was container state, not hardware failure. Docker
+events showed the prior Qwen containers destroyed at 06:56:14 UTC and the last
+GLM test stopped at 11:14:13 UTC. `glm53-b` had then been recreated at 11:17:18
+UTC but left in `Created`; no engine, Ramjet, or API listener was running. All
+eight GPUs, Docker, Caddy, disk, and host memory were healthy.
+
+Recovery retained the qualified MTP-off TP4/EP4 configuration and immutable
+identities. A fail-closed script starts only `glm53-b`, waits for direct health,
+then publishes a single-upstream Ramjet and runs the installed authenticated
+one-token Caddy probe. Two initial guard children failed before GPU work because
+the wrapper polling interval and then the inherited single-upstream validator
+environment were invalid; both correctly left the stack stopped. A subsequent
+attempt reached serving, but live clients immediately submitted several large
+requests. Those requests completed with HTTP 200, while the recovery script's
+additional queued eight-token request exceeded its 60-second client timeout;
+the failure trap stopped the stack rather than accepting ambiguous health.
+
+Final guard run `b4717ae72ba4b5b7392c615eb9d0bf2e` removed that competing
+request and reused the node's full-path synthetic probe. It passed in 279.879
+seconds. Weight loading took 207.01 seconds; direct engine health, Ramjet
+`status=ok`, `ramjet_upstream_up=1`, model listing for `glm-5.3-flash`, and the
+authenticated Caddy inference probe all passed. The probe returned HTTP 200
+with generated-token structure. The interval peaked at 41C intake, 63C GPU,
+1,170.73 W across all eight GPUs, and 89,815 MiB on the largest active rank.
+There were no restart, OOM, CUDA, NCCL, Xid, traceback, or fatal markers.
+
+The stack remains running: exact SGLang image
+`sha256:c3ded56b905cf9cc70b99ab75b3accabd591260ab373c7a3746de1cc715a748b`
+on `glm53-b`, and Ramjet image
+`sha256:78f13c87fcc928552593a8055293479dbbc2569d0b7a4b754d89e0d32a278385`
+with a single healthy upstream. Caddy retained its legacy model-named
+compatibility aliases; the pre-change on-node Caddyfile is preserved at
+`/etc/caddy/Caddyfile.pre-glm53-20260827T1323Z`.
+
+### 2026-08-27 GLM c1 API and agent-protocol correctness check
+
+The live single-upstream Ramjet path was exercised sequentially at concurrency
+one; no saturation cell was run. Every request-generating process was a child
+of a fresh `node06_gpu_guard.py` journal with 46C admission and 50C abort.
+`/v1/models` exposed exactly one expected `glm-5.3-flash` model. The existing
+two-request smoke passed deterministic text and a simple auto-selected add-tool
+call, with all 2 requests, 207 prompt tokens, and 25 completion tokens
+reconciling exactly against native SGLang counters.
+
+The five-case privacy-safe agent corpus then returned five structurally valid
+HTTP/SSE responses. Four cases were protocol-valid: non-streamed text, two
+parallel required streamed tool calls, one auto-selected streamed tool call,
+and reasoning/tool-result history. The remaining required streamed typed-tool
+case produced one tool call and the expected `tool_calls` finish reason, but
+violated its JSON argument contract: the required nullable `note` property was
+neither JSON null nor the requested value. One isolated deterministic replay
+failed in exactly the same way. The corpus therefore scored 4/5 (80%) and is
+not a complete tool-correctness pass for this pinned NVFP4/runtime/template.
+
+The sequence stopped at that first model-protocol failure; multi-turn session
+and 32/128 KiB recall cells were not run. Two earlier runner failures in this
+same evidence directory occurred before corpus inference because the copied
+harness initially lacked `engine_metrics.py` and then its required local token
+environment; they do not describe model behavior. The successful five-case
+cell lasted 2.792 seconds. Thermal evidence peaked at 40C intake, 62C GPU, and
+1,008.68 W across all eight GPUs. Post-check Ramjet health remained `ok` with
+one healthy replica and zero in-flight requests; engine and router logs had no
+CUDA, NCCL, Xid, traceback, OOM, panic, or fatal markers. Evidence is retained
+on node06 under
+`/home/luke/inference/glm53_flash/.experiments/20260827T140152Z-correctness-c1`.
+
+### 2026-08-27 canonical authenticated `/v1` ingress
+
+Caddy now exposes Ramjet at the conventional authenticated OpenAI base
+`http://100.89.187.17/v1`. It uses `handle /v1/*`, deliberately preserving the
+`/v1` prefix passed to Ramjet. Existing model-named routes remain Caddy-only
+compatibility aliases. No engine or Ramjet container was restarted.
+
+The candidate was formatted and validated before a non-disruptive Caddy reload
+under `/run/lock/ramjet-node06-deployment.lock`. Authenticated model listing
+passed through both the canonical path and the GLM compatibility alias; the
+canonical path returned 401 without a bearer token. Guarded run
+`9f35901b6538fea501dae00d273f634b` then passed one c1 deterministic request
+through the Tailscale address, Caddy, Ramjet, and `glm53-b`. It returned HTTP
+200, the Ramjet route header, the expected model and exact response, one choice,
+`finish_reason=stop`, and authoritative usage of 22 prompt plus 8 completion
+tokens. The 1.156-second interval peaked at 39C intake and 61C GPU.
+
+Ramjet remained healthy with one upstream and zero in-flight requests after the
+reload. The live rollback file is
+`/etc/caddy/Caddyfile.pre-canonical-v1-20260827T142817Z`; evidence is under
+`/home/luke/inference/glm53_flash/.experiments/20260827T142817Z-canonical-v1`.
