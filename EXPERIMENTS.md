@@ -1,5 +1,64 @@
 # node06 experiment journal
 
+## 2026-08-27 — Qwen3.8-Flash-Next closeout: deterministic memory and phase-aware routing won
+
+The Qwen3.8-Flash-Next campaign is paused and node06 has been released to the
+GLM-5.3-Flash deployment. This is an operational handoff, not a model failure.
+At the final Qwen handoff capture (`2026-08-27T04:59:47Z`), its Compose project
+had zero containers, every GPU reported zero allocated memory and utilization,
+and chassis intake was 47C. No cap-8/cap-32 or projected-load GPU campaign ran
+after the thermal gate closed. The active guard policy is now a 50C intake
+stop with new work admitted only at 40C or below.
+
+The qualified serving shape was the official FP8 checkpoint on two independent
+NUMA-local TP4+EP engines: 262,144 native context, a fixed
+`--kv-cache-memory=40190174004` setting, 64 sequences, an 8,192-token scheduler batch cap,
+prefix caching, MTP3, and QSA index reuse. Each engine exposed 2,667,258 KV
+tokens. The full pair completed 128/128 requests at c64, split exactly 64/64,
+at 3,340.5 aggregate output tok/s. Correctness gates passed tool/reasoning,
+multimodal, 199K deep-context, and a 251,009-token near-native-limit prompt.
+YaRN extension to 1M was not tested.
+
+The compact result matrix is:
+
+| experiment | measured result | decision |
+|---|---|---|
+| no MTP -> MTP3 | c1 +72.1%, c8 +38.0%, c16 +17.3%, c32 -4.6% | keep for latency and low/mid batch; not a universal throughput win |
+| QSA index reuse | paired average c8 +3.7%, c32 +0.9% | keep as a modest optimization |
+| direct vLLM -> same-engine ramjet | c1 -0.03%, c16 -0.24%; 212/212 requests reconciled | no measurable proxy tax |
+| load-only -> prefix routing | returning TTFT 1,119ms -> 908ms; prefix hits 23.9% -> 35.84%; blocker throughput 93.6% | useful, but failed the 20% TTFT and 95% throughput gates alone |
+| legacy -> phase-aware load | warm returning TTFT 2,496ms -> 287ms; blocker throughput retained 99.1%; c32 throughput +2.7% | strongest ramjet win; promoted |
+| routing alpha 4 -> 2 | prefix hits rose to 47.88%, but probe TTFT +15.1% and blocker output -7.3% | reject; retain alpha 4 |
+| scheduler batch cap 8,192 -> 16,384 | median cold TTFT -0.12%, mean +29.32%, p95 +88.27% | reject and roll back |
+| CPU KV offload | recipe required about 880 GiB per TP4 engine on a 125 GiB host | infeasible; do not run |
+
+The largest serving improvement was not a more aggressive kernel or scheduler
+knob. It came from making memory deterministic, using MTP only where the batch
+shape justified it, and teaching ramjet that a request's expensive prefill
+reservation should shrink once semantic output begins. Phase-aware routing
+kept a returning prefix on the warm engine instead of sending it to an idle but
+cold peer.
+
+The campaign also exposed reusable failure modes. vLLM's automatic KV profile
+varied from 38.32 GiB to 4.48 GiB across otherwise equivalent boots, so the
+first valid allocation was pinned explicitly. OpenAI response
+`cached_tokens` remained zero despite native prefix hits, so only vLLM's own
+counters were accepted as cache authority. One rollback omitted the immutable
+ramjet image override and briefly started an incompatible released binary;
+another assertion omitted the machine-view agent's `/sample` suffix. Both
+failed safe and restored the prior LB without changing either engine. Wrong
+base paths, a doubled `/v1`, an undersized vision output cap, and a JSONL
+terminal-record parser were benchmark-harness defects, not model failures, and
+are retained as negative evidence in the detailed entry below.
+
+The final retained ramjet policy is prefix affinity, alpha 4, 2KiB chunks, a
+2MiB prefix window, overlap cap 32, a 32KiB load quantum, load cap 8, and
+phase-aware accounting enabled. Candidate-specific projected-load scoring is
+implemented fail-closed but remains explicitly off and unqualified. The exact
+deployment, summarized results, and raw-evidence index remain in
+`deploy/qwen38_flash_next/`, pull requests #224-#232, and the detailed
+2026-08-26 journal below.
+
 ## 2026-08-26 — Qwen3.8-Flash-Next FP8 is live on two TP4 engines; fixed KV, QSA index reuse, and phase-aware routing qualified
 
 The official `Qwen/Qwen3.8-Flash-Next-FP8` checkpoint now serves production
