@@ -81,13 +81,13 @@ class AuthorizedWindow:
 # itself -- these devices throttle at 85C and the driver cuts power at 90C --
 # so gating on silicon mostly re-implements the hardware. Facility cooling has
 # no such backstop and is shared between hosts, so it is the failure that takes
-# out more than one run. 55C is the agreed ceiling on the same intake sensors
-# Grafana's bunker-temps dashboard plots.
+# out more than one run. The current operator ceiling is 50C on the same intake
+# sensors Grafana's bunker-temps dashboard plots.
 AUTHORIZED_WINDOWS = {
     "supervised-2026-08-14": AuthorizedWindow(
         identifier="supervised-2026-08-14",
         granted="2026-08-14",
-        max_abort_c=55,
+        max_abort_c=50,
         max_runtime_seconds=1500,
     ),
 }

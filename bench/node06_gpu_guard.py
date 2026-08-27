@@ -49,13 +49,14 @@ from node06_operational_moratorium import (
 # shared-prefix run drove GPUs to 79C while intake air did not move from 43C,
 # so the old GPU gate was aborting work that carried no facility risk.
 #
-# 55C is the agreed ceiling. For scale, node06 idles at 43C on FP_TEMP and the
-# infra alert rules warn at 62C for that sensor (55C for hosts exposing an
-# Inlet Temp sensor instead), so this stops a benchmark well before anyone is
-# paged.
-DEFAULT_ABORT_C = 55
-MAX_ABORT_C = 55
-DEFAULT_START_MAX_C = 50
+# The 2026-08-27 operator policy uses a ten-degree hysteresis band: stop
+# request-generating work at 50C, then admit a new workload only after intake
+# returns to 40C or below. For scale, node06's FP_TEMP was still 50C with every
+# GPU idle, so preflight waits rather than treating the upper threshold as a
+# reason to launch or spin up more work.
+DEFAULT_ABORT_C = 50
+MAX_ABORT_C = 50
+DEFAULT_START_MAX_C = 40
 DEFAULT_AIR_METRICS_URL = "http://127.0.0.1:9100/metrics"
 
 # Continuous inference cap. Independent of temperature: it bounds how long a
@@ -1076,15 +1077,6 @@ def run_guard(
             if interrupted_signal:
                 record["reason"] = "interrupted"
                 result = 128 + interrupted_signal
-                break
-            if sample.hottest_air.temperature_c >= args.abort_c:
-                record["reason"] = "preflight_thermal_abort"
-                record["trigger"] = {
-                    "sensor": sample.hottest_air.sensor,
-                    "temperature_c": sample.hottest_air.temperature_c,
-                }
-                checkpoint(True)
-                result = EXIT_THERMAL
                 break
             if sample.hottest_air.temperature_c <= args.start_max_c:
                 preflight_passed = True

@@ -567,8 +567,10 @@ LB. Connect with the SSH alias (config already set up):
 ### Thermal policy: intake air, not silicon (2026-08-14)
 
 The guard gates on **chassis intake-air temperature**, the same signal
-Grafana's `bunker-temps` dashboard plots, and aborts at **55C**. GPU and CPU
-temperatures are still recorded in the journal but no longer gate anything.
+Grafana's `bunker-temps` dashboard plots. It stops request-generating work at
+**50C** and admits new work only after intake returns to **40C or below**. GPU
+and CPU temperatures are still recorded in the journal but no longer gate
+anything.
 
 The reason is that a GPU already defends itself: these devices throttle at 85C
 and the driver cuts power at 90C, so a silicon gate mostly re-implements the
@@ -589,14 +591,18 @@ loss.
 
 Only the dashboard's intake sensors are admitted. The same exporter publishes
 `CPU0_TEMP`, `DIMMG*_TEMP`, and `SLOT*_GPU_TEMP` under the identical metric
-name, and letting a 65C CPU reading onto a 55C room gate would abort every run
+name, and letting a 65C CPU reading onto a 50C room gate would abort every run
 instantly.
 
 Note that node06's `FP_TEMP` reads higher than other hosts' `Inlet Temp` --
 43C against their 37C -- and the infra alert rules encode the same offset,
-warning at 62C for `FP_TEMP` against 55C for `Inlet Temp`. The 55C guard
-ceiling is therefore below infra's own warning level for this sensor, which is
-deliberate: the guard stops a benchmark, it does not page anyone.
+warning at 62C for `FP_TEMP` against 55C for `Inlet Temp`. The previous 55C
+guard was already below infra's own warning level for this sensor; the current
+50C stop / 40C resume band is deliberately more conservative. The guard stops
+a benchmark, it does not page anyone. An active request workload is terminated
+rather than process-stopped: pausing a client would not pause already admitted
+GPU work and could strand in-flight requests. A subsequent run waits at
+preflight until the lower threshold is reached.
 
 Guarded runs remain capped at **25 minutes of continuous inference**
 (`--max-runtime-seconds`, default and maximum 1500, exit code 79). The clock
@@ -788,16 +794,16 @@ Run the 104-source/100K exact-route shadow soak only through
 `bench/node06_gpu_guard.py` wrapping `bench/node06_shadow_soak_gate.py`, not
 through an SSH-attached `shadow_soak.py`. The thermal guard must observe all
 eight GPUs even when a workload intentionally uses only one TP4 pair. Its
-conservative defaults wait for every GPU to be at or below 65C, start a nominal
-one-second poll with each query bounded to two seconds, and terminate the
-complete benchmark descendant tree if any GPU reaches
-78C or if `nvidia-smi` telemetry is lost. On an abort it gives request-generating
-descendants at most five seconds to cancel, escalating sooner if a subsequent
-sample remains at or above 78C or telemetry disappears, while the deployment
-owner retains a separate bounded rollback grace. Telemetry continues while
-available; if it is lost, request work is killed and the rollback owner keeps
-only that bounded grace. These
-are operational abort thresholds, not claims about the hardware's damage limit.
+conservative defaults admit a workload only when chassis intake is at or below
+40C, start a nominal one-second poll with each query bounded to two seconds,
+and terminate the complete benchmark descendant tree if intake reaches 50C or
+if intake, GPU, or process telemetry is lost. On an abort it gives
+request-generating descendants at most five seconds to cancel, escalating
+sooner if a subsequent intake sample remains at or above 50C or telemetry
+disappears, while the deployment owner retains a separate bounded rollback
+grace. Telemetry continues while available; if it is lost, request work is
+killed and the rollback owner keeps only that bounded grace. These are
+operational intake-air thresholds, not claims about the hardware's damage limit.
 Never raise them merely to finish a benchmark. This is a request-generator kill
 switch, not proof that passive cooling is healthy or that no thermal slowdown
 occurred: the core sensor cannot see chassis airflow, inlet/exhaust temperature,
@@ -855,7 +861,7 @@ No sustained request-generating benchmark may start until a read-only
 inventory/temperature/power preflight is recorded with
 `bench/capture_node06.sh`. Inspect each device's reported target,
 maximum-operating, slowdown, and shutdown thresholds; never infer the hardware
-limit from r115's deliberately lower 78C policy, and inspect BMC/facility and
+limit from the current 50C chassis-intake policy, and inspect BMC/facility and
 driver slowdown evidence independently. Re-enter with one TP4 pair while
 production is stopped or isolated, then a bounded dual-pair cell; do not jump
 directly to the 52/64-app long-context boundary. Every sustained candidate
