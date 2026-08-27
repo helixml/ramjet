@@ -49,14 +49,16 @@ from node06_operational_moratorium import (
 # shared-prefix run drove GPUs to 79C while intake air did not move from 43C,
 # so the old GPU gate was aborting work that carried no facility risk.
 #
-# The 2026-08-27 operator policy uses a ten-degree hysteresis band: stop
+# The 2026-08-27 operator policy uses a four-degree hysteresis band: stop
 # request-generating work at 50C, then admit a new workload only after intake
-# returns to 40C or below. For scale, node06's FP_TEMP was still 50C with every
-# GPU idle, so preflight waits rather than treating the upper threshold as a
-# reason to launch or spin up more work.
+# returns to 46C or below. The admission threshold was raised from 40C on
+# 2026-08-27 because node06's FP_TEMP idles at 42-43C with every GPU at 0%
+# utilization, so a 40C gate never admitted work at all. For scale, FP_TEMP
+# was still 50C with every GPU idle, so preflight waits rather than treating
+# the upper threshold as a reason to launch or spin up more work.
 DEFAULT_ABORT_C = 50
 MAX_ABORT_C = 50
-DEFAULT_START_MAX_C = 40
+DEFAULT_START_MAX_C = 46
 DEFAULT_AIR_METRICS_URL = "http://127.0.0.1:9100/metrics"
 
 # Continuous inference cap. Independent of temperature: it bounds how long a

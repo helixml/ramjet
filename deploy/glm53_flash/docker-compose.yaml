@@ -1,0 +1,121 @@
+# Canonical experimental GLM-5.3-Flash deployment for node06. This is one
+# complete Compose file; do not add an overlay. Start only a named TP4 engine
+# until the single-engine canary passes.
+
+name: glm53_flash
+
+x-glm-engine: &glm-engine
+  image: ${SGLANG_IMAGE:?set SGLANG_IMAGE to the exact local sha256 image ID}
+  pull_policy: never
+  labels:
+    ai.ramjet.model.repository: LibertAIDAI/GLM-5.3-Flash-NVFP4
+    ai.ramjet.model.revision: 9e0d74e3cef17f634e84fb8e2223707e02616290
+    ai.ramjet.runtime.source: 0xSero/glm53-flash-nvfp4-sm120-exact-docker
+    ai.ramjet.runtime.source-revision: 8370bb04335bb07b6ee85907dd83cd1d300fa462
+  entrypoint: ["/bin/bash", "/opt/ramjet/glm53-launch.sh"]
+  restart: ${ENGINE_RESTART_POLICY:-"no"}
+  init: true
+  ipc: host
+  shm_size: 32gb
+  ulimits:
+    memlock: -1
+    stack: 67108864
+    nofile: {soft: 1048576, hard: 1048576}
+  environment: &glm-environment
+    CUDA_DEVICE_ORDER: PCI_BUS_ID
+    CUDA_CACHE_PATH: /root/.cache/nv/ComputeCache
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    TRITON_CACHE_DIR: /root/.cache/triton
+    TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+    XDG_CACHE_HOME: /root/.cache
+    TORCH_CUDA_ARCH_LIST: 12.0a
+    FLASHINFER_CUDA_ARCH_LIST: 12.0f
+    SGLANG_OPT_USE_TOPK_V2: "0"
+    SGLANG_OPT_USE_TILELANG_INDEXER: "1"
+    SGLANG_FP8_PAGED_MQA_LOGITS_TORCH: "1"
+    SGLANG_OPT_DEEPGEMM_HC_PRENORM: "0"
+    SGLANG_OPT_FP8_WO_A_GEMM: "0"
+    GLM_CONTEXT_LENGTH: ${GLM_CONTEXT_LENGTH:-262144}
+    GLM_MAX_RUNNING_REQUESTS: ${GLM_MAX_RUNNING_REQUESTS:-4}
+    GLM_MEM_FRACTION_STATIC: ${GLM_MEM_FRACTION_STATIC:-0.90}
+    GLM_CUDA_GRAPH_MAX_BS: ${GLM_CUDA_GRAPH_MAX_BS:-4}
+    GLM_MAX_MAMBA_CACHE_SIZE: ${GLM_MAX_MAMBA_CACHE_SIZE:-}
+    GLM_MTP_MODE: ${GLM_MTP_MODE:-off}
+    GLM_MTP_ADAPTIVE: ${GLM_MTP_ADAPTIVE:-on}
+    GLM_MTP_STEPS: ${GLM_MTP_STEPS:-5}
+    GLM_MTP_DRAFT_TOKENS: ${GLM_MTP_DRAFT_TOKENS:-6}
+
+services:
+  ds4-loadbalancer:
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.4.0@sha256:467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b}
+    container_name: ds4-loadbalancer
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8006:8000"
+      - "127.0.0.1:8007:9090"
+      - "100.89.187.17:8007:9090"
+    volumes:
+      - /var/lib/ramjet-machineview:/machineview
+    networks:
+      - default
+      - machineview-host
+    environment:
+      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://glm53-a:8000,http://glm53-b:8000}
+      RJ_ADVERTISE_CTX_MARGIN: ${RJ_ADVERTISE_CTX_MARGIN:-8192}
+      RJ_MAX_TOKENS_STRIP: "0"
+      RJ_AFFINITY: prefix
+      RJ_ROUTE_ALPHA: ${RJ_ROUTE_ALPHA:-4}
+      RJ_ROUTE_CHUNK_BYTES: "2048"
+      RJ_ROUTE_MAX_PREFIX_BYTES: "2097152"
+      RJ_ROUTE_MAX_OVERLAP_BLOCKS: "32"
+      RJ_ROUTE_LOAD_UNIT_BYTES: "32768"
+      RJ_ROUTE_MAX_LOAD_UNITS: "8"
+      RJ_ROUTE_PHASE_AWARE_LOAD: ${RJ_ROUTE_PHASE_AWARE_LOAD:-false}
+      RJ_ROUTE_PROJECTED_LOAD: "false"
+      RJ_ROUTE_JOURNAL: "true"
+      RJ_TOKENIZER_MODE: "off"
+      RJ_EXACT_ROUTE_MODE: "off"
+      RJ_UPSTREAM_ADMISSION_MODE: http
+      RJ_KV_EVENT_MODE: "off"
+      RJ_KV_EVENT_LIVE_ENDPOINTS: ""
+      RJ_KV_EVENT_REPLAY_ENDPOINTS: ""
+      RJ_SNAPSHOT_ROUTE_MODE: "off"
+      RJ_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
+      RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json
+      RJ_IDLE_DRAIN_MODE: "off"
+
+  glm53-a:
+    <<: *glm-engine
+    container_name: glm53-a
+    cpuset: "0-11,24-35"
+    ports: ["127.0.0.1:8050:8000"]
+    volumes:
+      - ${MODEL_DIR:-/prod/models/LibertAIDAI/GLM-5.3-Flash-NVFP4-9e0d74e3cef1}:/workspace/model:ro
+      - ${SGLANG_CACHE_DIR_A:-/prod/engine-cache-sglang-glm53-a}:/root/.cache
+      - ${GLM_LAUNCHER_SOURCE:-./glm53-launch.sh}:/opt/ramjet/glm53-launch.sh:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["0", "1", "2", "3"], capabilities: [gpu]}
+
+  glm53-b:
+    <<: *glm-engine
+    container_name: glm53-b
+    cpuset: "12-23,36-47"
+    ports: ["127.0.0.1:8051:8000"]
+    volumes:
+      - ${MODEL_DIR:-/prod/models/LibertAIDAI/GLM-5.3-Flash-NVFP4-9e0d74e3cef1}:/workspace/model:ro
+      - ${SGLANG_CACHE_DIR_B:-/prod/engine-cache-sglang-glm53-b}:/root/.cache
+      - ${GLM_LAUNCHER_SOURCE:-./glm53-launch.sh}:/opt/ramjet/glm53-launch.sh:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["4", "5", "6", "7"], capabilities: [gpu]}
+
+networks:
+  machineview-host:
+    external: true
+    name: ${MACHINEVIEW_NETWORK:-qwen38_27b_default}
