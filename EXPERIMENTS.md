@@ -1,5 +1,101 @@
 # node06 experiment journal
 
+## 2026-08-27 — cache-hit stats were missing from the API because of a default-off vLLM flag, not the model
+
+A user report that the Qwen-Next API returns no cache-hit statistics is
+confirmed and fixed. The cause is not ramjet and not the hybrid runtime: vLLM's
+`--enable-prompt-tokens-details` defaults to `False` and we never passed it, so
+`prompt_tokens_details` was omitted from every response.
+
+### Confirming it, and locating the layer
+
+A direct request to engine A on `:8040`, bypassing ramjet entirely, returned
+`prompt_tokens_details: None` on a cold call and both warm repeats. That
+placed the fault at the engine before any proxy code was read. Native counters
+proved the cache itself was healthy: `vllm:prefix_cache_hits_total` stood at
+1,550,400 against 2,345,919 queries, a 66.1% block hit rate. So reuse was real
+and only the API surface was missing.
+
+In the pinned image, `vllm/entrypoints/openai/chat_completion/serving.py`
+defines `_make_prompt_tokens_details()`, which returns `None` immediately
+unless `enable_prompt_tokens_details` is true, before it looks at any cache
+count. Both the streaming and non-streaming usage paths call it.
+`vllm/entrypoints/openai/cli_args.py` defaults the field to `False`. This is a
+pure API-surface gate and is not model-specific.
+
+Ramjet needed no change. `src/usage.rs` already reads
+`prompt_tokens_details.cached_tokens` with a legacy `cached_tokens` fallback,
+so the LB's own cache metrics were flat only because the engine never sent the
+field.
+
+### The fix
+
+`--enable-prompt-tokens-details` was added to the engine command in the single
+Compose file and to the validator's required-argument set. The flag was
+preflighted through the pinned image's own CLI parser before any engine was
+touched, per the flag-preflight rule; it parsed to `True` with no engine
+construction and no GPU allocation.
+
+Both engines were rolled one at a time under the common deployment lock, with
+the script asserting the peer's health before and after each recreate. B took
+540s and A 559s; ramjet served on the surviving engine throughout and reported
+`degraded 1/2` for the duration of each roll, returning to `ok 2/2` at the end.
+Both engines kept restart count zero, `OOMKilled=false`, the same image digest,
+and **2,667,258 KV tokens** — unchanged, confirming the flag is API-only and
+does not perturb the memory profile.
+
+### Verification, including the zeros
+
+Through the full public path (Caddy -> ramjet -> engine) with a fresh
+5,078-token prompt:
+
+| call | `cached_tokens` | share of prompt |
+|---|---:|---:|
+| 1 (cold) | 0 | 0% |
+| 2 | 0 | 0% |
+| 3 | 4,000 | 78.8% |
+| 4 | 4,000 | 78.8% |
+
+`ramjet_cached_prompt_tokens_total{endpoint="chat"}` moved off zero for the
+first time, which also restores the machine-view and Grafana cache-hit
+signal that had no input before.
+
+The second call reporting zero is reproducible and is **not** a reporting
+defect. Sampling `vllm:prefix_cache_queries_total` and
+`vllm:prefix_cache_hits_total` around each request showed the API and the
+native counters agreeing exactly on every call, zeros included: 5,114 queried
+with 0 hits on calls 1 and 2, and 5,114 queried with 4,000 hits on calls 3 and
+4. A 10-second pause after the cold call changed nothing, so it is not a
+publication lag. The first repeat of a prompt genuinely pays a full prefill on
+this engine. That is an engine caching behaviour worth understanding
+separately; it is not what the report was about, and the field is now
+trustworthy precisely because it reproduces the native counters including
+their misses.
+
+### Correcting the record
+
+The 2026-08-26 campaign concluded that "OpenAI response `cached_tokens`
+remained zero despite native prefix hits, so only vLLM's own counters were
+accepted as cache authority", and the deployment README attributed the empty
+field to the hybrid runtime. The observation was right and the fallback to
+native counters was the correct conservative response, but the attributed
+cause was wrong: the field was disabled by a default-off server flag, not
+unpopulated by the model or runtime. The README has been corrected.
+
+`bench/route_conflict.py` still emits `cached_tokens_authoritative: False` and
+prefers native counters. That remains a sound benchmark default and was left
+alone deliberately — flipping it changes reconciliation semantics that have
+test coverage, and is a separate change rather than part of this fix.
+
+### Cost and scope
+
+Two full engine reloads, about 18 minutes of rolling restart, at half capacity
+for each half of it. Intake air was 40C at preflight and every request-generating
+cell ran under the thermal guard. Evidence is on node06 under
+`.experiments/20260827T220713Z-enable-prompt-tokens-details` and the
+`cachehit-*` guard journals; the temporary probe scripts were removed from the
+box afterwards.
+
 ## 2026-08-27 — Qwen3.8-Flash-Next restored to node06 after the GLM close-out; upstream recipe delta triaged
 
 The GLM-5.3-Flash canary is finished, so node06 was returned to the qualified
