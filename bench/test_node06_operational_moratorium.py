@@ -66,7 +66,7 @@ class AuthorizedWindowTests(unittest.TestCase):
                 moratorium.require_active_work_permitted("gpu-workload.smoke")
             )
             window = moratorium.active_authorization()
-        self.assertEqual(window.max_abort_c, 55)
+        self.assertEqual(window.max_abort_c, 50)
         self.assertEqual(window.max_runtime_seconds, 1500)
 
     def test_every_window_bounds_intake_air_not_silicon(self):
@@ -74,5 +74,5 @@ class AuthorizedWindowTests(unittest.TestCase):
         # temperature. A window carrying a GPU-scale number would silently
         # never fire: intake air does not reach 78C before the room is lost.
         for window in moratorium.AUTHORIZED_WINDOWS.values():
-            self.assertLessEqual(window.max_abort_c, 55, window.identifier)
+            self.assertLessEqual(window.max_abort_c, 50, window.identifier)
             self.assertLessEqual(window.max_runtime_seconds, 1500, window.identifier)

@@ -596,12 +596,12 @@ inside `bench/node06_gpu_guard.py`. Copy
 are staged. Launch the pair as a detached transient
 systemd service using the command in `AGENTS.md`; do not attach the workload and
 rollback lifetime to SSH. The outer guard observes all eight GPUs, admits a
-65C-or-cooler start, aborts at 78C or on lost telemetry, and owns a separate
-mode-0600 append-only JSONL journal. It fsyncs a start record, periodic
-checkpoints, and the final result; records contain stable GPU names and hashed
-UUID identities plus bounded aggregates, but never the child command or
-environment. Stdout/journald receives only run ID, status, reason, and exit
-code. A launch-gated exec shim arms parent-death cancellation before
+40C-or-cooler chassis-intake start, aborts at 50C intake or on lost telemetry,
+and owns a separate mode-0600 append-only JSONL journal. It fsyncs a start
+record, periodic checkpoints, and the final result; records contain stable GPU
+names and hashed UUID identities plus bounded aggregates, but never the child
+command or environment. Stdout/journald receives only run ID, status, reason,
+and exit code. A launch-gated exec shim arms parent-death cancellation before
 releasing the command and supervises escaped sessions, so loss of the outer
 sampler cannot leave a direct benchmark running. On abort it gives
 request-generating descendants at most five seconds to cancel, escalating on

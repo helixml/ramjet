@@ -114,8 +114,8 @@ class Node06GpuGuardTests(unittest.TestCase):
             output=pathlib.Path(output),
             label="test-cell",
             expected_gpus=8,
-            start_max_c=50,
-            abort_c=55,
+            start_max_c=40,
+            abort_c=50,
             cooldown_timeout_seconds=0,
             poll_seconds=0.01,
             sample_timeout_seconds=1,
@@ -251,16 +251,18 @@ class Node06GpuGuardTests(unittest.TestCase):
             self.assertNotIn("child_exit_code", record)
             self.assertEqual(record["trigger"]["sensor"], "FP_TEMP")
 
-    def test_preflight_abort_temperature_fails_immediately(self):
+    def test_preflight_at_abort_temperature_waits_for_cool_start(self):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "result.jsonl"
-            args = self.args(output, ["does-not-exist"])
+            args = self.args(output, [sys.executable, "-c", "pass"])
             args.cooldown_timeout_seconds = 300
-            with mock.patch("node06_gpu_guard.time.sleep") as sleep:
-                result = self.run_guard(args, SequenceSampler([sample([50] * 8, air=55)]))
-            self.assertEqual(result, guard.EXIT_THERMAL)
-            self.assertEqual(final_record(output)["reason"], "preflight_thermal_abort")
-            sleep.assert_not_called()
+            sampler = SequenceSampler(
+                [sample([50] * 8, air=50), sample([50] * 8, air=40)]
+            )
+            result = self.run_guard(args, sampler)
+            self.assertEqual(result, 0)
+            self.assertGreaterEqual(sampler.index, 2)
+            self.assertEqual(final_record(output)["status"], "passed")
 
     def test_signal_during_cool_sample_revokes_launch(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -332,19 +334,19 @@ class Node06GpuGuardTests(unittest.TestCase):
                 output,
                 [sys.executable, "-c", "import time; time.sleep(60)"],
             )
-            sampler = SequenceSampler([sample([40] * 8, air=30), sample([40] * 8, air=55)])
+            sampler = SequenceSampler([sample([40] * 8, air=30), sample([40] * 8, air=50)])
             result = self.run_guard(args, sampler)
             self.assertEqual(result, guard.EXIT_THERMAL)
             record = final_record(output)
             self.assertEqual(record["reason"], "thermal_abort")
-            self.assertEqual(record["trigger"], {"sensor": "FP_TEMP", "temperature_c": 55})
+            self.assertEqual(record["trigger"], {"sensor": "FP_TEMP", "temperature_c": 50})
             self.assertIn("termination_escalated", record)
 
     def test_final_sample_rejects_a_hot_short_child(self):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "result.json"
             args = self.args(output, [sys.executable, "-c", "pass"])
-            sampler = SequenceSampler([sample([40] * 8, air=30), sample([40] * 8, air=55)])
+            sampler = SequenceSampler([sample([40] * 8, air=30), sample([40] * 8, air=50)])
             result = self.run_guard(args, sampler)
             self.assertEqual(result, guard.EXIT_THERMAL)
             record = final_record(output)
@@ -467,7 +469,7 @@ class Node06GpuGuardTests(unittest.TestCase):
                 "import node06_gpu_guard as g; "
                 "print(json.dumps(g.validate_inherited_guard()))"
             )
-            capability = guard.create_guard_capability(8, 55, "a" * 32)
+            capability = guard.create_guard_capability(8, 50, "a" * 32)
             environment = os.environ.copy()
             environment.update(capability.environment)
             valid = subprocess.run(
@@ -655,8 +657,8 @@ class Node06GpuGuardTests(unittest.TestCase):
         )
         guard.validate_args(parsed)
         self.assertEqual(parsed.expected_gpus, 8)
-        self.assertEqual(parsed.start_max_c, 50)
-        self.assertEqual(parsed.abort_c, 55)
+        self.assertEqual(parsed.start_max_c, 40)
+        self.assertEqual(parsed.abort_c, 50)
         self.assertEqual(parsed.command, ["true"])
 
         for field, value in (
@@ -810,7 +812,7 @@ class AirTemperatureGateTests(unittest.TestCase):
     def test_only_the_dashboard_intake_sensors_are_admitted(self):
         # The same exporter publishes CPU, DIMM, and per-slot GPU temperatures
         # under this metric name. Admitting those would put a 65C CPU reading
-        # on a 55C room gate and abort every run instantly.
+        # on a 50C room gate and abort every run instantly.
         payload = (
             'node_ipmi_temperature_celsius{sensor="CPU0_TEMP"} 65\n'
             'node_ipmi_temperature_celsius{sensor="DIMMG1_TEMP"} 46\n'
@@ -865,7 +867,7 @@ class AirTemperatureGateTests(unittest.TestCase):
             guard.validate_args(parsed)
 
     def test_the_ceiling_is_a_room_scale_temperature(self):
-        self.assertEqual(guard.MAX_ABORT_C, 55)
+        self.assertEqual(guard.MAX_ABORT_C, 50)
         self.assertLess(guard.DEFAULT_START_MAX_C, guard.MAX_ABORT_C)
         parsed = guard.parser().parse_args(
             ["--output", "/tmp/x.jsonl", "--abort-c", "78", "--", "/bin/true"]

@@ -157,6 +157,8 @@ compose_timeout_seconds=60
 campaign_max_seconds=25
 rollback_budget_seconds=10
 guard_kill_grace_seconds=5
+thermal_start_c=40
+thermal_abort_c=50
 campaign_started=$((SECONDS - 5))
 metrics_urls=unused
 model=unused
@@ -334,6 +336,10 @@ prove_render_delta
         self.assertLessEqual(values["smoke_max_seconds"] + 4 * values["full_max_seconds"], 1500)
         self.assertLessEqual(values["campaign_max_seconds"], 1800)
         self.assertIn('--max-runtime-seconds "$cell_runtime_seconds"', self.source)
+        self.assertIn('thermal_start_c=40', self.source)
+        self.assertIn('thermal_abort_c=50', self.source)
+        self.assertIn('--start-max-c "$thermal_start_c"', self.source)
+        self.assertIn('--abort-c "$thermal_abort_c"', self.source)
         self.assertIn('rollback_budget_seconds=180', self.source)
         self.assertIn('guard_kill_grace_seconds=30', self.source)
         self.assertIn('timeout --foreground --kill-after=45 "$available_seconds"', self.source)

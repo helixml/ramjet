@@ -43,10 +43,10 @@ bash bench/capture_node06.sh node06
 Before load, inspect all GPU temperatures, reported
 slowdown/shutdown thresholds, power, utilization, memory, topology, container
 identity/restarts, ramjet upstream health, driver throttling, and available
-BMC/facility cooling evidence. The watchdog's 78C ceiling is an operational
-abort policy, not proof that the chassis is safe. Stop before load if telemetry
-is missing, identities are ambiguous, cooling is unverified, a GPU is already
-hot/throttled, or the serving stack is unhealthy.
+BMC/facility cooling evidence. The watchdog's 50C chassis-intake ceiling is an
+operational abort policy, not proof that the chassis is safe. Stop before load
+if telemetry is missing, identities are ambiguous, cooling is unverified, a
+GPU is already hot/throttled, or the serving stack is unhealthy.
 
 Never run a sustained GPU command naked. Create an owner-only journal and make
 the thermal watchdog the parent of the complete workload process tree:
@@ -61,9 +61,9 @@ python3 bench/node06_gpu_guard.py \
   -- COMMAND ARGUMENTS
 ```
 
-Use a fresh journal for every invocation. Do not raise the 65C cool-start or
-78C abort defaults to make a run proceed. A telemetry failure, thermal abort,
-child failure, signal, or orphaned process is a failed interval.
+Use a fresh journal for every invocation. Do not raise the 40C cool-start or
+50C intake-abort defaults to make a run proceed. A telemetry failure, thermal
+abort, child failure, signal, or orphaned process is a failed interval.
 
 Obtain the bearer inside the remote shell without printing it and never enable
 shell tracing:

@@ -15,8 +15,8 @@ engines=(qwen38flashnext-a qwen38flashnext-b)
 compose_project=qwen38_flash_next
 mixed_bench_sha=4471df918d075236016633ad5d0f4fc8e88531ab1853b7158e568c72a8492ee5
 engine_metrics_sha=67e26a0d7e548fc8e8d193dc332f13962a4e7dc6775f8e255da37c9508ce8ce4
-gpu_guard_sha=91853921fbe01d4eaf1d6b7a15921e4d3c991828afe156240e3690c7bf23dcd8
-moratorium_sha=cc778fc2252567843c1e2b0b8cbbd207102294debb6ab8b641ce7836bc9f38a1
+gpu_guard_sha=2cfce985c7cf219500b214243d01392885346eb512975b4075e81a9b3f15904c
+moratorium_sha=a47317415d32b233ec71e8df895b87b022e9e7a557c13dacf8307eb202a6356b
 capture_sha=c8cb063ebd8e09d3e4732391986371298b2ad383105cdb99d1f1b6ba86463a3c
 compose_timeout_seconds=60
 smoke_max_seconds=120
@@ -26,6 +26,8 @@ rollback_budget_seconds=180
 guard_kill_grace_seconds=30
 render_budget_seconds=255
 post_render_mutation_budget_seconds=135
+thermal_start_c=40
+thermal_abort_c=50
 
 fail() {
   echo "qwen38 route-load cap A/B: $*" >&2
@@ -357,6 +359,8 @@ run_cell() {
     python3 "$experiment_dir/node06_gpu_guard.py" \
     --output "$thermal" \
     --label "qwen38-$label" \
+    --start-max-c "$thermal_start_c" \
+    --abort-c "$thermal_abort_c" \
     --max-runtime-seconds "$cell_runtime_seconds" \
     -- \
     env \
