@@ -30,36 +30,6 @@ x-vllm-engine: &vllm-engine
     # Host RAM is constrained on node06. Keep the 51B N-gram table on the
     # GPUs for the first qualification; CPU PLE offload is a later A/B only.
     VLLM_PLE_CPU_OFFLOAD: "0"
-  command: &vllm-command
-    - /workspace/model
-    - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-flash-next}
-    - --revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
-    - --tokenizer-revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
-    - --host=0.0.0.0
-    - --port=8000
-    - --tensor-parallel-size=4
-    - --enable-expert-parallel
-    - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
-    # Pin the first successful 90% boot's vLLM-recommended allocation. Auto
-    # profiling varied from 38.32 GiB to 4.48 GiB across identical warm boots.
-    - --kv-cache-memory=${KV_CACHE_MEMORY:-40190174004}
-    - --max-model-len=${MAX_MODEL_LEN:-262144}
-    - --max-num-seqs=${MAX_NUM_SEQS:-64}
-    - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}
-    # Candidate A/B: preserve MTP3 while reusing the step-0 QSA sparse indices
-    # on later draft steps. The pinned Qwen runtime implements this directly;
-    # it is the only variable relative to the qualified MTP3 reference.
-    - --speculative-config={"method":"mtp","num_speculative_tokens":3,"index_share_for_mtp_iteration":true}
-    - --enable-prefix-caching
-    # Without this the OpenAI usage object omits prompt_tokens_details
-    # entirely, so every client sees no cache-hit stats even though the
-    # native prefix cache is serving ~66% of queried blocks.
-    - --enable-prompt-tokens-details
-    - --no-enable-flashinfer-autotune
-    - --enable-auto-tool-choice
-    - --tool-call-parser=qwen3_coder
-    - --reasoning-parser=qwen3
-
 services:
   ds4-loadbalancer:
     image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.4.0@sha256:467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b}
@@ -92,14 +62,34 @@ services:
       RJ_ROUTE_LOAD_UNIT_BYTES: ${RJ_ROUTE_LOAD_UNIT_BYTES:-32768}
       RJ_ROUTE_MAX_LOAD_UNITS: ${RJ_ROUTE_MAX_LOAD_UNITS:-8}
       RJ_ROUTE_PHASE_AWARE_LOAD: ${RJ_ROUTE_PHASE_AWARE_LOAD:-true}
+      # Reserve bounded decode work after first token instead of treating every
+      # active decode as one equal unit. Zero is the instant rollback.
+      RJ_ROUTE_DECODE_LOAD_UNIT_TOKENS: ${RJ_ROUTE_DECODE_LOAD_UNIT_TOKENS:-256}
+      RJ_ROUTE_DECODE_MAX_LOAD_UNITS: ${RJ_ROUTE_DECODE_MAX_LOAD_UNITS:-4}
       # Default-off candidate: qualify warm long-prefix placement against
       # stale-locality and MTP throughput guards before enabling it.
       RJ_ROUTE_PROJECTED_LOAD: ${RJ_ROUTE_PROJECTED_LOAD:-false}
+      # A retains the qualified MTP3 profile; B is the standard long-output
+      # profile. Profile preference is only the final routing score tie-break.
+      RJ_ROUTE_SPECULATION_MODE: ${RJ_ROUTE_SPECULATION_MODE:-prefer}
+      RJ_ROUTE_SPECULATION_PROFILES: ${RJ_ROUTE_SPECULATION_PROFILES:-mtp,standard}
+      # Coalesce concurrent cold requests with at least 16KiB of common prefix.
+      # The bounded table and load delta both fail open to ordinary routing.
+      RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE:-prefer}
+      RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MIN_BLOCKS: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MIN_BLOCKS:-8}
+      RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY:-1024}
+      RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA:-1}
       RJ_ROUTE_JOURNAL: ${RJ_ROUTE_JOURNAL:-true}
       RJ_TOKENIZER_MODE: "off"
       RJ_TOKENIZER_PROFILE: qwen3.8-flash-next
       RJ_EXACT_ROUTE_MODE: "off"
       RJ_UPSTREAM_ADMISSION_MODE: http
+      # After a replica has failed readiness, require three successful probes
+      # spanning 30 seconds before it can rejoin placement. No synthetic probe
+      # is generated; this reuses the ordinary HTTP readiness loop.
+      RJ_UPSTREAM_WARMUP_MODE: ${RJ_UPSTREAM_WARMUP_MODE:-enforce}
+      RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES: ${RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES:-3}
+      RJ_UPSTREAM_WARMUP_STABLE_SECONDS: ${RJ_UPSTREAM_WARMUP_STABLE_SECONDS:-30}
       RJ_KV_EVENT_MODE: "off"
       RJ_KV_EVENT_LIVE_ENDPOINTS: ""
       RJ_KV_EVENT_REPLAY_ENDPOINTS: ""
@@ -125,7 +115,27 @@ services:
         reservations:
           devices:
             - {driver: nvidia, device_ids: ["0", "1", "2", "3"], capabilities: [gpu]}
-    command: *vllm-command
+    command: &vllm-command-mtp
+      - /workspace/model
+      - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-flash-next}
+      - --revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+      - --tokenizer-revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+      - --host=0.0.0.0
+      - --port=8000
+      - --tensor-parallel-size=4
+      - --enable-expert-parallel
+      - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
+      - --kv-cache-memory=${KV_CACHE_MEMORY:-40190174004}
+      - --max-model-len=${MAX_MODEL_LEN:-262144}
+      - --max-num-seqs=${MAX_NUM_SEQS:-64}
+      - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}
+      - --speculative-config={"method":"mtp","num_speculative_tokens":3,"index_share_for_mtp_iteration":true}
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --no-enable-flashinfer-autotune
+      - --enable-auto-tool-choice
+      - --tool-call-parser=qwen3_coder
+      - --reasoning-parser=qwen3
 
   qwen38flashnext-b:
     <<: *vllm-engine
@@ -137,7 +147,28 @@ services:
         reservations:
           devices:
             - {driver: nvidia, device_ids: ["4", "5", "6", "7"], capabilities: [gpu]}
-    command: *vllm-command
+    # Standard decoding is the qualified long-output counterpart to A's MTP3
+    # profile. Keep every other serving argument byte-identical.
+    command:
+      - /workspace/model
+      - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-flash-next}
+      - --revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+      - --tokenizer-revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+      - --host=0.0.0.0
+      - --port=8000
+      - --tensor-parallel-size=4
+      - --enable-expert-parallel
+      - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
+      - --kv-cache-memory=${KV_CACHE_MEMORY:-40190174004}
+      - --max-model-len=${MAX_MODEL_LEN:-262144}
+      - --max-num-seqs=${MAX_NUM_SEQS:-64}
+      - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --no-enable-flashinfer-autotune
+      - --enable-auto-tool-choice
+      - --tool-call-parser=qwen3_coder
+      - --reasoning-parser=qwen3
 
 networks:
   machineview-host:

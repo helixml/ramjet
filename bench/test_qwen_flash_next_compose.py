@@ -44,13 +44,21 @@ class QwenFlashNextComposeTests(unittest.TestCase):
 
     def test_unqualified_speculation_fails(self):
         changed = copy.deepcopy(self.document)
-        for name in validator.ENGINE_SHAPE:
-            command = changed["services"][name]["command"]
-            command[command.index(
-                '--speculative-config={"method":"mtp","num_speculative_tokens":3,'
-                '"index_share_for_mtp_iteration":true}'
-            )] = '--speculative-config={"method":"mtp","num_speculative_tokens":4}'
-        with self.assertRaisesRegex(validator.ValidationError, "index-reuse candidate"):
+        command = changed["services"]["qwen38flashnext-a"]["command"]
+        command[command.index(
+            '--speculative-config={"method":"mtp","num_speculative_tokens":3,'
+            '"index_share_for_mtp_iteration":true}'
+        )] = '--speculative-config={"method":"mtp","num_speculative_tokens":4}'
+        with self.assertRaisesRegex(validator.ValidationError, "admitted profile"):
+            validator.validate(changed)
+
+    def test_standard_profile_cannot_enable_speculation(self):
+        changed = copy.deepcopy(self.document)
+        changed["services"]["qwen38flashnext-b"]["command"].append(
+            '--speculative-config={"method":"mtp","num_speculative_tokens":3,'
+            '"index_share_for_mtp_iteration":true}'
+        )
+        with self.assertRaisesRegex(validator.ValidationError, "admitted profile"):
             validator.validate(changed)
 
     def test_host_memory_offload_fails(self):
