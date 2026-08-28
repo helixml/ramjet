@@ -162,13 +162,23 @@ failure, event disconnect, invalid replay, or insufficient exact gain preserves
 the approximate route. This is a fail-closed routing optimization, not a new
 serving-health dependency.
 
-The checked-in Compose deliberately keeps `RJ_EXACT_ROUTE_CANARY_BPS=0`; zero
-is the repository-safe rollback state when the file is rendered away from the
-qualified node. node06's protected mode-0600 `.env` promotes the live cohort to
-`10000` and supplies the independent canary key. Never commit or print that
-key. `RJ_UPSTREAM_ADMISSION_MODE=http` also remains intentional: serving-
-runtime compatibility admission is a separate contract and is not required
-for direct KV-event exact placement.
+The checked-in Compose defaults `RJ_EXACT_ROUTE_CANARY_BPS` to the qualified
+full cohort of `10000` and requires the independent canary key from node06's
+protected mode-0600 `.env`. A missing key fails during Compose rendering
+instead of silently disabling placement. Never commit or print that key. An
+explicit `RJ_EXACT_ROUTE_CANARY_BPS=0` remains the instant behavior rollback.
+
+This default-on boundary covers every serving improvement qualified for this
+deployment: phase-aware and bounded decode load, mixed MTP3/standard profile
+routing, prefix single-flight, passive warmup enforcement, local Qwen
+tokenization, live/replay KV inventory, and exact placement. Three other
+settings remain deliberately non-enforcing: projected-load scoring did not
+pass a guarded qualification; serving-runtime compatibility admission is a
+separate incomplete authority, so `RJ_UPSTREAM_ADMISSION_MODE=http` remains;
+and idle drain stays in `observe` because enforcement is an energy policy with
+measured host-RAM and cache-residency costs, not a qualified serving-speed win.
+Snapshot routing is absent because it is mutually exclusive with the admitted
+direct KV-event inventory.
 
 The deployment disables the legacy 100K max-token strip so valid long-output
 budgets reach vLLM unchanged. Qwen template controls such as
@@ -199,7 +209,7 @@ release. Every node06 `docker compose` invocation, including rollback and
 cleanup traps, must therefore carry the exact `LB_IMAGE` override; restoring
 the Compose file alone would select the older released default. The admitted
 node06 Compose SHA-256 is
-`784f20137bd404667591bc1a4b5b614e366a244a34220ca3ffcfcb002a42b4ce`.
+`3dea7929a5d66e31a6892e296ee53d95403210dcadf88d02441447760ea93d33`.
 
 The load balancer joins both the Flash serving network and the existing
 `qwen38_27b_default` bridge. The latter is observation-only: node06's host
