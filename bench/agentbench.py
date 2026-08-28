@@ -823,6 +823,14 @@ def benchmark_exit_status(records, report_protocol_failures, dspark, require_rec
     return 0 if dspark and dspark.get("reconciled") else 1
 
 
+def speculation_expected_enabled(mode):
+    if mode == "enabled":
+        return True
+    if mode == "disabled":
+        return False
+    raise ValueError(f"unknown speculation mode: {mode}")
+
+
 def command_run(args):
     token = os.environ.get("BENCH_TOKEN") or os.environ.get("VLLM_API_KEY")
     if not token:
@@ -913,7 +921,7 @@ def command_run(args):
             fetch_speculation_snapshot(args.engine_metrics),
             completion,
             len(transport_good),
-            expected_enabled=True,
+            expected_enabled=speculation_expected_enabled(args.speculation_mode),
         )
     summary = {
         "type": "summary",
@@ -926,6 +934,7 @@ def command_run(args):
         "concurrency": args.concurrency,
         "repetitions": args.repetitions,
         "warmup": args.warmup,
+        "speculation_mode": args.speculation_mode if args.engine_metrics else None,
         "prefix_kib": args.prefix_kib,
         "requests": len(records),
         "transport_successful": len(transport_good),
@@ -990,6 +999,12 @@ def parser():
     run.add_argument(
         "--engine-metrics",
         help="direct engine /metrics URL used to reconcile speculative work",
+    )
+    run.add_argument(
+        "--speculation-mode",
+        choices=("enabled", "disabled"),
+        default="enabled",
+        help="expected native speculation state; disabled reconciles an engine with no draft counters",
     )
     run.add_argument(
         "--require-reconciled-speculation",

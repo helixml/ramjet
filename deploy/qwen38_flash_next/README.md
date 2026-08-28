@@ -107,6 +107,17 @@ passed; the latter also confirms that the multimodal target works when vLLM
 warns that its MTP draft receives text-only inputs. See the 2026-08-26 entry in
 `EXPERIMENTS.md` for exact measurements and guard evidence.
 
+An order-balanced 256-token A/B/B/A on 2026-08-28 found a different c32 side
+of the crossover: with QSA index reuse, MTP3 improved aggregate throughput by
+79.1%, 35.0%, 27.0%, and 7.5% at c1/c8/c16/c32, while lowering TPOT by
+47.1%, 35.2%, 31.5%, and 14.3%. It increased TTFT at every concurrency because
+draft setup precedes the faster decode. Both enabled and disabled native states
+reconciled across 456/456 requests, and the agent corpus passed 5/5 in each
+shape. The 512-token c32 loss and 256-token c32 win mean a future heterogeneous
+policy needs output-work awareness; concurrency alone is not a safe selector.
+Retain MTP3 with index reuse on both engines until that policy is independently
+qualified.
+
 The retained MTP3 configuration also sets
 `index_share_for_mtp_iteration=true`. The pinned Qwen runtime implements
 step-zero QSA top-k selection plus per-request row compaction before later

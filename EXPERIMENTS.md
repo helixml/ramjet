@@ -56,6 +56,63 @@ on node06 under
 `20260828T0549Z-max-num-seqs-abba` and
 `20260828T0612Z-max-num-seqs-abba-r2`.
 
+## 2026-08-28 — order-balanced MTP crossover: keep MTP3, but its win is decode-depth dependent
+
+The original 2026-08-26 MTP result compared separate runs and found a c32 loss
+at 512 output tokens. A guarded same-engine A/B/B/A rerun now isolates MTP3
+with QSA index reuse against no speculative decoding at the 256-token code
+depth used by the scheduler campaign. Engine B was removed from ramjet before
+any direct traffic; the model revision, immutable image, TP4+EP topology,
+40,190,174,004-byte KV allocation, 64-sequence limit, 8,192-token batch cap,
+prompt, and GPU half were fixed.
+
+The candidate was a standalone Compose render made by deleting exactly the one
+`--speculative-config` command element; it was not an overlay. Its source hash
+and rendered argv were pinned, then the pinned image's real `AsyncEngineArgs`
+parser proved `speculative_config=None` in a network- and GPU-free container
+before B was withdrawn. The live initialization log independently recorded the
+same value.
+
+Each order used two fresh-namespace runs per concurrency and required exact
+native work reconciliation. The agent harness was extended to admit an
+explicit `--speculation-mode disabled`, so absence of draft counters is a
+verified native state rather than a reason to discard engine reconciliation.
+Order-balanced averages are:
+
+| concurrency | MTP off tok/s | MTP3 tok/s | throughput delta | TPOT off | TPOT MTP3 | TTFT off | TTFT MTP3 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 113.0 | 202.4 | **+79.1%** | 8.670ms | 4.586ms | 52.9ms | 97.5ms |
+| 8 | 632.3 | 853.4 | **+35.0%** | 11.987ms | 7.763ms | 182.4ms | 281.0ms |
+| 16 | 1,056.3 | 1,341.4 | **+27.0%** | 14.224ms | 9.748ms | 264.1ms | 324.8ms |
+| 32 | 1,657.8 | 1,781.6 | **+7.5%** | 16.881ms | 14.460ms | 448.0ms | 508.6ms |
+
+MTP3 improves aggregate decode throughput and TPOT at every measured
+concurrency for this 256-token workload, while adding draft setup cost to
+TTFT. The deterministic five-case tool/reasoning gate passed 5/5 in both
+shapes. MTP3 completed it in 5.261s versus 8.618s off, improving successful
+tasks/GPU-hour from 522 to 855; median request wall time was higher for the
+short cases (1,450 versus 1,159ms), but p95 fell from 3,206 to 1,682ms.
+
+This does not erase the 512-token c32 result (1,844.1 tok/s off versus 1,759.2
+with the earlier MTP3 shape, -4.6%). It establishes that the crossover depends
+on decode depth and probably on the exact index-reuse implementation, rather
+than concurrency alone. Do not build heterogeneous routing from a simple c32
+threshold. A future profile-aware policy needs an explicit output-work signal
+and must preserve prefix locality; until that policy is separately qualified,
+retain MTP3 with index reuse on both replicas.
+
+All 456 code requests and ten agent cases completed with zero failures. Every
+MTP3 cell reconciled client tokens/requests with native draft and generation
+counters; every off cell reconciled the explicit disabled state. MTP-off
+readiness took 477s and exposed 3,033,380 KV tokens; restored MTP3 took 533s
+and returned to its exact 2,667,258-token pool. Guard run
+`d343cb3014e472080d774f86980da763` passed in 1,243s, with 39C maximum intake,
+76C maximum GPU temperature, no Xid/OOM, and exact final 2/2 admission,
+restart count zero, original Compose SHA-256
+`826e3b4f11b06a80c2deca40f0e1d089a040fe3ae4dc7b001e54e01b89cc72d6`,
+and original MTP3 argv. Evidence is on node06 under
+`.experiments/20260828T0705Z-mtp-abba`.
+
 ## 2026-08-27 — cache-hit stats were missing from the API because of a default-off vLLM flag, not the model
 
 A user report that the Qwen-Next API returns no cache-hit statistics is
