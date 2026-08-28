@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use url::Url;
 
-use crate::config::Affinity;
+use crate::config::{Affinity, SpeculationProfile, SpeculationRouteMode};
 
 #[derive(Clone, Debug)]
 pub struct RouterConfig {
@@ -19,7 +19,76 @@ pub struct RouterConfig {
     pub load_unit_bytes: usize,
     pub max_load_units: usize,
     pub projected_load: bool,
+    pub speculation_mode: SpeculationRouteMode,
+    pub speculation_profiles: Vec<SpeculationProfile>,
     pub affinity: Affinity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SpeculationPreference {
+    Neutral,
+    Standard,
+    Mtp,
+}
+
+impl SpeculationPreference {
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Neutral => "neutral",
+            Self::Standard => "standard",
+            Self::Mtp => "mtp",
+        }
+    }
+
+    const fn matches(self, profile: SpeculationProfile) -> bool {
+        matches!(
+            (self, profile),
+            (Self::Standard, SpeculationProfile::Standard) | (Self::Mtp, SpeculationProfile::Mtp)
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SpeculationRouteOutcome {
+    Off,
+    Neutral,
+    Match,
+    WouldMove,
+    Moved,
+    ScoreBlocked,
+    Unavailable,
+}
+
+impl SpeculationRouteOutcome {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Off,
+        Self::Neutral,
+        Self::Match,
+        Self::WouldMove,
+        Self::Moved,
+        Self::ScoreBlocked,
+        Self::Unavailable,
+    ];
+
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Neutral => "neutral",
+            Self::Match => "match",
+            Self::WouldMove => "would_move",
+            Self::Moved => "moved",
+            Self::ScoreBlocked => "score_blocked",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SpeculationRouteObservation {
+    pub(crate) preference: SpeculationPreference,
+    pub(crate) outcome: SpeculationRouteOutcome,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -173,7 +242,7 @@ struct Inner {
     rr: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Score {
     index: usize,
     overlap: usize,
@@ -182,6 +251,120 @@ struct Score {
     request_load: usize,
     weighted: f64,
     healthy: bool,
+}
+
+fn compare_scores(
+    left: &Score,
+    right: &Score,
+    rotation: usize,
+    candidate_count: usize,
+    preference: SpeculationPreference,
+    profiles: &[SpeculationProfile],
+    profile_tie_break: bool,
+) -> Ordering {
+    right
+        .healthy
+        .cmp(&left.healthy)
+        .then_with(|| {
+            right
+                .weighted
+                .partial_cmp(&left.weighted)
+                .unwrap_or(Ordering::Equal)
+        })
+        .then_with(|| right.overlap.cmp(&left.overlap))
+        .then_with(|| {
+            if profile_tie_break {
+                preference
+                    .matches(profiles[right.index])
+                    .cmp(&preference.matches(profiles[left.index]))
+            } else {
+                Ordering::Equal
+            }
+        })
+        .then_with(|| {
+            ((left.index + rotation) % candidate_count)
+                .cmp(&((right.index + rotation) % candidate_count))
+        })
+}
+
+fn speculation_route_outcome(
+    scores: &[Score],
+    mode: SpeculationRouteMode,
+    profiles: &[SpeculationProfile],
+    preference: SpeculationPreference,
+) -> SpeculationRouteOutcome {
+    if mode == SpeculationRouteMode::Off {
+        return SpeculationRouteOutcome::Off;
+    }
+    if preference == SpeculationPreference::Neutral {
+        return SpeculationRouteOutcome::Neutral;
+    }
+    let baseline = &scores[0];
+    if preference.matches(profiles[baseline.index]) {
+        return SpeculationRouteOutcome::Match;
+    }
+    let preferred_available = scores
+        .iter()
+        .any(|score| score.healthy && preference.matches(profiles[score.index]));
+    if !preferred_available {
+        return SpeculationRouteOutcome::Unavailable;
+    }
+    #[allow(clippy::float_cmp)] // Tie-only routing mirrors the established score policy.
+    let preferred_tied = scores.iter().any(|score| {
+        score.healthy
+            && preference.matches(profiles[score.index])
+            && score.weighted == baseline.weighted
+            && score.overlap == baseline.overlap
+    });
+    if !preferred_tied {
+        return SpeculationRouteOutcome::ScoreBlocked;
+    }
+    match mode {
+        SpeculationRouteMode::Shadow => SpeculationRouteOutcome::WouldMove,
+        SpeculationRouteMode::Prefer => SpeculationRouteOutcome::Moved,
+        SpeculationRouteMode::Off => unreachable!("off mode returned above"),
+    }
+}
+
+fn decision_from_scores(scores: &[Score], total_blocks: usize, rotation: usize) -> Decision {
+    let winner = &scores[0];
+    #[allow(clippy::float_cmp)] // Exact equality is the established routing policy.
+    let scores_differ = scores
+        .iter()
+        .skip(1)
+        .any(|score| score.weighted != winner.weighted);
+    let outcome = if scores.len() == 1 {
+        Outcome::Single
+    } else if winner.overlap > 0 {
+        Outcome::Overlap
+    } else if scores_differ {
+        Outcome::Load
+    } else {
+        Outcome::RoundRobin
+    };
+    let candidate_state = scores
+        .iter()
+        .enumerate()
+        .map(|(rank, score)| CandidateState {
+            index: score.index,
+            rank,
+            overlap_blocks: score.overlap,
+            affinity_blocks: score.affinity,
+            load_units: score.load,
+            request_load_units: score.request_load,
+            healthy: score.healthy,
+        })
+        .collect();
+    Decision {
+        candidates: scores.iter().map(|score| score.index).collect(),
+        candidate_state,
+        overlap_blocks: winner.overlap,
+        total_blocks,
+        affinity_blocks: winner.affinity,
+        load_units: winner.request_load,
+        rotation,
+        outcome,
+    }
 }
 
 pub struct Router {
@@ -199,6 +382,11 @@ impl Router {
     #[must_use]
     pub fn new(config: RouterConfig) -> Self {
         assert!(!config.upstreams.is_empty(), "router needs an upstream");
+        assert_eq!(
+            config.speculation_profiles.len(),
+            config.upstreams.len(),
+            "router needs one speculation profile per upstream"
+        );
         let capacity = NonZeroUsize::new(config.index_capacity).expect("positive index capacity");
         let load_estimator = RequestLoadEstimator::from_router_config(&config);
         let states = config
@@ -236,7 +424,14 @@ impl Router {
 
     pub fn route(&self, body: &[u8]) -> Decision {
         let fingerprints = self.fingerprints(body);
-        self.route_fingerprints(body.len(), &fingerprints, 1, true)
+        self.route_fingerprints(
+            body.len(),
+            &fingerprints,
+            1,
+            SpeculationPreference::Neutral,
+            true,
+        )
+        .0
     }
 
     /// Prepares fingerprints once and returns them with the decision so a
@@ -245,7 +440,15 @@ impl Router {
     #[must_use]
     pub fn route_with_fingerprints(&self, body: &[u8]) -> (Decision, Vec<u64>) {
         let fingerprints = self.fingerprints(body);
-        let decision = self.route_fingerprints(body.len(), &fingerprints, 1, true);
+        let decision = self
+            .route_fingerprints(
+                body.len(),
+                &fingerprints,
+                1,
+                SpeculationPreference::Neutral,
+                true,
+            )
+            .0;
         (decision, fingerprints)
     }
 
@@ -261,16 +464,51 @@ impl Router {
     }
 
     pub(crate) fn route_prepared(&self, body_bytes: usize, fingerprints: &[u64]) -> Decision {
-        self.route_fingerprints(body_bytes, fingerprints, 1, true)
+        self.route_fingerprints(
+            body_bytes,
+            fingerprints,
+            1,
+            SpeculationPreference::Neutral,
+            true,
+        )
+        .0
     }
 
+    #[cfg(test)]
     pub(crate) fn route_prepared_with_load_floor(
         &self,
         body_bytes: usize,
         fingerprints: &[u64],
         load_floor: usize,
     ) -> Decision {
-        self.route_fingerprints(body_bytes, fingerprints, load_floor, true)
+        self.route_fingerprints(
+            body_bytes,
+            fingerprints,
+            load_floor,
+            SpeculationPreference::Neutral,
+            true,
+        )
+        .0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn route_prepared_profiled(
+        &self,
+        body_bytes: usize,
+        fingerprints: &[u64],
+        preference: SpeculationPreference,
+    ) -> (Decision, SpeculationRouteObservation) {
+        self.route_prepared_profiled_with_load_floor(body_bytes, fingerprints, 1, preference)
+    }
+
+    pub(crate) fn route_prepared_profiled_with_load_floor(
+        &self,
+        body_bytes: usize,
+        fingerprints: &[u64],
+        load_floor: usize,
+        preference: SpeculationPreference,
+    ) -> (Decision, SpeculationRouteObservation) {
+        self.route_fingerprints(body_bytes, fingerprints, load_floor, preference, true)
     }
 
     fn route_fingerprints(
@@ -278,8 +516,9 @@ impl Router {
         body_bytes: usize,
         fingerprints: &[u64],
         load_floor: usize,
+        preference: SpeculationPreference,
         advance_rotation: bool,
-    ) -> Decision {
+    ) -> (Decision, SpeculationRouteObservation) {
         let mut inner = self.inner.lock();
         let next_rotation = inner.rr.wrapping_add(1);
         if advance_rotation {
@@ -324,59 +563,45 @@ impl Router {
             .collect::<Vec<_>>();
         let candidate_count = scores.len();
         scores.sort_by(|left, right| {
-            right
-                .healthy
-                .cmp(&left.healthy)
-                .then_with(|| {
-                    right
-                        .weighted
-                        .partial_cmp(&left.weighted)
-                        .unwrap_or(Ordering::Equal)
-                })
-                .then_with(|| right.overlap.cmp(&left.overlap))
-                .then_with(|| {
-                    ((left.index + rotation) % candidate_count)
-                        .cmp(&((right.index + rotation) % candidate_count))
-                })
+            compare_scores(
+                left,
+                right,
+                rotation,
+                candidate_count,
+                preference,
+                &self.config.speculation_profiles,
+                false,
+            )
         });
-        let winner = &scores[0];
-        #[allow(clippy::float_cmp)] // Exact equality is the established routing policy.
-        let scores_differ = scores
-            .iter()
-            .skip(1)
-            .any(|score| score.weighted != winner.weighted);
-        let outcome = if scores.len() == 1 {
-            Outcome::Single
-        } else if winner.overlap > 0 {
-            Outcome::Overlap
-        } else if scores_differ {
-            Outcome::Load
-        } else {
-            Outcome::RoundRobin
-        };
-        let candidate_state = scores
-            .iter()
-            .enumerate()
-            .map(|(rank, score)| CandidateState {
-                index: score.index,
-                rank,
-                overlap_blocks: score.overlap,
-                affinity_blocks: score.affinity,
-                load_units: score.load,
-                request_load_units: score.request_load,
-                healthy: score.healthy,
-            })
-            .collect();
-        Decision {
-            candidates: scores.iter().map(|score| score.index).collect(),
-            candidate_state,
-            overlap_blocks: winner.overlap,
-            total_blocks: fingerprints.len(),
-            affinity_blocks: winner.affinity,
-            load_units: winner.request_load,
-            rotation,
-            outcome,
+        let profile_outcome = speculation_route_outcome(
+            &scores,
+            self.config.speculation_mode,
+            &self.config.speculation_profiles,
+            preference,
+        );
+        if self.config.speculation_mode == SpeculationRouteMode::Prefer
+            && profile_outcome == SpeculationRouteOutcome::Moved
+        {
+            scores.sort_by(|left, right| {
+                compare_scores(
+                    left,
+                    right,
+                    rotation,
+                    candidate_count,
+                    preference,
+                    &self.config.speculation_profiles,
+                    true,
+                )
+            });
         }
+        let decision = decision_from_scores(&scores, fingerprints.len(), rotation);
+        (
+            decision,
+            SpeculationRouteObservation {
+                preference,
+                outcome: profile_outcome,
+            },
+        )
     }
 
     pub fn observe(&self, upstream: usize, fingerprints: &[u64]) {
@@ -721,6 +946,8 @@ mod tests {
             load_unit_bytes: 32 << 10,
             max_load_units: 8,
             projected_load: false,
+            speculation_mode: SpeculationRouteMode::Off,
+            speculation_profiles: vec![SpeculationProfile::Standard; 2],
             affinity: Affinity::Prefix,
         }
     }
@@ -784,6 +1011,43 @@ mod tests {
                 .all(|candidate| candidate.request_load_units == 4)
         );
         assert_eq!(decision.load_units, 4);
+    }
+
+    #[test]
+    fn speculation_profile_moves_only_a_final_score_tie_and_shadow_is_immutable() {
+        let mut shadow_config = config();
+        shadow_config.speculation_mode = SpeculationRouteMode::Shadow;
+        shadow_config.speculation_profiles =
+            vec![SpeculationProfile::Mtp, SpeculationProfile::Standard];
+        let shadow = Router::new(shadow_config);
+        let (decision, observation) =
+            shadow.route_prepared_profiled(1, &[], SpeculationPreference::Mtp);
+        assert_eq!(decision.candidates[0], 1);
+        assert_eq!(observation.outcome, SpeculationRouteOutcome::WouldMove);
+
+        let mut prefer_config = config();
+        prefer_config.speculation_mode = SpeculationRouteMode::Prefer;
+        prefer_config.speculation_profiles =
+            vec![SpeculationProfile::Mtp, SpeculationProfile::Standard];
+        let prefer = Router::new(prefer_config);
+        let (decision, observation) =
+            prefer.route_prepared_profiled(1, &[], SpeculationPreference::Mtp);
+        assert_eq!(decision.candidates[0], 0);
+        assert_eq!(observation.outcome, SpeculationRouteOutcome::Moved);
+    }
+
+    #[test]
+    fn speculation_profile_never_overrides_better_prefix_locality() {
+        let mut configured = config();
+        configured.speculation_mode = SpeculationRouteMode::Prefer;
+        configured.speculation_profiles =
+            vec![SpeculationProfile::Mtp, SpeculationProfile::Standard];
+        let router = Router::new(configured);
+        router.observe(1, &[7]);
+        let (decision, observation) =
+            router.route_prepared_profiled(1, &[7], SpeculationPreference::Mtp);
+        assert_eq!(decision.candidates[0], 1);
+        assert_eq!(observation.outcome, SpeculationRouteOutcome::ScoreBlocked);
     }
 
     #[test]

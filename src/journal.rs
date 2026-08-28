@@ -267,6 +267,8 @@ mod tests {
             load_unit_bytes: 32 << 10,
             max_load_units: 8,
             projected_load: false,
+            speculation_mode: crate::config::SpeculationRouteMode::Off,
+            speculation_profiles: vec![crate::config::SpeculationProfile::Standard],
             affinity: Affinity::Prefix,
         });
         let prepared = PreparedRequest::new(

@@ -66,6 +66,8 @@ pub struct Config {
     pub route_decode_load_unit_tokens: usize,
     pub route_decode_max_load_units: usize,
     pub route_projected_load: bool,
+    pub route_speculation_mode: SpeculationRouteMode,
+    pub route_speculation_profiles: Vec<SpeculationProfile>,
     pub affinity: Affinity,
     pub session_affinity_mode: SessionAffinityMode,
     pub session_affinity_key: Option<SecretString>,
@@ -120,6 +122,40 @@ pub struct Config {
 pub enum Affinity {
     Prefix,
     Load,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpeculationRouteMode {
+    Off,
+    Shadow,
+    Prefer,
+}
+
+impl SpeculationRouteMode {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::Prefer => "prefer",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpeculationProfile {
+    Standard,
+    Mtp,
+}
+
+impl SpeculationProfile {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Mtp => "mtp",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -417,6 +453,8 @@ impl Config {
                 "no greater than RJ_ROUTE_MAX_LOAD_UNITS",
             ));
         }
+        let (route_speculation_mode, route_speculation_profiles) =
+            speculation_route_settings(&mut get, upstreams.len())?;
         let affinity = match get("RJ_AFFINITY").as_deref().unwrap_or("prefix") {
             "prefix" => Affinity::Prefix,
             "load" => Affinity::Load,
@@ -591,6 +629,8 @@ impl Config {
             route_decode_load_unit_tokens,
             route_decode_max_load_units,
             route_projected_load: parse(&mut get, "RJ_ROUTE_PROJECTED_LOAD", false, "a boolean")?,
+            route_speculation_mode,
+            route_speculation_profiles,
             affinity,
             session_affinity_mode: session_affinity.mode,
             session_affinity_key: session_affinity.key,
@@ -1372,6 +1412,59 @@ fn value_list(
     Ok(values)
 }
 
+fn speculation_route_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    upstream_count: usize,
+) -> Result<(SpeculationRouteMode, Vec<SpeculationProfile>), ConfigError> {
+    let mode = match get("RJ_ROUTE_SPECULATION_MODE").as_deref().unwrap_or("off") {
+        "off" => SpeculationRouteMode::Off,
+        "shadow" => SpeculationRouteMode::Shadow,
+        "prefer" => SpeculationRouteMode::Prefer,
+        value => {
+            return Err(invalid(
+                "RJ_ROUTE_SPECULATION_MODE",
+                value.to_owned(),
+                "off, shadow, or prefer",
+            ));
+        }
+    };
+    let raw_profiles = value_list(get, "RJ_ROUTE_SPECULATION_PROFILES")?;
+    let profiles = if raw_profiles.is_empty() {
+        vec![SpeculationProfile::Standard; upstream_count]
+    } else {
+        if raw_profiles.len() != upstream_count {
+            return Err(invalid(
+                "RJ_ROUTE_SPECULATION_PROFILES",
+                "<redacted>".to_owned(),
+                "exactly one standard or mtp profile per upstream",
+            ));
+        }
+        raw_profiles
+            .into_iter()
+            .map(|value| match value.as_str() {
+                "standard" => Ok(SpeculationProfile::Standard),
+                "mtp" => Ok(SpeculationProfile::Mtp),
+                _ => Err(invalid(
+                    "RJ_ROUTE_SPECULATION_PROFILES",
+                    "<redacted>".to_owned(),
+                    "a comma-separated list of standard or mtp",
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if mode != SpeculationRouteMode::Off
+        && (!profiles.contains(&SpeculationProfile::Standard)
+            || !profiles.contains(&SpeculationProfile::Mtp))
+    {
+        return Err(invalid(
+            "RJ_ROUTE_SPECULATION_PROFILES",
+            "<redacted>".to_owned(),
+            "both standard and mtp profiles when routing is enabled",
+        ));
+    }
+    Ok((mode, profiles))
+}
+
 fn parsed_list<T: std::str::FromStr>(
     get: &mut impl FnMut(&str) -> Option<String>,
     key: &'static str,
@@ -2130,6 +2223,11 @@ mod tests {
         assert_eq!(config.route_decode_load_unit_tokens, 0);
         assert_eq!(config.route_decode_max_load_units, 4);
         assert!(!config.route_projected_load);
+        assert_eq!(config.route_speculation_mode, SpeculationRouteMode::Off);
+        assert_eq!(
+            config.route_speculation_profiles,
+            [SpeculationProfile::Standard]
+        );
         assert_eq!(config.affinity, Affinity::Prefix);
         assert_eq!(config.session_affinity_mode, SessionAffinityMode::Off);
         assert!(config.session_affinity_key.is_none());
@@ -2233,6 +2331,35 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn speculation_profiles_are_explicit_cardinal_and_heterogeneous_when_enabled() {
+        let enabled = two_upstreams(&[
+            ("RJ_ROUTE_SPECULATION_MODE", "prefer"),
+            ("RJ_ROUTE_SPECULATION_PROFILES", "mtp,standard"),
+        ])
+        .unwrap();
+        assert_eq!(enabled.route_speculation_mode, SpeculationRouteMode::Prefer);
+        assert_eq!(
+            enabled.route_speculation_profiles,
+            [SpeculationProfile::Mtp, SpeculationProfile::Standard]
+        );
+
+        for profiles in ["mtp", "mtp,mtp", "mtp,unknown"] {
+            let error = two_upstreams(&[
+                ("RJ_ROUTE_SPECULATION_MODE", "shadow"),
+                ("RJ_ROUTE_SPECULATION_PROFILES", profiles),
+            ])
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                ConfigError::InvalidValue {
+                    key: "RJ_ROUTE_SPECULATION_PROFILES",
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

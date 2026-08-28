@@ -1111,8 +1111,17 @@ impl Proxy {
         } else {
             None
         };
-        let approximate_decision =
-            prepared.route_with_load_floor(&self.inner.router, decode_load_units);
+        let (approximate_decision, speculation_profile) =
+            prepared.route_profiled(&self.inner.router, endpoint, decode_load_units);
+        self.inner
+            .metrics
+            .route_speculation_profile
+            .with_label_values(&[
+                self.inner.config.route_speculation_mode.label(),
+                speculation_profile.preference.label(),
+                speculation_profile.outcome.label(),
+            ])
+            .inc();
         let session_affinity =
             self.inner
                 .session_affinity
@@ -2882,6 +2891,8 @@ mod tests {
             load_unit_bytes: config.route_load_unit_bytes,
             max_load_units: config.route_max_load_units,
             projected_load: config.route_projected_load,
+            speculation_mode: config.route_speculation_mode,
+            speculation_profiles: config.route_speculation_profiles.clone(),
             affinity: config.affinity,
         }));
         Proxy::new(config, reqwest::Client::new(), metrics, router, inventories).unwrap()
@@ -3400,6 +3411,8 @@ mod tests {
             load_unit_bytes: config.route_load_unit_bytes,
             max_load_units: config.route_max_load_units,
             projected_load: config.route_projected_load,
+            speculation_mode: config.route_speculation_mode,
+            speculation_profiles: config.route_speculation_profiles.clone(),
             affinity: config.affinity,
         }));
         let client = reqwest::Client::new();
@@ -3943,6 +3956,8 @@ mod tests {
             load_unit_bytes: config.route_load_unit_bytes,
             max_load_units: config.route_max_load_units,
             projected_load: config.route_projected_load,
+            speculation_mode: config.route_speculation_mode,
+            speculation_profiles: config.route_speculation_profiles.clone(),
             affinity: config.affinity,
         }));
         let proxy = Proxy::new(

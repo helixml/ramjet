@@ -42,6 +42,8 @@ async fn main() -> anyhow::Result<()> {
         load_unit_bytes: config.route_load_unit_bytes,
         max_load_units: config.route_max_load_units,
         projected_load: config.route_projected_load,
+        speculation_mode: config.route_speculation_mode,
+        speculation_profiles: config.route_speculation_profiles.clone(),
         affinity: config.affinity,
     }));
     let client = reqwest::Client::builder()
@@ -176,6 +178,8 @@ fn log_startup(config: &Config) {
         decode_load_unit_tokens = config.route_decode_load_unit_tokens,
         decode_max_load_units = config.route_decode_max_load_units,
         projected_load = config.route_projected_load,
+        route_speculation_mode = config.route_speculation_mode.label(),
+        route_speculation_profiles = ?config.route_speculation_profiles,
         session_affinity_mode = ?config.session_affinity_mode,
         session_affinity_bonus_blocks = config.session_affinity_bonus_blocks,
         session_affinity_max_load_delta = config.session_affinity_max_load_delta,
