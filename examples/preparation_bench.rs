@@ -1,7 +1,7 @@
 use std::{hint::black_box, time::Instant};
 
 use ramjet::{
-    config::Affinity,
+    config::{Affinity, SpeculationProfile, SpeculationRouteMode},
     prepare::PreparedRequest,
     router::{Router, RouterConfig},
     shims::{Endpoint, sanitize_request},
@@ -84,6 +84,8 @@ fn router() -> Router {
         load_unit_bytes: 32 << 10,
         max_load_units: 8,
         projected_load: false,
+        speculation_mode: SpeculationRouteMode::Off,
+        speculation_profiles: vec![SpeculationProfile::Standard],
         affinity: Affinity::Prefix,
     })
 }

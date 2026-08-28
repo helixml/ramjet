@@ -62,6 +62,7 @@ pub struct Metrics {
     pub route_decisions: CounterVec,
     pub route_overlap: Histogram,
     pub route_affinity: Histogram,
+    pub route_speculation_profile: CounterVec,
     pub session_affinity: CounterVec,
     pub upstream_inflight: GaugeVec,
     pub upstream_load_units: GaugeVec,
@@ -420,6 +421,11 @@ impl Metrics {
                     "Bounded prefix overlap contribution used in the route score",
                 )
                 .buckets(vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]),
+            )?,
+            route_speculation_profile: counter(
+                "ramjet_route_speculation_profile_total",
+                "Approximate profile-aware route decisions by bounded mode, request preference, and outcome",
+                &["mode", "preference", "outcome"],
             )?,
             session_affinity: counter(
                 "ramjet_session_affinity_total",
@@ -791,6 +797,17 @@ impl Metrics {
                     .with_label_values(&[endpoint, outcome]);
             }
         }
+        for mode in ["off", "shadow", "prefer"] {
+            for preference in ["neutral", "standard", "mtp"] {
+                for outcome in crate::router::SpeculationRouteOutcome::ALL
+                    .map(crate::router::SpeculationRouteOutcome::label)
+                {
+                    metrics
+                        .route_speculation_profile
+                        .with_label_values(&[mode, preference, outcome]);
+                }
+            }
+        }
         for phase in [
             "off",
             "collecting",
@@ -960,6 +977,7 @@ impl Metrics {
             Box::new(self.route_decisions.clone()),
             Box::new(self.route_overlap.clone()),
             Box::new(self.route_affinity.clone()),
+            Box::new(self.route_speculation_profile.clone()),
             Box::new(self.session_affinity.clone()),
             Box::new(self.upstream_inflight.clone()),
             Box::new(self.upstream_load_units.clone()),

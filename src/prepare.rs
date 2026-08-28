@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::{
-    router::{Decision, Router},
+    router::{Decision, Router, SpeculationPreference, SpeculationRouteObservation},
     shims::{Endpoint, sanitize_object},
 };
 
@@ -144,6 +144,26 @@ impl OutputLimitObservation {
         };
         upper_bound.div_ceil(unit_tokens).clamp(1, max_units)
     }
+
+    /// Classify only the effective, privacy-bounded output bucket. The
+    /// measured Qwen crossover favors MTP through 256 requested tokens and
+    /// the standard profile above that boundary. Missing or malformed limits
+    /// conservatively prefer the standard profile.
+    pub(crate) fn speculation_preference(self, endpoint: Endpoint) -> SpeculationPreference {
+        if endpoint == Endpoint::Other {
+            return SpeculationPreference::Neutral;
+        }
+        match self.effective_bucket {
+            OutputLimitBucket::OneTo64 | OutputLimitBucket::SixtyFiveTo256 => {
+                SpeculationPreference::Mtp
+            }
+            OutputLimitBucket::Unset
+            | OutputLimitBucket::Invalid
+            | OutputLimitBucket::TwoFiftySevenTo1024
+            | OutputLimitBucket::OneThousandTwentyFiveTo4096
+            | OutputLimitBucket::FourThousandNinetySevenPlus => SpeculationPreference::Standard,
+        }
+    }
 }
 
 fn output_limit(
@@ -256,8 +276,18 @@ impl PreparedRequest {
     }
 
     #[must_use]
-    pub(crate) fn route_with_load_floor(&self, router: &Router, load_floor: usize) -> Decision {
-        router.route_prepared_with_load_floor(self.body.len(), &self.fingerprints, load_floor)
+    pub(crate) fn route_profiled(
+        &self,
+        router: &Router,
+        endpoint: Endpoint,
+        load_floor: usize,
+    ) -> (Decision, SpeculationRouteObservation) {
+        router.route_prepared_profiled_with_load_floor(
+            self.body.len(),
+            &self.fingerprints,
+            load_floor,
+            self.output_limit.speculation_preference(endpoint),
+        )
     }
 }
 
@@ -326,6 +356,8 @@ mod tests {
             load_unit_bytes: 32 << 10,
             max_load_units: 8,
             projected_load: false,
+            speculation_mode: crate::config::SpeculationRouteMode::Off,
+            speculation_profiles: vec![crate::config::SpeculationProfile::Standard],
             affinity: Affinity::Prefix,
         })
     }
@@ -464,6 +496,31 @@ mod tests {
         assert_eq!(
             observation(br#"{"messages":[]}"#).decode_load_units(Endpoint::Other, 256, 4),
             1
+        );
+    }
+
+    #[test]
+    fn speculation_preference_uses_the_effective_256_token_crossover() {
+        let observe = |endpoint, body: &[u8]| {
+            PreparedRequest::new(endpoint, body, 100_000, &router())
+                .output_limit
+                .speculation_preference(endpoint)
+        };
+        assert_eq!(
+            observe(Endpoint::Chat, br#"{"messages":[],"max_tokens":256}"#),
+            SpeculationPreference::Mtp
+        );
+        assert_eq!(
+            observe(Endpoint::Chat, br#"{"messages":[],"max_tokens":257}"#),
+            SpeculationPreference::Standard
+        );
+        assert_eq!(
+            observe(Endpoint::Chat, br#"{"messages":[]}"#),
+            SpeculationPreference::Standard
+        );
+        assert_eq!(
+            observe(Endpoint::Other, br#"{"max_tokens":64}"#),
+            SpeculationPreference::Neutral
         );
     }
 

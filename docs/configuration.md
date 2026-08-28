@@ -67,6 +67,8 @@ resolving across the rename.
 | `RJ_ROUTE_DECODE_LOAD_UNIT_TOKENS` | `0` | Requested-output tokens per decode load unit. Zero disables decode weighting and retains one unit. |
 | `RJ_ROUTE_DECODE_MAX_LOAD_UNITS` | `min(4, RJ_ROUTE_MAX_LOAD_UNITS)` | Maximum decode reservation; must not exceed the overall route load cap. |
 | `RJ_ROUTE_PROJECTED_LOAD` | `false` | Experimental: include each candidate's extra request reservation beyond its decode floor in its approximate route score. |
+| `RJ_ROUTE_SPECULATION_MODE` | `off` | `off`, observation-only `shadow`, or `prefer` to use the engine profile as the final score tie-break. |
+| `RJ_ROUTE_SPECULATION_PROFILES` | `standard` per upstream | Dense comma-separated `standard` or `mtp` profile for every upstream. Non-off mode requires both profiles. |
 | `RJ_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
 | `RJ_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary; `0` disables the legacy strip. |
 | `RJ_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
@@ -82,6 +84,14 @@ prefill portion at the first generated token while retaining the decode floor.
 Non-streaming responses retain their dispatch reservation until completion
 because the proxy has no protocol-visible first-token boundary. The zero token
 quantum is an instant behavior rollback.
+
+Profile-aware speculation routing uses only the effective output-limit bucket:
+requests through 256 tokens prefer `mtp`, larger, missing, or malformed limits
+prefer `standard`, and non-generation endpoints stay neutral. `shadow` records
+the bounded counterfactual without changing placement. `prefer` is deliberately
+a final tie-break after serving health, weighted locality/load score, and raw
+prefix overlap; it cannot trade a warmer prefix or a less-loaded replica for an
+engine profile. `RJ_ROUTE_SPECULATION_MODE=off` is the instant rollback.
 
 `GET /health` returns opaque replica ordinals, serving health, DSpark
 reliability state, inflight work, load units, and index size. It returns `200 ok` when every replica is healthy,
