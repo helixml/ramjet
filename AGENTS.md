@@ -1,8 +1,10 @@
 # AGENTS.md — working on ramjet
 
 Guidance for coding agents (and humans) developing and testing ramjet.
-The production deployment is the DeepSeek-V4-Flash serving stack on **node06**;
-full experiments require GPUs, so they run there, not locally.
+The production deployment is the Qwen3.8-Flash-Next serving stack on
+**node06**; full experiments require GPUs, so they run there, not locally.
+DeepSeek-V4-Flash remains a supported reference deployment and experiment
+surface, but it is not the current node06 production owner.
 
 ## Local (no GPUs needed)
 
@@ -561,8 +563,8 @@ and must not become flaky CI thresholds.
 
 ## node06 — the test/production box
 
-node06 is a Tailscale host running two vLLM+DSpark TP4 instances behind this
-LB. Connect with the SSH alias (config already set up):
+node06 is a Tailscale host running two Qwen3.8-Flash-Next vLLM TP4 instances
+behind this LB. Connect with the SSH alias (config already set up):
 
 ### Thermal policy: intake air, not silicon (2026-08-14)
 
@@ -671,16 +673,16 @@ ssh node06            # root@100.89.187.17 via Tailscale
 
 Layout on the box:
 
-- `/home/luke/inference/dspark_0731/` — the whole serving stack (compose:
-  `ds4-loadbalancer` + `dspark-0731` + `dspark-0731-b`), plus `.env`
-  (`VLLM_API_KEY=<caddy bearer>`, mode 0600) and the bench scripts.
-- `deploy/dspark_0731/docker-compose.yaml` in this repository is the
-  canonical Compose source. The infra repository and node06 file are mirrors;
-  edit here first and use `sync-compose.sh` to update the infra copy.
-- Ports (loopback): LB API `:8006`, LB metrics `:8007`, engines `:8012`/`:8013`.
-- The bearer token used by clients AND for engine probes:
-  `grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head -1 | cut -d' ' -f2`
-  (never hard-code it; it is not committed anywhere).
+- `/home/luke/inference/qwen38_flash_next/` — the whole serving stack
+  (`ds4-loadbalancer`, `qwen38flashnext-a`, and `qwen38flashnext-b`), plus the
+  protected mode-0600 `.env` and experiment evidence.
+- `deploy/qwen38_flash_next/docker-compose.yaml` in this repository is the
+  canonical one-file Compose source. Edit and validate it here first; compare
+  its SHA-256 with node06 before any mutation.
+- Ports (loopback): LB API `:8006`, LB metrics `:8007`, engines `:8040`/`:8041`.
+- The engine bearer and exact-route canary key live only in the protected
+  `.env`. Source them only inside an owner-only operational shell; never print,
+  hard-code, or copy them into evidence.
 
 ### Build + deploy a new LB image
 
@@ -696,7 +698,7 @@ ssh node06 'rm -rf /tmp/md && mkdir /tmp/md && tar xzf /tmp/md.tgz -C /tmp/md \
 
 # swap the LB (engines untouched; ~4s, LB-only). The qwen38 deployment is a
 # single Compose file, so there is no -f list to get wrong.
-ssh node06 'cd /home/luke/inference/qwen38_27b \
+ssh node06 'cd /home/luke/inference/qwen38_flash_next \
   && flock --nonblock /run/lock/ramjet-node06-deployment.lock \
     env LB_IMAGE=ghcr.io/helixml/ramjet:<tag> \
     docker compose up -d --no-deps ds4-loadbalancer'
