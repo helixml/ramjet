@@ -35,6 +35,7 @@ const MAX_DSPARK_GUARD_MIN_PROPOSED_TOKENS: usize = 10_000_000;
 const MIN_DSPARK_QUARANTINE_CONSECUTIVE_WINDOWS: usize = 3;
 const MIN_DSPARK_QUARANTINE_PROPOSED_TOKENS: usize = 256;
 const MAX_DSPARK_GUARD_EXPECTED_POSITIONS: usize = 16;
+const MAX_PREFIX_SINGLE_FLIGHT_CAPACITY: usize = 100_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -68,6 +69,10 @@ pub struct Config {
     pub route_projected_load: bool,
     pub route_speculation_mode: SpeculationRouteMode,
     pub route_speculation_profiles: Vec<SpeculationProfile>,
+    pub route_prefix_single_flight_mode: PrefixSingleFlightMode,
+    pub route_prefix_single_flight_min_blocks: usize,
+    pub route_prefix_single_flight_capacity: usize,
+    pub route_prefix_single_flight_max_load_delta: usize,
     pub affinity: Affinity,
     pub session_affinity_mode: SessionAffinityMode,
     pub session_affinity_key: Option<SecretString>,
@@ -154,6 +159,24 @@ impl SpeculationProfile {
         match self {
             Self::Standard => "standard",
             Self::Mtp => "mtp",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrefixSingleFlightMode {
+    Off,
+    Shadow,
+    Prefer,
+}
+
+impl PrefixSingleFlightMode {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::Prefer => "prefer",
         }
     }
 }
@@ -460,6 +483,60 @@ impl Config {
             "load" => Affinity::Load,
             value => return Err(invalid("RJ_AFFINITY", value.to_owned(), "prefix or load")),
         };
+        let route_prefix_single_flight_mode = match get("RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE")
+            .as_deref()
+            .unwrap_or("off")
+        {
+            "off" => PrefixSingleFlightMode::Off,
+            "shadow" => PrefixSingleFlightMode::Shadow,
+            "prefer" => PrefixSingleFlightMode::Prefer,
+            value => {
+                return Err(invalid(
+                    "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE",
+                    value.to_owned(),
+                    "off, shadow, or prefer",
+                ));
+            }
+        };
+        if route_prefix_single_flight_mode != PrefixSingleFlightMode::Off
+            && affinity != Affinity::Prefix
+        {
+            return Err(invalid(
+                "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE",
+                route_prefix_single_flight_mode.label().to_owned(),
+                "off unless RJ_AFFINITY=prefix",
+            ));
+        }
+        let route_prefix_single_flight_min_blocks =
+            positive(&mut get, "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MIN_BLOCKS", 8)?;
+        if route_prefix_single_flight_min_blocks
+            > route_max_prefix_bytes.div_ceil(route_chunk_bytes)
+        {
+            return Err(invalid(
+                "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MIN_BLOCKS",
+                route_prefix_single_flight_min_blocks.to_string(),
+                "no more blocks than RJ_ROUTE_MAX_PREFIX_BYTES can produce",
+            ));
+        }
+        let route_prefix_single_flight_capacity = bounded_positive(
+            &mut get,
+            "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY",
+            1_024,
+            MAX_PREFIX_SINGLE_FLIGHT_CAPACITY,
+        )?;
+        let route_prefix_single_flight_max_load_delta = parse(
+            &mut get,
+            "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA",
+            1_usize,
+            "a non-negative integer",
+        )?;
+        if route_prefix_single_flight_max_load_delta > route_max_load_units {
+            return Err(invalid(
+                "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA",
+                route_prefix_single_flight_max_load_delta.to_string(),
+                "no greater than RJ_ROUTE_MAX_LOAD_UNITS",
+            ));
+        }
         let session_affinity = session_affinity_settings(
             &mut get,
             upstreams.len(),
@@ -582,6 +659,15 @@ impl Config {
             &snapshot_route,
             upstream_token.is_some(),
         )?;
+        if shadow_soak.mode == ShadowSoakMode::Capture
+            && route_prefix_single_flight_mode == PrefixSingleFlightMode::Prefer
+        {
+            return Err(invalid(
+                "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE",
+                "prefer".to_owned(),
+                "off or shadow while RJ_SHADOW_SOAK_MODE=capture",
+            ));
+        }
         let idle_drain = idle_drain_settings(&mut get, upstreams.len())?;
         let engine_park = engine_park_settings(&mut get, idle_drain.mode, upstreams.len())?;
 
@@ -631,6 +717,10 @@ impl Config {
             route_projected_load: parse(&mut get, "RJ_ROUTE_PROJECTED_LOAD", false, "a boolean")?,
             route_speculation_mode,
             route_speculation_profiles,
+            route_prefix_single_flight_mode,
+            route_prefix_single_flight_min_blocks,
+            route_prefix_single_flight_capacity,
+            route_prefix_single_flight_max_load_delta,
             affinity,
             session_affinity_mode: session_affinity.mode,
             session_affinity_key: session_affinity.key,
@@ -2228,6 +2318,13 @@ mod tests {
             config.route_speculation_profiles,
             [SpeculationProfile::Standard]
         );
+        assert_eq!(
+            config.route_prefix_single_flight_mode,
+            PrefixSingleFlightMode::Off
+        );
+        assert_eq!(config.route_prefix_single_flight_min_blocks, 8);
+        assert_eq!(config.route_prefix_single_flight_capacity, 1_024);
+        assert_eq!(config.route_prefix_single_flight_max_load_delta, 1);
         assert_eq!(config.affinity, Affinity::Prefix);
         assert_eq!(config.session_affinity_mode, SessionAffinityMode::Off);
         assert!(config.session_affinity_key.is_none());
@@ -2283,6 +2380,39 @@ mod tests {
         assert_eq!(config.snapshot_route_attempt_timeout_ms, 30_000);
         assert_eq!(config.snapshot_route_reconnect_min_ms, 250);
         assert_eq!(config.snapshot_route_reconnect_max_ms, 5_000);
+    }
+
+    #[test]
+    fn prefix_single_flight_is_explicit_bounded_and_prefix_only() {
+        let configured = Config::from_lookup(|key| match key {
+            "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE" => Some("shadow".to_owned()),
+            "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MIN_BLOCKS" => Some("16".to_owned()),
+            "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY" => Some("64".to_owned()),
+            "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA" => Some("2".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            configured.route_prefix_single_flight_mode,
+            PrefixSingleFlightMode::Shadow
+        );
+        assert_eq!(configured.route_prefix_single_flight_min_blocks, 16);
+        assert_eq!(configured.route_prefix_single_flight_capacity, 64);
+        assert_eq!(configured.route_prefix_single_flight_max_load_delta, 2);
+
+        let error = Config::from_lookup(|key| match key {
+            "RJ_AFFINITY" => Some("load".to_owned()),
+            "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE" => Some("prefer".to_owned()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2644,6 +2774,15 @@ mod tests {
         assert_eq!(soak.shadow_soak_attempt_limit, 100_001);
         assert_eq!(soak.shadow_soak_max_token_bytes, 96 << 20);
         assert_eq!(soak.shadow_soak_timeout_ms, 300_000);
+        values.insert("RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE", "prefer");
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+            Err(ConfigError::InvalidValue {
+                key: "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE",
+                ..
+            })
+        ));
+        values.remove("RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE");
         values.insert("RJ_SHADOW_SOAK_ATTEMPT_LIMIT", "99999");
         assert!(matches!(
             Config::from_lookup(|key| values.get(key).map(ToString::to_string)),

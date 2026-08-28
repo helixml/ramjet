@@ -63,6 +63,7 @@ pub struct Metrics {
     pub route_overlap: Histogram,
     pub route_affinity: Histogram,
     pub route_speculation_profile: CounterVec,
+    pub route_prefix_single_flight: CounterVec,
     pub session_affinity: CounterVec,
     pub upstream_inflight: GaugeVec,
     pub upstream_load_units: GaugeVec,
@@ -427,6 +428,11 @@ impl Metrics {
                 "Approximate profile-aware route decisions by bounded mode, request preference, and outcome",
                 &["mode", "preference", "outcome"],
             )?,
+            route_prefix_single_flight: counter(
+                "ramjet_route_prefix_single_flight_total",
+                "Bounded concurrent cold-prefix coalescing decisions by mode and outcome",
+                &["mode", "outcome"],
+            )?,
             session_affinity: counter(
                 "ramjet_session_affinity_total",
                 "Opaque-session primary/secondary shadow decisions by endpoint and bounded outcome",
@@ -771,6 +777,16 @@ impl Metrics {
                 &["engine", "outcome"],
             )?,
         };
+        for mode in ["off", "shadow", "prefer"] {
+            for outcome in crate::prefix_single_flight::PREFIX_SINGLE_FLIGHT_OUTCOMES {
+                metrics
+                    .route_prefix_single_flight
+                    .with_label_values(&[mode, outcome]);
+            }
+            metrics
+                .route_prefix_single_flight
+                .with_label_values(&[mode, "moved"]);
+        }
         for endpoint in ["chat", "messages", "responses", "completions", "other"] {
             metrics.prompt_tokens.with_label_values(&[endpoint]);
             metrics.cached_tokens.with_label_values(&[endpoint]);
@@ -978,6 +994,7 @@ impl Metrics {
             Box::new(self.route_overlap.clone()),
             Box::new(self.route_affinity.clone()),
             Box::new(self.route_speculation_profile.clone()),
+            Box::new(self.route_prefix_single_flight.clone()),
             Box::new(self.session_affinity.clone()),
             Box::new(self.upstream_inflight.clone()),
             Box::new(self.upstream_load_units.clone()),

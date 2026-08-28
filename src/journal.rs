@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::{
     config::Config,
+    prefix_single_flight::PrefixSingleFlightObservation,
     prepare::OutputLimitObservation,
     router::{CandidateState, Decision},
     session_affinity::SessionAffinityObservation,
@@ -28,6 +29,7 @@ pub(crate) struct RouteAnnotations {
     pub(crate) session_affinity: Option<SessionAffinityObservation>,
     pub(crate) output_limit: OutputLimitObservation,
     pub(crate) decode_load_units: usize,
+    pub(crate) prefix_single_flight: PrefixSingleFlightObservation,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,6 +61,7 @@ pub struct StartRecord<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     session_affinity: Option<SessionAffinityObservation>,
     output_limit: OutputLimitObservation,
+    prefix_single_flight: PrefixSingleFlightObservation,
     candidates: &'a [CandidateState],
 }
 
@@ -156,6 +159,7 @@ impl RouteJournal {
                 .then_some(annotations.exact_canary),
             session_affinity: annotations.session_affinity,
             output_limit: annotations.output_limit,
+            prefix_single_flight: annotations.prefix_single_flight,
             candidates: &decision.candidate_state,
         }
     }
@@ -297,6 +301,7 @@ mod tests {
                 }),
                 output_limit: prepared.output_limit,
                 decode_load_units: 1,
+                prefix_single_flight: PrefixSingleFlightObservation::off(),
             },
         ))
         .unwrap();
@@ -315,6 +320,9 @@ mod tests {
         assert!(encoded.contains("\"chosen\":1"));
         assert!(encoded.contains("\"served_chosen\":1"));
         assert!(encoded.contains("\"v\":10"));
+        assert!(
+            encoded.contains("\"prefix_single_flight\":{\"mode\":\"off\",\"outcome\":\"off\"}")
+        );
         assert!(encoded.contains("\"phase_aware_load\":false"));
         assert!(encoded.contains("\"decode_load_unit_tokens\":0"));
         assert!(encoded.contains("\"decode_max_load_units\":4"));

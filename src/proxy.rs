@@ -40,6 +40,7 @@ use crate::{
     journal::{RouteAnnotations, RouteJournal},
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
+    prefix_single_flight::{PrefixSingleFlight, PrefixSingleFlightConfig, PrefixSingleFlightGuard},
     prepare::PreparedRequest,
     router::{Decision, LoadGuard, Router},
     session::OpaqueSession,
@@ -145,6 +146,7 @@ struct Inner {
     exact_inventories: Arc<[ExactRouteInventory]>,
     journal: RouteJournal,
     session_affinity: SessionAffinity,
+    prefix_single_flight: PrefixSingleFlight,
     tokenizer: TokenizerObserver,
     dspark_guards: Arc<[DsparkGuardReplica]>,
     dspark_guard_store: Option<Arc<DsparkGuardStore>>,
@@ -842,6 +844,12 @@ impl Proxy {
         session_affinity: SessionAffinity,
         tokenizer: TokenizerObserver,
     ) -> anyhow::Result<Self> {
+        let prefix_single_flight = PrefixSingleFlight::new(PrefixSingleFlightConfig {
+            mode: config.route_prefix_single_flight_mode,
+            min_blocks: config.route_prefix_single_flight_min_blocks,
+            capacity: config.route_prefix_single_flight_capacity,
+            max_load_delta: config.route_prefix_single_flight_max_load_delta,
+        });
         let initial_probe_health =
             config.upstream_admission_mode != UpstreamAdmissionMode::Compatibility;
         let upstream_commitments = config
@@ -917,6 +925,7 @@ impl Proxy {
                 exact_inventories,
                 journal,
                 session_affinity,
+                prefix_single_flight,
                 tokenizer,
                 dspark_guards,
                 dspark_guard_store,
@@ -1167,6 +1176,15 @@ impl Proxy {
         } else {
             prepared.fingerprints
         };
+        let (prefix_single_flight, mut prefix_single_flight_guard) = self
+            .inner
+            .prefix_single_flight
+            .route(&fingerprints, &mut decision);
+        self.inner
+            .metrics
+            .route_prefix_single_flight
+            .with_label_values(&[prefix_single_flight.mode, prefix_single_flight.outcome])
+            .inc();
         let body = Bytes::from(prepared.body);
         self.inner
             .metrics
@@ -1191,6 +1209,7 @@ impl Proxy {
                 session_affinity,
                 output_limit,
                 decode_load_units,
+                prefix_single_flight,
             },
         );
 
@@ -1292,6 +1311,9 @@ impl Proxy {
             drop(inflight_guard);
             return json_error(status, "upstream unavailable");
         };
+        if let Some(guard) = prefix_single_flight_guard.as_mut() {
+            guard.retarget(upstream);
+        }
 
         let status = response.status();
         if capture_shadow_soak
@@ -1319,6 +1341,7 @@ impl Proxy {
                     request_load_units,
                     load_guard,
                     inflight_guard,
+                    prefix_single_flight_guard,
                     journal_sequence,
                     started,
                 )
@@ -1362,6 +1385,7 @@ impl Proxy {
                     decode_load_units,
                     load_guard,
                     inflight_guard,
+                    prefix_single_flight_guard,
                     journal_sequence,
                     started,
                 )
@@ -1392,6 +1416,7 @@ impl Proxy {
         decode_load_units: usize,
         mut load_guard: RoutedLoad,
         _inflight_guard: InflightGuard,
+        _prefix_single_flight_guard: Option<PrefixSingleFlightGuard>,
         journal_sequence: Option<u64>,
         started: Instant,
     ) {
@@ -1546,6 +1571,7 @@ impl Proxy {
         request_load_units: usize,
         _load_guard: RoutedLoad,
         _inflight_guard: InflightGuard,
+        _prefix_single_flight_guard: Option<PrefixSingleFlightGuard>,
         journal_sequence: Option<u64>,
         started: Instant,
     ) -> Response<Body> {
