@@ -32,18 +32,31 @@ ROUTING_SHAPE = {
     "RJ_ROUTE_LOAD_UNIT_BYTES": "32768",
     "RJ_ROUTE_MAX_LOAD_UNITS": "8",
     "RJ_ROUTE_PHASE_AWARE_LOAD": "true",
+    "RJ_ROUTE_DECODE_LOAD_UNIT_TOKENS": "256",
+    "RJ_ROUTE_DECODE_MAX_LOAD_UNITS": "4",
     "RJ_ROUTE_PROJECTED_LOAD": "false",
+    "RJ_ROUTE_SPECULATION_MODE": "prefer",
+    "RJ_ROUTE_SPECULATION_PROFILES": "mtp,standard",
+    "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE": "prefer",
+    "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MIN_BLOCKS": "8",
+    "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY": "1024",
+    "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA": "1",
+    "RJ_UPSTREAM_WARMUP_MODE": "enforce",
+    "RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES": "3",
+    "RJ_UPSTREAM_WARMUP_STABLE_SECONDS": "30",
 }
 ENGINE_SHAPE = {
     "qwen38flashnext-a": {
         "cpuset": "0-11,24-35",
         "gpus": ["0", "1", "2", "3"],
         "port": "8040",
+        "profile": "mtp",
     },
     "qwen38flashnext-b": {
         "cpuset": "12-23,36-47",
         "gpus": ["4", "5", "6", "7"],
         "port": "8041",
+        "profile": "standard",
     },
 }
 REQUIRED_ARGUMENTS = {
@@ -158,11 +171,15 @@ def validate_engine(name: str, service: dict[str, Any]) -> None:
     if any(argument.split("=", 1)[0] == "--api-key" for argument in arguments):
         fail(f"{name} exposes bearer authority in the serving argv")
     speculative = [argument for argument in arguments if "speculative" in argument]
-    if speculative != [
-        '--speculative-config={"method":"mtp","num_speculative_tokens":3,'
-        '"index_share_for_mtp_iteration":true}'
-    ]:
-        fail(f"{name} speculative decoding differs from the index-reuse candidate")
+    if expected["profile"] == "mtp":
+        wanted_speculative = [
+            '--speculative-config={"method":"mtp","num_speculative_tokens":3,'
+            '"index_share_for_mtp_iteration":true}'
+        ]
+    else:
+        wanted_speculative = []
+    if speculative != wanted_speculative:
+        fail(f"{name} speculative decoding differs from its admitted profile")
     environment = service.get("environment", {})
     if environment.get("VLLM_API_KEY") != "validator-token":
         fail(f"{name} bearer authority differs from the load balancer")
@@ -178,10 +195,13 @@ def validate(document: dict[str, Any]) -> None:
 
     for name in ENGINE_SHAPE:
         validate_engine(name, services[name])
-    left_command = services["qwen38flashnext-a"].get("command")
-    right_command = services["qwen38flashnext-b"].get("command")
-    if left_command != right_command:
-        fail("the two engine commands differ")
+    left_command = services["qwen38flashnext-a"].get("command", [])
+    right_command = services["qwen38flashnext-b"].get("command", [])
+    without_speculation = lambda command: [
+        argument for argument in command if "speculative" not in argument
+    ]
+    if without_speculation(left_command) != without_speculation(right_command):
+        fail("the two engine commands differ beyond their admitted profiles")
 
     load_balancer = services["ds4-loadbalancer"]
     if load_balancer.get("image") != LB_IMAGE:

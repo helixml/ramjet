@@ -7,14 +7,16 @@ import os
 import pathlib
 
 
-SOURCE_SHA256 = "826e3b4f11b06a80c2deca40f0e1d089a040fe3ae4dc7b001e54e01b89cc72d6"
-OUTPUT_SHA256 = "48b9e161e3aff275b7a0b31ce3cf351db97401714887b48c365eaf8327e0092b"
+SOURCE_SHA256 = "19f0463a737a547d2cd0800f0722dee5c9e078ad1562ae84fc29e8fe00068934"
+OUTPUT_SHA256 = "042687eec593b11f81f3d6ea461dd899b74aea136a68322699234af9701b05c7"
 REVISION = "103a7608316173ca6edd49929544244de7ffda70"
 
 
-def replace_once(source, old, new):
-    if source.count(old) != 1:
-        raise ValueError(f"expected exactly one candidate transform input: {old!r}")
+def replace_exact(source, old, new, count=1):
+    if source.count(old) != count:
+        raise ValueError(
+            f"expected exactly {count} candidate transform inputs: {old!r}"
+        )
     return source.replace(old, new)
 
 
@@ -54,37 +56,42 @@ def render(source):
         (
             "--served-model-name=${SERVED_MODEL_NAME:-qwen3.8-flash-next}",
             "--served-model-name=qwen3.8-flash-next",
+            2,
         ),
         (
             "--revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce",
             f"--revision={REVISION}",
+            2,
         ),
         (
             "--tokenizer-revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce",
             f"--tokenizer-revision={REVISION}",
+            2,
         ),
-        ("--gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}", "--gpu-memory-utilization=0.95"),
-        ("--max-model-len=${MAX_MODEL_LEN:-262144}", "--max-model-len=262144"),
-        ("--max-num-seqs=${MAX_NUM_SEQS:-64}", "--max-num-seqs=16"),
-        ("--max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}", "--max-num-batched-tokens=8192"),
-        ("    - --kv-cache-memory=${KV_CACHE_MEMORY:-40190174004}\n", ""),
+        ("--gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}", "--gpu-memory-utilization=0.95", 2),
+        ("--max-model-len=${MAX_MODEL_LEN:-262144}", "--max-model-len=262144", 2),
+        ("--max-num-seqs=${MAX_NUM_SEQS:-64}", "--max-num-seqs=16", 2),
+        ("--max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}", "--max-num-batched-tokens=8192", 2),
+        ("      - --kv-cache-memory=${KV_CACHE_MEMORY:-40190174004}\n", "", 2),
         (
-            '    - --speculative-config={"method":"mtp","num_speculative_tokens":3,"index_share_for_mtp_iteration":true}\n',
+            '      - --speculative-config={"method":"mtp","num_speculative_tokens":3,"index_share_for_mtp_iteration":true}\n',
             "",
         ),
         (
-            "    # Candidate A/B: preserve MTP3 while reusing the step-0 QSA sparse indices\n"
-            "    # on later draft steps. The pinned Qwen runtime implements this directly;\n"
-            "    # it is the only variable relative to the qualified MTP3 reference.\n",
-            "    # Match the upstream NVFP4 recipe: qualify the quantized weights without MTP.\n",
+            "      RJ_ROUTE_SPECULATION_MODE: ${RJ_ROUTE_SPECULATION_MODE:-prefer}\n"
+            "      RJ_ROUTE_SPECULATION_PROFILES: ${RJ_ROUTE_SPECULATION_PROFILES:-mtp,standard}\n",
+            "      RJ_ROUTE_SPECULATION_MODE: ${RJ_ROUTE_SPECULATION_MODE:-off}\n"
+            "      RJ_ROUTE_SPECULATION_PROFILES: ${RJ_ROUTE_SPECULATION_PROFILES:-standard,standard}\n",
         ),
         (
-            "    - --max-num-batched-tokens=8192\n",
-            "    - --max-num-batched-tokens=8192\n    - --moe-backend=marlin\n",
+            "      - --max-num-batched-tokens=8192\n",
+            "      - --max-num-batched-tokens=8192\n      - --moe-backend=marlin\n",
+            2,
         ),
     )
-    for old, new in replacements:
-        text = replace_once(text, old, new)
+    for replacement in replacements:
+        old, new, *expected = replacement
+        text = replace_exact(text, old, new, expected[0] if expected else 1)
     output = text.encode()
     if OUTPUT_SHA256 != "TO_BE_PINNED" and hashlib.sha256(output).hexdigest() != OUTPUT_SHA256:
         raise ValueError("NVFP4 candidate Compose bytes changed")
