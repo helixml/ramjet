@@ -1097,6 +1097,11 @@ impl Proxy {
             prepare_tokenizer_body,
         );
         let output_limit = prepared.output_limit;
+        let decode_load_units = output_limit.decode_load_units(
+            endpoint,
+            self.inner.config.route_decode_load_unit_tokens,
+            self.inner.config.route_decode_max_load_units,
+        );
         let tokenizer_body = prepared.tokenizer_body.clone();
         let pre_route_tokens = if prepare_tokenizer_body {
             self.inner
@@ -1106,7 +1111,8 @@ impl Proxy {
         } else {
             None
         };
-        let approximate_decision = prepared.route(&self.inner.router);
+        let approximate_decision =
+            prepared.route_with_load_floor(&self.inner.router, decode_load_units);
         let session_affinity =
             self.inner
                 .session_affinity
@@ -1144,6 +1150,7 @@ impl Proxy {
                 &mut decision,
             );
         }
+        decision.apply_request_load_floor(decode_load_units);
         let exact_route_snapshot =
             prepare_tokenizer_body.then(|| self.inner.tokenizer.capture_route(&decision));
         let fingerprints = if endpoint == Endpoint::Other {
@@ -1174,6 +1181,7 @@ impl Proxy {
                 exact_canary: canary_assignment,
                 session_affinity,
                 output_limit,
+                decode_load_units,
             },
         );
 
@@ -1342,6 +1350,7 @@ impl Proxy {
                     decision,
                     pending_shadow_source,
                     request_load_units,
+                    decode_load_units,
                     load_guard,
                     inflight_guard,
                     journal_sequence,
@@ -1371,6 +1380,7 @@ impl Proxy {
         decision: Decision,
         pending_shadow_source: Option<crate::shadow_soak::ShadowSoakSource>,
         request_load_units: usize,
+        decode_load_units: usize,
         mut load_guard: RoutedLoad,
         _inflight_guard: InflightGuard,
         journal_sequence: Option<u64>,
@@ -1412,11 +1422,12 @@ impl Proxy {
                             first_token = Some(received);
                             if self.inner.config.route_phase_aware_load {
                                 // A generated token is the local, protocol-visible proof that
-                                // prompt prefill has completed. Retain one decode unit while
-                                // releasing only the size-weighted prefill reservation. This is
+                                // prompt prefill has completed. Retain the bounded decode
+                                // reservation while releasing only the size-weighted prefill
+                                // reservation. This is
                                 // a colocated accounting analogue of the phase separation studied
                                 // by DistServe: https://arxiv.org/abs/2401.09670
-                                load_guard.reduce_to(1);
+                                load_guard.reduce_to(decode_load_units);
                             }
                         }
                     } else {
@@ -5263,7 +5274,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn phase_aware_load_releases_prefill_units_at_first_generated_token() {
+    async fn phase_aware_load_releases_prefill_to_the_bounded_decode_reservation() {
         let release_first_token = Arc::new(tokio::sync::Notify::new());
         let release_finish = Arc::new(tokio::sync::Notify::new());
         let first_gate = Arc::clone(&release_first_token);
@@ -5311,7 +5322,8 @@ mod tests {
             "RJ_UPSTREAM" => Some(joined.clone()),
             "RJ_ROUTE_PHASE_AWARE_LOAD" => Some("true".to_owned()),
             "RJ_ROUTE_LOAD_UNIT_BYTES" => Some("32".to_owned()),
-            "RJ_ROUTE_MAX_LOAD_UNITS" => Some("4".to_owned()),
+            "RJ_ROUTE_MAX_LOAD_UNITS" | "RJ_ROUTE_DECODE_MAX_LOAD_UNITS" => Some("4".to_owned()),
+            "RJ_ROUTE_DECODE_LOAD_UNIT_TOKENS" => Some("128".to_owned()),
             _ => None,
         })
         .unwrap();
@@ -5320,7 +5332,7 @@ mod tests {
             .method(Method::POST)
             .uri("/v1/chat/completions")
             .body(Body::from(format!(
-                "{{\"messages\":[{{\"role\":\"user\",\"content\":\"{}\"}}],\"stream\":true}}",
+                "{{\"messages\":[{{\"role\":\"user\",\"content\":\"{}\"}}],\"max_tokens\":256,\"stream\":true}}",
                 "x".repeat(256)
             )))
             .unwrap();
@@ -5332,12 +5344,12 @@ mod tests {
 
         release_first_token.notify_one();
         tokio::time::timeout(Duration::from_secs(1), async {
-            while proxy.router().state(0).unwrap().1 != 1 {
+            while proxy.router().state(0).unwrap().1 != 2 {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("first generated token must release the prefill reservation");
+        .expect("first generated token must retain the decode reservation");
         assert_eq!(proxy.router().state(0).unwrap().0, 1);
 
         release_finish.notify_one();

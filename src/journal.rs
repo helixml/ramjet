@@ -14,7 +14,7 @@ use crate::{
     usage::Accumulator,
 };
 
-const VERSION: u8 = 9;
+const VERSION: u8 = 10;
 
 pub struct RouteJournal {
     enabled: bool,
@@ -27,6 +27,7 @@ pub(crate) struct RouteAnnotations {
     pub(crate) exact_canary: CanaryAssignment,
     pub(crate) session_affinity: Option<SessionAffinityObservation>,
     pub(crate) output_limit: OutputLimitObservation,
+    pub(crate) decode_load_units: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +49,9 @@ pub struct StartRecord<'a> {
     load_unit_bytes: usize,
     max_load_units: usize,
     phase_aware_load: bool,
+    decode_load_unit_tokens: usize,
+    decode_max_load_units: usize,
+    decode_load_units: usize,
     projected_load: bool,
     score_tie_break: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -143,6 +147,9 @@ impl RouteJournal {
             load_unit_bytes: config.route_load_unit_bytes,
             max_load_units: config.route_max_load_units,
             phase_aware_load: config.route_phase_aware_load,
+            decode_load_unit_tokens: config.route_decode_load_unit_tokens,
+            decode_max_load_units: config.route_decode_max_load_units,
+            decode_load_units: annotations.decode_load_units,
             projected_load: config.route_projected_load,
             score_tie_break: "overlap",
             exact_canary: (annotations.exact_canary != CanaryAssignment::NotApplicable)
@@ -287,6 +294,7 @@ mod tests {
                     target: Some(0),
                 }),
                 output_limit: prepared.output_limit,
+                decode_load_units: 1,
             },
         ))
         .unwrap();
@@ -304,8 +312,11 @@ mod tests {
         }
         assert!(encoded.contains("\"chosen\":1"));
         assert!(encoded.contains("\"served_chosen\":1"));
-        assert!(encoded.contains("\"v\":9"));
+        assert!(encoded.contains("\"v\":10"));
         assert!(encoded.contains("\"phase_aware_load\":false"));
+        assert!(encoded.contains("\"decode_load_unit_tokens\":0"));
+        assert!(encoded.contains("\"decode_max_load_units\":4"));
+        assert!(encoded.contains("\"decode_load_units\":1"));
         assert!(encoded.contains("\"projected_load\":false"));
         assert!(encoded.contains("\"exact_canary\":\"treatment\""));
         assert!(encoded.contains(
@@ -337,7 +348,7 @@ mod tests {
         };
 
         let encoded = serde_json::to_string(&record).unwrap();
-        assert!(encoded.contains("\"v\":9"));
+        assert!(encoded.contains("\"v\":10"));
         assert!(encoded.contains("\"upstream\":1"));
         assert!(encoded.contains("\"request_load_units\":4"));
         for forbidden in ["prompt_text", "token_ids", "fingerprint"] {

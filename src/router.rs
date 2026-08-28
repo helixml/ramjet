@@ -93,6 +93,25 @@ pub struct Decision {
     pub outcome: Outcome,
 }
 
+impl Decision {
+    /// Preserve a bounded decode reservation after any exact-prefix
+    /// recomputation has adjusted candidate-specific prefill work.
+    pub(crate) fn apply_request_load_floor(&mut self, load_floor: usize) {
+        let load_floor = load_floor.max(1);
+        for candidate in &mut self.candidate_state {
+            candidate.request_load_units = candidate.request_load_units.max(load_floor);
+        }
+        if let Some(&selected) = self.candidates.first()
+            && let Some(candidate) = self
+                .candidate_state
+                .iter()
+                .find(|candidate| candidate.index == selected)
+        {
+            self.load_units = candidate.request_load_units;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Outcome {
     Overlap,
@@ -217,7 +236,7 @@ impl Router {
 
     pub fn route(&self, body: &[u8]) -> Decision {
         let fingerprints = self.fingerprints(body);
-        self.route_fingerprints(body.len(), &fingerprints, true)
+        self.route_fingerprints(body.len(), &fingerprints, 1, true)
     }
 
     /// Prepares fingerprints once and returns them with the decision so a
@@ -226,7 +245,7 @@ impl Router {
     #[must_use]
     pub fn route_with_fingerprints(&self, body: &[u8]) -> (Decision, Vec<u64>) {
         let fingerprints = self.fingerprints(body);
-        let decision = self.route_fingerprints(body.len(), &fingerprints, true);
+        let decision = self.route_fingerprints(body.len(), &fingerprints, 1, true);
         (decision, fingerprints)
     }
 
@@ -242,13 +261,23 @@ impl Router {
     }
 
     pub(crate) fn route_prepared(&self, body_bytes: usize, fingerprints: &[u64]) -> Decision {
-        self.route_fingerprints(body_bytes, fingerprints, true)
+        self.route_fingerprints(body_bytes, fingerprints, 1, true)
+    }
+
+    pub(crate) fn route_prepared_with_load_floor(
+        &self,
+        body_bytes: usize,
+        fingerprints: &[u64],
+        load_floor: usize,
+    ) -> Decision {
+        self.route_fingerprints(body_bytes, fingerprints, load_floor, true)
     }
 
     fn route_fingerprints(
         &self,
         body_bytes: usize,
         fingerprints: &[u64],
+        load_floor: usize,
         advance_rotation: bool,
     ) -> Decision {
         let mut inner = self.inner.lock();
@@ -271,7 +300,10 @@ impl Router {
                     0
                 };
                 let affinity = overlap.min(self.config.max_overlap_blocks);
-                let request_load = self.load_estimator.estimate_blocks(body_bytes, overlap);
+                let request_load = self
+                    .load_estimator
+                    .estimate_blocks(body_bytes, overlap)
+                    .max(load_floor.clamp(1, self.config.max_load_units));
                 let additional_load = if self.config.projected_load {
                     request_load.saturating_sub(1)
                 } else {
@@ -728,6 +760,30 @@ mod tests {
         );
         assert_eq!(estimator.estimate_exact_tokens(1 << 20, 1, 0), None);
         assert_eq!(estimator.estimate_exact_tokens(1 << 20, 4_097, 4_096), None);
+    }
+
+    #[test]
+    fn decode_floor_survives_candidate_specific_reservation_recompute() {
+        let router = Router::new(config());
+        let mut decision = router.route_prepared_with_load_floor(1, &[], 4);
+        assert!(
+            decision
+                .candidate_state
+                .iter()
+                .all(|candidate| candidate.request_load_units == 4)
+        );
+        for candidate in &mut decision.candidate_state {
+            candidate.request_load_units = 1;
+        }
+        decision.load_units = 1;
+        decision.apply_request_load_floor(4);
+        assert!(
+            decision
+                .candidate_state
+                .iter()
+                .all(|candidate| candidate.request_load_units == 4)
+        );
+        assert_eq!(decision.load_units, 4);
     }
 
     #[test]

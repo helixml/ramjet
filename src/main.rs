@@ -173,6 +173,8 @@ fn log_startup(config: &Config) {
         load_unit_bytes = config.route_load_unit_bytes,
         max_load_units = config.route_max_load_units,
         phase_aware_load = config.route_phase_aware_load,
+        decode_load_unit_tokens = config.route_decode_load_unit_tokens,
+        decode_max_load_units = config.route_decode_max_load_units,
         projected_load = config.route_projected_load,
         session_affinity_mode = ?config.session_affinity_mode,
         session_affinity_bonus_blocks = config.session_affinity_bonus_blocks,
