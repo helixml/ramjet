@@ -24,8 +24,9 @@ class QwenFlashNextDocumentationTests(unittest.TestCase):
             "Qwen exact placement is admitted and live",
             "publish live KV",
             "events on port 5557 and bounded replay on port 5558",
-            "node06's protected mode-0600 `.env` promotes the live cohort to",
-            "`10000`",
+            "defaults `RJ_EXACT_ROUTE_CANARY_BPS` to the qualified",
+            "full cohort of `10000`",
+            "A missing key fails during Compose rendering",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, readme)
@@ -33,6 +34,8 @@ class QwenFlashNextDocumentationTests(unittest.TestCase):
         for expected in (
             "RJ_TOKENIZER_MODE: local-shadow",
             "RJ_EXACT_ROUTE_MODE: placement",
+            "RJ_EXACT_ROUTE_CANARY_BPS: ${RJ_EXACT_ROUTE_CANARY_BPS:-10000}",
+            "RJ_EXACT_ROUTE_CANARY_KEY: ${RJ_EXACT_ROUTE_CANARY_KEY:?",
             "RJ_KV_EVENT_MODE: shadow",
             "endpoint\":\"tcp://*:5557",
             "replay_endpoint\":\"tcp://*:5558",
@@ -47,6 +50,7 @@ class QwenFlashNextDocumentationTests(unittest.TestCase):
             "keeps tokenizer and exact KV routing off",
             "Retain MTP3 with index reuse on both engines",
             "rust-r133-qwen38-flash-next",
+            "zero placement cohort",
         ):
             with self.subTest(stale=stale):
                 self.assertNotIn(stale, readme)

@@ -23,6 +23,7 @@ LB_IMAGE = (
     "ghcr.io/helixml/ramjet:v0.4.0@sha256:"
     "467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b"
 )
+EXACT_CANARY_KEY = "validator-exact-route-key-000000"
 ROUTING_SHAPE = {
     "RJ_AFFINITY": "prefix",
     "RJ_ROUTE_ALPHA": "4",
@@ -97,6 +98,7 @@ def render() -> dict[str, Any]:
         {
             "VLLM_API_KEY": "validator-token",
             "ENGINE_RESTART_POLICY": "unless-stopped",
+            "RJ_EXACT_ROUTE_CANARY_KEY": EXACT_CANARY_KEY,
         }
     )
     completed = subprocess.run(
@@ -227,8 +229,8 @@ def validate(document: dict[str, Any]) -> None:
         "RJ_EXACT_ROUTE_MANIFEST_SHA256": "a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67",
         "RJ_EXACT_ROUTE_MIN_GAIN_TOKENS": "8192",
         "RJ_EXACT_ROUTE_MAX_LOAD_DELTA": "0",
-        "RJ_EXACT_ROUTE_CANARY_BPS": "0",
-        "RJ_EXACT_ROUTE_CANARY_KEY": "",
+        "RJ_EXACT_ROUTE_CANARY_BPS": "10000",
+        "RJ_EXACT_ROUTE_CANARY_KEY": EXACT_CANARY_KEY,
         "RJ_KV_EVENT_MODE": "shadow",
         "RJ_KV_EVENT_LIVE_ENDPOINTS": "tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557",
         "RJ_KV_EVENT_REPLAY_ENDPOINTS": "tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558",

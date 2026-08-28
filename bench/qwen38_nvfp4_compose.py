@@ -7,8 +7,8 @@ import os
 import pathlib
 
 
-SOURCE_SHA256 = "784f20137bd404667591bc1a4b5b614e366a244a34220ca3ffcfcb002a42b4ce"
-OUTPUT_SHA256 = "cbb62c85e213eb43b52e723a083f8dc96f21e80d2c8f7348ce95a50bb6c8fb48"
+SOURCE_SHA256 = "3dea7929a5d66e31a6892e296ee53d95403210dcadf88d02441447760ea93d33"
+OUTPUT_SHA256 = "237ac9507c7d81dddc696dda339992aa236b6894b85bf6db6be4170d37b01dd8"
 REVISION = "103a7608316173ca6edd49929544244de7ffda70"
 
 
@@ -93,6 +93,17 @@ def render(source):
         ),
         ("      RJ_TOKENIZER_MODE: local-shadow\n", "      RJ_TOKENIZER_MODE: \"off\"\n"),
         ("      RJ_EXACT_ROUTE_MODE: placement\n", "      RJ_EXACT_ROUTE_MODE: \"off\"\n"),
+        (
+            "      # Exact placement passed the 1%, 10%, and 100% live rollout gates. Keep\n"
+            "      # the qualified full cohort as the deployment default and require its\n"
+            "      # independent key from the protected mode-0600 .env. An explicit zero\n"
+            "      # remains the instant behavior rollback.\n"
+            "      RJ_EXACT_ROUTE_CANARY_BPS: ${RJ_EXACT_ROUTE_CANARY_BPS:-10000}\n"
+            "      RJ_EXACT_ROUTE_CANARY_KEY: ${RJ_EXACT_ROUTE_CANARY_KEY:?set RJ_EXACT_ROUTE_CANARY_KEY in protected mode-0600 .env}\n",
+            "      # This rejected alternate recipe has no qualified exact authority.\n"
+            "      RJ_EXACT_ROUTE_CANARY_BPS: \"0\"\n"
+            "      RJ_EXACT_ROUTE_CANARY_KEY: \"\"\n",
+        ),
         (
             "      - --max-num-batched-tokens=8192\n",
             "      - --max-num-batched-tokens=8192\n      - --moe-backend=marlin\n",

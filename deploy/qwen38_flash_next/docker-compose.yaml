@@ -93,11 +93,12 @@ services:
       RJ_EXACT_ROUTE_MANIFEST_SHA256: a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67
       RJ_EXACT_ROUTE_MIN_GAIN_TOKENS: ${RJ_EXACT_ROUTE_MIN_GAIN_TOKENS:-8192}
       RJ_EXACT_ROUTE_MAX_LOAD_DELTA: ${RJ_EXACT_ROUTE_MAX_LOAD_DELTA:-0}
-      # The committed deployment is fail-closed at a zero placement cohort.
-      # node06 promotes this through its protected .env only after live event
-      # replay and comparison gates pass; zero is the instant rollback.
-      RJ_EXACT_ROUTE_CANARY_BPS: ${RJ_EXACT_ROUTE_CANARY_BPS:-0}
-      RJ_EXACT_ROUTE_CANARY_KEY: ${RJ_EXACT_ROUTE_CANARY_KEY:-}
+      # Exact placement passed the 1%, 10%, and 100% live rollout gates. Keep
+      # the qualified full cohort as the deployment default and require its
+      # independent key from the protected mode-0600 .env. An explicit zero
+      # remains the instant behavior rollback.
+      RJ_EXACT_ROUTE_CANARY_BPS: ${RJ_EXACT_ROUTE_CANARY_BPS:-10000}
+      RJ_EXACT_ROUTE_CANARY_KEY: ${RJ_EXACT_ROUTE_CANARY_KEY:?set RJ_EXACT_ROUTE_CANARY_KEY in protected mode-0600 .env}
       RJ_UPSTREAM_ADMISSION_MODE: http
       # After a replica has failed readiness, require three successful probes
       # spanning 30 seconds before it can rejoin placement. No synthetic probe

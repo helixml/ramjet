@@ -1,7 +1,9 @@
 import copy
 import importlib.util
+import os
 import pathlib
 import shutil
+import subprocess
 import unittest
 
 
@@ -91,13 +93,41 @@ class QwenFlashNextComposeTests(unittest.TestCase):
         with self.assertRaisesRegex(validator.ValidationError, "output budget"):
             validator.validate(changed)
 
-    def test_exact_placement_defaults_to_a_zero_cohort(self):
+    def test_exact_placement_defaults_to_the_qualified_full_cohort(self):
         changed = copy.deepcopy(self.document)
         changed["services"]["ds4-loadbalancer"]["environment"][
             "RJ_EXACT_ROUTE_CANARY_BPS"
-        ] = "100"
+        ] = "0"
         with self.assertRaisesRegex(validator.ValidationError, "exact routing authority"):
             validator.validate(changed)
+
+    def test_exact_placement_requires_the_independent_key(self):
+        changed = copy.deepcopy(self.document)
+        changed["services"]["ds4-loadbalancer"]["environment"][
+            "RJ_EXACT_ROUTE_CANARY_KEY"
+        ] = ""
+        with self.assertRaisesRegex(validator.ValidationError, "exact routing authority"):
+            validator.validate(changed)
+
+    def test_compose_render_without_the_exact_key_fails_closed(self):
+        environment = os.environ.copy()
+        environment.pop("RJ_EXACT_ROUTE_CANARY_KEY", None)
+        completed = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(validator.COMPOSE),
+                "config",
+                "--quiet",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("set RJ_EXACT_ROUTE_CANARY_KEY", completed.stderr)
 
     def test_engine_kv_event_publisher_is_required(self):
         changed = copy.deepcopy(self.document)
