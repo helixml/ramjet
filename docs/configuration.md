@@ -55,6 +55,9 @@ resolving across the rename.
 | --- | --- | --- |
 | `RJ_UPSTREAM` | `http://ds4-flash:8000` | Comma-separated OpenAI-compatible engine URLs. |
 | `RJ_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
+| `RJ_UPSTREAM_WARMUP_MODE` | `off` | `off`, observation-only `shadow`, or `enforce` passive admission for a replica recovering from observed health loss. HTTP admission only. |
+| `RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES` | `3` | Successful existing readiness probes required after recovery before passive warmup admits the replica. |
+| `RJ_UPSTREAM_WARMUP_STABLE_SECONDS` | `30` | Minimum healthy interval from the first successful recovery probe to admission. |
 | `RJ_AFFINITY` | `prefix` | `prefix` for locality/load scoring; `load` for the load-only baseline. |
 | `RJ_ROUTE_ALPHA` | `4` | Non-negative load penalty in the routing score. |
 | `RJ_ROUTE_CHUNK_BYTES` | `2048` | Bytes per approximate prefix fingerprint block. |
@@ -102,6 +105,17 @@ reliability state, inflight work, load units, and index size. It returns `200 ok
 `200 degraded` when at least one can serve, and `503 unhealthy` when none can
 serve. Successful proxied responses include `X-Ramjet-Upstream` with an
 opaque replica ordinal.
+
+Passive warmup sends no synthetic inference requests. It reuses the existing
+`/v1/models` readiness result after a replica has first been observed unhealthy.
+`shadow` publishes the counterfactual readiness without fencing. `enforce`
+requires both the configured consecutive-success count and stable interval;
+the peer continues serving in the meantime. Reachability remains visible in
+`ramjet_upstream_up`, while `ramjet_upstream_warmup_ready` and the health
+response explain why a reachable replica is not yet routable. A successfully
+completed real request is stronger evidence and admits immediately. Replicas
+begin admitted when Ramjet itself starts so restarting the stateless LB cannot
+create a fleet-wide warmup outage.
 
 Projected-load scoring keeps all-cold and other equal-cost choices unchanged.
 When approximate overlap makes a request cheaper on one replica, its score uses
