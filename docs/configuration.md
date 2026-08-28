@@ -69,6 +69,10 @@ resolving across the rename.
 | `RJ_ROUTE_PROJECTED_LOAD` | `false` | Experimental: include each candidate's extra request reservation beyond its decode floor in its approximate route score. |
 | `RJ_ROUTE_SPECULATION_MODE` | `off` | `off`, observation-only `shadow`, or `prefer` to use the engine profile as the final score tie-break. |
 | `RJ_ROUTE_SPECULATION_PROFILES` | `standard` per upstream | Dense comma-separated `standard` or `mtp` profile for every upstream. Non-off mode requires both profiles. |
+| `RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE` | `off` | `off`, observation-only `shadow`, or `prefer` to co-locate concurrent cold requests sharing a leading prefix. |
+| `RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MIN_BLOCKS` | `8` | Leading approximate fingerprint blocks (16KiB at the default chunk size) that identify one bounded flight. |
+| `RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY` | `1024` | Maximum concurrently tracked prefix flights; a full table fails open to ordinary routing. |
+| `RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA` | `1` | Maximum active load-unit disadvantage allowed when joining the flight's engine. |
 | `RJ_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
 | `RJ_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary; `0` disables the legacy strip. |
 | `RJ_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
@@ -106,6 +110,15 @@ large warm prefix that the bounded affinity credit alone would spill cold, but
 it also strengthens stale approximate locality. Keep it off until a guarded
 cache/load conflict test proves service-time improvement rather than only more
 prefix hits.
+
+Prefix single-flight closes the interval before a successful response has
+published approximate cache residency: the first cold request owns a bounded
+leading-prefix flight, and concurrent followers may join its engine. Flights
+exist only while their requests are alive, carry no prompt bytes, are capped by
+entry count, retarget after dispatch failover, and never override exact routing
+or a prefix already known warm. The load-delta gate prevents coalescing from
+turning one engine into an unbounded queue. Start with `shadow`; `prefer` is the
+only mode that changes placement.
 
 Serving admission fails open. A readiness probe competes with request traffic
 for the same engine capacity, so a saturated fleet stops answering probes

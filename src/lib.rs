@@ -27,6 +27,7 @@ pub mod kv_wire;
 pub mod machineview;
 pub mod metrics;
 pub mod model;
+pub mod prefix_single_flight;
 pub mod prepare;
 pub mod proxy;
 pub mod router;
