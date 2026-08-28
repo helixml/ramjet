@@ -184,9 +184,14 @@ print(M.get_tool_parser('qwen3_xml') is M.get_tool_parser('qwen3_coder'))"
 The same commit marks `rtx_pro_6000_4x` verified and publishes an FP8 override
 of `--max-num-seqs 16` at `--gpu-memory-utilization 0.95`. That is a different
 trade from our measured 64 sequences at 0.90 with a pinned `--kv-cache-memory`,
-and it is a candidate for a bounded A/B rather than a correction. The recipe
-also raised `min_vllm_version` to `0.29.0`, which is unreleased; vLLM v0.28.0
-(2026-08-26) is the newest tagged release and remains ungated here.
+and was tested as a bounded same-engine A/B/B/A on 2026-08-28. Seq16 gained
+4.0% at c8 and 4.6% at c16, but lost 31.1% aggregate throughput at c32 while
+raising median TTFT from 679 to 1,710ms and p95 TTFT from 1,009 to 4,172ms.
+All 456 requests completed and reconciled, so this is a scheduler-capacity
+trade rather than a correctness failure. Retain 64 sequences; the recipe's
+16-sequence override is rejected for this mixed-concurrency deployment. The
+recipe also raised `min_vllm_version` to `0.29.0`, which is unreleased; vLLM
+v0.28.0 (2026-08-26) is the newest tagged release and remains ungated here.
 
 ## Cache-hit statistics in the API response (2026-08-27)
 

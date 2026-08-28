@@ -1,5 +1,61 @@
 # node06 experiment journal
 
+## 2026-08-28 — upstream Qwen Flash-Next `max-num-seqs=16` rejected after same-engine A/B/B/A
+
+The vLLM recipe's newly verified `rtx_pro_6000_4x` override recommends
+`--max-num-seqs 16`. A guarded same-engine crossover tested that scheduler
+limit against node06's qualified 64-sequence setting while holding every other
+input fixed: the official FP8 model and revision, immutable engine image,
+40,190,174,004-byte KV allocation, 8,192-token scheduler batch cap, MTP3 with
+QSA index reuse, prompt, output depth, direct engine, and GPU half.
+
+The final order was 64/16/16/64 on engine B. Ramjet was single-homed on healthy
+engine A before the first direct request and stayed there through both B
+restarts. Each code cell used two fresh-namespace 256-token runs and required
+native speculative-counter reconciliation. The averages of the two orders are:
+
+| concurrency | seq64 tok/s | seq16 tok/s | throughput delta | seq64 median TTFT | seq16 median TTFT |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 184.6 | 185.3 | +0.4% | 93.9ms | 95.0ms |
+| 8 | 817.9 | 850.6 | +4.0% | 282.8ms | 278.0ms |
+| 16 | 1,210.2 | 1,265.7 | +4.6% | 346.7ms | 397.2ms |
+| 32 | 1,666.9 | 1,148.9 | **-31.1%** | 679.0ms | **1,709.7ms** |
+
+At c32, seq16's two independent runs measured 1,138.9 and 1,158.8 tok/s,
+with median TTFT of 1,733.2 and 1,686.2ms and p95 TTFT of 4,108.9 and
+4,235.0ms. The limit does reduce active-request TPOT from an order-balanced
+15.131 to 11.913ms, but the extra requests wait behind the 16 admitted
+sequences; aggregate throughput and end-user TTFT are therefore substantially
+worse. The small c8/c16 wins do not justify that capacity cliff on this mixed
+serving stack.
+
+All 456 measured code requests completed with zero failures, zero cache hits
+from the fresh prompt namespaces, and exact client/native MTP reconciliation.
+The deterministic agent/tool/reasoning corpus also passed 5/5 before mutation
+and 5/5 on seq16, with two ordinary stops and three tool calls in each shape.
+Candidate and restored-baseline readiness took 508s and 527s respectively;
+the fixed KV pool remained exactly 2,667,258 tokens.
+
+Two earlier guarded attempts are retained as harness negatives. The first
+loaded the exact candidate, then failed because the metadata helper inherited
+the DeepSeek default model path. The second corrected that authority but had
+not staged the agent corpus. Both immediately restored seq64 and 2/2 ramjet
+admission. The final runner now stages and hashes the corpus and runs the
+complete baseline agent invocation before any engine mutation, closing both
+gaps.
+
+Decision: retain `--max-num-seqs=64`; do not copy the recipe's 16-sequence
+override into production. The passing guard run
+`6043b922f90c39d44030991b9220932a` lasted 1,259s, peaked at 39C intake and
+74C GPU temperature, and ended with both engines and the LB running, restart
+count zero, `OOMKilled=false`, 2/2 admission, the original Compose SHA-256
+`826e3b4f11b06a80c2deca40f0e1d089a040fe3ae4dc7b001e54e01b89cc72d6`,
+and B's exact seq64 argv. There were no kernel Xids or OOM kills. Evidence is
+on node06 under
+`.experiments/20260828T0632Z-max-num-seqs-abba-r3`; the fail-safe attempts are
+`20260828T0549Z-max-num-seqs-abba` and
+`20260828T0612Z-max-num-seqs-abba-r2`.
+
 ## 2026-08-27 — cache-hit stats were missing from the API because of a default-off vLLM flag, not the model
 
 A user report that the Qwen-Next API returns no cache-hit statistics is
