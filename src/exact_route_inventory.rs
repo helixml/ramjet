@@ -6,8 +6,8 @@
 //! storage representation.
 
 use crate::{
-    kv_consumer::SharedFencedInventory, snapshot_actor::SnapshotPublicationMarker,
-    snapshot_consumer::SharedSnapshotPublication,
+    exact_index::ExactCacheGroupCoverage, kv_consumer::SharedFencedInventory,
+    snapshot_actor::SnapshotPublicationMarker, snapshot_consumer::SharedSnapshotPublication,
 };
 
 #[derive(Clone)]
@@ -34,6 +34,8 @@ pub(crate) struct ExactInventoryStatus {
     pub trusted: bool,
     pub resident_blocks: usize,
     pub resident_tokens: usize,
+    pub group_coverage: ExactCacheGroupCoverage,
+    pub placement_ready: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,6 +63,20 @@ impl ExactRouteInventory {
         matches!(self, Self::Direct(_))
     }
 
+    /// Whether this representation and its observed cache-group semantics may
+    /// currently influence serving placement. Hybrid inventories remain fully
+    /// usable for shadow comparison while unrecognized groups keep this false.
+    #[must_use]
+    pub fn placement_ready(&self) -> bool {
+        match self {
+            Self::Direct(inventory) => {
+                let inventory = inventory.read();
+                inventory.trusted() && inventory.group_coverage().placement_ready()
+            }
+            Self::Snapshot(_) => false,
+        }
+    }
+
     #[must_use]
     pub fn ready(&self) -> bool {
         self.marker().is_some()
@@ -73,10 +89,13 @@ impl ExactRouteInventory {
             Self::Direct(inventory) => {
                 let inventory = inventory.read();
                 let stats = inventory.stats();
+                let group_coverage = inventory.group_coverage();
                 ExactInventoryStatus {
                     trusted: inventory.trusted(),
                     resident_blocks: stats.external_hashes,
                     resident_tokens: stats.token_ids,
+                    group_coverage,
+                    placement_ready: inventory.trusted() && group_coverage.placement_ready(),
                 }
             }
             Self::Snapshot(publication) => {
@@ -89,6 +108,8 @@ impl ExactRouteInventory {
                     trusted: publication.published_marker().is_some(),
                     resident_blocks: stats.external_hashes,
                     resident_tokens: stats.logical_token_ids,
+                    group_coverage: ExactCacheGroupCoverage::default(),
+                    placement_ready: false,
                 }
             }
         }
@@ -201,6 +222,8 @@ mod tests {
         )));
 
         assert!(direct.supports_placement());
+        assert!(!direct.placement_ready());
         assert!(!snapshot.supports_placement());
+        assert!(!snapshot.placement_ready());
     }
 }

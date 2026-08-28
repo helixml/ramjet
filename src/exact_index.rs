@@ -51,6 +51,34 @@ pub struct ExactIndexStats {
     pub external_hashes: usize,
 }
 
+/// Content-free cache-group coverage learned from vLLM KV events.
+///
+/// Untagged legacy event streams deliberately remain placement-compatible.
+/// Once an engine publishes group metadata, however, serving placement is
+/// safe only after at least one reusable attention group is known and every
+/// observed group has a recognized semantic kind. Shadow lookup remains
+/// available while that gate is incomplete.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExactCacheGroupCoverage {
+    pub main_groups: usize,
+    pub non_main_groups: usize,
+    pub unknown_groups: usize,
+    pub unlearned_groups: usize,
+}
+
+impl ExactCacheGroupCoverage {
+    #[must_use]
+    pub const fn placement_ready(self) -> bool {
+        let tagged_groups = self
+            .main_groups
+            .saturating_add(self.non_main_groups)
+            .saturating_add(self.unknown_groups)
+            .saturating_add(self.unlearned_groups);
+        tagged_groups == 0
+            || (self.main_groups > 0 && self.unknown_groups == 0 && self.unlearned_groups == 0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BatchApplySummary {
     pub stored_blocks: usize,
@@ -171,6 +199,8 @@ pub enum ExactIndexError {
     DuplicateHash,
     #[error("exact KV store conflicts with an existing token path")]
     ConflictingPath,
+    #[error("exact KV cache group changed semantic kind within one generation")]
+    ConflictingGroupKind,
     #[error("exact KV index capacity would be exceeded")]
     CapacityExceeded,
     #[error("exact KV lookup work budget was exceeded")]
@@ -185,6 +215,7 @@ impl ExactIndexError {
             Self::ParentNotFound => "index_parent_not_found",
             Self::DuplicateHash => "index_duplicate_hash",
             Self::ConflictingPath => "index_conflicting_path",
+            Self::ConflictingGroupKind => "index_conflicting_group_kind",
             Self::CapacityExceeded => "index_capacity_exceeded",
             Self::LookupBudgetExceeded => "index_lookup_budget_exceeded",
         }
@@ -500,6 +531,7 @@ impl AttentionKind {
 pub struct ExactKvInventory {
     index: ExactKvIndex,
     group_kinds: HashMap<(u32, u32), AttentionKind>,
+    unlearned_groups: HashSet<(u32, u32)>,
     group_block_sizes: HashMap<(u32, u32), usize>,
 }
 
@@ -509,6 +541,7 @@ impl ExactKvInventory {
         Self {
             index: ExactKvIndex::new(limits),
             group_kinds: HashMap::new(),
+            unlearned_groups: HashSet::new(),
             group_block_sizes: HashMap::new(),
         }
     }
@@ -520,12 +553,35 @@ impl ExactKvInventory {
     pub fn reset_generation(&mut self) {
         self.index.clear();
         self.group_kinds.clear();
+        self.unlearned_groups.clear();
         self.group_block_sizes.clear();
     }
 
     #[must_use]
     pub fn stats(&self) -> ExactIndexStats {
         self.index.stats()
+    }
+
+    #[must_use]
+    pub fn group_coverage(&self) -> ExactCacheGroupCoverage {
+        let mut coverage = ExactCacheGroupCoverage {
+            unlearned_groups: self.unlearned_groups.len(),
+            ..ExactCacheGroupCoverage::default()
+        };
+        for kind in self.group_kinds.values() {
+            match kind {
+                AttentionKind::Main => {
+                    coverage.main_groups = coverage.main_groups.saturating_add(1);
+                }
+                AttentionKind::NonMain => {
+                    coverage.non_main_groups = coverage.non_main_groups.saturating_add(1);
+                }
+                AttentionKind::Unknown => {
+                    coverage.unknown_groups = coverage.unknown_groups.saturating_add(1);
+                }
+            }
+        }
+        coverage
     }
 
     /// Apply one decoded event after conservative cache-tier/group filtering.
@@ -559,6 +615,7 @@ impl ExactKvInventory {
                 }
             }
             KvEvent::BlockRemoved(removed) => {
+                self.observe_unlearned_group(data_parallel_rank, removed.group_idx)?;
                 if let Some(reason) = filter_remove(removed, data_parallel_rank, &self.group_kinds)
                 {
                     return Ok(ApplyOutcome::Filtered(reason));
@@ -602,22 +659,59 @@ impl ExactKvInventory {
     }
 
     fn learn_group(&mut self, rank: u32, stored: &BlockStored) -> Result<(), ExactIndexError> {
-        let (Some(group), Some(kind)) = (stored.group_idx, stored.kv_cache_spec_kind.as_deref())
-        else {
+        let Some(group) = stored.group_idx else {
             return Ok(());
         };
         let key = (rank, group);
-        if !self.group_kinds.contains_key(&key)
-            && self.group_kinds.len() >= self.index.limits.max_nodes
-        {
-            return Err(ExactIndexError::CapacityExceeded);
+        let Some(kind) = stored.kv_cache_spec_kind.as_deref() else {
+            return self.observe_unlearned_group(rank, Some(group));
+        };
+        let observed = AttentionKind::from_wire(kind);
+        if let Some(existing) = self.group_kinds.get(&key) {
+            if *existing != observed {
+                return Err(ExactIndexError::ConflictingGroupKind);
+            }
+        } else {
+            self.ensure_group_capacity(key)?;
         }
-        self.group_kinds.insert(key, AttentionKind::from_wire(kind));
+        self.group_kinds.insert(key, observed);
+        self.unlearned_groups.remove(&key);
         if stored.parent_block_hash.is_none() {
             self.group_block_sizes
                 .entry(key)
                 .and_modify(|size| *size = (*size).max(stored.block_size))
                 .or_insert(stored.block_size);
+        }
+        Ok(())
+    }
+
+    fn observe_unlearned_group(
+        &mut self,
+        rank: u32,
+        group: Option<u32>,
+    ) -> Result<(), ExactIndexError> {
+        let Some(group) = group else {
+            return Ok(());
+        };
+        let key = (rank, group);
+        if self.group_kinds.contains_key(&key) || self.unlearned_groups.contains(&key) {
+            return Ok(());
+        }
+        self.ensure_group_capacity(key)?;
+        self.unlearned_groups.insert(key);
+        Ok(())
+    }
+
+    fn ensure_group_capacity(&self, key: (u32, u32)) -> Result<(), ExactIndexError> {
+        if !self.group_kinds.contains_key(&key)
+            && !self.unlearned_groups.contains(&key)
+            && self
+                .group_kinds
+                .len()
+                .saturating_add(self.unlearned_groups.len())
+                >= self.index.limits.max_nodes
+        {
+            return Err(ExactIndexError::CapacityExceeded);
         }
         Ok(())
     }
@@ -672,6 +766,11 @@ impl SharedExactKvInventory {
     #[must_use]
     pub fn stats(&self) -> ExactIndexStats {
         self.inner.read().stats()
+    }
+
+    #[must_use]
+    pub fn group_coverage(&self) -> ExactCacheGroupCoverage {
+        self.inner.read().group_coverage()
     }
 
     pub fn clear(&self) {
@@ -761,6 +860,11 @@ impl FencedExactKvInventory {
     #[must_use]
     pub fn stats(&self) -> ExactIndexStats {
         self.inventory.stats()
+    }
+
+    #[must_use]
+    pub fn group_coverage(&self) -> ExactCacheGroupCoverage {
+        self.inventory.group_coverage()
     }
 
     /// Allocate an isolated accumulator for a full generation replay.
@@ -1197,6 +1301,69 @@ mod tests {
             ApplyOutcome::Filtered(FilterReason::Namespaced)
         );
         assert_eq!(inventory.stats(), ExactIndexStats::default());
+    }
+
+    #[test]
+    fn hybrid_group_coverage_keeps_shadow_available_until_semantics_are_complete() {
+        let mut inventory = ExactKvInventory::new(ExactIndexLimits::default());
+        assert!(inventory.group_coverage().placement_ready());
+
+        let mut unlearned = store_event(&[1], None, &[1, 2], 2);
+        unlearned.group_idx = Some(3);
+        assert_eq!(
+            inventory
+                .apply_event(0, &KvEvent::BlockStored(unlearned))
+                .unwrap(),
+            ApplyOutcome::Filtered(FilterReason::UnlearnedAttentionGroup)
+        );
+        assert_eq!(
+            inventory.group_coverage(),
+            ExactCacheGroupCoverage {
+                unlearned_groups: 1,
+                ..ExactCacheGroupCoverage::default()
+            }
+        );
+        assert!(!inventory.group_coverage().placement_ready());
+
+        let mut main = store_event(&[2], None, &[3, 4], 2);
+        main.group_idx = Some(3);
+        main.kv_cache_spec_kind = Some("full_attention".to_owned());
+        inventory
+            .apply_event(0, &KvEvent::BlockStored(main))
+            .unwrap();
+        let mut mamba = store_event(&[3], None, &[5, 6], 2);
+        mamba.group_idx = Some(4);
+        mamba.kv_cache_spec_kind = Some("mamba".to_owned());
+        inventory
+            .apply_event(0, &KvEvent::BlockStored(mamba))
+            .unwrap();
+        assert_eq!(
+            inventory.group_coverage(),
+            ExactCacheGroupCoverage {
+                main_groups: 1,
+                non_main_groups: 1,
+                unknown_groups: 0,
+                unlearned_groups: 0,
+            }
+        );
+        assert!(inventory.group_coverage().placement_ready());
+
+        let mut future = store_event(&[4], None, &[7, 8], 2);
+        future.group_idx = Some(5);
+        future.kv_cache_spec_kind = Some("future_attention".to_owned());
+        inventory
+            .apply_event(0, &KvEvent::BlockStored(future))
+            .unwrap();
+        assert_eq!(inventory.group_coverage().unknown_groups, 1);
+        assert!(!inventory.group_coverage().placement_ready());
+
+        let mut conflicting = store_event(&[5], None, &[9, 10], 2);
+        conflicting.group_idx = Some(3);
+        conflicting.kv_cache_spec_kind = Some("mamba".to_owned());
+        assert_eq!(
+            inventory.apply_event(0, &KvEvent::BlockStored(conflicting)),
+            Err(ExactIndexError::ConflictingGroupKind)
+        );
     }
 
     #[test]

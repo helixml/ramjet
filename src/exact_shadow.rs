@@ -336,7 +336,12 @@ impl ExactRouteShadow {
         // Capability is enforced here as well as by configuration parsing so
         // library callers and future wiring cannot make compact snapshots
         // serving-authoritative before qualification.
-        let mode = if mode.applies() && !self.placement_capable {
+        let placement_ready = self.placement_capable
+            && self
+                .inventories
+                .iter()
+                .all(ExactRouteInventory::placement_ready);
+        let mode = if mode.applies() && !placement_ready {
             ExactPlacementMode::Shadow
         } else {
             mode
@@ -1110,7 +1115,7 @@ mod tests {
             token_ids: tokens.to_vec(),
             block_size: tokens.len(),
             group_idx: Some(0),
-            kv_cache_spec_kind: None,
+            kv_cache_spec_kind: Some("full_attention".to_owned()),
             kv_cache_spec_sliding_window: None,
             medium: Some("GPU".to_owned()),
             locality: Some("LOCAL".to_owned()),
@@ -1118,6 +1123,14 @@ mod tests {
             cache_namespace: None,
             has_extra_keys: false,
         })
+    }
+
+    fn store_unlearned(hash: u64, tokens: &[u32]) -> KvEvent {
+        let KvEvent::BlockStored(mut stored) = store_hash(hash, tokens) else {
+            unreachable!("store_hash always constructs a store event");
+        };
+        stored.kv_cache_spec_kind = None;
+        KvEvent::BlockStored(stored)
     }
 
     fn trusted_inventory(events: Vec<KvEvent>) -> SharedFencedInventory {
@@ -1360,6 +1373,42 @@ mod tests {
                 .get()
                 .abs()
                 < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn unlearned_hybrid_group_forces_shadow_without_hiding_exact_overlap() {
+        let selected = trusted_inventory(Vec::new());
+        let alternative = trusted_inventory(vec![store_unlearned(7, &[1, 2, 3, 4])]);
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+            estimator(),
+        );
+        let mut route = decision();
+        let original = route.clone();
+
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4],
+            1_024,
+            &mut route,
+            ExactPlacementPolicy {
+                min_gain_tokens: 4,
+                max_load_delta: 0,
+            },
+            ExactPlacementMode::Placement,
+        );
+
+        assert_eq!(route, original);
+        assert_one(
+            metrics
+                .exact_route_placement
+                .with_label_values(&["shadow", "chat", "would_move"])
+                .get(),
         );
     }
 

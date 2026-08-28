@@ -337,6 +337,16 @@ Placement additionally requires `RJ_AFFINITY=prefix`; snapshot inventories are
 shadow-only. Any timeout, attestation failure, event gap, revision change, or
 missing `X-Session-ID` preserves the approximate route.
 
+For vLLM hybrid caches, Ramjet learns the bounded cache-group index and
+`kv_cache_spec_kind` carried by KV events. Reusable full/MLA groups feed the
+exact prefix index; Mamba, sliding-window, local, encoder, and cross-attention
+groups are observed but excluded. An unknown kind or a group seen before its
+kind is learned keeps exact comparison available in `shadow` while dynamically
+fencing `placement`. Untagged legacy event streams retain their existing
+placement behavior. `/health` reports only content-free group counts plus
+`placement_ready` under each replica's `exact_inventory`; no group state is
+folded into ordinary upstream health.
+
 When exact placement applies, admission reservations are recomputed from the
 exact warm-prefix overlap instead of the approximate block estimate that was
 derived before the inventory was consulted. A request whose prefix is already
