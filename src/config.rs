@@ -63,6 +63,8 @@ pub struct Config {
     pub route_load_unit_bytes: usize,
     pub route_max_load_units: usize,
     pub route_phase_aware_load: bool,
+    pub route_decode_load_unit_tokens: usize,
+    pub route_decode_max_load_units: usize,
     pub route_projected_load: bool,
     pub affinity: Affinity,
     pub session_affinity_mode: SessionAffinityMode,
@@ -397,6 +399,24 @@ impl Config {
         let route_index_capacity = positive(&mut get, "RJ_ROUTE_INDEX_CAPACITY", 100_000)?;
         let route_load_unit_bytes = positive(&mut get, "RJ_ROUTE_LOAD_UNIT_BYTES", 32 << 10)?;
         let route_max_load_units = positive(&mut get, "RJ_ROUTE_MAX_LOAD_UNITS", 8)?;
+        let route_decode_load_unit_tokens = parse(
+            &mut get,
+            "RJ_ROUTE_DECODE_LOAD_UNIT_TOKENS",
+            0_usize,
+            "a non-negative integer",
+        )?;
+        let route_decode_max_load_units = positive(
+            &mut get,
+            "RJ_ROUTE_DECODE_MAX_LOAD_UNITS",
+            route_max_load_units.min(4),
+        )?;
+        if route_decode_max_load_units > route_max_load_units {
+            return Err(invalid(
+                "RJ_ROUTE_DECODE_MAX_LOAD_UNITS",
+                route_decode_max_load_units.to_string(),
+                "no greater than RJ_ROUTE_MAX_LOAD_UNITS",
+            ));
+        }
         let affinity = match get("RJ_AFFINITY").as_deref().unwrap_or("prefix") {
             "prefix" => Affinity::Prefix,
             "load" => Affinity::Load,
@@ -568,6 +588,8 @@ impl Config {
                 false,
                 "a boolean",
             )?,
+            route_decode_load_unit_tokens,
+            route_decode_max_load_units,
             route_projected_load: parse(&mut get, "RJ_ROUTE_PROJECTED_LOAD", false, "a boolean")?,
             affinity,
             session_affinity_mode: session_affinity.mode,
@@ -2105,6 +2127,8 @@ mod tests {
         assert_eq!(config.route_load_unit_bytes, 32 << 10);
         assert_eq!(config.route_max_load_units, 8);
         assert!(!config.route_phase_aware_load);
+        assert_eq!(config.route_decode_load_unit_tokens, 0);
+        assert_eq!(config.route_decode_max_load_units, 4);
         assert!(!config.route_projected_load);
         assert_eq!(config.affinity, Affinity::Prefix);
         assert_eq!(config.session_affinity_mode, SessionAffinityMode::Off);
@@ -2179,6 +2203,33 @@ mod tests {
             error,
             ConfigError::InvalidValue {
                 key: "RJ_ROUTE_PROJECTED_LOAD",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_load_is_default_off_and_bounded_by_the_route_cap() {
+        let enabled = Config::from_lookup(|key| match key {
+            "RJ_ROUTE_MAX_LOAD_UNITS" => Some("8".to_owned()),
+            "RJ_ROUTE_DECODE_LOAD_UNIT_TOKENS" => Some("256".to_owned()),
+            "RJ_ROUTE_DECODE_MAX_LOAD_UNITS" => Some("4".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(enabled.route_decode_load_unit_tokens, 256);
+        assert_eq!(enabled.route_decode_max_load_units, 4);
+
+        let error = Config::from_lookup(|key| match key {
+            "RJ_ROUTE_MAX_LOAD_UNITS" => Some("2".to_owned()),
+            "RJ_ROUTE_DECODE_MAX_LOAD_UNITS" => Some("3".to_owned()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "RJ_ROUTE_DECODE_MAX_LOAD_UNITS",
                 ..
             }
         ));

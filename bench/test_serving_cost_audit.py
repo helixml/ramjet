@@ -349,7 +349,7 @@ class ServingCostAuditTest(unittest.TestCase):
             bounded_output_limit(boolean_policy)["telemetry_state"], "invalid"
         )
         future = start(6, 1)
-        future.update(v=10, endpoint="chat", output_limit=output_limit())
+        future.update(v=11, endpoint="chat", output_limit=output_limit())
         self.assertEqual(bounded_output_limit(future)["telemetry_state"], "invalid")
 
     def test_output_limit_analysis_retains_unmatched_start_as_missing_finish(self):

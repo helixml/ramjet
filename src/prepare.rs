@@ -118,6 +118,32 @@ impl OutputLimitObservation {
             stream_mode,
         }
     }
+
+    /// Convert the privacy-bounded effective output bucket into a bounded
+    /// decode reservation. Zero token quantum is the instant off switch and
+    /// preserves the established single-unit decode accounting.
+    #[must_use]
+    pub(crate) fn decode_load_units(
+        self,
+        endpoint: Endpoint,
+        unit_tokens: usize,
+        max_units: usize,
+    ) -> usize {
+        if unit_tokens == 0 || endpoint == Endpoint::Other {
+            return 1;
+        }
+        assert!(max_units > 0, "decode load cap must be positive");
+        let upper_bound: usize = match self.effective_bucket {
+            OutputLimitBucket::OneTo64 => 64,
+            OutputLimitBucket::SixtyFiveTo256 => 256,
+            OutputLimitBucket::TwoFiftySevenTo1024 => 1_024,
+            OutputLimitBucket::OneThousandTwentyFiveTo4096 => 4_096,
+            OutputLimitBucket::FourThousandNinetySevenPlus
+            | OutputLimitBucket::Unset
+            | OutputLimitBucket::Invalid => return max_units,
+        };
+        upper_bound.div_ceil(unit_tokens).clamp(1, max_units)
+    }
 }
 
 fn output_limit(
@@ -227,6 +253,11 @@ impl PreparedRequest {
     #[must_use]
     pub fn route(&self, router: &Router) -> Decision {
         router.route_prepared(self.body.len(), &self.fingerprints)
+    }
+
+    #[must_use]
+    pub(crate) fn route_with_load_floor(&self, router: &Router, load_floor: usize) -> Decision {
+        router.route_prepared_with_load_floor(self.body.len(), &self.fingerprints, load_floor)
     }
 }
 
@@ -387,6 +418,53 @@ mod tests {
         for (value, expected) in cases {
             assert_eq!(output_limit_bucket(value), expected);
         }
+    }
+
+    #[test]
+    fn decode_load_uses_only_bounded_effective_buckets_and_has_an_instant_off_switch() {
+        let router = router();
+        let observation =
+            |body: &[u8]| PreparedRequest::new(Endpoint::Chat, body, 0, &router).output_limit;
+        assert_eq!(
+            observation(br#"{"messages":[],"max_tokens":64}"#).decode_load_units(
+                Endpoint::Chat,
+                256,
+                4,
+            ),
+            1
+        );
+        assert_eq!(
+            observation(br#"{"messages":[],"max_tokens":257}"#).decode_load_units(
+                Endpoint::Chat,
+                256,
+                4,
+            ),
+            4
+        );
+        assert_eq!(
+            observation(br#"{"messages":[]}"#).decode_load_units(Endpoint::Chat, 256, 4),
+            4
+        );
+        assert_eq!(
+            observation(br#"{"messages":[],"max_tokens":4097}"#).decode_load_units(
+                Endpoint::Chat,
+                256,
+                4,
+            ),
+            4
+        );
+        assert_eq!(
+            observation(br#"{"messages":[],"max_tokens":4097}"#).decode_load_units(
+                Endpoint::Chat,
+                0,
+                4,
+            ),
+            1
+        );
+        assert_eq!(
+            observation(br#"{"messages":[]}"#).decode_load_units(Endpoint::Other, 256, 4),
+            1
+        );
     }
 
     #[test]

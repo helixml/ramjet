@@ -63,12 +63,25 @@ resolving across the rename.
 | `RJ_ROUTE_INDEX_CAPACITY` | `100000` | Maximum entries in the approximate locality index. |
 | `RJ_ROUTE_LOAD_UNIT_BYTES` | `32768` | Request bytes represented by one reserved load unit. |
 | `RJ_ROUTE_MAX_LOAD_UNITS` | `8` | Maximum size-weighted load reservation per request. |
-| `RJ_ROUTE_PHASE_AWARE_LOAD` | `false` | Experimental: after the first generated token on a streaming response, reduce the request's size-weighted prefill reservation to one decode unit. |
-| `RJ_ROUTE_PROJECTED_LOAD` | `false` | Experimental: include each candidate's extra request reservation beyond the one-unit decode floor in its approximate route score. |
+| `RJ_ROUTE_PHASE_AWARE_LOAD` | `false` | Experimental: after the first generated token on a streaming response, reduce the request's size-weighted prefill reservation to its bounded decode reservation. |
+| `RJ_ROUTE_DECODE_LOAD_UNIT_TOKENS` | `0` | Requested-output tokens per decode load unit. Zero disables decode weighting and retains one unit. |
+| `RJ_ROUTE_DECODE_MAX_LOAD_UNITS` | `min(4, RJ_ROUTE_MAX_LOAD_UNITS)` | Maximum decode reservation; must not exceed the overall route load cap. |
+| `RJ_ROUTE_PROJECTED_LOAD` | `false` | Experimental: include each candidate's extra request reservation beyond its decode floor in its approximate route score. |
 | `RJ_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
 | `RJ_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary; `0` disables the legacy strip. |
 | `RJ_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
 | `RUST_LOG` | `info` | Standard tracing filter, for example `ramjet=debug`. |
+
+Decode load uses only the already journaled, low-cardinality effective output
+bucket. A bounded bucket reserves its upper edge; `4097+`, unset, and invalid
+limits reserve the configured maximum rather than trusting an unbounded or
+malformed request. The reservation is a floor on each candidate's prefill
+estimate, not an additive token count, and exact-prefix recomputation cannot
+drop below it. On a streaming response the phase-aware boundary releases the
+prefill portion at the first generated token while retaining the decode floor.
+Non-streaming responses retain their dispatch reservation until completion
+because the proxy has no protocol-visible first-token boundary. The zero token
+quantum is an instant behavior rollback.
 
 `GET /health` returns opaque replica ordinals, serving health, DSpark
 reliability state, inflight work, load units, and index size. It returns `200 ok` when every replica is healthy,
