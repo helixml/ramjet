@@ -625,6 +625,11 @@ struct ExactInventoryHealth {
     trusted: bool,
     resident_blocks: usize,
     resident_tokens: usize,
+    placement_ready: bool,
+    main_groups: usize,
+    non_main_groups: usize,
+    unknown_groups: usize,
+    unlearned_groups: usize,
 }
 
 struct InflightGuard(GaugeHandle);
@@ -968,6 +973,11 @@ impl Proxy {
                                     trusted: status.trusted,
                                     resident_blocks: status.resident_blocks,
                                     resident_tokens: status.resident_tokens,
+                                    placement_ready: status.placement_ready,
+                                    main_groups: status.group_coverage.main_groups,
+                                    non_main_groups: status.group_coverage.non_main_groups,
+                                    unknown_groups: status.group_coverage.unknown_groups,
+                                    unlearned_groups: status.group_coverage.unlearned_groups,
                                 }
                             });
                         let compatibility_attested = (proxy.inner.config.upstream_admission_mode
@@ -3480,7 +3490,7 @@ mod tests {
                     token_ids: tokens.to_vec(),
                     block_size: tokens.len(),
                     group_idx: Some(0),
-                    kv_cache_spec_kind: None,
+                    kv_cache_spec_kind: Some("full_attention".to_owned()),
                     kv_cache_spec_sliding_window: None,
                     medium: Some("GPU".to_owned()),
                     locality: Some("LOCAL".to_owned()),
@@ -4971,6 +4981,15 @@ mod tests {
         let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["replicas"][0]["exact_inventory"]["trusted"], true);
+        assert_eq!(
+            health["replicas"][0]["exact_inventory"]["placement_ready"],
+            true
+        );
+        assert_eq!(health["replicas"][0]["exact_inventory"]["main_groups"], 1);
+        assert_eq!(
+            health["replicas"][0]["exact_inventory"]["unlearned_groups"],
+            0
+        );
         assert_eq!(
             health["replicas"][0]["exact_inventory"]["resident_blocks"],
             1
