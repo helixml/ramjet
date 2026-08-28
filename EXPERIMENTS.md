@@ -87,6 +87,44 @@ prefers native counters. That remains a sound benchmark default and was left
 alone deliberately — flipping it changes reconciliation semantics that have
 test coverage, and is a separate change rather than part of this fix.
 
+### Fleet sweep: every other deployment already had it
+
+All four model deployments were then swept, and no further change was needed.
+
+| deployment | engine | flag | where it lives |
+|---|---|---|---|
+| `qwen38_flash_next` | vLLM | `--enable-prompt-tokens-details` | Compose command (added today) |
+| `dspark_0731` | vLLM | `--enable-prompt-tokens-details` | baked into `serve-ds4-flash.sh`, recorded at `argv[45]` of the pinned r11 `serving-runtime.json` |
+| `qwen38_27b` | SGLang | `--enable-cache-report` | Compose command |
+| `glm53_flash` | SGLang | `--enable-cache-report` | `glm53-launch.sh` |
+
+The first pass of this audit was wrong in both directions because it grepped
+only `docker-compose.yaml`. That missed `glm53_flash`, whose serving arguments
+live in its launch script, and `dspark_0731`, whose launcher is baked into the
+image and whose real argv is visible only in the pinned runtime manifest. A
+deployment's serving arguments legitimately live in any of those three places,
+and an audit that checks one of them produces confident false negatives.
+
+That `dspark_0731` carried the flag all along is the missing half of the root
+cause. The gap did not exist while the DeepSeek stack was live; it appeared
+when Flash-Next was brought up, because that deployment's Compose command was
+written from the upstream vLLM recipe. Checking the upstream repository at
+commit head: **178 model recipes, 164 of which publish a `vllm serve` command,
+and none mention `--enable-prompt-tokens-details`.** Every server built from a
+recipe silently returns no cache-hit statistics. Contributing the flag upstream
+was considered and deliberately not done in this pass; the omission is recorded
+here so the next recipe-derived deployment is not written from an incomplete
+command.
+
+`bench/test_cache_stats_flags.py` now enforces the property rather than leaving
+it to the next audit. It resolves each deployment's serving argv across Compose
+files, launch scripts, and pinned-manifest `argv` lists, requires the correct
+flag for the engine, rejects the crossed spelling, and fails when a
+GPU-reserving deployment is added without being registered. It was
+mutation-tested against all three regressions: removing the flag, swapping the
+vLLM and SGLang spellings, and adding an unregistered GPU deployment. The check
+reads files only, so it runs in the ordinary Python lane with no Docker or GPU.
+
 ### Cost and scope
 
 Two full engine reloads, about 18 minutes of rolling restart, at half capacity
