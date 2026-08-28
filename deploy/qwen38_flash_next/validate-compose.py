@@ -274,7 +274,10 @@ def main() -> int:
     except ValidationError as error:
         print(str(error))
         return 1
-    print("Qwen3.8-Flash-Next Compose validation passed: two isolated TP4 engines")
+    print(
+        "Qwen3.8-Flash-Next Compose validation passed: mixed-profile TP4 pair "
+        "with pinned tokenizer and live/replay KV-event authority"
+    )
     return 0
 
 

@@ -10,7 +10,8 @@ The checkpoint and image are immutable inputs:
 - model payload: 185,502,232,570 bytes across 131 safetensors shards
 - linux/amd64 vLLM image: `sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
 - released ramjet Compose default: `v0.4.0@sha256:467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b`
-- node06-qualified profile override: `rust-r133-qwen38-flash-next-df01c18@sha256:78f13c87fcc928552593a8055293479dbbc2569d0b7a4b754d89e0d32a278385`
+- node06-qualified live ramjet image: `rust-r135-qwen-exact-de0bb28@sha256:33b547fb33d78ed94b03fd7eaf27accb5939c6e82f12faa1b2c32bd4478b9b64`
+- exact-route manifest: `compat/qwen38-flash-next-r134.json`, SHA-256 `a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67`
 
 The day-zero vLLM image config labels its source/build revision as `unknown`.
 The digest makes the bytes immutable, but it does not supply source provenance;
@@ -28,8 +29,10 @@ queue. It is rejected as a deployment recipe. This is not a weight-only claim:
 the candidate intentionally qualified the upstream recipe as published. See
 the 2026-08-28 NVFP4 entry in `EXPERIMENTS.md`.
 
-Production now uses both TP4 engines: A on GPUs 0-3 and B on GPUs 4-7. The
-load balancer is owned by this Compose project and reports 2/2 HTTP admission.
+Production now uses both TP4 engines: MTP3 engine A on GPUs 0-3 and standard
+decoding engine B on GPUs 4-7. The load balancer is owned by this Compose project
+and reports 2/2 HTTP admission. HTTP admission describes engine readiness; the
+independent exact-route lane is enabled for the full valid-session cohort.
 Both engines independently passed direct identity, deterministic agent/tool,
 code-decode, prefix-cache, long-context, and multimodal gates before pair
 admission. The temporary canary controller was removed after promotion so an
@@ -95,9 +98,11 @@ independently only after observed cache and memory telemetry shows room.
 
 ## Qualified TP4 pair
 
-Both active engines are healthy with restart count zero. With MTP3 each
-reports a 2,667,258-token GPU KV pool, enough for 10.17 native 262K contexts;
-the non-speculative baseline reported 3,033,380 tokens. A guarded request with
+Both active engines are healthy with restart count zero. Engine A retains MTP3
+and reports a 2,667,258-token GPU KV pool, enough for 10.17 native 262K
+contexts. Engine B uses standard decoding and reports 3,033,380 tokens. The
+mixed pair therefore exposes 5,700,638 KV tokens, 6.9% more than two MTP3
+replicas. A guarded request with
 251,009 actual prompt tokens completed, and the identical-prefix warm TTFT was
 1.58s versus 32.25s cold. The response's `cached_tokens` field was empty during
 that campaign and was therefore not treated as cache authority; on 2026-08-27
@@ -125,8 +130,10 @@ draft setup precedes the faster decode. Both enabled and disabled native states
 reconciled across 456/456 requests, and the agent corpus passed 5/5 in each
 shape. The 512-token c32 loss and 256-token c32 win mean a future heterogeneous
 policy needs output-work awareness; concurrency alone is not a safe selector.
-Retain MTP3 with index reuse on both engines until that policy is independently
-qualified.
+The independently qualified profile-aware policy now retains MTP3 with index
+reuse on A and standard decoding on B. Requests through 256 output tokens
+prefer A and larger, missing, or malformed limits prefer B only as the final
+tie-break after health, cache locality, and load.
 
 The retained MTP3 configuration also sets
 `index_share_for_mtp_iteration=true`. The pinned Qwen runtime implements
@@ -138,14 +145,36 @@ the first full matrix. The five-case agent gate, 4/4 deep-context corpus, and a
 This flag is retained as a measured low/mid-batch improvement, not as a fix for
 the MTP3 c32 crossover.
 
-Ramjet's approximate route is the only admitted routing mode for this model.
-The deployment selects the dedicated `qwen3.8-flash-next` renderer profile but
-keeps tokenizer and exact KV routing off pending separate live attestation.
-It disables the legacy 100K max-token strip so valid long-output budgets reach
-vLLM unchanged. Qwen template controls such as `chat_template_kwargs`,
-`preserve_thinking`, and multimodal processor kwargs participate in prefix
-fingerprints, preventing requests with different rendered prefixes from
-claiming the same warm route.
+Qwen exact placement is admitted and live. Ramjet uses the dedicated
+`qwen3.8-flash-next` renderer, SHA-pinned `tokenizer.json` and
+`tokenizer_config.json`, and the committed
+`compat/qwen38-flash-next-r134.json` manifest. Both engines publish live KV
+events on port 5557 and bounded replay on port 5558. The consumers are required
+to be connected, replayed, trusted, and hybrid-cache placement-ready before
+their inventories may influence routing. Unknown or unlearned cache-group
+kinds fence placement without affecting approximate serving.
+
+The rollout advanced through 1%, 10%, and 100% stable session cohorts. The
+final independent-session gate tokenized 100/100 requests and exact placement
+agreed with the approximate route on 100/100, with both engine inventories
+trusted and placement-ready. Missing or invalid `X-Session-ID`, tokenization
+failure, event disconnect, invalid replay, or insufficient exact gain preserves
+the approximate route. This is a fail-closed routing optimization, not a new
+serving-health dependency.
+
+The checked-in Compose deliberately keeps `RJ_EXACT_ROUTE_CANARY_BPS=0`; zero
+is the repository-safe rollback state when the file is rendered away from the
+qualified node. node06's protected mode-0600 `.env` promotes the live cohort to
+`10000` and supplies the independent canary key. Never commit or print that
+key. `RJ_UPSTREAM_ADMISSION_MODE=http` also remains intentional: serving-
+runtime compatibility admission is a separate contract and is not required
+for direct KV-event exact placement.
+
+The deployment disables the legacy 100K max-token strip so valid long-output
+budgets reach vLLM unchanged. Qwen template controls such as
+`chat_template_kwargs`, `preserve_thinking`, and multimodal processor kwargs
+participate in prefix fingerprints, preventing requests with different
+rendered prefixes from claiming the same warm route.
 
 The approximate routing shape is pinned explicitly in Compose: 2KiB chunks, a
 2MiB fingerprint window, a 32-block affinity cap, 32KiB load units, and an
@@ -164,11 +193,13 @@ prefix hits while regressing returning-probe TTFT by 15%, blocker TTFT p95 by
 qualified value.
 
 The checked-in Compose default follows the repository-wide released-image
-policy. The node06 production render supplies the separately qualified r133
+policy. The node06 production render supplies the separately qualified r135
 override explicitly until these Flash-Next changes are included in a tagged
 release. Every node06 `docker compose` invocation, including rollback and
 cleanup traps, must therefore carry the exact `LB_IMAGE` override; restoring
-the Compose file alone would select the older released default.
+the Compose file alone would select the older released default. The admitted
+node06 Compose SHA-256 is
+`784f20137bd404667591bc1a4b5b614e366a244a34220ca3ffcfcb002a42b4ce`.
 
 The load balancer joins both the Flash serving network and the existing
 `qwen38_27b_default` bridge. The latter is observation-only: node06's host
