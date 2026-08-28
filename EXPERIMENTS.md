@@ -56,6 +56,52 @@ on node06 under
 `20260828T0549Z-max-num-seqs-abba` and
 `20260828T0612Z-max-num-seqs-abba-r2`.
 
+## 2026-08-28 — upstream NVFP4 recipe passes correctness but loses the serving frontier
+
+The pinned Inferact recipe candidate was qualified on node06 as one isolated
+TP4 engine on GPUs 4-7 while the production FP8/MTP3 engine on GPUs 0-3 served
+the load balancer. The candidate was the complete upstream recipe shape, not a
+weight-only comparison: immutable revision
+`103a7608316173ca6edd49929544244de7ffda70`, 182,838,060,595 verified bytes,
+95% GPU utilization, max 16 sequences, 8,192 batched tokens, Marlin MoE, and no
+speculative decoding. It used the same immutable vLLM image as production.
+
+The candidate became ready in 406 seconds and exposed 3,559,245 KV tokens
+(13.58 native 262K contexts), versus production MTP3's 2,667,258. Correctness
+was clean: deterministic agent/tool/reasoning 5/5, sessions 7/7, deep context
+4/4, multimodal 1/1, and 7/8 on the greedy comparator, exactly matching the
+FP8 baseline's 7/8. Six of eight greedy outputs were byte-identical; the shared
+failure was the same backwards-spelling case, so it is not a quantization
+regression.
+
+The 256-token code ladder rejected the recipe on serving speed:
+
+| concurrency | NVFP4 recipe tok/s | production FP8/MTP3 tok/s | delta |
+| ---: | ---: | ---: | ---: |
+| 1 | 108.8 | 202.4 | **-46.2%** |
+| 8 | 687.3 | 853.4 | **-19.5%** |
+| 16 | 1,242.0 | 1,341.4 | **-7.4%** |
+| 32 | 1,254.6 | 1,781.6 | **-29.6%** |
+
+The c32 candidate also queued in two 16-request waves, with 3.60s TTFT p95;
+that is an expected consequence of the recipe's 16-sequence cap and reinforces
+the earlier independent rejection of max-num-seqs 16. Because this campaign
+tested the published recipe as a deployment candidate, the result does not
+attribute the loss to NVFP4 weights alone. A future weight-only A/B would need
+production max-num-seqs 64 and MTP3 held constant, but there is no serving
+reason to pay for that experiment now.
+
+The guarded run `58570421873b607f0348ca123ed2f8f5` completed 1096 seconds with
+maximum intake 39C, maximum GPU temperature 77C, zero request failures, no OOM
+or restart, and exact one-engine-at-a-time restoration. The final LB reported
+2/2 healthy on the original FP8 model revision, image, max-num-seqs 64, pinned
+KV bytes/tokens, and MTP3 argv. Evidence is on node06 under
+`.experiments/20260828T0833Z-nvfp4-tp4-r3/`.
+
+Decision: reject the upstream NVFP4 recipe for production. Keep the verified
+model available only as an immutable audit artifact; do not add its Compose
+shape to the one-file deployment.
+
 ## 2026-08-28 — order-balanced MTP crossover: keep MTP3, but its win is decode-depth dependent
 
 The original 2026-08-26 MTP result compared separate runs and found a c32 loss
