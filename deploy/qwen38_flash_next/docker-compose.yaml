@@ -51,6 +51,10 @@ x-vllm-engine: &vllm-engine
     # it is the only variable relative to the qualified MTP3 reference.
     - --speculative-config={"method":"mtp","num_speculative_tokens":3,"index_share_for_mtp_iteration":true}
     - --enable-prefix-caching
+    # Without this the OpenAI usage object omits prompt_tokens_details
+    # entirely, so every client sees no cache-hit stats even though the
+    # native prefix cache is serving ~66% of queried blocks.
+    - --enable-prompt-tokens-details
     - --no-enable-flashinfer-autotune
     - --enable-auto-tool-choice
     - --tool-call-parser=qwen3_coder

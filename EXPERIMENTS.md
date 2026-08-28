@@ -1,5 +1,312 @@
 # node06 experiment journal
 
+## 2026-08-27 — cache-hit stats were missing from the API because of a default-off vLLM flag, not the model
+
+A user report that the Qwen-Next API returns no cache-hit statistics is
+confirmed and fixed. The cause is not ramjet and not the hybrid runtime: vLLM's
+`--enable-prompt-tokens-details` defaults to `False` and we never passed it, so
+`prompt_tokens_details` was omitted from every response.
+
+### Confirming it, and locating the layer
+
+A direct request to engine A on `:8040`, bypassing ramjet entirely, returned
+`prompt_tokens_details: None` on a cold call and both warm repeats. That
+placed the fault at the engine before any proxy code was read. Native counters
+proved the cache itself was healthy: `vllm:prefix_cache_hits_total` stood at
+1,550,400 against 2,345,919 queries, a 66.1% block hit rate. So reuse was real
+and only the API surface was missing.
+
+In the pinned image, `vllm/entrypoints/openai/chat_completion/serving.py`
+defines `_make_prompt_tokens_details()`, which returns `None` immediately
+unless `enable_prompt_tokens_details` is true, before it looks at any cache
+count. Both the streaming and non-streaming usage paths call it.
+`vllm/entrypoints/openai/cli_args.py` defaults the field to `False`. This is a
+pure API-surface gate and is not model-specific.
+
+Ramjet needed no change. `src/usage.rs` already reads
+`prompt_tokens_details.cached_tokens` with a legacy `cached_tokens` fallback,
+so the LB's own cache metrics were flat only because the engine never sent the
+field.
+
+### The fix
+
+`--enable-prompt-tokens-details` was added to the engine command in the single
+Compose file and to the validator's required-argument set. The flag was
+preflighted through the pinned image's own CLI parser before any engine was
+touched, per the flag-preflight rule; it parsed to `True` with no engine
+construction and no GPU allocation.
+
+Both engines were rolled one at a time under the common deployment lock, with
+the script asserting the peer's health before and after each recreate. B took
+540s and A 559s; ramjet served on the surviving engine throughout and reported
+`degraded 1/2` for the duration of each roll, returning to `ok 2/2` at the end.
+Both engines kept restart count zero, `OOMKilled=false`, the same image digest,
+and **2,667,258 KV tokens** — unchanged, confirming the flag is API-only and
+does not perturb the memory profile.
+
+### Verification, including the zeros
+
+Through the full public path (Caddy -> ramjet -> engine) with a fresh
+5,078-token prompt:
+
+| call | `cached_tokens` | share of prompt |
+|---|---:|---:|
+| 1 (cold) | 0 | 0% |
+| 2 | 0 | 0% |
+| 3 | 4,000 | 78.8% |
+| 4 | 4,000 | 78.8% |
+
+`ramjet_cached_prompt_tokens_total{endpoint="chat"}` moved off zero for the
+first time, which also restores the machine-view and Grafana cache-hit
+signal that had no input before.
+
+The second call reporting zero is reproducible and is **not** a reporting
+defect. Sampling `vllm:prefix_cache_queries_total` and
+`vllm:prefix_cache_hits_total` around each request showed the API and the
+native counters agreeing exactly on every call, zeros included: 5,114 queried
+with 0 hits on calls 1 and 2, and 5,114 queried with 4,000 hits on calls 3 and
+4. A 10-second pause after the cold call changed nothing, so it is not a
+publication lag. The first repeat of a prompt genuinely pays a full prefill on
+this engine. That is an engine caching behaviour worth understanding
+separately; it is not what the report was about, and the field is now
+trustworthy precisely because it reproduces the native counters including
+their misses.
+
+### Correcting the record
+
+The 2026-08-26 campaign concluded that "OpenAI response `cached_tokens`
+remained zero despite native prefix hits, so only vLLM's own counters were
+accepted as cache authority", and the deployment README attributed the empty
+field to the hybrid runtime. The observation was right and the fallback to
+native counters was the correct conservative response, but the attributed
+cause was wrong: the field was disabled by a default-off server flag, not
+unpopulated by the model or runtime. The README has been corrected.
+
+`bench/route_conflict.py` still emits `cached_tokens_authoritative: False` and
+prefers native counters. That remains a sound benchmark default and was left
+alone deliberately — flipping it changes reconciliation semantics that have
+test coverage, and is a separate change rather than part of this fix.
+
+### Fleet sweep: every other deployment already had it
+
+All four model deployments were then swept, and no further change was needed.
+
+| deployment | engine | flag | where it lives |
+|---|---|---|---|
+| `qwen38_flash_next` | vLLM | `--enable-prompt-tokens-details` | Compose command (added today) |
+| `dspark_0731` | vLLM | `--enable-prompt-tokens-details` | baked into `serve-ds4-flash.sh`, recorded at `argv[45]` of the pinned r11 `serving-runtime.json` |
+| `qwen38_27b` | SGLang | `--enable-cache-report` | Compose command |
+| `glm53_flash` | SGLang | `--enable-cache-report` | `glm53-launch.sh` |
+
+The first pass of this audit was wrong in both directions because it grepped
+only `docker-compose.yaml`. That missed `glm53_flash`, whose serving arguments
+live in its launch script, and `dspark_0731`, whose launcher is baked into the
+image and whose real argv is visible only in the pinned runtime manifest. A
+deployment's serving arguments legitimately live in any of those three places,
+and an audit that checks one of them produces confident false negatives.
+
+That `dspark_0731` carried the flag all along is the missing half of the root
+cause. The gap did not exist while the DeepSeek stack was live; it appeared
+when Flash-Next was brought up, because that deployment's Compose command was
+written from the upstream vLLM recipe. Checking the upstream repository at
+commit head: **178 model recipes, 164 of which publish a `vllm serve` command,
+and none mention `--enable-prompt-tokens-details`.** Every server built from a
+recipe silently returns no cache-hit statistics. Contributing the flag upstream
+was considered and deliberately not done in this pass; the omission is recorded
+here so the next recipe-derived deployment is not written from an incomplete
+command.
+
+`bench/test_cache_stats_flags.py` now enforces the property rather than leaving
+it to the next audit. It resolves each deployment's serving argv across Compose
+files, launch scripts, and pinned-manifest `argv` lists, requires the correct
+flag for the engine, rejects the crossed spelling, and fails when a
+GPU-reserving deployment is added without being registered. It was
+mutation-tested against all three regressions: removing the flag, swapping the
+vLLM and SGLang spellings, and adding an unregistered GPU deployment. The check
+reads files only, so it runs in the ordinary Python lane with no Docker or GPU.
+
+### Cost and scope
+
+Two full engine reloads, about 18 minutes of rolling restart, at half capacity
+for each half of it. Intake air was 40C at preflight and every request-generating
+cell ran under the thermal guard. Evidence is on node06 under
+`.experiments/20260827T220713Z-enable-prompt-tokens-details` and the
+`cachehit-*` guard journals; the temporary probe scripts were removed from the
+box afterwards.
+
+## 2026-08-27 — Qwen3.8-Flash-Next restored to node06 after the GLM close-out; upstream recipe delta triaged
+
+The GLM-5.3-Flash canary is finished, so node06 was returned to the qualified
+Qwen3.8-Flash-Next-FP8 pair. This is an operational restore of an already
+qualified deployment, not a new candidate: the immutable model revision, engine
+image, launcher argv, and ramjet policy are the ones promoted on 2026-08-26.
+
+### The pinned checkpoint is still the latest substantive revision
+
+`Qwen/Qwen3.8-Flash-Next-FP8` mutable `main` moved to
+`970c569adaca6b35532111fd6b27351b2baefe50` at 2026-08-27T05:04Z, after our pin
+`bcd9f01ddc9cff2316eb84281bebcd5b058bddce`. Comparing the two revision trees
+through the Hub API, both carry 144 files and the delta is `README.md` alone
+(65,041 -> 65,400 bytes; a model-card URL casing fix and a dark-mode CSS block).
+`config.json`, `chat_template.jinja`, `generation_config.json`,
+`tokenizer.json`, `tokenizer_config.json`, and all 131 safetensors shards are
+byte-identical. No re-download, re-pin, or re-qualification is warranted. The
+on-disk tokenizer hash `0997f410c57a1f4e...` independently matches the Hub LFS
+object for both revisions.
+
+### Switch mechanics
+
+One detached systemd unit held `/run/lock/ramjet-node06-deployment.lock` for the
+whole inspect/mutate/verify interval and failed closed, with no automatic GLM
+restore path. It preflighted the Compose SHA-256, a loopback intake-air reading,
+and local presence of the qualified ramjet image before mutating anything. Two
+earlier launches of the same unit aborted inside their own setup — a
+process-substitution log race, then a `pipefail` SIGPIPE from an early-exiting
+`awk` — and both exited before the GLM teardown, leaving the stack untouched.
+That is the intended shape: a fail-closed deployment script that dies in
+preflight costs nothing.
+
+Engines were started sequentially rather than together. Two concurrent TP4
+loaders have never been proved safe on this 125 GiB host; the 2026-08-27 GLM
+entry established only that one fits.
+
+| step | wall time |
+|---|---:|
+| `glm53_flash` project down, all 8 GPUs released | 6s |
+| `qwen38flashnext-a` (GPUs 0-3) to healthy | 630s |
+| `qwen38flashnext-b` (GPUs 4-7) to healthy | 590s |
+| ramjet 2/2 admission | 5s |
+| total locked interval | 20m 20s |
+
+Canonical and on-box Compose SHA-256 is now
+`81490fcbce2b3b9e95faefe25b465bbd643b43fb37c074702580177249ae4359`. The on-box
+copy had been one commit stale (missing only the default-off
+`RJ_ROUTE_PROJECTED_LOAD` line, which is inert) and was resynced from the
+repository before the switch rather than after it.
+
+### Verification
+
+Both engines run image
+`vllm/vllm-openai@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
+with restart count zero, `OOMKilled=false`, and **2,667,258 KV tokens each** —
+exactly the qualified 2026-08-26 figure, which is the strongest available
+evidence that the fixed `--kv-cache-memory` reproduced the same allocation.
+`ds4-loadbalancer` runs the qualified
+`rust-r133-qwen38-flash-next-df01c18@sha256:78f13c87...` and is owned by the
+`qwen38_flash_next` project and its single Compose file.
+
+The guarded deterministic five-case agent corpus scored **5/5 protocol valid**
+through the load balancer (guard run `4eaafa0211ad3889fff217bdd24799e6`), with
+requests landing on both engines (route counts 2/3), zero protocol errors, and
+finish reasons of two `stop` and three `tool_calls`. Authenticated ingress
+through Caddy on the canonical `http://100.89.187.17/v1` returned HTTP 200, the
+`X-Ramjet-Upstream` header, the exact expected content, `finish_reason=stop`,
+and reconciling usage; the unauthenticated request returned 401. `/v1/models`
+exposes exactly `qwen3.8-flash-next`. Intake air peaked at 39C and GPU at 61C
+across every guarded interval.
+
+The first ingress probe is retained as a negative harness result, not a model
+fault: at `max_tokens=16` the model spent all 16 tokens on reasoning and
+returned `content: null` with `finish_reason=length`. This is the same
+undersized-output-cap defect the 2026-08-26 multimodal cell hit. The 256-token
+rerun with `reasoning_effort=low` returned `ready` exactly.
+
+### Thermal guard drift found and corrected
+
+`node06_gpu_guard.py` under `qwen38_flash_next/bench` predated the 2026-08-27
+intake hysteresis change and was still enforcing a 50C admission / 55C abort
+band — more permissive than the committed 46C/50C policy. It was resynced
+along with `engine_metrics.py` and `node06_operational_moratorium.py`, and a
+no-op guarded run confirmed `start_max_c: 46, abort_c: 50`. All twelve bench
+scripts in that deployment now hash-match the repository. The drift did not
+affect this run (39C throughout), but a per-deployment copy of a safety gate
+silently retaining a retired threshold is exactly the failure the single-source
+rule exists to prevent.
+
+### Upstream source scan: one real candidate, one non-issue
+
+`bench/watchlist_scan.py --all` plus a direct read of the vLLM recipes history
+produced four findings that touch this deployment.
+
+**The `qwen3_coder` -> `qwen3_xml` tool-parser rename is a no-op for us.**
+vLLM recipes commit `6e688958257b` switched the Flash-Next guide's
+`--tool-call-parser` from `qwen3_coder` to `qwen3_xml` in every variant, which
+reads as a tool-calling correctness change against our production argv. It is
+not, in our pinned image. Probing the live engine's lazy parser registry,
+`qwen3_xml` and `qwen3_coder` both resolve to the *same class object*,
+`vllm.tool_parsers.qwen3_engine_tool_parser.Qwen3EngineToolParser`, so the two
+spellings are aliases with no behavioural difference. No A/B is justified. This
+holds for image `sha256:0aea3024...` specifically and must be re-probed on any
+future engine image, where the names may diverge.
+
+**Upstream now claims our exact topology, with different tuning.** The same
+commit added `rtx_pro_6000_4x: verified` to the Flash-Next recipe and a
+hardware override block for FP8: `--max-num-seqs 16`,
+`--gpu-memory-utilization 0.95`, `--max-num-batched-tokens 8192`,
+`--enable-prefix-caching`. We run 64 sequences at 0.90 with an explicitly
+pinned `--kv-cache-memory`. These are genuinely different trades and ours is
+measured on this box, including the finding that automatic KV profiling varied
+from 38.32 GiB to 4.48 GiB across identical boots. The recipe's fixed
+`vram_minimum_gb` for FP8 also dropped from 265 to 250. Treat the override
+block as a candidate for a bounded A/B, not as a correction.
+
+**vLLM v0.28.0 released 2026-08-26**, the first tagged release since our
+day-zero image. Our engine reports `0.1.dev20073+g8e685d198` and that commit
+does not resolve in `vllm-project/vllm`, consistent with the image's own
+`unknown` source label — the digest fixes the bytes but not the provenance.
+A tagged release would replace an unprovenanced build, which is worth having.
+But the recipe raised `min_vllm_version` from `0.28.0` to `0.29.0` on
+2026-08-27T05:27Z, i.e. its current guidance targets a vLLM that is not
+released yet. Do not chase the recipe head; v0.28.0 is a candidate requiring
+the normal correctness-before-capacity gate, and the version bump is itself a
+signal that something in Flash-Next support is still moving.
+
+Also noted and not acted on: recipes commit `7997f1d1bf1b` fixes the Flash-Next
+YaRN recipe from `--rope-scaling` to `--hf-overrides` (we have never enabled
+YaRN, and 1M context remains untested), and `RadixArk/Qwen3.8-Flash-Next-NVFP4`
+was revised on 2026-08-26. The NVFP4 export has no SM120 qualification, no TP2
+recipe, and no reproducible accuracy comparison against the official FP8
+checkpoint, which is precisely what its `watch_for` asks for before it becomes
+a candidate.
+
+### The synthetic liveness probe has been dark since the Flash-Next promotion
+
+Post-restore log triage found both engines returning a steady ~1/minute 404,
+`The model 'deepseek-v4-flash' does not exist`. The caller is
+`/usr/local/bin/ds4-synthetic-probe.sh`, driven by `ds4-synthetic-probe.timer`
+every minute. It still requests `BASE=http://127.0.0.1/deepseek-v4-flash` with
+`"model":"deepseek-v4-flash"` in the body, a model this box stopped serving
+when Flash-Next was promoted on 2026-08-26. `ds4_synthetic_probe_success` has
+therefore been pinned at `0` with `http_code 404` since then.
+
+This is not caused by the restore and it does not affect serving: the 404s
+resolve in 3-9ms, never reach a GPU, and every Caddy path (`/v1/*` and both
+legacy model-named aliases) returns 200. The cost is monitoring, and it is
+pointed: this probe exists because the 2026-08-14 outage (#156) was invisible
+to a check that only asked whether the endpoint responded. A probe stuck at
+`success 0` for a stale reason cannot distinguish a real authenticated-inference
+outage from its own misconfiguration, which is the exact failure mode #159 was
+written to close.
+
+The fix is two lines — `BASE=http://127.0.0.1` (the canonical `/v1` ingress
+preserves its prefix, and there is no `/qwen3.8-flash-next/*` alias) and the
+served model name `qwen3.8-flash-next`. Note that the probe's own header
+comment overstates its check: the code requires only that `choices[0].message`
+exists and `completion_tokens >= 0`, not that content is non-empty. Its
+`max_tokens: 1` request will therefore still score a success against this
+reasoning model, whose first token is a reasoning token. That gap is worth
+closing separately, but it is not what is breaking the probe today. The script
+is infra-owned and was left unmodified by this run.
+
+### Not done
+
+No Helix end-to-end session was run from this checkout; its app id and
+credentials live in the infra repository. No performance cell was run — the
+restore reproduces a qualified configuration and its headline numbers stand
+from 2026-08-26. Evidence is on node06 under
+`/home/luke/inference/qwen38_flash_next/.experiments/20260827T154055Z-switch-back-to-qwen`
+and `.../20260827T160239Z-restore-correctness`.
+
 ## 2026-08-27 — Qwen3.8-Flash-Next closeout: deterministic memory and phase-aware routing won
 
 The Qwen3.8-Flash-Next campaign is paused and node06 has been released to the

@@ -59,6 +59,7 @@ REQUIRED_ARGUMENTS = {
     "--max-num-seqs=64",
     "--max-num-batched-tokens=8192",
     "--enable-prefix-caching",
+    "--enable-prompt-tokens-details",
     "--no-enable-flashinfer-autotune",
     "--enable-auto-tool-choice",
     "--tool-call-parser=qwen3_coder",

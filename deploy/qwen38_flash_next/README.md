@@ -89,8 +89,12 @@ Both active engines are healthy with restart count zero. With MTP3 each
 reports a 2,667,258-token GPU KV pool, enough for 10.17 native 262K contexts;
 the non-speculative baseline reported 3,033,380 tokens. A guarded request with
 251,009 actual prompt tokens completed, and the identical-prefix warm TTFT was
-1.58s versus 32.25s cold. The hybrid runtime did not populate the response's
-`cached_tokens` field, so that field is not treated as cache authority.
+1.58s versus 32.25s cold. The response's `cached_tokens` field was empty during
+that campaign and was therefore not treated as cache authority; on 2026-08-27
+the cause was found to be the missing `--enable-prompt-tokens-details` server
+flag rather than anything about the hybrid runtime, and the field now
+reconciles exactly with vLLM's native counters. See "Cache-hit statistics"
+below.
 The synthetic long-context correctness gate also passed 4/4 requests: five
 needles spanning 1–99% depth at 99,875 and 199,482 prompt tokens, followed by a
 two-turn tool session over a 50K-token prompt.
@@ -151,3 +155,58 @@ machine-view agent listens on that bridge gateway, so dropping it would leave
 serving healthy while silently losing machine telemetry. It can be retired
 only after the host agent is deliberately rebound and the replacement URL is
 qualified from inside the final load-balancer container.
+
+## Checkpoint revision currency (checked 2026-08-27)
+
+`Qwen/Qwen3.8-Flash-Next-FP8` mutable `main` has moved past our pin
+`bcd9f01ddc9cff2316eb84281bebcd5b058bddce` to
+`970c569adaca6b35532111fd6b27351b2baefe50`. The delta is `README.md` only;
+`config.json`, `chat_template.jinja`, `generation_config.json`, both tokenizer
+files, and all 131 safetensors shards are byte-identical across the two
+revisions. Our pin is therefore still the latest substantive revision and no
+re-download or re-qualification is warranted. Re-check the revision tree, not
+just the `lastModified` timestamp, before concluding that a Hub change matters.
+
+## Upstream recipe delta (vLLM recipes, 2026-08-27)
+
+The recipe's Flash-Next guide switched `--tool-call-parser` from `qwen3_coder`
+to `qwen3_xml`. In the pinned engine image both names resolve to the same class
+object, `vllm.tool_parsers.qwen3_engine_tool_parser.Qwen3EngineToolParser`, so
+our argv needs no change. Re-probe the parser registry on any future engine
+image before assuming the alias still holds:
+
+```bash
+docker exec qwen38flashnext-a python3 -c "
+from vllm.tool_parsers import ToolParserManager as M
+print(M.get_tool_parser('qwen3_xml') is M.get_tool_parser('qwen3_coder'))"
+```
+
+The same commit marks `rtx_pro_6000_4x` verified and publishes an FP8 override
+of `--max-num-seqs 16` at `--gpu-memory-utilization 0.95`. That is a different
+trade from our measured 64 sequences at 0.90 with a pinned `--kv-cache-memory`,
+and it is a candidate for a bounded A/B rather than a correction. The recipe
+also raised `min_vllm_version` to `0.29.0`, which is unreleased; vLLM v0.28.0
+(2026-08-26) is the newest tagged release and remains ungated here.
+
+## Cache-hit statistics in the API response (2026-08-27)
+
+The engines pass `--enable-prompt-tokens-details`. Without it vLLM's
+`_make_prompt_tokens_details()` returns `None` before looking at any cache
+counter, so the OpenAI usage object omits `prompt_tokens_details` entirely and
+every client sees no cache-hit statistics — even though the native prefix cache
+is serving the majority of queried blocks. The flag defaults to `False` and is
+a pure API-surface control: it does not change scheduling, memory, or the KV
+pool, and both engines still report 2,667,258 KV tokens with it enabled.
+
+With the flag on, `usage.prompt_tokens_details.cached_tokens` matches
+`vllm:prefix_cache_hits_total` delta for delta, so it is now usable as cache
+authority for clients. `bench/route_conflict.py` still reports
+`cached_tokens_authoritative: False` and prefers native counters; that is a
+conservative benchmark default, not a statement that the field is wrong, and
+revisiting it is a separate change.
+
+Note an engine behaviour that is *not* a reporting defect: the first repeat of
+a prompt reports `cached_tokens: 0`, and only the second and later repeats
+report a hit. The native counters agree exactly on those zeros, so the first
+repeat genuinely pays a full prefill. Steady-state repeats of a 5,099-token
+prompt reported 4,000 cached tokens against an 800-token block size.
