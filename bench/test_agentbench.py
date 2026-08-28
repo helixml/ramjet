@@ -17,7 +17,9 @@ from agentbench import (
     fetch_speculation_snapshot,
     load_cases,
     main,
+    parser,
     run_exit_status,
+    speculation_expected_enabled,
     validate_case,
     validate_choice_results,
     validate_result,
@@ -38,6 +40,24 @@ def sse(event):
 
 
 class AgentBenchTest(unittest.TestCase):
+    def test_disabled_speculation_is_explicit_and_parseable(self):
+        args = parser().parse_args(
+            [
+                "run",
+                "http://127.0.0.1:8013",
+                "model",
+                "--metadata-json",
+                "/does/not/matter.json",
+                "--speculation-mode",
+                "disabled",
+            ]
+        )
+        self.assertEqual(args.speculation_mode, "disabled")
+        self.assertFalse(speculation_expected_enabled(args.speculation_mode))
+        self.assertTrue(speculation_expected_enabled("enabled"))
+        with self.assertRaisesRegex(ValueError, "unknown speculation mode"):
+            speculation_expected_enabled("automatic")
+
     def test_reconciled_speculation_flag_requires_metrics_endpoint(self):
         with self.assertRaisesRegex(
             SystemExit, "requires --engine-metrics"
