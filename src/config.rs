@@ -36,6 +36,8 @@ const MIN_DSPARK_QUARANTINE_CONSECUTIVE_WINDOWS: usize = 3;
 const MIN_DSPARK_QUARANTINE_PROPOSED_TOKENS: usize = 256;
 const MAX_DSPARK_GUARD_EXPECTED_POSITIONS: usize = 16;
 const MAX_PREFIX_SINGLE_FLIGHT_CAPACITY: usize = 100_000;
+const MAX_UPSTREAM_WARMUP_STABLE_SECONDS: usize = 15 * 60;
+const MAX_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES: usize = 60;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -43,6 +45,9 @@ pub struct Config {
     pub upstream_token: Option<String>,
     pub upstream_admission_mode: UpstreamAdmissionMode,
     pub upstream_admission_timeout_ms: usize,
+    pub upstream_warmup_mode: WarmupAdmissionMode,
+    pub upstream_warmup_consecutive_successes: usize,
+    pub upstream_warmup_stable_seconds: usize,
     pub dspark_guard_mode: DsparkGuardMode,
     pub dspark_guard_interval_ms: usize,
     pub dspark_guard_consecutive_windows: usize,
@@ -185,6 +190,24 @@ impl PrefixSingleFlightMode {
 pub enum UpstreamAdmissionMode {
     Http,
     Compatibility,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WarmupAdmissionMode {
+    Off,
+    Shadow,
+    Enforce,
+}
+
+impl WarmupAdmissionMode {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::Enforce => "enforce",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -556,6 +579,40 @@ impl Config {
             &exact_route,
             &serving_runtime,
         )?;
+        let upstream_warmup_mode = match get("RJ_UPSTREAM_WARMUP_MODE").as_deref().unwrap_or("off")
+        {
+            "off" => WarmupAdmissionMode::Off,
+            "shadow" => WarmupAdmissionMode::Shadow,
+            "enforce" => WarmupAdmissionMode::Enforce,
+            value => {
+                return Err(invalid(
+                    "RJ_UPSTREAM_WARMUP_MODE",
+                    value.to_owned(),
+                    "off, shadow, or enforce",
+                ));
+            }
+        };
+        if upstream_warmup_mode != WarmupAdmissionMode::Off
+            && upstream_admission_mode != UpstreamAdmissionMode::Http
+        {
+            return Err(invalid(
+                "RJ_UPSTREAM_WARMUP_MODE",
+                upstream_warmup_mode.label().to_owned(),
+                "off unless RJ_UPSTREAM_ADMISSION_MODE=http",
+            ));
+        }
+        let upstream_warmup_consecutive_successes = bounded_positive(
+            &mut get,
+            "RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES",
+            3,
+            MAX_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES,
+        )?;
+        let upstream_warmup_stable_seconds = bounded_positive(
+            &mut get,
+            "RJ_UPSTREAM_WARMUP_STABLE_SECONDS",
+            30,
+            MAX_UPSTREAM_WARMUP_STABLE_SECONDS,
+        )?;
         let dspark_guard_mode = dspark_guard_mode(&mut get, upstream_admission_mode)?;
         let dspark_guard_interval_ms = bounded_positive(
             &mut get,
@@ -675,6 +732,9 @@ impl Config {
             upstreams,
             upstream_token,
             upstream_admission_mode,
+            upstream_warmup_mode,
+            upstream_warmup_consecutive_successes,
+            upstream_warmup_stable_seconds,
             upstream_admission_timeout_ms: bounded_positive(
                 &mut get,
                 "RJ_UPSTREAM_ADMISSION_TIMEOUT_MS",
@@ -2295,6 +2355,9 @@ mod tests {
         assert_eq!(config.upstreams[0].as_str(), "http://ds4-flash:8000/");
         assert_eq!(config.upstream_admission_mode, UpstreamAdmissionMode::Http);
         assert_eq!(config.upstream_admission_timeout_ms, 5_000);
+        assert_eq!(config.upstream_warmup_mode, WarmupAdmissionMode::Off);
+        assert_eq!(config.upstream_warmup_consecutive_successes, 3);
+        assert_eq!(config.upstream_warmup_stable_seconds, 30);
         assert_eq!(config.dspark_guard_mode, DsparkGuardMode::Off);
         assert_eq!(config.dspark_guard_interval_ms, 5_000);
         assert_eq!(config.dspark_guard_consecutive_windows, 3);
@@ -2413,6 +2476,57 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn passive_warmup_is_bounded_and_http_admission_only() {
+        let configured = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM_WARMUP_MODE" => Some("shadow".to_owned()),
+            "RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES" => Some("4".to_owned()),
+            "RJ_UPSTREAM_WARMUP_STABLE_SECONDS" => Some("45".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(configured.upstream_warmup_mode, WarmupAdmissionMode::Shadow);
+        assert_eq!(configured.upstream_warmup_consecutive_successes, 4);
+        assert_eq!(configured.upstream_warmup_stable_seconds, 45);
+
+        let compatibility = HashMap::from([
+            ("RJ_UPSTREAM", "http://a:1,http://b:1"),
+            ("RJ_UPSTREAM_ADMISSION_MODE", "compatibility"),
+            ("RJ_UPSTREAM_WARMUP_MODE", "enforce"),
+            ("RJ_TOKENIZER_MODE", "local-shadow"),
+            ("RJ_TOKENIZER_PATH", "/models/tokenizer.json"),
+            (
+                "RJ_TOKENIZER_SHA256",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            ("RJ_EXACT_ROUTE_MANIFEST_PATH", "/compat/manifest.json"),
+            (
+                "RJ_EXACT_ROUTE_MANIFEST_SHA256",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+            (
+                "RJ_SERVING_RUNTIME_MANIFEST_PATH",
+                "/compat/serving-runtime.json",
+            ),
+            (
+                "RJ_SERVING_RUNTIME_MANIFEST_SHA256",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            ),
+        ]);
+        let error =
+            Config::from_lookup(|key| compatibility.get(key).map(ToString::to_string)).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ConfigError::InvalidValue {
+                    key: "RJ_UPSTREAM_WARMUP_MODE",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]

@@ -25,7 +25,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 
 use crate::{
-    config::{Config, DsparkGuardMode, UpstreamAdmissionMode},
+    config::{Config, DsparkGuardMode, UpstreamAdmissionMode, WarmupAdmissionMode},
     dspark_guard::{
         AttestedEngineCoreIncarnation, DsparkCounters, DsparkGuard, IncarnationOutcome,
         MAX_PROMETHEUS_BYTES, Observation, ParseFailure, WindowOutcome, parse_prometheus,
@@ -48,6 +48,7 @@ use crate::{
     shims::{self, Endpoint},
     tokenizer::{CompatibilityAdmission, ExactTokens, TokenizerObserver},
     usage::{Accumulator, feed_sse_chunk},
+    warmup_admission::{WarmupAdmission, WarmupAdmissionConfig, WarmupAdmissionOutcome},
 };
 
 const MAX_REQUEST_BODY: usize = 64 << 20;
@@ -148,6 +149,7 @@ struct Inner {
     session_affinity: SessionAffinity,
     prefix_single_flight: PrefixSingleFlight,
     tokenizer: TokenizerObserver,
+    warmup_admission: Option<WarmupAdmission>,
     dspark_guards: Arc<[DsparkGuardReplica]>,
     dspark_guard_store: Option<Arc<DsparkGuardStore>>,
     /// Idle-drain policy and the monotonic origin its millisecond clock is
@@ -226,6 +228,8 @@ struct ReplicaHealth {
     quarantined: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     compatibility_attested: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warmup_ready: Option<bool>,
     inflight: usize,
     load_units: usize,
     approximate_index_entries: usize,
@@ -771,6 +775,35 @@ fn publish_initial_replica_state(
     }
 }
 
+fn initialize_warmup_admission(config: &Config, metrics: &Metrics) -> Option<WarmupAdmission> {
+    for upstream in &config.upstreams {
+        let label = upstream.as_str().trim_end_matches('/');
+        metrics
+            .upstream_warmup_ready
+            .with_label_values(&[label])
+            .set(1.0);
+        for mode in ["off", "shadow", "enforce"] {
+            for outcome in WarmupAdmissionOutcome::ALL {
+                metrics.upstream_warmup_admission.with_label_values(&[
+                    label,
+                    mode,
+                    outcome.label(),
+                ]);
+            }
+        }
+    }
+    (config.upstream_warmup_mode != WarmupAdmissionMode::Off).then(|| {
+        WarmupAdmission::new(WarmupAdmissionConfig {
+            mode: config.upstream_warmup_mode,
+            consecutive_successes: config.upstream_warmup_consecutive_successes,
+            stable_for: Duration::from_secs(
+                u64::try_from(config.upstream_warmup_stable_seconds).unwrap_or(u64::MAX),
+            ),
+            replicas: config.upstreams.len(),
+        })
+    })
+}
+
 impl Proxy {
     /// Builds the proxy and its optional tokenizer workers.
     ///
@@ -898,6 +931,7 @@ impl Proxy {
             &dspark_guards,
             initial_probe_health,
         );
+        let warmup_admission = initialize_warmup_admission(&config, metrics.as_ref());
         let idle_drain = config.idle_drain.mode.enabled().then(|| {
             let origin = Instant::now();
             IdleDrainState {
@@ -927,6 +961,7 @@ impl Proxy {
                 session_affinity,
                 prefix_single_flight,
                 tokenizer,
+                warmup_admission,
                 dspark_guards,
                 dspark_guard_store,
                 idle_drain,
@@ -1006,8 +1041,19 @@ impl Proxy {
                             },
                             DsparkGuardReplica::status,
                         );
-                        let healthy =
-                            reliability.effective_healthy && compatibility_attested.unwrap_or(true);
+                        let warmup_ready = proxy
+                            .inner
+                            .warmup_admission
+                            .as_ref()
+                            .map(|warmup| warmup.ready(index));
+                        let warmup_admitted = proxy
+                            .inner
+                            .warmup_admission
+                            .as_ref()
+                            .is_none_or(|warmup| warmup.routing_ready(index));
+                        let healthy = reliability.effective_healthy
+                            && compatibility_attested.unwrap_or(true)
+                            && warmup_admitted;
                         let idle_drain = proxy.inner.idle_drain.as_ref().and_then(|state| {
                             state
                                 .policy
@@ -1021,6 +1067,7 @@ impl Proxy {
                             reliability_state: reliability.state.label(),
                             quarantined: reliability.quarantined,
                             compatibility_attested,
+                            warmup_ready,
                             inflight,
                             load_units,
                             approximate_index_entries,
@@ -2507,10 +2554,17 @@ impl Proxy {
                 .state(upstream)
                 .is_some_and(|state| state.3)
         } else {
-            self.publish_upstream_health(upstream, healthy)
+            self.publish_probed_upstream_health(upstream, healthy)
         };
         let label = self.upstream_label(upstream);
-        if healthy && effective_healthy {
+        let warmup_pending = healthy
+            && !effective_healthy
+            && self
+                .inner
+                .warmup_admission
+                .as_ref()
+                .is_some_and(|warmup| !warmup.routing_ready(upstream));
+        if healthy && (effective_healthy || warmup_pending) {
             self.inner
                 .metrics
                 .last_upstream_success
@@ -2580,7 +2634,15 @@ impl Proxy {
 
     fn publish_upstream_health(&self, upstream: usize, probe_healthy: bool) -> bool {
         let upstream_label = self.upstream_label(upstream);
-        self.inner.dspark_guards.get(upstream).is_some_and(|guard| {
+        let warmup_outcome = self.inner.warmup_admission.as_ref().map(|warmup| {
+            if probe_healthy {
+                warmup.observe_serving(upstream)
+            } else {
+                warmup.observe_probe(upstream, false, self.inner.origin.elapsed())
+            }
+        });
+        self.record_warmup(upstream, warmup_outcome);
+        let underlying = self.inner.dspark_guards.get(upstream).is_some_and(|guard| {
             guard.publish_probe_health(
                 &self.inner.router,
                 self.inner.metrics.as_ref(),
@@ -2588,7 +2650,66 @@ impl Proxy {
                 &upstream_label,
                 probe_healthy,
             )
-        })
+        });
+        underlying
+            && self
+                .inner
+                .warmup_admission
+                .as_ref()
+                .is_none_or(|warmup| warmup.routing_ready(upstream))
+    }
+
+    fn publish_probed_upstream_health(&self, upstream: usize, probe_healthy: bool) -> bool {
+        let upstream_label = self.upstream_label(upstream);
+        let underlying = self.inner.dspark_guards.get(upstream).is_some_and(|guard| {
+            guard.publish_probe_health(
+                &self.inner.router,
+                self.inner.metrics.as_ref(),
+                upstream,
+                &upstream_label,
+                probe_healthy,
+            )
+        });
+        let warmup_outcome = self.inner.warmup_admission.as_ref().map(|warmup| {
+            warmup.observe_probe(
+                upstream,
+                probe_healthy && underlying,
+                self.inner.origin.elapsed(),
+            )
+        });
+        self.record_warmup(upstream, warmup_outcome);
+        let admitted = self
+            .inner
+            .warmup_admission
+            .as_ref()
+            .is_none_or(|warmup| warmup.routing_ready(upstream));
+        if underlying && !admitted {
+            self.inner.router.set_healthy(upstream, false);
+        }
+        underlying && admitted
+    }
+
+    fn record_warmup(&self, upstream: usize, outcome: Option<WarmupAdmissionOutcome>) {
+        let Some(warmup) = self.inner.warmup_admission.as_ref() else {
+            return;
+        };
+        let label = self.upstream_label(upstream);
+        self.inner
+            .metrics
+            .upstream_warmup_ready
+            .with_label_values(&[&label])
+            .set(f64::from(warmup.ready(upstream)));
+        if let Some(outcome) = outcome {
+            self.inner
+                .metrics
+                .upstream_warmup_admission
+                .with_label_values(&[
+                    &label,
+                    self.inner.config.upstream_warmup_mode.label(),
+                    outcome.label(),
+                ])
+                .inc();
+        }
     }
 
     /// Proxies a native Prometheus endpoint selected by opaque upstream ordinal.
@@ -5200,6 +5321,58 @@ mod tests {
             "a healthy upstream must be routed to normally, not through fail-open"
         );
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn passive_warmup_keeps_reachability_separate_from_routing_admission() {
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some("http://engine:8000".to_owned()),
+            "RJ_UPSTREAM_WARMUP_MODE" => Some("enforce".to_owned()),
+            "RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES" => Some("2".to_owned()),
+            "RJ_UPSTREAM_WARMUP_STABLE_SECONDS" => Some("30".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        let label = proxy.upstream_label(0);
+
+        assert!(!proxy.publish_probed_upstream_health(0, false));
+        assert!(!proxy.publish_probed_upstream_health(0, true));
+        assert!(!proxy.router().state(0).unwrap().3);
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .upstream_up
+                .with_label_values(&[&label])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON,
+            "the engine is reachable even while passive warmup fences routing"
+        );
+        assert!(
+            proxy
+                .inner
+                .metrics
+                .upstream_warmup_ready
+                .with_label_values(&[&label])
+                .get()
+                .abs()
+                < f64::EPSILON
+        );
+
+        assert_eq!(
+            proxy
+                .inner
+                .warmup_admission
+                .as_ref()
+                .unwrap()
+                .observe_probe(0, true, Duration::from_secs(31)),
+            WarmupAdmissionOutcome::Admitted
+        );
+        assert!(proxy.publish_probed_upstream_health(0, true));
+        assert!(proxy.router().state(0).unwrap().3);
     }
 
     #[tokio::test]
