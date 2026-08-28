@@ -7,8 +7,8 @@ import os
 import pathlib
 
 
-SOURCE_SHA256 = "19f0463a737a547d2cd0800f0722dee5c9e078ad1562ae84fc29e8fe00068934"
-OUTPUT_SHA256 = "042687eec593b11f81f3d6ea461dd899b74aea136a68322699234af9701b05c7"
+SOURCE_SHA256 = "784f20137bd404667591bc1a4b5b614e366a244a34220ca3ffcfcb002a42b4ce"
+OUTPUT_SHA256 = "cbb62c85e213eb43b52e723a083f8dc96f21e80d2c8f7348ce95a50bb6c8fb48"
 REVISION = "103a7608316173ca6edd49929544244de7ffda70"
 
 
@@ -54,6 +54,14 @@ def render(source):
             "/prod/models/Inferact/Qwen3.8-Flash-Next-NVFP4-103a76083161:/workspace/model:ro",
         ),
         (
+            "${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}/tokenizer.json",
+            "/prod/models/Inferact/Qwen3.8-Flash-Next-NVFP4-103a76083161/tokenizer.json",
+        ),
+        (
+            "${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}/tokenizer_config.json",
+            "/prod/models/Inferact/Qwen3.8-Flash-Next-NVFP4-103a76083161/tokenizer_config.json",
+        ),
+        (
             "--served-model-name=${SERVED_MODEL_NAME:-qwen3.8-flash-next}",
             "--served-model-name=qwen3.8-flash-next",
             2,
@@ -83,6 +91,8 @@ def render(source):
             "      RJ_ROUTE_SPECULATION_MODE: ${RJ_ROUTE_SPECULATION_MODE:-off}\n"
             "      RJ_ROUTE_SPECULATION_PROFILES: ${RJ_ROUTE_SPECULATION_PROFILES:-standard,standard}\n",
         ),
+        ("      RJ_TOKENIZER_MODE: local-shadow\n", "      RJ_TOKENIZER_MODE: \"off\"\n"),
+        ("      RJ_EXACT_ROUTE_MODE: placement\n", "      RJ_EXACT_ROUTE_MODE: \"off\"\n"),
         (
             "      - --max-num-batched-tokens=8192\n",
             "      - --max-num-batched-tokens=8192\n      - --moe-backend=marlin\n",

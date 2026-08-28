@@ -1,0 +1,177 @@
+{
+  "admitted_request_classes": [
+    "plain",
+    "system_multiturn",
+    "reasoning_low",
+    "reasoning_medium",
+    "reasoning_xhigh",
+    "thinking_disabled"
+  ],
+  "engine": {
+    "image_digest": "sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3",
+    "version": "0.1.dev20073+g8e685d198"
+  },
+  "goldens": [
+    {
+      "endpoint": "chat",
+      "name": "plain",
+      "request": {
+        "add_generation_prompt": true,
+        "messages": [
+          {
+            "content": "Explain prefix caching briefly.",
+            "role": "user"
+          }
+        ],
+        "model": "qwen3.8-flash-next",
+        "return_token_strs": false
+      },
+      "token_count": 58,
+      "token_ids_sha256": "0c694964dfbab505e1df8cfcadfc57aa57c9021d0882014fe609d9bcbc8f165e"
+    },
+    {
+      "endpoint": "chat",
+      "name": "system_multiturn",
+      "request": {
+        "add_generation_prompt": true,
+        "messages": [
+          {
+            "content": "Answer as a concise systems engineer.",
+            "role": "system"
+          },
+          {
+            "content": "Name one cache invariant.",
+            "role": "user"
+          },
+          {
+            "content": "A cached block must match its token prefix.",
+            "role": "assistant"
+          },
+          {
+            "content": "Now name one recovery invariant.",
+            "role": "user"
+          }
+        ],
+        "model": "qwen3.8-flash-next",
+        "return_token_strs": false
+      },
+      "token_count": 94,
+      "token_ids_sha256": "bc8c6600d1be056f99d3b3fe4bafb141438ab2c5ca5b1ee8f239d36b77604e4d"
+    },
+    {
+      "endpoint": "chat",
+      "name": "reasoning_low",
+      "request": {
+        "add_generation_prompt": true,
+        "chat_template_kwargs": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "messages": [
+          {
+            "content": "Compare two routing scores.",
+            "role": "user"
+          }
+        ],
+        "model": "qwen3.8-flash-next",
+        "reasoning_effort": "low",
+        "return_token_strs": false
+      },
+      "token_count": 45,
+      "token_ids_sha256": "a450e06bbc853edc1c662ae1995c5f4114f35828e9f38398058cf52156c4115b"
+    },
+    {
+      "endpoint": "chat",
+      "name": "reasoning_medium",
+      "request": {
+        "add_generation_prompt": true,
+        "chat_template_kwargs": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "messages": [
+          {
+            "content": "Compare two routing scores.",
+            "role": "user"
+          }
+        ],
+        "model": "qwen3.8-flash-next",
+        "reasoning_effort": "medium",
+        "return_token_strs": false
+      },
+      "token_count": 15,
+      "token_ids_sha256": "3a9b6f48f9111a24eb5cd2006d7821c6b1068fea4ab5617eadc1fb320018b336"
+    },
+    {
+      "endpoint": "chat",
+      "name": "reasoning_xhigh",
+      "request": {
+        "add_generation_prompt": true,
+        "chat_template_kwargs": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "messages": [
+          {
+            "content": "Compare two routing scores.",
+            "role": "user"
+          }
+        ],
+        "model": "qwen3.8-flash-next",
+        "reasoning_effort": "xhigh",
+        "return_token_strs": false
+      },
+      "token_count": 57,
+      "token_ids_sha256": "2b1b7e3c6650cd2b2c6c5c2e281a2207075f1adfe4bf834d92b00f97e84c2681"
+    },
+    {
+      "endpoint": "chat",
+      "name": "thinking_disabled",
+      "request": {
+        "add_generation_prompt": true,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        },
+        "messages": [
+          {
+            "content": "Return one short sentence.",
+            "role": "user"
+          }
+        ],
+        "model": "qwen3.8-flash-next",
+        "return_token_strs": false
+      },
+      "token_count": 17,
+      "token_ids_sha256": "81adba0cd59314a7368fbbee7763725f55f7c0ea4907e2e0fef37e8652025687"
+    },
+    {
+      "endpoint": "chat",
+      "name": "normalized_content",
+      "request": {
+        "add_generation_prompt": true,
+        "messages": [
+          {
+            "content": "first part; second part",
+            "role": "user"
+          }
+        ],
+        "model": "qwen3.8-flash-next",
+        "return_token_strs": false
+      },
+      "token_count": 57,
+      "token_ids_sha256": "833bfaf68365eb63d01010164d32795c8231dbe72b772aea6ae0d8d799ed2f09"
+    }
+  ],
+  "model": {
+    "id": "qwen3.8-flash-next",
+    "max_model_len": 262144,
+    "root": "/workspace/model"
+  },
+  "renderer": {
+    "profile": "qwen3.8-flash-next"
+  },
+  "schema_version": 1,
+  "tokenizer": {
+    "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+  }
+}

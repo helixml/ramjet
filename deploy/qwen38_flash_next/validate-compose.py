@@ -71,6 +71,9 @@ REQUIRED_ARGUMENTS = {
     "--max-model-len=262144",
     "--max-num-seqs=64",
     "--max-num-batched-tokens=8192",
+    '--kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq",'
+    '"endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558",'
+    '"buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}',
     "--enable-prefix-caching",
     "--enable-prompt-tokens-details",
     "--no-enable-flashinfer-autotune",
@@ -213,15 +216,43 @@ def validate(document: dict[str, Any]) -> None:
         fail("load balancer does not target exactly the two TP4 engines")
     if environment.get("RJ_UPSTREAM_TOKEN") != "validator-token":
         fail("engine and load-balancer bearer authority differ")
-    for key in ("RJ_TOKENIZER_MODE", "RJ_EXACT_ROUTE_MODE", "RJ_KV_EVENT_MODE"):
-        if environment.get(key) != "off":
-            fail(f"unqualified routing authority is enabled: {key}")
+    exact_shape = {
+        "RJ_TOKENIZER_MODE": "local-shadow",
+        "RJ_TOKENIZER_PATH": "/models/qwen38-flash-next/tokenizer.json",
+        "RJ_TOKENIZER_SHA256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+        "RJ_CHAT_TEMPLATE_PATH": "/models/qwen38-flash-next/tokenizer_config.json",
+        "RJ_CHAT_TEMPLATE_SHA256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+        "RJ_EXACT_ROUTE_MODE": "placement",
+        "RJ_EXACT_ROUTE_MANIFEST_PATH": "/compat/qwen38-flash-next-r134.json",
+        "RJ_EXACT_ROUTE_MANIFEST_SHA256": "a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67",
+        "RJ_EXACT_ROUTE_MIN_GAIN_TOKENS": "8192",
+        "RJ_EXACT_ROUTE_MAX_LOAD_DELTA": "0",
+        "RJ_EXACT_ROUTE_CANARY_BPS": "0",
+        "RJ_EXACT_ROUTE_CANARY_KEY": "",
+        "RJ_KV_EVENT_MODE": "shadow",
+        "RJ_KV_EVENT_LIVE_ENDPOINTS": "tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557",
+        "RJ_KV_EVENT_REPLAY_ENDPOINTS": "tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558",
+    }
+    for key, value in exact_shape.items():
+        if environment.get(key) != value:
+            fail(f"exact routing authority changed: {key}")
     if environment.get("RJ_UPSTREAM_ADMISSION_MODE") != "http":
         fail("unqualified compatibility admission is enabled")
     if environment.get("RJ_TOKENIZER_PROFILE") != "qwen3.8-flash-next":
         fail("load balancer does not select the Flash-Next renderer profile")
     if environment.get("RJ_MAX_TOKENS_STRIP") != "0":
         fail("load balancer can silently strip a valid Flash-Next output budget")
+    mounts = {
+        mount.get("target"): mount
+        for mount in load_balancer.get("volumes", [])
+    }
+    for target in (
+        "/models/qwen38-flash-next/tokenizer.json",
+        "/models/qwen38-flash-next/tokenizer_config.json",
+    ):
+        mount = mounts.get(target, {})
+        if mount.get("read_only") is not True:
+            fail(f"exact routing artifact is not mounted read-only: {target}")
     for key, value in ROUTING_SHAPE.items():
         if environment.get(key) != value:
             fail(f"load balancer routing shape changed: {key}")
