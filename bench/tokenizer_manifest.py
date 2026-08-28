@@ -28,6 +28,7 @@ MODEL = sys.argv[2]
 ENGINE_IMAGE_DIGEST = sys.argv[3]
 TOKENIZER_PATH = sys.argv[4]
 TOKEN = os.environ.get("BENCH_TOKEN") or os.environ.get("VLLM_API_KEY")
+RENDERER_PROFILE = os.environ.get("TOKENIZER_PROFILE", "deepseek-v4-r34")
 if not TOKEN:
     raise SystemExit("set BENCH_TOKEN or VLLM_API_KEY")
 
@@ -103,6 +104,37 @@ ADMITTED_REQUEST_CLASSES = [
     "reasoning_medium",
     "thinking_disabled",
 ]
+
+if RENDERER_PROFILE == "qwen3.8-flash-next":
+    CASES = {
+        "plain": CASES["plain"],
+        "system_multiturn": CASES["system_multiturn"],
+        "reasoning_low": CASES["reasoning_low"],
+        "reasoning_medium": CASES["reasoning_medium"],
+        "reasoning_xhigh": {
+            "messages": [
+                {"role": "user", "content": "Compare two routing scores."}
+            ],
+            "reasoning_effort": "xhigh",
+        },
+        "thinking_disabled": {
+            "messages": [
+                {"role": "user", "content": "Return one short sentence."}
+            ],
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+        "normalized_content": CASES["normalized_content"],
+    }
+    ADMITTED_REQUEST_CLASSES = [
+        "plain",
+        "system_multiturn",
+        "reasoning_low",
+        "reasoning_medium",
+        "reasoning_xhigh",
+        "thinking_disabled",
+    ]
+elif RENDERER_PROFILE != "deepseek-v4-r34":
+    raise SystemExit(f"unsupported TOKENIZER_PROFILE: {RENDERER_PROFILE}")
 
 
 def request(method, path, payload=None):
@@ -186,7 +218,7 @@ manifest = {
         "image_digest": ENGINE_IMAGE_DIGEST,
     },
     "tokenizer": {"sha256": tokenizer_sha256},
-    "renderer": {"profile": "deepseek-v4-r34"},
+    "renderer": {"profile": RENDERER_PROFILE},
     "admitted_request_classes": ADMITTED_REQUEST_CLASSES,
     "goldens": goldens,
 }

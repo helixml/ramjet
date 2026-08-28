@@ -1153,4 +1153,24 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn committed_qwen38_flash_next_manifest_is_structurally_valid() {
+        let bytes = include_bytes!("../compat/qwen38-flash-next-r134.json");
+        let manifest: CompatibilityManifest = serde_json::from_slice(bytes).unwrap();
+        manifest
+            .validate(
+                "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+                "qwen3.8-flash-next",
+            )
+            .unwrap();
+        assert_eq!(manifest.goldens.len(), 7);
+        assert_eq!(manifest.admitted_request_classes.len(), 6);
+        assert!(
+            !manifest
+                .admitted_request_classes
+                .iter()
+                .any(|class| class == "tools_declared")
+        );
+    }
 }

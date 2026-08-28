@@ -41,6 +41,8 @@ services:
       - "100.89.187.17:8007:9090"
     volumes:
       - /var/lib/ramjet-machineview:/machineview
+      - ${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}/tokenizer.json:/models/qwen38-flash-next/tokenizer.json:ro
+      - ${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}/tokenizer_config.json:/models/qwen38-flash-next/tokenizer_config.json:ro
     # The host telemetry agent is intentionally bound only to the established
     # node06 bridge gateway. Retain that observation-only path when Compose
     # ownership moves from the old Qwen stack to this deployment.
@@ -80,9 +82,22 @@ services:
       RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY:-1024}
       RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA:-1}
       RJ_ROUTE_JOURNAL: ${RJ_ROUTE_JOURNAL:-true}
-      RJ_TOKENIZER_MODE: "off"
+      RJ_TOKENIZER_MODE: local-shadow
       RJ_TOKENIZER_PROFILE: qwen3.8-flash-next
-      RJ_EXACT_ROUTE_MODE: "off"
+      RJ_TOKENIZER_PATH: /models/qwen38-flash-next/tokenizer.json
+      RJ_TOKENIZER_SHA256: 0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3
+      RJ_CHAT_TEMPLATE_PATH: /models/qwen38-flash-next/tokenizer_config.json
+      RJ_CHAT_TEMPLATE_SHA256: b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27
+      RJ_EXACT_ROUTE_MODE: placement
+      RJ_EXACT_ROUTE_MANIFEST_PATH: /compat/qwen38-flash-next-r134.json
+      RJ_EXACT_ROUTE_MANIFEST_SHA256: a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67
+      RJ_EXACT_ROUTE_MIN_GAIN_TOKENS: ${RJ_EXACT_ROUTE_MIN_GAIN_TOKENS:-8192}
+      RJ_EXACT_ROUTE_MAX_LOAD_DELTA: ${RJ_EXACT_ROUTE_MAX_LOAD_DELTA:-0}
+      # The committed deployment is fail-closed at a zero placement cohort.
+      # node06 promotes this through its protected .env only after live event
+      # replay and comparison gates pass; zero is the instant rollback.
+      RJ_EXACT_ROUTE_CANARY_BPS: ${RJ_EXACT_ROUTE_CANARY_BPS:-0}
+      RJ_EXACT_ROUTE_CANARY_KEY: ${RJ_EXACT_ROUTE_CANARY_KEY:-}
       RJ_UPSTREAM_ADMISSION_MODE: http
       # After a replica has failed readiness, require three successful probes
       # spanning 30 seconds before it can rejoin placement. No synthetic probe
@@ -90,9 +105,9 @@ services:
       RJ_UPSTREAM_WARMUP_MODE: ${RJ_UPSTREAM_WARMUP_MODE:-enforce}
       RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES: ${RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES:-3}
       RJ_UPSTREAM_WARMUP_STABLE_SECONDS: ${RJ_UPSTREAM_WARMUP_STABLE_SECONDS:-30}
-      RJ_KV_EVENT_MODE: "off"
-      RJ_KV_EVENT_LIVE_ENDPOINTS: ""
-      RJ_KV_EVENT_REPLAY_ENDPOINTS: ""
+      RJ_KV_EVENT_MODE: shadow
+      RJ_KV_EVENT_LIVE_ENDPOINTS: tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557
+      RJ_KV_EVENT_REPLAY_ENDPOINTS: tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558
       RJ_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
       RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json
       RJ_IDLE_DRAIN_MODE: ${RJ_IDLE_DRAIN_MODE:-observe}
@@ -130,6 +145,7 @@ services:
       - --max-num-seqs=${MAX_NUM_SEQS:-64}
       - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}
       - --speculative-config={"method":"mtp","num_speculative_tokens":3,"index_share_for_mtp_iteration":true}
+      - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
       - --no-enable-flashinfer-autotune
@@ -163,6 +179,7 @@ services:
       - --max-model-len=${MAX_MODEL_LEN:-262144}
       - --max-num-seqs=${MAX_NUM_SEQS:-64}
       - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}
+      - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
       - --no-enable-flashinfer-autotune

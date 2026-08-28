@@ -91,6 +91,21 @@ class QwenFlashNextComposeTests(unittest.TestCase):
         with self.assertRaisesRegex(validator.ValidationError, "output budget"):
             validator.validate(changed)
 
+    def test_exact_placement_defaults_to_a_zero_cohort(self):
+        changed = copy.deepcopy(self.document)
+        changed["services"]["ds4-loadbalancer"]["environment"][
+            "RJ_EXACT_ROUTE_CANARY_BPS"
+        ] = "100"
+        with self.assertRaisesRegex(validator.ValidationError, "exact routing authority"):
+            validator.validate(changed)
+
+    def test_engine_kv_event_publisher_is_required(self):
+        changed = copy.deepcopy(self.document)
+        command = changed["services"]["qwen38flashnext-b"]["command"]
+        command[:] = [argument for argument in command if "kv-events-config" not in argument]
+        with self.assertRaisesRegex(validator.ValidationError, "required serving arguments"):
+            validator.validate(changed)
+
     def test_machineview_bridge_drift_fails(self):
         changed = copy.deepcopy(self.document)
         changed["networks"]["machineview-host"]["name"] = "unbound-bridge"
