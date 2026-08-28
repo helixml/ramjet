@@ -18,6 +18,16 @@ the recorded runtime/package capture, correctness, and performance qualification
 establish this deployment without inventing missing image-source provenance.
 Do not turn the recipe page into an authority claim.
 
+The recipe's Inferact NVFP4 alternative was also checked at immutable revision
+`103a7608316173ca6edd49929544244de7ffda70`. Its complete max-seqs-16,
+Marlin-MoE, non-speculative recipe passed agent, tool, reasoning, deep-context,
+multimodal, and greedy correctness, and increased KV capacity to 3,559,245
+tokens. It nevertheless delivered 7–46% less 256-token aggregate throughput
+than the production FP8/MTP3 shape across c1/c8/c16/c32, with a two-wave c32
+queue. It is rejected as a deployment recipe. This is not a weight-only claim:
+the candidate intentionally qualified the upstream recipe as published. See
+the 2026-08-28 NVFP4 entry in `EXPERIMENTS.md`.
+
 Production now uses both TP4 engines: A on GPUs 0-3 and B on GPUs 4-7. The
 load balancer is owned by this Compose project and reports 2/2 HTTP admission.
 Both engines independently passed direct identity, deterministic agent/tool,
