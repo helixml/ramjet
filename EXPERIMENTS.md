@@ -1,5 +1,41 @@
 # node06 experiment journal
 
+## 2026-08-29 — topology transition dialog and LB-only rollout
+
+Ramjet commit `d1f8772` was built and transferred as
+`rust-r140-transition-dialog-d1f8772`, image ID
+`sha256:9b52bc178f6e6832afa0b368265bd133f484265206df50a1480a8d801e5cd86e`.
+The native browser confirmation was replaced by an accessible dashboard modal
+that visualizes the current and target GPU shapes, calls out the expected
+serving interruption, explains the four transition stages, traps focus, and
+keeps API errors in context for a safe retry.
+
+The rendered candidate differed from r139 only by the LB image. The common
+deployment lock covered each LB-only replacement and verification. Two early
+verification attempts deliberately rolled back to r139: the first expected the
+health endpoint's obsolete plain-text shape, and the second incorrectly
+asserted `manual` while the durable controller state was already `auto`. The
+corrected attempt preserved that live mode and admitted r140. These were
+verification-script assertions, not service failures; both TP4 engine IDs and
+their zero restart counts remained unchanged through all attempts, and the TP8
+candidate remained stopped.
+
+Unauthenticated machine-view, adaptive-status, and audit reads returned 401;
+an authenticated session read `split-tp4`, `idle`, and the preserved `auto`
+mode. The production bundle contains `Reconfigure engine topology?`, contains
+no native `window.confirm`, and does not expose `RJ_UPSTREAM_TOKEN`. One
+10-input/1-output-token request passed under thermal guard run
+`96b3146977fd4e835cc82ac7ef501a49`; maximum intake air was 38C. Final health
+was `ok`, upstream gauges were 1/1/0 for TP4 A, TP4 B, and the stopped TP8
+candidate, and recent logs contained no fatal marker.
+
+The admitted Compose and adaptive-policy SHA-256 values remain
+`083c455b8da0c91acc9e4c995c313c1e60e9831cf767637868ca6d3ad72a51d5`
+and `39bbd0f4ca311ae431f7cbf6e9230510c0ce1beaea0e9fe9ee58dd57bd6c6b8a`.
+Owner-only evidence is retained below
+`.experiments/transition-dialog-d1f8772-r3/`; the two fail-safe attempts are
+retained beside it.
+
 ## 2026-08-29 — authenticated and audited adaptive control surface
 
 Ramjet commit `fd2ef97` was built and transferred as

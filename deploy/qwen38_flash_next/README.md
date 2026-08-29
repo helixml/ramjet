@@ -11,7 +11,7 @@ The checkpoint and image are immutable inputs:
 - model payload: 185,502,232,570 bytes across 131 safetensors shards
 - linux/amd64 vLLM image: `sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
 - released ramjet Compose default: `v0.4.0@sha256:467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b`
-- node06-qualified live ramjet image: `rust-r139-ui-auth-audit-fd2ef97@sha256:09306f3ea029d6d125b1d3451fe6a40d6de4652077c6992ba677e691175f475f`
+- node06-qualified live ramjet image: `rust-r140-transition-dialog-d1f8772@sha256:9b52bc178f6e6832afa0b368265bd133f484265206df50a1480a8d801e5cd86e`
 - exact-route manifest: `compat/qwen38-flash-next-r134.json`, SHA-256 `a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67`
 
 The day-zero vLLM image config labels its source/build revision as `unknown`.
