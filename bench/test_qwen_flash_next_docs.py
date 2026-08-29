@@ -27,6 +27,8 @@ class QwenFlashNextDocumentationTests(unittest.TestCase):
             "defaults `RJ_EXACT_ROUTE_CANARY_BPS` to the qualified",
             "full cohort of `10000`",
             "A missing key fails during Compose rendering",
+            "POST /api/adaptive/rollback",
+            "Retry rollback",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, readme)

@@ -17,6 +17,10 @@
   manual/recommend/auto modes are explicit, and every configured transition
   publishes its downtime requirement and estimate. Target startup uses the
   ordinary health/warmup gates and failures attempt an automatic rollback.
+- Transition intent and every destructive phase are durably journaled before
+  Docker mutation. A restart with an unfinished journal fences all profiles,
+  keeps the dashboard available, and exposes an authenticated retry-rollback
+  action that can restore the exact previously committed profile.
 - Machine view adds an animated SVG Topology screen with per-GPU engine
   grouping, token ingress/egress, GPU utilization, normalized serving load,
   profile controls, a persistent authenticated session, and change history.

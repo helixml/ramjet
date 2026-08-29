@@ -412,3 +412,7 @@ export function startAdaptiveTransition(
 ): Promise<AdaptiveStatus> {
   return postAdaptive("/api/adaptive/transition", { profile })
 }
+
+export function retryAdaptiveRollback(): Promise<AdaptiveStatus> {
+  return postAdaptive("/api/adaptive/rollback", {})
+}

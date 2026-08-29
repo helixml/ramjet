@@ -52,8 +52,11 @@ The TP8 service is behind Compose profile `adaptive`. Deployment must run
 `docker compose --profile adaptive create qwen38flashnext-tp8` while the TP4
 pair remains live; it must not start the candidate. The controller fails its
 own startup unless all three containers already exist, carry the exact
-adaptive profile/upstream labels, use the pinned image ID and exact GPU set,
-and only the configured active profile is running.
+adaptive profile/upstream labels, and use the pinned image ID and exact GPU
+set. In stable state only the configured active profile may be running. An
+unfinished durable transition journal is the sole exception: Ramjet then
+fences every profile and exposes only an exact retry rollback to the committed
+source shape.
 
 The load balancer mounts `/var/run/docker.sock`, which is root-equivalent.
 Its code authority is therefore intentionally narrower than the socket: only
@@ -89,7 +92,12 @@ members and drains dispatched requests before stopping engines, reports zero
 active capacity so new work fails fast, waits for the target's normal HTTP and
 warmup admission to remain stable, then admits it. A failed target start
 automatically attempts to restore Twin Cruise. Manual recovery uses the same
-common lock and immutable Compose inputs.
+common lock and immutable Compose inputs. Transition intent plus every
+destructive phase is atomically journaled before mutation; after a controller
+restart the Topology page keeps routing fenced and offers `Retry rollback` for
+the exact committed source profile rather than guessing from container state.
+That action calls authenticated `POST /api/adaptive/rollback`; it accepts no
+container or profile selector.
 
 Every future mutation must hold `/run/lock/ramjet-node06-deployment.lock` and
 retain an owner-only evidence journal below `.experiments/`. Roll back one TP4

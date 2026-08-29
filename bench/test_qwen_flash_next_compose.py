@@ -112,6 +112,7 @@ class QwenFlashNextComposeTests(unittest.TestCase):
     def test_compose_render_without_the_exact_key_fails_closed(self):
         environment = os.environ.copy()
         environment.pop("RJ_EXACT_ROUTE_CANARY_KEY", None)
+        environment["RJ_UI_AUTH_TOKEN"] = "test-ui-authority-not-a-real-secret"
         completed = subprocess.run(
             [
                 "docker",
