@@ -71,6 +71,7 @@ function buildSamples(): Sample[] {
     samples.push({
       t,
       host: {
+        intake_temp_c: 38 + Math.sin(i / 11) * 1.5,
         cpu_pct: Math.min(100, 6 + load * 38 + burst * 20 + random() * 6),
         load1: 2 + load * 30 + random() * 2,
         mem_total_bytes: 1024 * 2 ** 30,

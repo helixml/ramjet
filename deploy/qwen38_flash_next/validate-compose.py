@@ -12,6 +12,7 @@ from typing import Any
 
 HERE = pathlib.Path(__file__).resolve().parent
 COMPOSE = HERE / "docker-compose.yaml"
+ADAPTIVE_CONFIG = HERE / "adaptive-config.json"
 MODEL_REPOSITORY = "Qwen/Qwen3.8-Flash-Next-FP8"
 MODEL_REVISION = "bcd9f01ddc9cff2316eb84281bebcd5b058bddce"
 MODEL_SOURCE = "/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c"
@@ -37,7 +38,7 @@ ROUTING_SHAPE = {
     "RJ_ROUTE_DECODE_MAX_LOAD_UNITS": "4",
     "RJ_ROUTE_PROJECTED_LOAD": "false",
     "RJ_ROUTE_SPECULATION_MODE": "prefer",
-    "RJ_ROUTE_SPECULATION_PROFILES": "mtp,standard",
+    "RJ_ROUTE_SPECULATION_PROFILES": "mtp,standard,mtp",
     "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE": "prefer",
     "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MIN_BLOCKS": "8",
     "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY": "1024",
@@ -52,12 +53,27 @@ ENGINE_SHAPE = {
         "gpus": ["0", "1", "2", "3"],
         "port": "8040",
         "profile": "mtp",
+        "adaptive_profile": "split-tp4",
+        "upstream": "0",
+        "tp": "4",
     },
     "qwen38flashnext-b": {
         "cpuset": "12-23,36-47",
         "gpus": ["4", "5", "6", "7"],
         "port": "8041",
         "profile": "standard",
+        "adaptive_profile": "split-tp4",
+        "upstream": "1",
+        "tp": "4",
+    },
+    "qwen38flashnext-tp8": {
+        "cpuset": "0-47",
+        "gpus": [str(index) for index in range(8)],
+        "port": "8042",
+        "profile": "mtp",
+        "adaptive_profile": "unified-tp8",
+        "upstream": "2",
+        "tp": "8",
     },
 }
 REQUIRED_ARGUMENTS = {
@@ -65,7 +81,6 @@ REQUIRED_ARGUMENTS = {
     "--served-model-name=qwen3.8-flash-next",
     "--revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce",
     "--tokenizer-revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce",
-    "--tensor-parallel-size=4",
     "--enable-expert-parallel",
     "--gpu-memory-utilization=0.90",
     "--kv-cache-memory=40190174004",
@@ -102,7 +117,10 @@ def render() -> dict[str, Any]:
         }
     )
     completed = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE), "config", "--format", "json"],
+        [
+            "docker", "compose", "-f", str(COMPOSE),
+            "--profile", "adaptive", "config", "--format", "json",
+        ],
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -144,6 +162,10 @@ def validate_engine(name: str, service: dict[str, Any]) -> None:
         fail(f"{name} model repository label changed")
     if labels.get("ai.ramjet.model.revision") != MODEL_REVISION:
         fail(f"{name} model revision label changed")
+    if labels.get("com.helixml.ramjet.adaptive-profile") != expected["adaptive_profile"]:
+        fail(f"{name} adaptive profile label changed")
+    if labels.get("com.helixml.ramjet.adaptive-upstream") != expected["upstream"]:
+        fail(f"{name} adaptive upstream label changed")
 
     model_mount = only_mount(service, "/workspace/model")
     if (
@@ -173,6 +195,8 @@ def validate_engine(name: str, service: dict[str, Any]) -> None:
     arguments = service.get("command", [])
     if not REQUIRED_ARGUMENTS.issubset(set(arguments)):
         fail(f"{name} required serving arguments changed")
+    if f'--tensor-parallel-size={expected["tp"]}' not in arguments:
+        fail(f"{name} tensor-parallel shape changed")
     if any(argument.split("=", 1)[0] == "--api-key" for argument in arguments):
         fail(f"{name} exposes bearer authority in the serving argv")
     speculative = [argument for argument in arguments if "speculative" in argument]
@@ -190,6 +214,13 @@ def validate_engine(name: str, service: dict[str, Any]) -> None:
         fail(f"{name} bearer authority differs from the load balancer")
     if environment.get("VLLM_PLE_CPU_OFFLOAD") != "0":
         fail(f"{name} enables unqualified host-memory PLE offload")
+    # NVIDIA remaps the requested physical devices to container-local ordinal
+    # 0..N-1; the process-level visibility list names those local ordinals.
+    expected_cuda = ",".join(str(index) for index in range(len(expected["gpus"])))
+    if environment.get("CUDA_VISIBLE_DEVICES") != expected_cuda:
+        fail(f"{name} CUDA visibility differs from its GPU assignment")
+    if name == "qwen38flashnext-tp8" and service.get("profiles") != ["adaptive"]:
+        fail("TP8 candidate is not isolated behind the adaptive Compose profile")
 
 
 def validate(document: dict[str, Any]) -> None:
@@ -213,9 +244,10 @@ def validate(document: dict[str, Any]) -> None:
         fail("load-balancer rollback pin changed")
     environment = load_balancer.get("environment", {})
     if environment.get("RJ_UPSTREAM") != (
-        "http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000"
+        "http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000,"
+        "http://qwen38flashnext-tp8:8000"
     ):
-        fail("load balancer does not target exactly the two TP4 engines")
+        fail("load balancer does not target the two TP4 engines plus fenced TP8 candidate")
     if environment.get("RJ_UPSTREAM_TOKEN") != "validator-token":
         fail("engine and load-balancer bearer authority differ")
     exact_shape = {
@@ -232,8 +264,9 @@ def validate(document: dict[str, Any]) -> None:
         "RJ_EXACT_ROUTE_CANARY_BPS": "10000",
         "RJ_EXACT_ROUTE_CANARY_KEY": EXACT_CANARY_KEY,
         "RJ_KV_EVENT_MODE": "shadow",
-        "RJ_KV_EVENT_LIVE_ENDPOINTS": "tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557",
-        "RJ_KV_EVENT_REPLAY_ENDPOINTS": "tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558",
+        "RJ_KV_EVENT_LIVE_ENDPOINTS": "tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557,tcp://qwen38flashnext-tp8:5557",
+        "RJ_KV_EVENT_REPLAY_ENDPOINTS": "tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558,tcp://qwen38flashnext-tp8:5558",
+        "RJ_ADAPTIVE_CONFIG_PATH": "/etc/ramjet/adaptive-config.json",
     }
     for key, value in exact_shape.items():
         if environment.get(key) != value:
@@ -255,9 +288,39 @@ def validate(document: dict[str, Any]) -> None:
         mount = mounts.get(target, {})
         if mount.get("read_only") is not True:
             fail(f"exact routing artifact is not mounted read-only: {target}")
+    adaptive_mounts = {
+        "/etc/ramjet/adaptive-config.json": (str(ADAPTIVE_CONFIG), True),
+        "/var/run/docker.sock": ("/var/run/docker.sock", False),
+        "/run/lock/ramjet-node06-deployment.lock": (
+            "/run/lock/ramjet-node06-deployment.lock", False
+        ),
+        "/var/lib/ramjet-adaptive": ("/var/lib/ramjet-adaptive", False),
+    }
+    for target, (source, read_only) in adaptive_mounts.items():
+        mount = mounts.get(target, {})
+        if mount.get("source") != source or bool(mount.get("read_only")) != read_only:
+            fail(f"adaptive authority mount changed: {target}")
     for key, value in ROUTING_SHAPE.items():
         if environment.get(key) != value:
             fail(f"load balancer routing shape changed: {key}")
+    adaptive = json.loads(ADAPTIVE_CONFIG.read_text(encoding="utf-8"))
+    if adaptive.get("mode") != "manual" or adaptive.get("active_profile") != "split-tp4":
+        fail("adaptive rollout must start manual on the qualified TP4 profile")
+    profile_engines = {
+        profile["id"]: profile["engines"] for profile in adaptive.get("profiles", [])
+    }
+    if set(profile_engines) != {"split-tp4", "unified-tp8"}:
+        fail("adaptive profile set changed")
+    configured = {
+        engine["container"]: (str(engine["upstream"]), [str(gpu) for gpu in engine["gpus"]])
+        for engines in profile_engines.values()
+        for engine in engines
+    }
+    expected_configured = {
+        name: (shape["upstream"], shape["gpus"]) for name, shape in ENGINE_SHAPE.items()
+    }
+    if configured != expected_configured:
+        fail("adaptive config no longer matches Compose engine authority")
 
     if set(load_balancer.get("networks", {})) != {"default", "machineview-host"}:
         fail("load balancer lost its serving or host-telemetry network")
@@ -277,8 +340,8 @@ def main() -> int:
         print(str(error))
         return 1
     print(
-        "Qwen3.8-Flash-Next Compose validation passed: mixed-profile TP4 pair "
-        "with pinned tokenizer and live/replay KV-event authority"
+        "Qwen3.8-Flash-Next Compose validation passed: adaptive TP4-pair/TP8 "
+        "profiles with pinned controller and live/replay KV-event authority"
     )
     return 0
 

@@ -8,6 +8,7 @@ import { ChartCard, type ChartCardProps } from "@/components/ChartCard"
 import { HeatmapCard, buildScale } from "@/components/Heatmap"
 import { dayGrid, hourGrid, totals } from "@/lib/tokens"
 import { GpuGrid } from "@/components/GpuGrid"
+import { AdaptiveTopology } from "@/components/AdaptiveTopology"
 import { Meter } from "@/components/Meter"
 import { TabBar, useTabs, type TabDef } from "@/components/Tabs"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -94,6 +95,7 @@ function toRow(sample: Sample): Row {
 
 const TABS: TabDef[] = [
   { id: "overview", label: "Overview" },
+  { id: "topology", label: "Topology" },
   { id: "serving", label: "Serving" },
   { id: "gpus", label: "GPUs" },
   { id: "system", label: "System" },
@@ -715,6 +717,13 @@ export default function App() {
       ) : null}
 
       {tab === "serving" ? <ChartGrid cards={servingCards} loading={loading} /> : null}
+
+      {tab === "topology" ? (
+        <AdaptiveTopology
+          gpus={latest?.gpus ?? []}
+          intake={latestHost?.intake_temp_c ?? null}
+        />
+      ) : null}
 
       {tab === "gpus" ? (
         <>

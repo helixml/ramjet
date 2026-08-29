@@ -14,7 +14,7 @@ use axum::{
     http::{HeaderMap, HeaderName, Method, Request, Response, StatusCode, Uri},
 };
 use futures_util::StreamExt;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -156,6 +156,15 @@ struct Inner {
     /// measured from. Absent unless the policy is enabled, so the default build
     /// carries no extra per-request work.
     idle_drain: Option<IdleDrainState>,
+    /// Membership authority owned by the embedded adaptive controller.
+    ///
+    /// This is deliberately separate from reachability and idle-drain state:
+    /// an inactive topology can remain healthy while it is withheld, and an
+    /// idle-drain tick must never accidentally admit it.
+    topology_active: RwLock<Vec<bool>>,
+    /// Serializes the two control-plane owners that publish the router's one
+    /// combined drain bit. It is never acquired on a request path.
+    routing_authority: Mutex<()>,
     /// Monotonic origin for the serving-liveness clock below. Separate from the
     /// idle-drain origin because that state is absent in the default build.
     origin: Instant,
@@ -196,6 +205,9 @@ impl Inner {
 struct IdleDrainState {
     policy: Mutex<IdleDrainPolicy>,
     origin: Instant,
+    /// Last fence published by idle-drain, kept separate from the router's
+    /// combined fence so topology changes can never confuse the two owners.
+    fenced: Mutex<Vec<bool>>,
     /// This balancer's belief about each replica's sleep state.
     ///
     /// Held separately from the policy because it survives policy decisions:
@@ -216,6 +228,7 @@ struct HealthResponse {
     status: &'static str,
     admission_mode: &'static str,
     healthy_replicas: usize,
+    active_replicas: usize,
     total_replicas: usize,
     replicas: Vec<ReplicaHealth>,
 }
@@ -223,6 +236,7 @@ struct HealthResponse {
 #[derive(Serialize)]
 struct ReplicaHealth {
     index: usize,
+    active: bool,
     healthy: bool,
     reliability_state: &'static str,
     quarantined: bool,
@@ -941,6 +955,7 @@ impl Proxy {
                     0,
                 )),
                 origin,
+                fenced: Mutex::new(vec![false; config.upstreams.len()]),
                 park: Mutex::new(vec![ParkState::Awake; config.upstreams.len()]),
             }
         });
@@ -950,6 +965,7 @@ impl Proxy {
             })
             .collect::<Vec<_>>()
             .into();
+        let upstream_count = config.upstreams.len();
         Ok(Self {
             inner: Arc::new(Inner {
                 config,
@@ -965,6 +981,8 @@ impl Proxy {
                 dspark_guards,
                 dspark_guard_store,
                 idle_drain,
+                topology_active: RwLock::new(vec![true; upstream_count]),
+                routing_authority: Mutex::new(()),
                 origin: Instant::now(),
                 upstream_liveness,
                 failing_open: AtomicBool::new(false),
@@ -975,6 +993,107 @@ impl Proxy {
     #[must_use]
     pub fn router(&self) -> &Arc<Router> {
         &self.inner.router
+    }
+
+    #[must_use]
+    pub fn upstream_count(&self) -> usize {
+        self.inner.config.upstreams.len()
+    }
+
+    /// Atomically publishes the set of upstreams belonging to the serving
+    /// topology. Empty membership is valid during a drain/reconfiguration and
+    /// makes new requests fail fast while already-dispatched work completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an upstream index is out of range or duplicated.
+    pub fn set_topology_active(&self, active: &[usize]) -> anyhow::Result<()> {
+        let _authority = self.inner.routing_authority.lock();
+        let mut next = vec![false; self.inner.config.upstreams.len()];
+        for &upstream in active {
+            let slot = next
+                .get_mut(upstream)
+                .with_context(|| format!("adaptive upstream index {upstream} is out of range"))?;
+            if *slot {
+                anyhow::bail!("adaptive upstream index {upstream} is duplicated");
+            }
+            *slot = true;
+        }
+        let drained = next
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(upstream, active)| {
+                let idle_fenced = self.inner.idle_drain.as_ref().is_some_and(|state| {
+                    state.fenced.lock().get(upstream).copied().unwrap_or(false)
+                });
+                let park_fenced = self.park_state(upstream).must_fence();
+                !active || idle_fenced || park_fenced
+            })
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            self.inner.router.set_drained_mask(&drained),
+            "adaptive topology cardinality no longer matches router"
+        );
+        self.inner.topology_active.write().clone_from(&next);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn topology_active(&self, upstream: usize) -> bool {
+        self.inner
+            .topology_active
+            .read()
+            .get(upstream)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    #[must_use]
+    pub fn total_inflight(&self) -> usize {
+        (0..self.inner.config.upstreams.len())
+            .map(|upstream| self.inner.router.inflight(upstream))
+            .sum()
+    }
+
+    #[must_use]
+    pub fn total_load_units(&self) -> usize {
+        (0..self.inner.config.upstreams.len())
+            .filter_map(|upstream| self.inner.router.state(upstream))
+            .map(|(_, load, _, _)| load)
+            .sum()
+    }
+
+    /// Serving readiness for one configured upstream, independent of adaptive
+    /// topology membership. The controller uses this while a target remains
+    /// fenced during its cold start.
+    #[must_use]
+    pub fn upstream_ready(&self, upstream: usize) -> bool {
+        let Some(reliability) = self.inner.dspark_guards.get(upstream) else {
+            return false;
+        };
+        self.inner
+            .router
+            .state(upstream)
+            .is_some_and(|(_, _, _, healthy)| healthy)
+            && reliability.status().effective_healthy
+            && (self.inner.config.upstream_admission_mode != UpstreamAdmissionMode::Compatibility
+                || self
+                    .inner
+                    .tokenizer
+                    .compatibility_attested(upstream)
+                    .unwrap_or(false))
+            && self
+                .inner
+                .warmup_admission
+                .as_ref()
+                .is_none_or(|warmup| warmup.routing_ready(upstream))
+    }
+
+    /// Invalidates stale readiness before an engine process is stopped or
+    /// restarted. A later ordinary probe is the only path that restores it.
+    pub fn mark_upstream_unavailable(&self, upstream: usize) {
+        self.inner.router.set_healthy(upstream, false);
     }
 
     /// Start the bounded comparison phase after all marked serving requests
@@ -1004,7 +1123,7 @@ impl Proxy {
     /// Reports aggregate readiness and every replica's serving state without
     /// exposing upstream hostnames. One healthy replica is sufficient to
     /// serve, but the response is marked degraded until all are healthy.
-    #[allow(clippy::unused_async)] // Axum handlers return futures.
+    #[allow(clippy::too_many_lines, clippy::unused_async)] // Axum handlers return futures.
     pub async fn health(State(proxy): State<Self>) -> Response<Body> {
         let replicas = (0..proxy.inner.config.upstreams.len())
             .filter_map(|index| {
@@ -1063,6 +1182,7 @@ impl Proxy {
                         });
                         ReplicaHealth {
                             index,
+                            active: proxy.topology_active(index),
                             healthy,
                             reliability_state: reliability.state.label(),
                             quarantined: reliability.quarantined,
@@ -1078,16 +1198,21 @@ impl Proxy {
                 )
             })
             .collect::<Vec<_>>();
-        let healthy_replicas = replicas.iter().filter(|replica| replica.healthy).count();
+        let active_replicas = replicas.iter().filter(|replica| replica.active).count();
+        let healthy_replicas = replicas
+            .iter()
+            .filter(|replica| replica.active && replica.healthy)
+            .count();
         let status = match healthy_replicas {
             0 => "unhealthy",
-            healthy if healthy == replicas.len() => "ok",
+            healthy if healthy == active_replicas => "ok",
             _ => "degraded",
         };
         let response = HealthResponse {
             status,
             admission_mode: upstream_admission_label(proxy.inner.config.upstream_admission_mode),
             healthy_replicas,
+            active_replicas,
             total_replicas: replicas.len(),
             replicas,
         };
@@ -1097,7 +1222,7 @@ impl Proxy {
             StatusCode::OK
         };
         let body = serde_json::to_vec(&response).unwrap_or_else(|_| {
-            br#"{"status":"unhealthy","admission_mode":"unknown","healthy_replicas":0,"total_replicas":0,"replicas":[]}"#.to_vec()
+            br#"{"status":"unhealthy","admission_mode":"unknown","healthy_replicas":0,"active_replicas":0,"total_replicas":0,"replicas":[]}"#.to_vec()
         });
         Response::builder()
             .status(code)
@@ -2123,7 +2248,8 @@ impl Proxy {
     /// The single routing-authority expression, shared with the simulation
     /// harness so a test cannot pass against a re-implementation of the rule.
     fn routing_fenced(&self, upstream: usize, intent: UpstreamIntent) -> bool {
-        crate::engine_park::fenced(intent, self.park_state(upstream))
+        !self.topology_active(upstream)
+            || crate::engine_park::fenced(intent, self.park_state(upstream))
     }
 
     /// This balancer's belief about one replica's sleep state.
@@ -2164,6 +2290,7 @@ impl Proxy {
         {
             return;
         }
+        let _authority = self.inner.routing_authority.lock();
         for (upstream, intent) in decision.upstreams.iter().enumerate() {
             self.inner
                 .router
@@ -2187,7 +2314,16 @@ impl Proxy {
     }
 
     fn publish_idle_drain(&self, decision: &IdleDrainDecision) {
+        let _authority = self.inner.routing_authority.lock();
         let metrics = &self.inner.metrics;
+        if let Some(state) = self.inner.idle_drain.as_ref() {
+            let mut fenced = state.fenced.lock();
+            for (upstream, intent) in decision.upstreams.iter().enumerate() {
+                if let Some(slot) = fenced.get_mut(upstream) {
+                    *slot = intent.fenced;
+                }
+            }
+        }
         metrics.idle_drain_fleet_idle.set(f64::from(decision.idle));
         metrics
             .idle_drain_load_per_replica
@@ -3342,6 +3478,51 @@ mod tests {
         assert!(!proxy.inner.router.drained(0));
         assert!(!proxy.inner.router.drained(1));
         assert!(proxy.inner.router.acquire_if_healthy(1, 1).is_some());
+    }
+
+    #[tokio::test]
+    async fn adaptive_topology_fence_survives_idle_drain_ticks() {
+        let proxy = idle_drain_proxy(&upstreams_pair(), "drain");
+        proxy.set_topology_active(&[0]).unwrap();
+        assert!(!proxy.inner.router.drained(0));
+        assert!(proxy.inner.router.drained(1));
+
+        advance_idle_drain(&proxy, 90_000);
+        advance_idle_drain(&proxy, 120_000);
+        assert!(
+            proxy.inner.router.drained(1),
+            "idle-drain must not admit an inactive topology member"
+        );
+
+        proxy.set_topology_active(&[1]).unwrap();
+        assert!(proxy.inner.router.drained(0));
+        assert!(
+            proxy.inner.router.drained(1),
+            "changing topology must preserve an independent idle-drain fence"
+        );
+
+        let observe = idle_drain_proxy(&upstreams_pair(), "observe");
+        observe.set_topology_active(&[0]).unwrap();
+        observe.set_topology_active(&[1]).unwrap();
+        assert!(!observe.inner.router.drained(1));
+    }
+
+    #[tokio::test]
+    async fn health_counts_only_active_topology_members() {
+        let proxy = proxy_for(&upstreams_pair());
+        proxy.router().set_healthy(0, true);
+        proxy.router().set_healthy(1, false);
+        proxy.set_topology_active(&[0]).unwrap();
+        let response = Proxy::health(State(proxy)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap())
+                .unwrap();
+        assert_eq!(body["healthy_replicas"], 1);
+        assert_eq!(body["active_replicas"], 1);
+        assert_eq!(body["total_replicas"], 2);
+        assert_eq!(body["replicas"][0]["active"], true);
+        assert_eq!(body["replicas"][1]["active"], false);
     }
 
     /// Records activity on the policy's injected clock. Production calls

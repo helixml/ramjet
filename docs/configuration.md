@@ -787,3 +787,88 @@ correctness.
 Journals contain sizes, opaque ordinals, route state, status, latency, and
 aggregate usage—not prompts, generated text, request IDs, cache keys, tokens,
 or upstream hostnames.
+
+## Adaptive engine topology
+
+`RJ_ADAPTIVE_CONFIG_PATH` enables the embedded topology controller. It is
+unset by default. Enabling it is a privileged deployment choice: the Ramjet
+container needs read/write access to the Docker Unix socket, a private durable
+state directory, and the same deployment-lock file used by host rollout
+scripts. The socket is root-equivalent; never expose the control API directly
+to an untrusted network.
+
+The controller can only inspect, start, and stop containers named in the
+mounted JSON file. Every container must already exist and pass all of these
+checks before Ramjet binds either listener:
+
+- an exact immutable `sha256:` image ID;
+- `com.helixml.ramjet.adaptive-profile` and
+  `com.helixml.ramjet.adaptive-upstream` labels;
+- the exact NVIDIA device assignment declared for the engine;
+- exactly one configured profile owning that container.
+
+It never creates, removes, pulls, restarts, or execs a container. API requests
+select only a configured profile ID and cannot provide Docker arguments.
+
+```json
+{
+  "version": 1,
+  "mode": "manual",
+  "active_profile": "split-tp4",
+  "state_path": "/var/lib/ramjet-adaptive/state.json",
+  "docker_socket": "/var/run/docker.sock",
+  "deployment_lock_path": "/run/lock/ramjet-deployment.lock",
+  "poll_seconds": 5,
+  "drain_timeout_seconds": 120,
+  "start_timeout_seconds": 900,
+  "stable_seconds": 15,
+  "profiles": [
+    {
+      "id": "split-tp4",
+      "label": "Twin Cruise",
+      "description": "Two TP4 engines for sustained throughput",
+      "engines": [
+        {"upstream": 0, "label": "A", "container": "engine-a", "image": "sha256:<64 hex>", "gpus": [0,1,2,3]},
+        {"upstream": 1, "label": "B", "container": "engine-b", "image": "sha256:<64 hex>", "gpus": [4,5,6,7]}
+      ]
+    },
+    {
+      "id": "unified-tp8",
+      "label": "Afterburner",
+      "description": "One TP8 engine for burst latency",
+      "engines": [
+        {"upstream": 2, "label": "Aero", "container": "engine-tp8", "image": "sha256:<64 hex>", "gpus": [0,1,2,3,4,5,6,7]}
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "from": "split-tp4", "to": "unified-tp8",
+      "automatic": true, "allow_downtime": true,
+      "estimated_downtime_seconds": 540,
+      "condition": {"metric": "requests_per_second", "comparison": "above", "threshold": 3.0, "for_seconds": 30}
+    }
+  ]
+}
+```
+
+Modes are `off`, `manual`, `recommend`, and `auto`. A transition is eligible
+for recommendation/automation only when `automatic` is true and its directional
+condition remains true for `for_seconds`. Metrics are
+`requests_per_second`, `inflight`, and `load_per_engine`; comparisons are
+`above` and `below`. An automatic transition that can interrupt serving must
+also set `allow_downtime: true`, otherwise startup fails closed.
+
+`GET /api/adaptive/status` is observation-only. `POST /api/adaptive/mode` and
+`POST /api/adaptive/transition` require the same bearer configured by
+`RJ_UPSTREAM_TOKEN`. The machine-view UI keeps that bearer only in page memory.
+It always shows whether a configured edge requires downtime and its operator
+estimate before enabling the action.
+
+During a reconfiguration Ramjet first takes the common deployment lock, fences
+every topology member, drains in-flight requests, stops the source engines,
+starts the target engines, and waits for ordinary health/admission to remain
+stable. New requests receive an immediate service-unavailable response while
+membership is empty. A failed start automatically attempts to restore the
+previous profile. Reachability continues to be probed independently, so an
+inactive engine is not reported as a failed engine.

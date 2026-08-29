@@ -7,8 +7,8 @@ import os
 import pathlib
 
 
-SOURCE_SHA256 = "3dea7929a5d66e31a6892e296ee53d95403210dcadf88d02441447760ea93d33"
-OUTPUT_SHA256 = "237ac9507c7d81dddc696dda339992aa236b6894b85bf6db6be4170d37b01dd8"
+SOURCE_SHA256 = "9baa2f394279d36f1a26d4cc137ad67ca6767bd5f724aa372a2f97f5065ac3dc"
+OUTPUT_SHA256 = "e45e0d65ace863a8404b9c841e94a3fddcd3537a768350f0876f03be81623e97"
 REVISION = "103a7608316173ca6edd49929544244de7ffda70"
 
 
@@ -24,6 +24,39 @@ def render(source):
     if hashlib.sha256(source).hexdigest() != SOURCE_SHA256:
         raise ValueError("canonical Qwen Compose bytes changed")
     text = source.decode()
+    # The rejected NVFP4 artifact remains a standalone, two-engine experiment;
+    # it must not inherit the production adaptive controller's Docker authority
+    # or TP8 service merely because its canonical source grew that feature.
+    adaptive_service = text.index(
+        "\n  # Created during deployment but left stopped. The embedded controller"
+    )
+    networks = text.index("\nnetworks:\n", adaptive_service)
+    text = text[:adaptive_service] + text[networks:]
+    for adaptive_line in (
+        "      - /var/lib/ramjet-adaptive:/var/lib/ramjet-adaptive\n",
+        "      - /var/run/docker.sock:/var/run/docker.sock\n",
+        "      - /run/lock/ramjet-node06-deployment.lock:/run/lock/ramjet-node06-deployment.lock\n",
+        "      - ${ADAPTIVE_CONFIG_PATH:-./adaptive-config.json}:/etc/ramjet/adaptive-config.json:ro\n",
+        "      RJ_ADAPTIVE_CONFIG_PATH: /etc/ramjet/adaptive-config.json\n",
+        "      com.helixml.ramjet.adaptive-upstream: \"0\"\n",
+        "      com.helixml.ramjet.adaptive-upstream: \"1\"\n",
+    ):
+        text = replace_exact(text, adaptive_line, "")
+    text = replace_exact(
+        text, "      com.helixml.ramjet.adaptive-profile: split-tp4\n", "", 2
+    )
+    text = replace_exact(
+        text,
+        "${RJ_UPSTREAM:-http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000,http://qwen38flashnext-tp8:8000}",
+        "${RJ_UPSTREAM:-http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000}",
+    )
+    text = replace_exact(
+        text,
+        "${RJ_ROUTE_SPECULATION_PROFILES:-mtp,standard,mtp}",
+        "${RJ_ROUTE_SPECULATION_PROFILES:-mtp,standard}",
+    )
+    text = replace_exact(text, ",tcp://qwen38flashnext-tp8:5557", "")
+    text = replace_exact(text, ",tcp://qwen38flashnext-tp8:5558", "")
     replacements = (
         (
             "# Qwen3.8-Flash-Next-FP8 on 8x RTX PRO 6000 Blackwell (SM120): two NUMA-local",

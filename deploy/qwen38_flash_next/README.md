@@ -2,7 +2,8 @@
 
 This directory is the canonical one-file deployment for the official
 `Qwen/Qwen3.8-Flash-Next-FP8` checkpoint on node06. It defines two NUMA-local
-TP4 engines and the existing ramjet load balancer. Do not add Compose overlays.
+TP4 engines, one default-stopped TP8 adaptive candidate, and the ramjet load
+balancer/controller. Do not add Compose overlays.
 
 The checkpoint and image are immutable inputs:
 
@@ -37,6 +38,44 @@ Both engines independently passed direct identity, deterministic agent/tool,
 code-decode, prefix-cache, long-context, and multimodal gates before pair
 admission. The temporary canary controller was removed after promotion so an
 obsolete action cannot silently restore the retired baseline.
+
+## Adaptive topology controller
+
+Ramjet owns the two named serving shapes in `adaptive-config.json`:
+
+- **Twin Cruise** — the qualified MTP3/standard TP4 pair, the initial and
+  rollback profile for sustained throughput and cache locality;
+- **Afterburner** — one MTP3 TP8 process spanning GPUs 0–7, intended for a
+  short burst-latency qualification before any automatic promotion.
+
+The TP8 service is behind Compose profile `adaptive`. Deployment must run
+`docker compose --profile adaptive create qwen38flashnext-tp8` while the TP4
+pair remains live; it must not start the candidate. The controller fails its
+own startup unless all three containers already exist, carry the exact
+adaptive profile/upstream labels, use the pinned image ID and exact GPU set,
+and only the configured active profile is running.
+
+The load balancer mounts `/var/run/docker.sock`, which is root-equivalent.
+Its code authority is therefore intentionally narrower than the socket: only
+inspect/start/stop of the three configured names, with no create, remove, pull,
+restart, or exec route. Both the host rollout scripts and the embedded
+controller flock `/run/lock/ramjet-node06-deployment.lock` before mutating the
+stack. `/var/lib/ramjet-adaptive` must be root-owned mode 0700; its atomically
+published state is mode 0600.
+
+The first rollout stays in `manual` mode. The two automatic edges are present
+and visible for soak/recommendation work but cannot act until an operator
+selects `auto` through the authenticated UI/API. Split→TP8 observes a short
+request-rate burst; TP8→split observes sustained in-flight work. Their initial
+thresholds are policy candidates, not qualified performance claims, and must
+be tuned from recorded traffic plus a guarded TP8 crossover.
+
+Every shape change has an estimated nine-minute outage. Ramjet fences all
+members and drains dispatched requests before stopping engines, reports zero
+active capacity so new work fails fast, waits for the target's normal HTTP and
+warmup admission to remain stable, then admits it. A failed target start
+automatically attempts to restore Twin Cruise. Manual recovery uses the same
+common lock and immutable Compose inputs.
 
 Every future mutation must hold `/run/lock/ramjet-node06-deployment.lock` and
 retain an owner-only evidence journal below `.experiments/`. Roll back one TP4
@@ -209,7 +248,7 @@ release. Every node06 `docker compose` invocation, including rollback and
 cleanup traps, must therefore carry the exact `LB_IMAGE` override; restoring
 the Compose file alone would select the older released default. The admitted
 node06 Compose SHA-256 is
-`3dea7929a5d66e31a6892e296ee53d95403210dcadf88d02441447760ea93d33`.
+`9baa2f394279d36f1a26d4cc137ad67ca6767bd5f724aa372a2f97f5065ac3dc`.
 
 The load balancer joins both the Flash serving network and the existing
 `qwen38_27b_default` bridge. The latter is observation-only: node06's host

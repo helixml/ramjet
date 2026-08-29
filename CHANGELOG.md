@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Adaptive engine topology
+
+- An optional controller inside the Ramjet process can drain routing and
+  switch between label-verified, pre-created Docker engine profiles. Its
+  Docker authority is limited to inspect/start/stop, profile state is durable,
+  manual/recommend/auto modes are explicit, and every configured transition
+  publishes its downtime requirement and estimate. Target startup uses the
+  ordinary health/warmup gates and failures attempt an automatic rollback.
+- Machine view adds an animated SVG Topology screen with per-GPU engine
+  grouping, intake airflow/temperature, live scaling signals, profile controls,
+  and an in-memory bearer prompt. The host agent reads only node-exporter's
+  `FP_TEMP` chassis-intake series.
+- The node06 Flash-Next Compose defines its qualified TP4 pair and a
+  default-stopped TP8 candidate as two named shapes. The controller and host
+  deployment tools share the same filesystem lock; the initial rollout stays
+  manual until the TP8 crossover and automatic thresholds are qualified.
+
 ## 0.4.0 — 2026-08-20
 
 ### Idle drain grows an actuator

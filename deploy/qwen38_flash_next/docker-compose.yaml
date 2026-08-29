@@ -4,11 +4,13 @@
 # TP4 vLLM engines behind ramjet. This is the whole deployment; do not add an
 # overlay. During qualification, start only the explicitly named canary engine.
 
+x-vllm-labels: &vllm-labels
+  ai.ramjet.model.repository: Qwen/Qwen3.8-Flash-Next-FP8
+  ai.ramjet.model.revision: bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+
 x-vllm-engine: &vllm-engine
   image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3}
-  labels:
-    ai.ramjet.model.repository: Qwen/Qwen3.8-Flash-Next-FP8
-    ai.ramjet.model.revision: bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+  labels: *vllm-labels
   entrypoint: ["vllm", "serve"]
   restart: ${ENGINE_RESTART_POLICY:-unless-stopped}
   ipc: host
@@ -41,6 +43,10 @@ services:
       - "100.89.187.17:8007:9090"
     volumes:
       - /var/lib/ramjet-machineview:/machineview
+      - /var/lib/ramjet-adaptive:/var/lib/ramjet-adaptive
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /run/lock/ramjet-node06-deployment.lock:/run/lock/ramjet-node06-deployment.lock
+      - ${ADAPTIVE_CONFIG_PATH:-./adaptive-config.json}:/etc/ramjet/adaptive-config.json:ro
       - ${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}/tokenizer.json:/models/qwen38-flash-next/tokenizer.json:ro
       - ${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}/tokenizer_config.json:/models/qwen38-flash-next/tokenizer_config.json:ro
     # The host telemetry agent is intentionally bound only to the established
@@ -50,7 +56,7 @@ services:
       - default
       - machineview-host
     environment:
-      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000}
+      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000,http://qwen38flashnext-tp8:8000}
       RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:-qwen-local}
       RJ_ADVERTISE_CTX_MARGIN: ${RJ_ADVERTISE_CTX_MARGIN:-8192}
       # Flash-Next admits valid six-figure output budgets. Preserve the
@@ -74,7 +80,7 @@ services:
       # A retains the qualified MTP3 profile; B is the standard long-output
       # profile. Profile preference is only the final routing score tie-break.
       RJ_ROUTE_SPECULATION_MODE: ${RJ_ROUTE_SPECULATION_MODE:-prefer}
-      RJ_ROUTE_SPECULATION_PROFILES: ${RJ_ROUTE_SPECULATION_PROFILES:-mtp,standard}
+      RJ_ROUTE_SPECULATION_PROFILES: ${RJ_ROUTE_SPECULATION_PROFILES:-mtp,standard,mtp}
       # Coalesce concurrent cold requests with at least 16KiB of common prefix.
       # The bounded table and load delta both fail open to ordinary routing.
       RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE:-prefer}
@@ -107,8 +113,9 @@ services:
       RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES: ${RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES:-3}
       RJ_UPSTREAM_WARMUP_STABLE_SECONDS: ${RJ_UPSTREAM_WARMUP_STABLE_SECONDS:-30}
       RJ_KV_EVENT_MODE: shadow
-      RJ_KV_EVENT_LIVE_ENDPOINTS: tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557
-      RJ_KV_EVENT_REPLAY_ENDPOINTS: tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558
+      RJ_KV_EVENT_LIVE_ENDPOINTS: tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557,tcp://qwen38flashnext-tp8:5557
+      RJ_KV_EVENT_REPLAY_ENDPOINTS: tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558,tcp://qwen38flashnext-tp8:5558
+      RJ_ADAPTIVE_CONFIG_PATH: /etc/ramjet/adaptive-config.json
       RJ_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
       RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json
       RJ_IDLE_DRAIN_MODE: ${RJ_IDLE_DRAIN_MODE:-observe}
@@ -124,6 +131,10 @@ services:
   qwen38flashnext-a:
     <<: *vllm-engine
     container_name: qwen38flashnext-a
+    labels:
+      <<: *vllm-labels
+      com.helixml.ramjet.adaptive-profile: split-tp4
+      com.helixml.ramjet.adaptive-upstream: "0"
     cpuset: "0-11,24-35"
     ports: ["127.0.0.1:8040:8000"]
     deploy:
@@ -157,6 +168,10 @@ services:
   qwen38flashnext-b:
     <<: *vllm-engine
     container_name: qwen38flashnext-b
+    labels:
+      <<: *vllm-labels
+      com.helixml.ramjet.adaptive-profile: split-tp4
+      com.helixml.ramjet.adaptive-upstream: "1"
     cpuset: "12-23,36-47"
     ports: ["127.0.0.1:8041:8000"]
     deploy:
@@ -180,6 +195,53 @@ services:
       - --max-model-len=${MAX_MODEL_LEN:-262144}
       - --max-num-seqs=${MAX_NUM_SEQS:-64}
       - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}
+      - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --no-enable-flashinfer-autotune
+      - --enable-auto-tool-choice
+      - --tool-call-parser=qwen3_coder
+      - --reasoning-parser=qwen3
+
+  # Created during deployment but left stopped. The embedded controller is the
+  # only runtime owner allowed to start it, after both TP4 engines are drained
+  # and stopped. The profile prevents an ordinary `docker compose up` from
+  # claiming all eight GPUs behind the controller's back.
+  qwen38flashnext-tp8:
+    <<: *vllm-engine
+    profiles: [adaptive]
+    container_name: qwen38flashnext-tp8
+    labels:
+      <<: *vllm-labels
+      com.helixml.ramjet.adaptive-profile: unified-tp8
+      com.helixml.ramjet.adaptive-upstream: "2"
+    cpuset: "0-47"
+    ports: ["127.0.0.1:8042:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["0", "1", "2", "3", "4", "5", "6", "7"], capabilities: [gpu]}
+    environment:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+      VLLM_API_KEY: ${VLLM_API_KEY:-qwen-local}
+      VLLM_PLE_CPU_OFFLOAD: "0"
+    command:
+      - /workspace/model
+      - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-flash-next}
+      - --revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+      - --tokenizer-revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+      - --host=0.0.0.0
+      - --port=8000
+      - --tensor-parallel-size=8
+      - --enable-expert-parallel
+      - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
+      - --kv-cache-memory=${KV_CACHE_MEMORY:-40190174004}
+      - --max-model-len=${MAX_MODEL_LEN:-262144}
+      - --max-num-seqs=${MAX_NUM_SEQS:-64}
+      - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}
+      - --speculative-config={"method":"mtp","num_speculative_tokens":3,"index_share_for_mtp_iteration":true}
       - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
       - --enable-prefix-caching
       - --enable-prompt-tokens-details

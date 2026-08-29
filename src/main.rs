@@ -10,6 +10,7 @@ use axum::{
 };
 use prometheus::{Encoder, Registry, TextEncoder};
 use ramjet::{
+    adaptive::Adaptive,
     config::Config,
     kv_consumer::KvEventConsumers,
     machineview,
@@ -75,6 +76,13 @@ async fn main() -> anyhow::Result<()> {
         exact_inventories,
     )
     .context("initialize ramjet proxy")?;
+    let adaptive = Adaptive::from_env(
+        proxy.clone(),
+        metrics.requests.clone(),
+        config.upstream_token.clone(),
+    )
+    .await
+    .context("initialize adaptive topology controller")?;
     let machineview_settings =
         machineview::Settings::from_env().context("invalid machineview configuration")?;
     let machineview = machineview::MachineView::start(
@@ -100,6 +108,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(view) = &machineview {
         metrics_api = metrics_api.merge(view.router());
     }
+    if let Some(controller) = &adaptive {
+        metrics_api = metrics_api.merge(controller.router());
+    }
     let api_listener = TcpListener::bind("0.0.0.0:8000")
         .await
         .context("bind API listener")?;
@@ -112,6 +123,9 @@ async fn main() -> anyhow::Result<()> {
     let probe = tokio::spawn(proxy.clone().probe_loop());
     let dspark_guard = tokio::spawn(proxy.clone().dspark_guard_loop());
     let idle_drain = tokio::spawn(proxy.clone().idle_drain_loop());
+    let adaptive_task = adaptive
+        .clone()
+        .map(|controller| tokio::spawn(controller.run()));
     let mut api_shutdown = shutdown_tx.subscribe();
     let mut metrics_shutdown = shutdown_tx.subscribe();
     let api_server = axum::serve(api_listener, api).with_graceful_shutdown(async move {
@@ -149,6 +163,9 @@ async fn main() -> anyhow::Result<()> {
     probe.abort();
     dspark_guard.abort();
     idle_drain.abort();
+    if let Some(task) = adaptive_task {
+        task.abort();
+    }
     if let Some(view) = machineview {
         view.shutdown().await;
     }
