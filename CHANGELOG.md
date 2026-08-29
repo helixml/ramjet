@@ -18,6 +18,9 @@
   default-stopped TP8 candidate as two named shapes. The controller and host
   deployment tools share the same filesystem lock; the initial rollout stays
   manual until the TP8 crossover and automatic thresholds are qualified.
+- Exact placement now requires authority from the currently routable
+  candidates, so a deliberately stopped adaptive profile cannot disable cache
+  placement for the active shape or participate with stale inventory.
 
 ## 0.4.0 — 2026-08-20
 

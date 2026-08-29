@@ -19,7 +19,6 @@ use crate::{
 #[derive(Clone)]
 pub struct ExactRouteShadow {
     inventories: Arc<[ExactRouteInventory]>,
-    placement_capable: bool,
     metrics: Arc<Metrics>,
     alpha: f64,
     max_overlap_units: usize,
@@ -266,13 +265,8 @@ impl ExactRouteShadow {
         max_overlap_units: usize,
         load_estimator: RequestLoadEstimator,
     ) -> Self {
-        let placement_capable = !inventories.is_empty()
-            && inventories
-                .iter()
-                .all(ExactRouteInventory::supports_placement);
         Self {
             inventories,
-            placement_capable,
             metrics,
             alpha,
             max_overlap_units,
@@ -284,6 +278,36 @@ impl ExactRouteShadow {
     #[must_use]
     pub fn ready(&self) -> bool {
         !self.inventories.is_empty() && self.inventories.iter().all(ExactRouteInventory::ready)
+    }
+
+    /// Whether tokenization can produce a useful exact result for at least one
+    /// inventory. The route-specific gate below still requires every healthy
+    /// candidate to be authoritative before placement can change the route.
+    /// This distinction lets an intentionally inactive adaptive profile stay
+    /// untrusted without disabling exact placement for the serving topology.
+    #[must_use]
+    pub fn tokenization_ready(&self) -> bool {
+        self.inventories.iter().any(ExactRouteInventory::ready)
+    }
+
+    fn placement_ready_for(&self, decision: &Decision) -> bool {
+        let mut any_healthy = false;
+        let mut seen = vec![false; self.inventories.len()];
+        for candidate in &decision.candidate_state {
+            if candidate.index >= self.inventories.len() || seen[candidate.index] {
+                return false;
+            }
+            seen[candidate.index] = true;
+            if !candidate.healthy {
+                continue;
+            }
+            any_healthy = true;
+            let inventory = &self.inventories[candidate.index];
+            if !inventory.supports_placement() || !inventory.placement_ready() {
+                return false;
+            }
+        }
+        any_healthy && seen.into_iter().all(|seen| seen)
     }
 
     /// Captures the exact inventory generation visible at approximate routing
@@ -336,11 +360,7 @@ impl ExactRouteShadow {
         // Capability is enforced here as well as by configuration parsing so
         // library callers and future wiring cannot make compact snapshots
         // serving-authoritative before qualification.
-        let placement_ready = self.placement_capable
-            && self
-                .inventories
-                .iter()
-                .all(ExactRouteInventory::placement_ready);
+        let placement_ready = self.placement_ready_for(decision);
         let mode = if mode.applies() && !placement_ready {
             ExactPlacementMode::Shadow
         } else {
@@ -1972,15 +1992,60 @@ mod tests {
             )
             .ready()
         );
+        let partial = ExactRouteShadow::new(
+            Arc::from([trusted, untrusted]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+            estimator(),
+        );
+        assert!(!partial.ready());
+        assert!(partial.tokenization_ready());
+    }
+
+    #[test]
+    fn inactive_untrusted_inventory_does_not_disable_active_placement() {
+        let trusted = trusted_inventory(Vec::new());
+        let untrusted = Arc::new(parking_lot::RwLock::new(FencedExactKvInventory::new(
+            8,
+            ExactIndexLimits::default(),
+        )));
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        let shadow = ExactRouteShadow::new(
+            Arc::from([trusted, untrusted]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+            estimator(),
+        );
+        let mut route = decision();
+        route.candidate_state[1].healthy = false;
+
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4],
+            1_024,
+            &mut route,
+            ExactPlacementPolicy {
+                min_gain_tokens: 0,
+                max_load_delta: usize::MAX,
+            },
+            ExactPlacementMode::Placement,
+        );
+
+        assert_one(
+            metrics
+                .exact_route_placement
+                .with_label_values(&["placement", "chat", "fallback"])
+                .get(),
+        );
         assert!(
-            !ExactRouteShadow::new(
-                Arc::from([trusted, untrusted]),
-                Arc::clone(&metrics),
-                1.0,
-                8,
-                estimator(),
-            )
-            .ready()
+            metrics
+                .exact_route_placement
+                .with_label_values(&["shadow", "chat", "fallback"])
+                .get()
+                .abs()
+                < f64::EPSILON
         );
     }
 }
