@@ -70,6 +70,8 @@ Dashboard access uses the dedicated `RJ_UI_AUTH_TOKEN` from the protected
 mode-0600 `.env`; it must differ from `VLLM_API_KEY`/`RJ_UPSTREAM_TOKEN`.
 Successful login creates a signed HttpOnly 30-day browser session, so the
 engine credential and a reusable token field never appear in the dashboard.
+Open the node UI at `/ui/`; the login screen is public, while dashboard data,
+the live stream, audit history, and all topology actions remain session-gated.
 
 The first rollout stays in `manual` mode. The two automatic edges are present
 and visible for soak/recommendation work but cannot act until an operator
