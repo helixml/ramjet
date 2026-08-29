@@ -2,7 +2,8 @@
 
 This directory is the canonical one-file deployment for the official
 `Qwen/Qwen3.8-Flash-Next-FP8` checkpoint on node06. It defines two NUMA-local
-TP4 engines and the existing ramjet load balancer. Do not add Compose overlays.
+TP4 engines, one default-stopped TP8 adaptive candidate, and the ramjet load
+balancer/controller. Do not add Compose overlays.
 
 The checkpoint and image are immutable inputs:
 
@@ -10,7 +11,7 @@ The checkpoint and image are immutable inputs:
 - model payload: 185,502,232,570 bytes across 131 safetensors shards
 - linux/amd64 vLLM image: `sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
 - released ramjet Compose default: `v0.4.0@sha256:467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b`
-- node06-qualified live ramjet image: `rust-r135-qwen-exact-de0bb28@sha256:33b547fb33d78ed94b03fd7eaf27accb5939c6e82f12faa1b2c32bd4478b9b64`
+- node06-qualified live ramjet image: `rust-r140-transition-dialog-d1f8772@sha256:9b52bc178f6e6832afa0b368265bd133f484265206df50a1480a8d801e5cd86e`
 - exact-route manifest: `compat/qwen38-flash-next-r134.json`, SHA-256 `a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67`
 
 The day-zero vLLM image config labels its source/build revision as `unknown`.
@@ -37,6 +38,58 @@ Both engines independently passed direct identity, deterministic agent/tool,
 code-decode, prefix-cache, long-context, and multimodal gates before pair
 admission. The temporary canary controller was removed after promotion so an
 obsolete action cannot silently restore the retired baseline.
+
+## Adaptive topology controller
+
+Ramjet owns the two named serving shapes in `adaptive-config.json`:
+
+- **Twin Cruise** — the qualified MTP3/standard TP4 pair, the initial and
+  rollback profile for sustained throughput and cache locality;
+- **Afterburner** — one MTP3 TP8 process spanning GPUs 0–7, intended for a
+  short burst-latency qualification before any automatic promotion.
+
+The TP8 service is behind Compose profile `adaptive`. Deployment must run
+`docker compose --profile adaptive create qwen38flashnext-tp8` while the TP4
+pair remains live; it must not start the candidate. The controller fails its
+own startup unless all three containers already exist, carry the exact
+adaptive profile/upstream labels, use the pinned image ID and exact GPU set,
+and only the configured active profile is running.
+
+The load balancer mounts `/var/run/docker.sock`, which is root-equivalent.
+Its code authority is therefore intentionally narrower than the socket: only
+inspect/start/stop of the three configured names, with no create, remove, pull,
+restart, or exec route. Both the host rollout scripts and the embedded
+controller flock `/run/lock/ramjet-node06-deployment.lock` before mutating the
+stack. `/var/lib/ramjet-adaptive` must be root-owned mode 0700; its atomically
+published state is mode 0600.
+
+The same private directory contains `audit.jsonl`, an append-only mode-0600
+record of controller starts, mode changes, transition outcomes, and individual
+engine start/stop actions. The Topology page shows the most recent entries.
+Dashboard access uses the dedicated `RJ_UI_AUTH_TOKEN` from the protected
+mode-0600 `.env`; it must differ from `VLLM_API_KEY`/`RJ_UPSTREAM_TOKEN`.
+Successful login creates a signed HttpOnly 30-day browser session, so the
+engine credential and a reusable token field never appear in the dashboard.
+Open the node UI at `/ui/`; the login screen is public, while dashboard data,
+the live stream, audit history, and all topology actions remain session-gated.
+
+The first rollout stays in `manual` mode. The two automatic edges are present
+and visible for soak/recommendation work but cannot act until an operator
+selects `auto` through the authenticated UI/API. Split→TP8 observes delivered
+output-token throughput; TP8→split observes the live size- and phase-weighted
+load reservation per active engine. The status surface also publishes input,
+output, and total token rates, in-flight requests, and request rate. Temperature
+is not a topology signal; the independent intake-air guard remains only a
+safety boundary for request-generating node work. These initial thresholds are
+policy candidates, not qualified performance claims, and must be tuned from
+recorded traffic plus a guarded TP8 crossover.
+
+Every shape change has an estimated nine-minute outage. Ramjet fences all
+members and drains dispatched requests before stopping engines, reports zero
+active capacity so new work fails fast, waits for the target's normal HTTP and
+warmup admission to remain stable, then admits it. A failed target start
+automatically attempts to restore Twin Cruise. Manual recovery uses the same
+common lock and immutable Compose inputs.
 
 Every future mutation must hold `/run/lock/ramjet-node06-deployment.lock` and
 retain an owner-only evidence journal below `.experiments/`. Roll back one TP4
@@ -203,13 +256,15 @@ prefix hits while regressing returning-probe TTFT by 15%, blocker TTFT p95 by
 qualified value.
 
 The checked-in Compose default follows the repository-wide released-image
-policy. The node06 production render supplies the separately qualified r135
+policy. The node06 production render supplies the separately qualified r139
 override explicitly until these Flash-Next changes are included in a tagged
 release. Every node06 `docker compose` invocation, including rollback and
 cleanup traps, must therefore carry the exact `LB_IMAGE` override; restoring
 the Compose file alone would select the older released default. The admitted
 node06 Compose SHA-256 is
-`3dea7929a5d66e31a6892e296ee53d95403210dcadf88d02441447760ea93d33`.
+`083c455b8da0c91acc9e4c995c313c1e60e9831cf767637868ca6d3ad72a51d5`;
+the adaptive policy SHA-256 is
+`39bbd0f4ca311ae431f7cbf6e9230510c0ce1beaea0e9fe9ee58dd57bd6c6b8a`.
 
 The load balancer joins both the Flash serving network and the existing
 `qwen38_27b_default` bridge. The latter is observation-only: node06's host

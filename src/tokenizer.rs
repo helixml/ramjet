@@ -496,7 +496,7 @@ impl TokenizerObserver {
             self.record_pre_route(endpoint, "unattested");
             return None;
         };
-        if !self.exact_shadow.ready() {
+        if !self.exact_shadow.tokenization_ready() {
             self.record_pre_route(endpoint, "inventory_untrusted");
             return None;
         }

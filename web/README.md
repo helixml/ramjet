@@ -96,6 +96,7 @@ VPN opens http://100.89.187.17:8007/ui/ directly.
 | `RJ_MACHINEVIEW_AGENT_URL` | unset | host agent `/sample` URL; without it there is no host/GPU/energy telemetry |
 | `RJ_MACHINEVIEW_STATE_PATH` | unset | JSON snapshot path; restores both the ring and the token history across LB restarts |
 | `RJ_MACHINEVIEW_UI_DIR` | `/ui` if present | static bundle directory |
+| `RJ_UI_AUTH_TOKEN` | unset | Dedicated 32–256-byte dashboard/control token. Protects machine-view and adaptive APIs with a signed 30-day HttpOnly session cookie. |
 
 Engine (`vllm:*`) scraping needs no configuration — it reuses the configured
 `RJ_UPSTREAM` list. Without the agent the serving charts still work; the

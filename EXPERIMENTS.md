@@ -1,5 +1,135 @@
 # node06 experiment journal
 
+## 2026-08-29 — topology transition dialog and LB-only rollout
+
+Ramjet commit `d1f8772` was built and transferred as
+`rust-r140-transition-dialog-d1f8772`, image ID
+`sha256:9b52bc178f6e6832afa0b368265bd133f484265206df50a1480a8d801e5cd86e`.
+The native browser confirmation was replaced by an accessible dashboard modal
+that visualizes the current and target GPU shapes, calls out the expected
+serving interruption, explains the four transition stages, traps focus, and
+keeps API errors in context for a safe retry.
+
+The rendered candidate differed from r139 only by the LB image. The common
+deployment lock covered each LB-only replacement and verification. Two early
+verification attempts deliberately rolled back to r139: the first expected the
+health endpoint's obsolete plain-text shape, and the second incorrectly
+asserted `manual` while the durable controller state was already `auto`. The
+corrected attempt preserved that live mode and admitted r140. These were
+verification-script assertions, not service failures; both TP4 engine IDs and
+their zero restart counts remained unchanged through all attempts, and the TP8
+candidate remained stopped.
+
+Unauthenticated machine-view, adaptive-status, and audit reads returned 401;
+an authenticated session read `split-tp4`, `idle`, and the preserved `auto`
+mode. The production bundle contains `Reconfigure engine topology?`, contains
+no native `window.confirm`, and does not expose `RJ_UPSTREAM_TOKEN`. One
+10-input/1-output-token request passed under thermal guard run
+`96b3146977fd4e835cc82ac7ef501a49`; maximum intake air was 38C. Final health
+was `ok`, upstream gauges were 1/1/0 for TP4 A, TP4 B, and the stopped TP8
+candidate, and recent logs contained no fatal marker.
+
+The admitted Compose and adaptive-policy SHA-256 values remain
+`083c455b8da0c91acc9e4c995c313c1e60e9831cf767637868ca6d3ad72a51d5`
+and `39bbd0f4ca311ae431f7cbf6e9230510c0ce1beaea0e9fe9ee58dd57bd6c6b8a`.
+Owner-only evidence is retained below
+`.experiments/transition-dialog-d1f8772-r3/`; the two fail-safe attempts are
+retained beside it.
+
+## 2026-08-29 — authenticated and audited adaptive control surface
+
+Ramjet commit `fd2ef97` was built and transferred as
+`rust-r139-ui-auth-audit-fd2ef97`, image ID
+`sha256:09306f3ea029d6d125b1d3451fe6a40d6de4652077c6992ba677e691175f475f`.
+The LB-only rollout added a dedicated `RJ_UI_AUTH_TOKEN`, signed 30-day
+HttpOnly browser sessions, and an owner-only JSONL topology audit without
+recreating either TP4 engine. Both engine container identities and restart
+counts remained unchanged; the TP8 candidate remained stopped.
+
+Unauthenticated machine-view status, adaptive status, and adaptive audit calls
+all returned 401. Login returned 200, and the resulting cookie read all three
+protected surfaces. The production UI bundle contains the new login screen and
+does not contain `RJ_UPSTREAM_TOKEN`. `/var/lib/ramjet-adaptive/audit.jsonl`
+was created root-owned mode 0600 and recorded the reconciled
+`controller_started` event for `split-tp4`. No topology transition was
+requested or exercised.
+
+The first thermal-wrapper invocation stopped before generating work because
+its companion policy module had not yet been copied. After transferring and
+hash-verifying both guard files, one 65-input/1-output-token request passed
+under guard run `29302e73968d055380d94b9f682539b2`; maximum intake air was
+38C. Final health was `ok`, active upstream gauges were 1/1/0 for the two TP4
+engines and stopped TP8 candidate, LB and engines had zero restarts, and recent
+LB logs contained no fatal marker. Exact rollback evidence was corrected to
+the actual pre-rollout r138 image rather than the older Compose default.
+
+The admitted Compose and adaptive-policy SHA-256 values are
+`083c455b8da0c91acc9e4c995c313c1e60e9831cf767637868ca6d3ad72a51d5`
+and `39bbd0f4ca311ae431f7cbf6e9230510c0ce1beaea0e9fe9ee58dd57bd6c6b8a`.
+Owner-only evidence is retained below
+`.experiments/ui-auth-audit-fd2ef97/`.
+
+## 2026-08-29 — adaptive topology corrected to serving load and token flow
+
+Ramjet commit `7d90a5f` was built and transferred as
+`rust-r138-adaptive-load-7d90a5f`, image ID
+`sha256:7c6ec3968fc1d84d98b1a4c3195df94e9511ebba43be145288ea3c8ba2ad5bd2`.
+The LB-only rollout retained both TP4 engine processes and their restart count
+of zero. The controller remained `manual`, `split-tp4`, and `idle`; the TP8
+candidate remained stopped. The new status contract publishes input, output,
+and total token rates alongside in-flight and normalized per-engine load. The
+two configured candidate edges now observe output-token throughput and
+per-engine load instead of request rate and raw in-flight count.
+
+The production SVG bundle contains `TOKEN INTAKE` and `SYSTEM LOAD` and no
+longer contains the discarded chassis-temperature gauge. The branch-only IPMI
+scrape added to the observation-only host agent was removed and node06's agent
+was restored to the canonical non-IPMI implementation. Temperature remains an
+independent benchmark/deployment safety guard and is not a topology input.
+
+A bounded three-request smoke ran under thermal guard run
+`1a6cc45643e90ff59e1efe9c3b3da4fd`. Ramjet observed maxima of 2,896.6 input
+tok/s, 0.4 output tok/s, 2,897.0 total tok/s, and 0.6 req/s for the deliberately
+one-token responses. Both active exact inventories then returned trusted and
+placement-ready. Final health was 2/2 active and healthy, all four container
+restart counts were zero, and recent LB logs contained no fatal marker. The
+admitted Compose and adaptive-policy SHA-256 values are
+`9baa2f394279d36f1a26d4cc137ad67ca6767bd5f724aa372a2f97f5065ac3dc`
+and `1a3be15fc91d812a315ffd609ac1aae6c11f81055f2296cb426af5dd3731c80b`.
+Owner-only evidence is retained below `.experiments/adaptive-load-7d90a5f/`.
+
+## 2026-08-29 — adaptive topology controller admitted in manual TP4 mode
+
+Ramjet commit `37f816c` was built and transferred as
+`rust-r137-adaptive-37f816c`, image ID
+`sha256:1022c9165afb5398175e9bf29c0e6b37b530e16cf4f08e2219441833cdc301c7`.
+The common deployment lock covered the staged Compose mutation, one-engine-at-
+a-time label promotion, default-stopped TP8 creation, Ramjet replacement, and
+final verification. Engine A and B each returned through their ordinary HTTP
+and 30-second warmup gates with restart count zero while the other TP4 engine
+served. The TP8 candidate was created with the exact image, labels, and GPU
+set but was not started or performance-qualified.
+
+The final controller state is `manual`, `split-tp4`, and `idle`: two active and
+healthy replicas out of three configured upstreams. Both active direct KV
+inventories re-established trusted, hybrid-placement-ready authority after a
+fresh live batch; the inactive TP8 inventory remained untrusted and fenced.
+Three bounded synthetic requests (A, B, and Ramjet) returned HTTP 200 with
+usage. The control endpoint rejected an unauthenticated mode write with 401
+and accepted the same manual-mode write with the existing bearer authority.
+The machine-view agent upgrade exposed the chassis `FP_TEMP` value at 38C and
+all eight GPUs; the production SVG Topology bundle returned HTTP 200 and
+contained the Afterburner shape.
+
+All four containers ended at restart count zero: A/B running, TP8 stopped, and
+Ramjet running. The admitted Compose and adaptive policy SHA-256 values are
+`9baa2f394279d36f1a26d4cc137ad67ca6767bd5f724aa372a2f97f5065ac3dc`
+and `5d241f690c754a5e94e9bea86d0ff3cc84017c886762deacedce2f0140209ee1`.
+Owner-only evidence is retained on node06 below
+`.experiments/adaptive-d04f0ff/`. No topology transition was exercised: the
+nine-minute TP8 outage and its crossover remain a separate guarded maintenance
+qualification before `recommend` or `auto` mode.
+
 ## 2026-08-28 — upstream Qwen Flash-Next `max-num-seqs=16` rejected after same-engine A/B/B/A
 
 The vLLM recipe's newly verified `rtx_pro_6000_4x` override recommends

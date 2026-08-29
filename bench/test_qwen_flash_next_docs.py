@@ -17,8 +17,8 @@ class QwenFlashNextDocumentationTests(unittest.TestCase):
         manifest_sha = hashlib.sha256(MANIFEST.read_bytes()).hexdigest()
 
         for expected in (
-            "rust-r135-qwen-exact-de0bb28",
-            "33b547fb33d78ed94b03fd7eaf27accb5939c6e82f12faa1b2c32bd4478b9b64",
+            "rust-r140-transition-dialog-d1f8772",
+            "9b52bc178f6e6832afa0b368265bd133f484265206df50a1480a8d801e5cd86e",
             compose_sha,
             manifest_sha,
             "Qwen exact placement is admitted and live",

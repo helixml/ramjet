@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "mode": "manual",
+  "active_profile": "split-tp4",
+  "state_path": "/var/lib/ramjet-adaptive/state.json",
+  "audit_path": "/var/lib/ramjet-adaptive/audit.jsonl",
+  "docker_socket": "/var/run/docker.sock",
+  "deployment_lock_path": "/run/lock/ramjet-node06-deployment.lock",
+  "poll_seconds": 5,
+  "drain_timeout_seconds": 120,
+  "start_timeout_seconds": 900,
+  "stable_seconds": 30,
+  "profiles": [
+    {
+      "id": "split-tp4",
+      "label": "Twin Cruise",
+      "description": "Two NUMA-local TP4 engines for sustained throughput and cache locality.",
+      "engines": [
+        {
+          "upstream": 0,
+          "label": "A · MTP3",
+          "container": "qwen38flashnext-a",
+          "image": "sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3",
+          "gpus": [0, 1, 2, 3]
+        },
+        {
+          "upstream": 1,
+          "label": "B · standard",
+          "container": "qwen38flashnext-b",
+          "image": "sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3",
+          "gpus": [4, 5, 6, 7]
+        }
+      ]
+    },
+    {
+      "id": "unified-tp8",
+      "label": "Afterburner",
+      "description": "One MTP3 TP8 engine spanning all GPUs for burst latency.",
+      "engines": [
+        {
+          "upstream": 2,
+          "label": "Aero · MTP3",
+          "container": "qwen38flashnext-tp8",
+          "image": "sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3",
+          "gpus": [0, 1, 2, 3, 4, 5, 6, 7]
+        }
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "from": "split-tp4",
+      "to": "unified-tp8",
+      "automatic": true,
+      "allow_downtime": true,
+      "estimated_downtime_seconds": 540,
+      "condition": {
+        "metric": "completion_tokens_per_second",
+        "comparison": "above",
+        "threshold": 400.0,
+        "for_seconds": 30
+      }
+    },
+    {
+      "from": "unified-tp8",
+      "to": "split-tp4",
+      "automatic": true,
+      "allow_downtime": true,
+      "estimated_downtime_seconds": 540,
+      "condition": {
+        "metric": "load_per_engine",
+        "comparison": "above",
+        "threshold": 4.0,
+        "for_seconds": 300
+      }
+    }
+  ]
+}

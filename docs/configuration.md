@@ -787,3 +787,117 @@ correctness.
 Journals contain sizes, opaque ordinals, route state, status, latency, and
 aggregate usage—not prompts, generated text, request IDs, cache keys, tokens,
 or upstream hostnames.
+
+## Adaptive engine topology
+
+`RJ_ADAPTIVE_CONFIG_PATH` enables the embedded topology controller. It is
+unset by default. Enabling it is a privileged deployment choice: the Ramjet
+container needs read/write access to the Docker Unix socket, a private durable
+state directory, and the same deployment-lock file used by host rollout
+scripts. The socket is root-equivalent; never expose the control API directly
+to an untrusted network.
+
+The controller can only inspect, start, and stop containers named in the
+mounted JSON file. Every container must already exist and pass all of these
+checks before Ramjet binds either listener:
+
+- an exact immutable `sha256:` image ID;
+- `com.helixml.ramjet.adaptive-profile` and
+  `com.helixml.ramjet.adaptive-upstream` labels;
+- the exact NVIDIA device assignment declared for the engine;
+- exactly one configured profile owning that container.
+
+It never creates, removes, pulls, restarts, or execs a container. API requests
+select only a configured profile ID and cannot provide Docker arguments.
+
+```json
+{
+  "version": 1,
+  "mode": "manual",
+  "active_profile": "split-tp4",
+  "state_path": "/var/lib/ramjet-adaptive/state.json",
+  "audit_path": "/var/lib/ramjet-adaptive/audit.jsonl",
+  "docker_socket": "/var/run/docker.sock",
+  "deployment_lock_path": "/run/lock/ramjet-deployment.lock",
+  "poll_seconds": 5,
+  "drain_timeout_seconds": 120,
+  "start_timeout_seconds": 900,
+  "stable_seconds": 15,
+  "profiles": [
+    {
+      "id": "split-tp4",
+      "label": "Twin Cruise",
+      "description": "Two TP4 engines for sustained throughput",
+      "engines": [
+        {"upstream": 0, "label": "A", "container": "engine-a", "image": "sha256:<64 hex>", "gpus": [0,1,2,3]},
+        {"upstream": 1, "label": "B", "container": "engine-b", "image": "sha256:<64 hex>", "gpus": [4,5,6,7]}
+      ]
+    },
+    {
+      "id": "unified-tp8",
+      "label": "Afterburner",
+      "description": "One TP8 engine for burst latency",
+      "engines": [
+        {"upstream": 2, "label": "Aero", "container": "engine-tp8", "image": "sha256:<64 hex>", "gpus": [0,1,2,3,4,5,6,7]}
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "from": "split-tp4", "to": "unified-tp8",
+      "automatic": true, "allow_downtime": true,
+      "estimated_downtime_seconds": 540,
+      "condition": {"metric": "completion_tokens_per_second", "comparison": "above", "threshold": 400.0, "for_seconds": 30}
+    }
+  ]
+}
+```
+
+Modes are `off`, `manual`, `recommend`, and `auto`. A transition is eligible
+for recommendation/automation only when `automatic` is true and its directional
+condition remains true for `for_seconds`. Workload metrics are
+`prompt_tokens_per_second`, `completion_tokens_per_second`,
+`tokens_per_second` (their sum), `inflight`, and `load_per_engine`;
+`requests_per_second` remains available as a coarse compatibility signal.
+Token rates are derived from Ramjet's own completed-response usage counters,
+while load is the live size- and phase-weighted reservation per active engine.
+No temperature measurement participates in recommendation, automation, or
+routing. Comparisons are `above` and `below`. An automatic transition that can
+interrupt serving must also set `allow_downtime: true`, otherwise startup fails
+closed.
+
+Set `RJ_UI_AUTH_TOKEN` to a dedicated 32–256-byte value whenever adaptive
+control is enabled. It must not reuse `RJ_UPSTREAM_TOKEN`: the latter is an
+engine credential, while the UI token authorizes topology mutation and access
+to machine-view observations. The login endpoint exchanges the operator's
+token for a signed, HttpOnly, SameSite-Strict browser cookie that persists for
+30 days. The token is not retained in JavaScript or rendered elsewhere in the
+dashboard. The direct node06 UI is carried over the encrypted Tailscale path;
+internet-facing deployments should additionally terminate HTTPS at their
+authenticated reverse proxy.
+
+The static `/ui/` application remains readable so it can render the login
+screen. With `RJ_UI_AUTH_TOKEN` configured, every
+`/api/machineview/*` and `/api/adaptive/*` route, including the machine-view
+WebSocket, requires the signed session. `POST /api/ui/login` starts a session,
+`GET /api/ui/session` checks it, and `POST /api/ui/logout` clears it.
+`GET /api/adaptive/status` and `GET /api/adaptive/audit` are read-only after
+login; `POST /api/adaptive/mode` and `POST /api/adaptive/transition` mutate
+controller state. The UI always shows whether a configured edge requires
+downtime and its operator estimate before enabling the action.
+
+The controller appends schema-v1 JSON Lines to `audit_path`. The file and its
+parent must be owner-only (0600 and a non-group/world-writable directory). It
+records controller starts, mode changes, transition requests and outcomes,
+rollback outcomes, and each successful engine start/stop. Records contain
+timestamps, named profiles/containers, and bounded error details—never tokens,
+prompts, completions, engine bearers, or UI credentials. The dashboard reads
+only the newest 100 records from a bounded one-MiB tail.
+
+During a reconfiguration Ramjet first takes the common deployment lock, fences
+every topology member, drains in-flight requests, stops the source engines,
+starts the target engines, and waits for ordinary health/admission to remain
+stable. New requests receive an immediate service-unavailable response while
+membership is empty. A failed start automatically attempts to restore the
+previous profile. Reachability continues to be probed independently, so an
+inactive engine is not reported as a failed engine.

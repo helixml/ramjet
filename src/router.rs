@@ -704,6 +704,20 @@ impl Router {
         }
     }
 
+    /// Replaces every drain fence under one router lock. Used for topology
+    /// membership changes where a partially published shape could otherwise
+    /// dispatch into an engine while its peer is being reconfigured.
+    pub fn set_drained_mask(&self, drained: &[bool]) -> bool {
+        let mut inner = self.inner.lock();
+        if inner.states.len() != drained.len() {
+            return false;
+        }
+        for (state, drained) in inner.states.iter_mut().zip(drained) {
+            state.drained = *drained;
+        }
+        true
+    }
+
     /// Whether an upstream is currently withheld by the idle-drain policy.
     #[must_use]
     pub fn drained(&self, upstream: usize) -> bool {
@@ -1235,6 +1249,20 @@ mod tests {
         assert_eq!(router.state(upstream).map(|state| state.3), Some(true));
         router.set_drained(upstream, false);
         assert!(!router.drained(upstream));
+    }
+
+    #[test]
+    fn drain_mask_is_all_or_nothing() {
+        let router = Router::new(config());
+        assert!(router.set_drained_mask(&[true, false]));
+        assert!(router.drained(0));
+        assert!(!router.drained(1));
+        assert!(!router.set_drained_mask(&[false]));
+        assert!(
+            router.drained(0),
+            "invalid cardinality must not mutate state"
+        );
+        assert!(!router.drained(1));
     }
 
     #[test]

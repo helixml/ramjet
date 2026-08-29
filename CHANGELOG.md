@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+- Added a dedicated dashboard login backed by signed, persistent HttpOnly
+  sessions. Adaptive control no longer reuses or renders `RJ_UPSTREAM_TOKEN`,
+  and authenticated machine-view/adaptive APIs share one browser session.
+- Added an owner-only JSONL topology audit trail plus a dashboard Engine Change
+  History view for controller, transition, rollback, and engine start/stop
+  events.
+
+### Adaptive engine topology
+
+- An optional controller inside the Ramjet process can drain routing and
+  switch between label-verified, pre-created Docker engine profiles. Its
+  Docker authority is limited to inspect/start/stop, profile state is durable,
+  manual/recommend/auto modes are explicit, and every configured transition
+  publishes its downtime requirement and estimate. Target startup uses the
+  ordinary health/warmup gates and failures attempt an automatic rollback.
+- Machine view adds an animated SVG Topology screen with per-GPU engine
+  grouping, token ingress/egress, GPU utilization, normalized serving load,
+  profile controls, a persistent authenticated session, and change history.
+  Adaptive policy can use
+  input, output, or total token throughput plus live in-flight/load signals;
+  temperature never participates in topology selection.
+- The node06 Flash-Next Compose defines its qualified TP4 pair and a
+  default-stopped TP8 candidate as two named shapes. The controller and host
+  deployment tools share the same filesystem lock; the initial rollout stays
+  manual until the TP8 crossover and automatic thresholds are qualified.
+- Exact placement now requires authority from the currently routable
+  candidates, so a deliberately stopped adaptive profile cannot disable cache
+  placement for the active shape or participate with stale inventory.
+
 ## 0.4.0 — 2026-08-20
 
 ### Idle drain grows an actuator

@@ -144,6 +144,89 @@ export interface TokenHistory {
   buckets: TokenBucket[]
 }
 
+export type AdaptiveMode = "off" | "manual" | "recommend" | "auto"
+export type AdaptivePhase =
+  | "idle"
+  | "draining"
+  | "stopping"
+  | "starting"
+  | "stabilizing"
+  | "rolling_back"
+  | "failed"
+
+export interface AdaptiveEngine {
+  upstream: number
+  label: string
+  container: string
+  image: string
+  gpus: number[]
+}
+
+export interface AdaptiveProfile {
+  id: string
+  label: string
+  description: string
+  engines: AdaptiveEngine[]
+  active: boolean
+}
+
+export interface AdaptiveTransition {
+  from: string
+  to: string
+  automatic: boolean
+  allow_downtime: boolean
+  requires_downtime: boolean
+  estimated_downtime_seconds: number
+  condition?: {
+    metric:
+      | "requests_per_second"
+      | "prompt_tokens_per_second"
+      | "completion_tokens_per_second"
+      | "tokens_per_second"
+      | "inflight"
+      | "load_per_engine"
+    comparison: "above" | "below"
+    threshold: number
+    for_seconds: number
+  } | null
+}
+
+export interface AdaptiveStatus {
+  enabled: boolean
+  mode: AdaptiveMode
+  active_profile: string
+  phase: AdaptivePhase
+  target_profile: string | null
+  phase_started_at: number
+  last_error: string | null
+  signal: {
+    requests_per_second: number
+    prompt_tokens_per_second: number
+    completion_tokens_per_second: number
+    tokens_per_second: number
+    inflight: number
+    load_per_engine: number
+  }
+  recommendation: string | null
+  profiles: AdaptiveProfile[]
+  transitions: AdaptiveTransition[]
+}
+
+export interface AdaptiveAuditRecord {
+  version: number
+  timestamp_unix_ms: number
+  event: string
+  active_profile: string
+  target_profile?: string
+  source?: string
+  engine?: string
+  detail?: string
+}
+
+export interface UiSession {
+  authenticated: boolean
+}
+
 /** Frames pushed over `/api/machineview/stream`, tagged by `kind`. */
 export type StreamFrame =
   | {
@@ -171,11 +254,43 @@ export function isMockMode(): boolean {
 }
 
 async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(path, { headers: { accept: "application/json" } })
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    headers: { accept: "application/json" },
+  })
   if (!response.ok) {
     throw new Error(`${path}: HTTP ${response.status}`)
   }
   return (await response.json()) as T
+}
+
+export async function fetchUiSession(): Promise<UiSession> {
+  if (isMockMode()) return { authenticated: true }
+  return getJson<UiSession>("/api/ui/session")
+}
+
+export async function loginUi(token: string): Promise<UiSession> {
+  const response = await fetch("/api/ui/login", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({ token }),
+  })
+  const payload = (await response.json().catch(() => null)) as
+    | (UiSession & { error?: string })
+    | null
+  if (!response.ok) throw new Error(payload?.error ?? `HTTP ${response.status}`)
+  return payload ?? { authenticated: false }
+}
+
+export async function logoutUi(): Promise<void> {
+  if (isMockMode()) return
+  const response = await fetch("/api/ui/logout", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { accept: "application/json" },
+  })
+  if (!response.ok) throw new Error(`logout: HTTP ${response.status}`)
 }
 
 export function fetchSummary(): Promise<Summary> {
@@ -190,4 +305,110 @@ export function fetchSeries(rangeSeconds: number, points: number): Promise<Serie
 
 export function fetchTokens(days: number): Promise<TokenHistory> {
   return getJson<TokenHistory>(`/api/machineview/tokens?days=${days}`)
+}
+
+export async function fetchAdaptiveStatus(): Promise<AdaptiveStatus | null> {
+  if (isMockMode()) {
+    return {
+      enabled: true,
+      mode: "recommend",
+      active_profile: "split-tp4",
+      phase: "idle",
+      target_profile: null,
+      phase_started_at: Date.now() / 1000,
+      last_error: null,
+      signal: {
+        requests_per_second: 3.7,
+        prompt_tokens_per_second: 1820,
+        completion_tokens_per_second: 635,
+        tokens_per_second: 2455,
+        inflight: 5,
+        load_per_engine: 2.5,
+      },
+      recommendation: "unified-tp8",
+      profiles: [
+        {
+          id: "split-tp4",
+          label: "Twin Cruise",
+          description: "Two TP4 engines for sustained throughput and cache locality.",
+          active: true,
+          engines: [
+            { upstream: 0, label: "A", container: "engine-a", image: "sha256:mock", gpus: [0, 1, 2, 3] },
+            { upstream: 1, label: "B", container: "engine-b", image: "sha256:mock", gpus: [4, 5, 6, 7] },
+          ],
+        },
+        {
+          id: "unified-tp8",
+          label: "Afterburner",
+          description: "One TP8 engine spanning the box for burst latency.",
+          active: false,
+          engines: [
+            { upstream: 2, label: "Aero", container: "engine-tp8", image: "sha256:mock", gpus: [0, 1, 2, 3, 4, 5, 6, 7] },
+          ],
+        },
+      ],
+      transitions: [
+        {
+          from: "split-tp4",
+          to: "unified-tp8",
+          automatic: true,
+          allow_downtime: true,
+          requires_downtime: true,
+          estimated_downtime_seconds: 540,
+          condition: { metric: "completion_tokens_per_second", comparison: "above", threshold: 400, for_seconds: 30 },
+        },
+      ],
+    }
+  }
+  const response = await fetch("/api/adaptive/status", {
+    credentials: "same-origin",
+    headers: { accept: "application/json" },
+  })
+  if (response.status === 404) return null
+  if (!response.ok) throw new Error(`adaptive status: HTTP ${response.status}`)
+  return (await response.json()) as AdaptiveStatus
+}
+
+export async function fetchAdaptiveAudit(): Promise<AdaptiveAuditRecord[]> {
+  if (isMockMode()) {
+    return [
+      {
+        version: 1,
+        timestamp_unix_ms: Date.now() - 3600_000,
+        event: "controller_started",
+        active_profile: "split-tp4",
+        detail: "topology authority reconciled",
+      },
+    ]
+  }
+  return getJson<AdaptiveAuditRecord[]>("/api/adaptive/audit")
+}
+
+async function postAdaptive<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new Error(payload?.error ?? `HTTP ${response.status}`)
+  }
+  return (await response.json()) as T
+}
+
+export function setAdaptiveMode(
+  mode: AdaptiveMode,
+): Promise<AdaptiveStatus> {
+  return postAdaptive("/api/adaptive/mode", { mode })
+}
+
+export function startAdaptiveTransition(
+  profile: string,
+): Promise<AdaptiveStatus> {
+  return postAdaptive("/api/adaptive/transition", { profile })
 }

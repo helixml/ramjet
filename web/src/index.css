@@ -202,6 +202,44 @@ body {
   @apply bg-background text-foreground font-sans antialiased;
 }
 
+.airflow {
+  animation: adaptive-flow 1.7s linear infinite;
+}
+
+.airflow-slow {
+  animation-duration: 3.4s;
+}
+
+.fan-spin {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: adaptive-spin 2.4s linear infinite;
+}
+
+.core-pulse {
+  animation: adaptive-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes adaptive-flow {
+  to { stroke-dashoffset: -52; }
+}
+
+@keyframes adaptive-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes adaptive-pulse {
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .airflow,
+  .fan-spin,
+  .core-pulse {
+    animation: none;
+  }
+}
+
 /* Brand mark — same treatment as Helix ChatSidebarBrandHeader. */
 .wordmark {
   font-family: var(--font-wordmark);

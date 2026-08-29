@@ -10,6 +10,7 @@ use axum::{
 };
 use prometheus::{Encoder, Registry, TextEncoder};
 use ramjet::{
+    adaptive::Adaptive,
     config::Config,
     kv_consumer::KvEventConsumers,
     machineview,
@@ -17,6 +18,7 @@ use ramjet::{
     proxy::Proxy,
     router::{Router as LocalityRouter, RouterConfig},
     snapshot_route::SnapshotRouteConsumers,
+    ui_auth::UiAuth,
 };
 use tokio::{net::TcpListener, sync::broadcast};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -75,6 +77,20 @@ async fn main() -> anyhow::Result<()> {
         exact_inventories,
     )
     .context("initialize ramjet proxy")?;
+    let ui_auth = UiAuth::from_env().context("invalid UI authentication configuration")?;
+    let adaptive = Adaptive::from_env(
+        proxy.clone(),
+        metrics.requests.clone(),
+        metrics.prompt_tokens.clone(),
+        metrics.completion_tokens.clone(),
+    )
+    .await
+    .context("initialize adaptive topology controller")?;
+    if adaptive.is_some() {
+        ui_auth
+            .as_ref()
+            .context("adaptive control requires RJ_UI_AUTH_TOKEN")?;
+    }
     let machineview_settings =
         machineview::Settings::from_env().context("invalid machineview configuration")?;
     let machineview = machineview::MachineView::start(
@@ -97,8 +113,23 @@ async fn main() -> anyhow::Result<()> {
             proxy: proxy.clone(),
             registry,
         });
+    if let Some(auth) = &ui_auth {
+        metrics_api = metrics_api.merge(auth.router());
+    }
     if let Some(view) = &machineview {
-        metrics_api = metrics_api.merge(view.router());
+        metrics_api = if let Some(auth) = &ui_auth {
+            metrics_api
+                .merge(view.ui_router())
+                .merge(auth.protect(view.api_router()))
+        } else {
+            metrics_api.merge(view.router())
+        };
+    }
+    if let Some(controller) = &adaptive {
+        let auth = ui_auth
+            .as_ref()
+            .expect("adaptive UI authority checked above");
+        metrics_api = metrics_api.merge(auth.protect(controller.router()));
     }
     let api_listener = TcpListener::bind("0.0.0.0:8000")
         .await
@@ -112,6 +143,9 @@ async fn main() -> anyhow::Result<()> {
     let probe = tokio::spawn(proxy.clone().probe_loop());
     let dspark_guard = tokio::spawn(proxy.clone().dspark_guard_loop());
     let idle_drain = tokio::spawn(proxy.clone().idle_drain_loop());
+    let adaptive_task = adaptive
+        .clone()
+        .map(|controller| tokio::spawn(controller.run()));
     let mut api_shutdown = shutdown_tx.subscribe();
     let mut metrics_shutdown = shutdown_tx.subscribe();
     let api_server = axum::serve(api_listener, api).with_graceful_shutdown(async move {
@@ -149,6 +183,9 @@ async fn main() -> anyhow::Result<()> {
     probe.abort();
     dspark_guard.abort();
     idle_drain.abort();
+    if let Some(task) = adaptive_task {
+        task.abort();
+    }
     if let Some(view) = machineview {
         view.shutdown().await;
     }
