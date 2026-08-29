@@ -359,7 +359,7 @@ fn validate_container(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum Phase {
     Idle,
@@ -392,6 +392,24 @@ struct Runtime {
     target_profile: Option<String>,
     phase_started_at: u64,
     last_error: Option<String>,
+}
+
+impl Runtime {
+    fn persisted_state(&self) -> PersistedState {
+        PersistedState {
+            version: 1,
+            mode: self.mode,
+            active_profile: self.active_profile.clone(),
+            pending_transition: self
+                .target_profile
+                .as_ref()
+                .map(|target| PersistedTransition {
+                    from: self.active_profile.clone(),
+                    to: target.clone(),
+                    phase: self.phase,
+                }),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -456,12 +474,47 @@ impl From<&Condition> for ConditionStatus {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedState {
     version: u32,
     mode: Mode,
     active_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_transition: Option<PersistedTransition>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedTransition {
+    from: String,
+    to: String,
+    phase: Phase,
+}
+
+impl PersistedState {
+    fn validate(&self, config: &Config) -> anyhow::Result<()> {
+        ensure!(self.version == 1, "adaptive state version must be 1");
+        ensure!(
+            config.profile(&self.active_profile).is_some(),
+            "persisted adaptive profile no longer exists"
+        );
+        if let Some(pending) = &self.pending_transition {
+            ensure!(
+                pending.from == self.active_profile,
+                "pending transition source does not match active profile"
+            );
+            ensure!(
+                config.transition(&pending.from, &pending.to).is_some(),
+                "pending adaptive transition is no longer configured"
+            );
+            ensure!(
+                pending.phase != Phase::Idle,
+                "pending adaptive transition cannot be idle"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -565,6 +618,9 @@ impl Adaptive {
         }
 
         let persisted = load_state(&config.state_path)?;
+        if let Some(state) = &persisted {
+            state.validate(&config)?;
+        }
         let active_profile = persisted.as_ref().map_or_else(
             || config.active_profile.clone(),
             |state| state.active_profile.clone(),
@@ -574,13 +630,22 @@ impl Adaptive {
             "persisted adaptive profile no longer exists"
         );
         let mode = persisted.as_ref().map_or(config.mode, |state| state.mode);
+        let pending = persisted
+            .as_ref()
+            .and_then(|state| state.pending_transition.clone());
         let profile = config
             .profile(&active_profile)
             .context("validated adaptive profile disappeared")?;
-        proxy.set_topology_active(&profile_upstreams(profile))?;
+        if pending.is_some() {
+            proxy.set_topology_active(&[])?;
+        } else {
+            proxy.set_topology_active(&profile_upstreams(profile))?;
+        }
         let initial_requests = counter_sum(&requests);
         let initial_prompt_tokens = counter_sum(&prompt_tokens);
         let initial_completion_tokens = counter_sum(&completion_tokens);
+        let interrupted_phase = pending.as_ref().map(|transition| transition.phase);
+        let target_profile = pending.as_ref().map(|transition| transition.to.clone());
 
         let controller = Self {
             inner: Arc::new(Inner {
@@ -593,10 +658,20 @@ impl Adaptive {
                 runtime: Mutex::new(Runtime {
                     mode,
                     active_profile,
-                    phase: Phase::Idle,
-                    target_profile: None,
+                    phase: if pending.is_some() {
+                        Phase::Failed
+                    } else {
+                        Phase::Idle
+                    },
+                    target_profile,
                     phase_started_at: unix_seconds(),
-                    last_error: None,
+                    last_error: pending.as_ref().map(|transition| {
+                        format!(
+                            "Ramjet restarted during {:?}; rollback to {} is required",
+                            transition.phase, transition.from
+                        )
+                        .to_lowercase()
+                    }),
                 }),
                 audit: Mutex::new(audit),
                 auto: Mutex::new(AutoSample {
@@ -608,14 +683,19 @@ impl Adaptive {
                 operation: AsyncMutex::new(()),
             }),
         };
-        controller.reconcile_running_profile().await?;
+        if pending.is_none() {
+            controller.reconcile_running_profile().await?;
+        }
         controller.persist()?;
         controller.append_audit(
             "controller_started",
             None,
+            pending.as_ref().map(|transition| transition.to.clone()),
             None,
-            None,
-            Some("topology authority reconciled".to_owned()),
+            Some(interrupted_phase.map_or_else(
+                || "topology authority reconciled".to_owned(),
+                |phase| format!("interrupted {phase:?} fenced; rollback required").to_lowercase(),
+            )),
         )?;
         Ok(Some(controller))
     }
@@ -626,6 +706,7 @@ impl Adaptive {
             .route("/api/adaptive/audit", get(Self::get_audit))
             .route("/api/adaptive/mode", post(Self::set_mode))
             .route("/api/adaptive/transition", post(Self::transition))
+            .route("/api/adaptive/rollback", post(Self::retry_rollback))
             .with_state(self.clone())
     }
 
@@ -713,7 +794,7 @@ impl Adaptive {
         State(controller): State<Self>,
         Json(request): Json<ModeRequest>,
     ) -> Response {
-        if controller.inner.runtime.lock().phase.busy() {
+        if controller.inner.runtime.lock().target_profile.is_some() {
             return api_error(StatusCode::CONFLICT, "a topology transition is in progress");
         }
         let previous = controller.inner.runtime.lock().mode;
@@ -747,13 +828,21 @@ impl Adaptive {
         }
     }
 
+    #[allow(clippy::unused_async)] // Axum handlers return futures.
+    async fn retry_rollback(State(controller): State<Self>) -> Response {
+        match controller.begin_rollback("manual") {
+            Ok(()) => (StatusCode::ACCEPTED, Json(controller.status())).into_response(),
+            Err(error) => api_error(StatusCode::CONFLICT, &error.to_string()),
+        }
+    }
+
     fn begin_transition(&self, target: String, source: &'static str) -> anyhow::Result<()> {
         validate_id("target profile", &target)?;
         {
             let mut runtime = self.inner.runtime.lock();
             ensure!(
-                !runtime.phase.busy(),
-                "a topology transition is already in progress"
+                runtime.phase == Phase::Idle && runtime.target_profile.is_none(),
+                "topology control is not idle"
             );
             ensure!(runtime.mode != Mode::Off, "adaptive control is off");
             ensure!(
@@ -776,6 +865,13 @@ impl Adaptive {
             runtime.phase_started_at = unix_seconds();
             runtime.last_error = None;
         }
+        if let Err(error) = self.persist() {
+            let mut runtime = self.inner.runtime.lock();
+            runtime.phase = Phase::Idle;
+            runtime.target_profile = None;
+            runtime.phase_started_at = unix_seconds();
+            return Err(error).context("persist topology transition intent");
+        }
         if let Err(error) = self.append_audit(
             "transition_requested",
             Some(source),
@@ -787,6 +883,7 @@ impl Adaptive {
             runtime.phase = Phase::Idle;
             runtime.target_profile = None;
             runtime.phase_started_at = unix_seconds();
+            let _ = self.persist();
             return Err(error).context("write topology audit record");
         }
         tracing::info!(target_profile = %target, source, "adaptive topology transition accepted");
@@ -797,79 +894,201 @@ impl Adaptive {
         Ok(())
     }
 
+    fn begin_rollback(&self, source: &'static str) -> anyhow::Result<()> {
+        let target = {
+            let mut runtime = self.inner.runtime.lock();
+            ensure!(
+                runtime.phase == Phase::Failed,
+                "rollback is available only for a failed transition"
+            );
+            let target = runtime
+                .target_profile
+                .clone()
+                .context("there is no interrupted transition to roll back")?;
+            runtime.phase = Phase::RollingBack;
+            runtime.phase_started_at = unix_seconds();
+            runtime.last_error = None;
+            target
+        };
+        if let Err(error) = self.persist() {
+            let mut runtime = self.inner.runtime.lock();
+            runtime.phase = Phase::Failed;
+            runtime.last_error = Some(error.to_string());
+            return Err(error).context("persist topology rollback intent");
+        }
+        if let Err(error) = self.append_audit(
+            "rollback_requested",
+            Some(source),
+            Some(target.clone()),
+            None,
+            None,
+        ) {
+            let mut runtime = self.inner.runtime.lock();
+            runtime.phase = Phase::Failed;
+            runtime.last_error = Some(error.to_string());
+            drop(runtime);
+            let _ = self.persist();
+            return Err(error).context("write topology rollback audit record");
+        }
+        let controller = self.clone();
+        tokio::spawn(async move {
+            controller.execute_rollback(target).await;
+        });
+        Ok(())
+    }
+
     async fn execute_transition(&self, target: String) {
         let _operation = self.inner.operation.lock().await;
         let previous = self.inner.runtime.lock().active_profile.clone();
-        let result = self.transition_once(&previous, &target).await;
-        match result {
-            Ok(()) => {
-                let mut runtime = self.inner.runtime.lock();
-                runtime.active_profile.clone_from(&target);
-                runtime.phase = Phase::Idle;
-                runtime.target_profile = None;
-                runtime.phase_started_at = unix_seconds();
-                runtime.last_error = None;
-                drop(runtime);
-                if let Err(error) = self.persist() {
+        let _deployment_lock =
+            match acquire_deployment_lock(&self.inner.config.deployment_lock_path) {
+                Ok(lock) => lock,
+                Err(error) => {
                     self.audit_best_effort(
                         "transition_failed",
                         Some("controller"),
-                        Some(target.clone()),
+                        Some(target),
                         None,
-                        Some(format!("persist completed transition: {error}")),
+                        Some(error.to_string()),
                     );
-                    self.fail(format!("persist completed transition: {error:#}"));
+                    self.fail_pending(format!("acquire deployment lock: {error:#}"));
+                    return;
+                }
+            };
+        match self.transition_once(&previous, &target).await {
+            Ok(()) => self.commit_transition(&previous, target),
+            Err(error) => {
+                self.rollback_failed_transition(&previous, target, error)
+                    .await;
+            }
+        }
+    }
+
+    fn commit_transition(&self, previous: &str, target: String) {
+        {
+            let mut runtime = self.inner.runtime.lock();
+            runtime.active_profile.clone_from(&target);
+            runtime.phase = Phase::Idle;
+            runtime.target_profile = None;
+            runtime.phase_started_at = unix_seconds();
+            runtime.last_error = None;
+        }
+        if let Err(error) = self.persist() {
+            let detail = format!("persist completed transition: {error:#}");
+            {
+                let mut runtime = self.inner.runtime.lock();
+                previous.clone_into(&mut runtime.active_profile);
+                runtime.target_profile = Some(target.clone());
+            }
+            self.fail_pending(detail.clone());
+            self.audit_best_effort(
+                "transition_failed",
+                Some("controller"),
+                Some(target),
+                None,
+                Some(detail),
+            );
+            return;
+        }
+        self.audit_best_effort("transition_completed", Some("controller"), None, None, None);
+        tracing::info!(active_profile = %target, "adaptive topology transition completed");
+    }
+
+    async fn rollback_failed_transition(
+        &self,
+        previous: &str,
+        target: String,
+        error: anyhow::Error,
+    ) {
+        tracing::error!(target_profile = %target, error = %error, "adaptive topology transition failed; rolling back");
+        if let Err(phase_error) = self.set_phase(Phase::RollingBack) {
+            tracing::error!(error = %phase_error, "persist rollback phase failed");
+        }
+        let rollback = self.rollback_once(&target, previous).await;
+        let detail = match rollback {
+            Ok(()) => {
+                self.audit_best_effort(
+                    "rollback_completed",
+                    Some("controller"),
+                    Some(previous.to_owned()),
+                    None,
+                    None,
+                );
+                format!("transition failed and was rolled back: {error:#}")
+            }
+            Err(ref rollback) => {
+                self.audit_best_effort(
+                    "rollback_failed",
+                    Some("controller"),
+                    Some(previous.to_owned()),
+                    None,
+                    Some(rollback.to_string()),
+                );
+                format!("transition failed: {error:#}; rollback failed: {rollback:#}")
+            }
+        };
+        self.audit_best_effort(
+            "transition_failed",
+            Some("controller"),
+            Some(target.clone()),
+            None,
+            Some(error.to_string()),
+        );
+        if rollback.is_ok() {
+            if let Err(persist_error) = self.finish_rollback(target, Some(detail.clone())) {
+                tracing::error!(error = %persist_error, "persist completed rollback failed");
+            }
+        } else {
+            self.fail_pending(detail);
+        }
+    }
+
+    async fn execute_rollback(&self, target: String) {
+        let _operation = self.inner.operation.lock().await;
+        let previous = self.inner.runtime.lock().active_profile.clone();
+        let _deployment_lock =
+            match acquire_deployment_lock(&self.inner.config.deployment_lock_path) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    self.audit_best_effort(
+                        "rollback_failed",
+                        Some("controller"),
+                        Some(previous),
+                        None,
+                        Some(error.to_string()),
+                    );
+                    self.fail_pending(format!("acquire deployment lock for rollback: {error:#}"));
+                    return;
+                }
+            };
+        match self.rollback_once(&target, &previous).await {
+            Ok(()) => {
+                if let Err(error) = self.finish_rollback(target, None) {
+                    tracing::error!(error = %error, "persist retried rollback failed");
                     return;
                 }
                 self.audit_best_effort(
-                    "transition_completed",
+                    "rollback_completed",
                     Some("controller"),
-                    None,
+                    Some(previous),
                     None,
                     None,
                 );
-                tracing::info!(active_profile = %target, "adaptive topology transition completed");
             }
             Err(error) => {
-                tracing::error!(target_profile = %target, error = %error, "adaptive topology transition failed; rolling back");
-                self.set_phase(Phase::RollingBack);
-                let rollback = self.rollback(&target, &previous).await;
-                let detail = match rollback {
-                    Ok(()) => {
-                        self.audit_best_effort(
-                            "rollback_completed",
-                            Some("controller"),
-                            Some(previous.clone()),
-                            None,
-                            None,
-                        );
-                        format!("transition failed and was rolled back: {error:#}")
-                    }
-                    Err(rollback) => {
-                        self.audit_best_effort(
-                            "rollback_failed",
-                            Some("controller"),
-                            Some(previous.clone()),
-                            None,
-                            Some(rollback.to_string()),
-                        );
-                        format!("transition failed: {error:#}; rollback failed: {rollback:#}")
-                    }
-                };
                 self.audit_best_effort(
-                    "transition_failed",
+                    "rollback_failed",
                     Some("controller"),
-                    Some(target),
+                    Some(previous),
                     None,
                     Some(error.to_string()),
                 );
-                self.fail(detail);
+                self.fail_pending(format!("rollback retry failed: {error:#}"));
             }
         }
     }
 
     async fn transition_once(&self, from: &str, to: &str) -> anyhow::Result<()> {
-        let lock = acquire_deployment_lock(&self.inner.config.deployment_lock_path)?;
         let source = self
             .inner
             .config
@@ -888,7 +1107,7 @@ impl Adaptive {
         .await
         .context("timed out draining active requests")?;
 
-        self.set_phase(Phase::Stopping);
+        self.set_phase(Phase::Stopping)?;
         for engine in &source.engines {
             self.inner.proxy.mark_upstream_unavailable(engine.upstream);
             self.inner.docker.stop(&engine.container).await?;
@@ -900,7 +1119,7 @@ impl Adaptive {
                 None,
             );
         }
-        self.set_phase(Phase::Starting);
+        self.set_phase(Phase::Starting)?;
         for engine in &target.engines {
             self.inner.proxy.mark_upstream_unavailable(engine.upstream);
             self.inner.docker.start(&engine.container).await?;
@@ -912,17 +1131,15 @@ impl Adaptive {
                 None,
             );
         }
-        self.set_phase(Phase::Stabilizing);
+        self.set_phase(Phase::Stabilizing)?;
         self.wait_profile_ready(target).await?;
         self.inner
             .proxy
             .set_topology_active(&profile_upstreams(target))?;
-        drop(lock);
         Ok(())
     }
 
-    async fn rollback(&self, failed: &str, previous: &str) -> anyhow::Result<()> {
-        let _lock = acquire_deployment_lock(&self.inner.config.deployment_lock_path)?;
+    async fn rollback_once(&self, failed: &str, previous: &str) -> anyhow::Result<()> {
         self.inner.proxy.set_topology_active(&[])?;
         let failed = self
             .inner
@@ -1037,7 +1254,11 @@ impl Adaptive {
                 runtime.mode,
             )
         };
-        if !matches!(mode, Mode::Recommend | Mode::Auto) || self.inner.runtime.lock().phase.busy() {
+        let runtime_blocked = {
+            let runtime = self.inner.runtime.lock();
+            runtime.phase.busy() || runtime.target_profile.is_some()
+        };
+        if !matches!(mode, Mode::Recommend | Mode::Auto) || runtime_blocked {
             self.inner.auto.lock().candidate = None;
             return;
         }
@@ -1114,27 +1335,50 @@ impl Adaptive {
         from_names != to_names
     }
 
-    fn set_phase(&self, phase: Phase) {
-        let mut runtime = self.inner.runtime.lock();
-        runtime.phase = phase;
-        runtime.phase_started_at = unix_seconds();
+    fn set_phase(&self, phase: Phase) -> anyhow::Result<()> {
+        {
+            let mut runtime = self.inner.runtime.lock();
+            runtime.phase = phase;
+            runtime.phase_started_at = unix_seconds();
+        }
+        self.persist().context("persist topology transition phase")
     }
 
-    fn fail(&self, error: String) {
-        let mut runtime = self.inner.runtime.lock();
-        runtime.phase = Phase::Failed;
-        runtime.target_profile = None;
-        runtime.phase_started_at = unix_seconds();
-        runtime.last_error = Some(error);
+    fn finish_rollback(&self, target: String, last_error: Option<String>) -> anyhow::Result<()> {
+        {
+            let mut runtime = self.inner.runtime.lock();
+            runtime.phase = Phase::Idle;
+            runtime.target_profile = None;
+            runtime.phase_started_at = unix_seconds();
+            runtime.last_error = last_error;
+        }
+        if let Err(error) = self.persist() {
+            let detail = format!("persist completed rollback: {error:#}");
+            self.inner.runtime.lock().target_profile = Some(target);
+            self.fail_pending(detail);
+            return Err(error).context("persist completed topology rollback");
+        }
+        Ok(())
+    }
+
+    fn fail_pending(&self, error: String) {
+        if let Err(fence_error) = self.inner.proxy.set_topology_active(&[]) {
+            tracing::error!(error = %fence_error, "fence topology after transition failure failed");
+        }
+        {
+            let mut runtime = self.inner.runtime.lock();
+            runtime.phase = Phase::Failed;
+            runtime.phase_started_at = unix_seconds();
+            runtime.last_error = Some(error);
+        }
+        if let Err(error) = self.persist() {
+            tracing::error!(error = %error, "persist failed topology state failed");
+        }
     }
 
     fn persist(&self) -> anyhow::Result<()> {
         let runtime = self.inner.runtime.lock();
-        let state = PersistedState {
-            version: 1,
-            mode: runtime.mode,
-            active_profile: runtime.active_profile.clone(),
-        };
+        let state = runtime.persisted_state();
         drop(runtime);
         write_state(&self.inner.config.state_path, &state)
     }
@@ -1701,6 +1945,93 @@ mod tests {
         assert!((counter_rate(1_250.0, 1_000.0, 5.0) - 50.0).abs() < f64::EPSILON);
         assert!(counter_rate(10.0, 1_000.0, 5.0).abs() < f64::EPSILON);
         assert!(counter_rate(10.0, 1.0, 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn transition_journal_is_strict_and_stable_state_stays_legacy_shaped() {
+        let stable = Runtime {
+            mode: Mode::Manual,
+            active_profile: "split".to_owned(),
+            phase: Phase::Idle,
+            target_profile: None,
+            phase_started_at: 123,
+            last_error: None,
+        }
+        .persisted_state();
+        let stable_json = serde_json::to_value(&stable).unwrap();
+        assert_eq!(
+            stable_json,
+            serde_json::json!({
+                "version": 1,
+                "mode": "manual",
+                "active_profile": "split"
+            })
+        );
+        let decoded_stable: PersistedState = serde_json::from_value(stable_json).unwrap();
+        decoded_stable.validate(&config()).unwrap();
+
+        let pending = Runtime {
+            mode: Mode::Auto,
+            active_profile: "split".to_owned(),
+            phase: Phase::Starting,
+            target_profile: Some("unified".to_owned()),
+            phase_started_at: 456,
+            last_error: None,
+        }
+        .persisted_state();
+        pending.validate(&config()).unwrap();
+        let pending_json = serde_json::to_value(&pending).unwrap();
+        assert_eq!(pending_json["pending_transition"]["from"], "split");
+        assert_eq!(pending_json["pending_transition"]["to"], "unified");
+        assert_eq!(pending_json["pending_transition"]["phase"], "starting");
+
+        let mut wrong_source = pending.clone();
+        wrong_source.pending_transition.as_mut().unwrap().from = "unified".to_owned();
+        assert!(
+            wrong_source
+                .validate(&config())
+                .unwrap_err()
+                .to_string()
+                .contains("source")
+        );
+
+        let mut idle = pending;
+        idle.pending_transition.as_mut().unwrap().phase = Phase::Idle;
+        assert!(idle.validate(&config()).is_err());
+    }
+
+    #[test]
+    fn state_file_round_trip_preserves_pending_transition() {
+        let directory = PathBuf::from(format!(
+            "/tmp/rj-adaptive-state-{}-{}",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.join("state.json");
+        let expected = Runtime {
+            mode: Mode::Recommend,
+            active_profile: "split".to_owned(),
+            phase: Phase::RollingBack,
+            target_profile: Some("unified".to_owned()),
+            phase_started_at: 789,
+            last_error: Some("redacted".to_owned()),
+        }
+        .persisted_state();
+        write_state(&path, &expected).unwrap();
+        let actual = load_state(&path).unwrap().unwrap();
+        actual.validate(&config()).unwrap();
+        let pending = actual.pending_transition.unwrap();
+        assert_eq!(pending.from, "split");
+        assert_eq!(pending.to, "unified");
+        assert_eq!(pending.phase, Phase::RollingBack);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 
     #[test]

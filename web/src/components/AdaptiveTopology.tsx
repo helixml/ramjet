@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Activity, ArrowDownToLine, ArrowRight, ArrowUpFromLine, Gauge, History, TimerReset } from "lucide-react"
+import { Activity, AlertTriangle, ArrowDownToLine, ArrowRight, ArrowUpFromLine, Gauge, History, RotateCcw, TimerReset } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -7,6 +7,7 @@ import { TransitionDialog } from "@/components/TransitionDialog"
 import {
   fetchAdaptiveAudit,
   fetchAdaptiveStatus,
+  retryAdaptiveRollback,
   setAdaptiveMode,
   startAdaptiveTransition,
   type AdaptiveAuditRecord,
@@ -225,6 +226,18 @@ export function AdaptiveTopology({
       setWorking(false)
     }
   }
+  const retryRollback = async () => {
+    setWorking(true)
+    try {
+      setStatus(await retryAdaptiveRollback())
+      setAudit(await fetchAdaptiveAudit())
+      setError(null)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setWorking(false)
+    }
+  }
 
   if (status === undefined) {
     return <Card><CardContent className="py-20 text-center text-sm text-muted-foreground">reading engine topology…</CardContent></Card>
@@ -236,6 +249,33 @@ export function AdaptiveTopology({
   return (
     <div className="flex flex-col gap-3">
       {active ? <TokenFlowDiagram profile={active} gpus={gpus} signal={status.signal} phase={status.phase} /> : null}
+      {status.target_profile ? (
+        <Card className={status.phase === "failed" ? "border-red-500/35 bg-red-500/[0.04]" : "border-primary/25 bg-primary/[0.03]"}>
+          <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 gap-3">
+              <span className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${status.phase === "failed" ? "bg-red-500/10 text-red-500" : "bg-primary/10 text-primary"}`}>
+                {status.phase === "failed" ? <AlertTriangle className="size-4" /> : <RotateCcw className="size-4 animate-spin" />}
+              </span>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold">
+                  {status.phase === "failed" ? "Topology recovery required" : `Transition ${status.phase.replaceAll("_", " ")}`}
+                </div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  {status.phase === "failed"
+                    ? `Routing is fenced. Restore ${active?.label ?? status.active_profile} from the durable transition journal before attempting another shape.`
+                    : `${active?.label ?? status.active_profile} → ${status.profiles.find((profile) => profile.id === status.target_profile)?.label ?? status.target_profile}`}
+                </p>
+                {status.last_error ? <p className="mt-1 text-[11px] text-red-500">{status.last_error}</p> : null}
+              </div>
+            </div>
+            {status.phase === "failed" ? (
+              <Button disabled={working} onClick={() => void retryRollback()} className="shrink-0">
+                <RotateCcw /> {working ? "Starting rollback…" : "Retry rollback"}
+              </Button>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1fr_360px]">
         <Card>
           <CardHeader>

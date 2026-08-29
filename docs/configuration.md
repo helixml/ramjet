@@ -882,9 +882,12 @@ screen. With `RJ_UI_AUTH_TOKEN` configured, every
 WebSocket, requires the signed session. `POST /api/ui/login` starts a session,
 `GET /api/ui/session` checks it, and `POST /api/ui/logout` clears it.
 `GET /api/adaptive/status` and `GET /api/adaptive/audit` are read-only after
-login; `POST /api/adaptive/mode` and `POST /api/adaptive/transition` mutate
-controller state. The UI always shows whether a configured edge requires
-downtime and its operator estimate before enabling the action.
+login; `POST /api/adaptive/mode`, `POST /api/adaptive/transition`, and
+`POST /api/adaptive/rollback` mutate controller state. The rollback endpoint
+accepts no profile or container input: it is available only for the exact
+source profile retained by a failed/interrupted transition journal. The UI
+always shows whether a configured edge requires downtime and its operator
+estimate before enabling the action.
 
 The controller appends schema-v1 JSON Lines to `audit_path`. The file and its
 parent must be owner-only (0600 and a non-group/world-writable directory). It
@@ -894,10 +897,21 @@ timestamps, named profiles/containers, and bounded error details—never tokens,
 prompts, completions, engine bearers, or UI credentials. The dashboard reads
 only the newest 100 records from a bounded one-MiB tail.
 
-During a reconfiguration Ramjet first takes the common deployment lock, fences
-every topology member, drains in-flight requests, stops the source engines,
-starts the target engines, and waits for ordinary health/admission to remain
-stable. New requests receive an immediate service-unavailable response while
-membership is empty. A failed start automatically attempts to restore the
-previous profile. Reachability continues to be probed independently, so an
-inactive engine is not reported as a failed engine.
+During a reconfiguration Ramjet first durably records intent, then takes the
+common deployment lock before it fences every topology member, drains
+in-flight requests, stops the source engines, starts the target engines, and
+waits for ordinary health/admission to remain stable. It retains the lock
+through the final durable commit or rollback. New requests receive an
+immediate service-unavailable response while membership is empty. A failed
+start automatically attempts to restore the previous profile. Reachability
+continues to be probed independently, so an inactive engine is not reported as
+a failed engine.
+
+The owner-only state file remains schema-v1 compatible while stable. Once a
+transition is accepted it additionally carries the exact source, target, and
+phase; that intent is atomically synced before fencing or Docker actions and
+each later destructive phase is synced before it begins. If Ramjet restarts
+with that field present, it does not infer authority from container names or
+running state: all topology members remain fenced, status becomes `failed`,
+and the authenticated UI offers `Retry rollback`. A successful retry clears
+the journal only after the previous profile is healthy and routable again.
