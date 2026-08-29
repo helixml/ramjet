@@ -1,5 +1,37 @@
 # node06 experiment journal
 
+## 2026-08-29 — adaptive topology controller admitted in manual TP4 mode
+
+Ramjet commit `37f816c` was built and transferred as
+`rust-r137-adaptive-37f816c`, image ID
+`sha256:1022c9165afb5398175e9bf29c0e6b37b530e16cf4f08e2219441833cdc301c7`.
+The common deployment lock covered the staged Compose mutation, one-engine-at-
+a-time label promotion, default-stopped TP8 creation, Ramjet replacement, and
+final verification. Engine A and B each returned through their ordinary HTTP
+and 30-second warmup gates with restart count zero while the other TP4 engine
+served. The TP8 candidate was created with the exact image, labels, and GPU
+set but was not started or performance-qualified.
+
+The final controller state is `manual`, `split-tp4`, and `idle`: two active and
+healthy replicas out of three configured upstreams. Both active direct KV
+inventories re-established trusted, hybrid-placement-ready authority after a
+fresh live batch; the inactive TP8 inventory remained untrusted and fenced.
+Three bounded synthetic requests (A, B, and Ramjet) returned HTTP 200 with
+usage. The control endpoint rejected an unauthenticated mode write with 401
+and accepted the same manual-mode write with the existing bearer authority.
+The machine-view agent upgrade exposed the chassis `FP_TEMP` value at 38C and
+all eight GPUs; the production SVG Topology bundle returned HTTP 200 and
+contained the Afterburner shape.
+
+All four containers ended at restart count zero: A/B running, TP8 stopped, and
+Ramjet running. The admitted Compose and adaptive policy SHA-256 values are
+`9baa2f394279d36f1a26d4cc137ad67ca6767bd5f724aa372a2f97f5065ac3dc`
+and `5d241f690c754a5e94e9bea86d0ff3cc84017c886762deacedce2f0140209ee1`.
+Owner-only evidence is retained on node06 below
+`.experiments/adaptive-d04f0ff/`. No topology transition was exercised: the
+nine-minute TP8 outage and its crossover remain a separate guarded maintenance
+qualification before `recommend` or `auto` mode.
+
 ## 2026-08-28 — upstream Qwen Flash-Next `max-num-seqs=16` rejected after same-engine A/B/B/A
 
 The vLLM recipe's newly verified `rtx_pro_6000_4x` override recommends
