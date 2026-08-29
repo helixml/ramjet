@@ -1,5 +1,34 @@
 # node06 experiment journal
 
+## 2026-08-29 — adaptive topology corrected to serving load and token flow
+
+Ramjet commit `7d90a5f` was built and transferred as
+`rust-r138-adaptive-load-7d90a5f`, image ID
+`sha256:7c6ec3968fc1d84d98b1a4c3195df94e9511ebba43be145288ea3c8ba2ad5bd2`.
+The LB-only rollout retained both TP4 engine processes and their restart count
+of zero. The controller remained `manual`, `split-tp4`, and `idle`; the TP8
+candidate remained stopped. The new status contract publishes input, output,
+and total token rates alongside in-flight and normalized per-engine load. The
+two configured candidate edges now observe output-token throughput and
+per-engine load instead of request rate and raw in-flight count.
+
+The production SVG bundle contains `TOKEN INTAKE` and `SYSTEM LOAD` and no
+longer contains the discarded chassis-temperature gauge. The branch-only IPMI
+scrape added to the observation-only host agent was removed and node06's agent
+was restored to the canonical non-IPMI implementation. Temperature remains an
+independent benchmark/deployment safety guard and is not a topology input.
+
+A bounded three-request smoke ran under thermal guard run
+`1a6cc45643e90ff59e1efe9c3b3da4fd`. Ramjet observed maxima of 2,896.6 input
+tok/s, 0.4 output tok/s, 2,897.0 total tok/s, and 0.6 req/s for the deliberately
+one-token responses. Both active exact inventories then returned trusted and
+placement-ready. Final health was 2/2 active and healthy, all four container
+restart counts were zero, and recent LB logs contained no fatal marker. The
+admitted Compose and adaptive-policy SHA-256 values are
+`9baa2f394279d36f1a26d4cc137ad67ca6767bd5f724aa372a2f97f5065ac3dc`
+and `1a3be15fc91d812a315ffd609ac1aae6c11f81055f2296cb426af5dd3731c80b`.
+Owner-only evidence is retained below `.experiments/adaptive-load-7d90a5f/`.
+
 ## 2026-08-29 — adaptive topology controller admitted in manual TP4 mode
 
 Ramjet commit `37f816c` was built and transferred as
