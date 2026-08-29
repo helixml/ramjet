@@ -9,7 +9,6 @@ export interface DiskSample {
 }
 
 export interface HostSample {
-  intake_temp_c?: number | null
   cpu_pct: number | null
   load1: number | null
   mem_total_bytes: number | null
@@ -179,7 +178,13 @@ export interface AdaptiveTransition {
   requires_downtime: boolean
   estimated_downtime_seconds: number
   condition?: {
-    metric: "requests_per_second" | "inflight" | "load_per_engine"
+    metric:
+      | "requests_per_second"
+      | "prompt_tokens_per_second"
+      | "completion_tokens_per_second"
+      | "tokens_per_second"
+      | "inflight"
+      | "load_per_engine"
     comparison: "above" | "below"
     threshold: number
     for_seconds: number
@@ -196,6 +201,9 @@ export interface AdaptiveStatus {
   last_error: string | null
   signal: {
     requests_per_second: number
+    prompt_tokens_per_second: number
+    completion_tokens_per_second: number
+    tokens_per_second: number
     inflight: number
     load_per_engine: number
   }
@@ -262,7 +270,14 @@ export async function fetchAdaptiveStatus(): Promise<AdaptiveStatus | null> {
       target_profile: null,
       phase_started_at: Date.now() / 1000,
       last_error: null,
-      signal: { requests_per_second: 3.7, inflight: 5, load_per_engine: 2.5 },
+      signal: {
+        requests_per_second: 3.7,
+        prompt_tokens_per_second: 1820,
+        completion_tokens_per_second: 635,
+        tokens_per_second: 2455,
+        inflight: 5,
+        load_per_engine: 2.5,
+      },
       recommendation: "unified-tp8",
       profiles: [
         {
@@ -293,7 +308,7 @@ export async function fetchAdaptiveStatus(): Promise<AdaptiveStatus | null> {
           allow_downtime: true,
           requires_downtime: true,
           estimated_downtime_seconds: 540,
-          condition: { metric: "requests_per_second", comparison: "above", threshold: 3, for_seconds: 30 },
+          condition: { metric: "completion_tokens_per_second", comparison: "above", threshold: 400, for_seconds: 30 },
         },
       ],
     }

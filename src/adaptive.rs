@@ -53,6 +53,9 @@ pub enum Mode {
 #[serde(rename_all = "snake_case")]
 pub enum Metric {
     RequestsPerSecond,
+    PromptTokensPerSecond,
+    CompletionTokensPerSecond,
+    TokensPerSecond,
     Inflight,
     LoadPerEngine,
 }
@@ -402,6 +405,9 @@ pub struct Status {
 #[derive(Clone, Debug, Default, Serialize)]
 struct Signal {
     requests_per_second: f64,
+    prompt_tokens_per_second: f64,
+    completion_tokens_per_second: f64,
+    tokens_per_second: f64,
     inflight: usize,
     load_per_engine: f64,
 }
@@ -454,7 +460,11 @@ struct PersistedState {
 struct AutoSample {
     at: Instant,
     requests: f64,
+    prompt_tokens: f64,
+    completion_tokens: f64,
     rps: f64,
+    prompt_tps: f64,
+    completion_tps: f64,
     candidate: Option<(String, Instant)>,
     recommendation: Option<String>,
 }
@@ -464,7 +474,11 @@ impl Default for AutoSample {
         Self {
             at: Instant::now(),
             requests: 0.0,
+            prompt_tokens: 0.0,
+            completion_tokens: 0.0,
             rps: 0.0,
+            prompt_tps: 0.0,
+            completion_tps: 0.0,
             candidate: None,
             recommendation: None,
         }
@@ -482,6 +496,8 @@ struct Inner {
     docker: Docker,
     admin_token: String,
     requests: CounterVec,
+    prompt_tokens: CounterVec,
+    completion_tokens: CounterVec,
     runtime: Mutex<Runtime>,
     auto: Mutex<AutoSample>,
     operation: AsyncMutex<()>,
@@ -499,6 +515,8 @@ impl Adaptive {
     pub async fn from_env(
         proxy: Proxy,
         requests: CounterVec,
+        prompt_tokens: CounterVec,
+        completion_tokens: CounterVec,
         admin_token: Option<String>,
     ) -> anyhow::Result<Option<Self>> {
         let Some(path) = env::var_os(CONFIG_ENV) else {
@@ -537,6 +555,8 @@ impl Adaptive {
             .context("validated adaptive profile disappeared")?;
         proxy.set_topology_active(&profile_upstreams(profile))?;
         let initial_requests = counter_sum(&requests);
+        let initial_prompt_tokens = counter_sum(&prompt_tokens);
+        let initial_completion_tokens = counter_sum(&completion_tokens);
 
         let controller = Self {
             inner: Arc::new(Inner {
@@ -545,6 +565,8 @@ impl Adaptive {
                 docker,
                 admin_token,
                 requests,
+                prompt_tokens,
+                completion_tokens,
                 runtime: Mutex::new(Runtime {
                     mode,
                     active_profile,
@@ -555,6 +577,8 @@ impl Adaptive {
                 }),
                 auto: Mutex::new(AutoSample {
                     requests: initial_requests,
+                    prompt_tokens: initial_prompt_tokens,
+                    completion_tokens: initial_completion_tokens,
                     ..AutoSample::default()
                 }),
                 operation: AsyncMutex::new(()),
@@ -593,6 +617,9 @@ impl Adaptive {
             .max(1);
         let signal = Signal {
             requests_per_second: auto.rps,
+            prompt_tokens_per_second: auto.prompt_tps,
+            completion_tokens_per_second: auto.completion_tps,
+            tokens_per_second: auto.prompt_tps + auto.completion_tps,
             inflight: self.inner.proxy.total_inflight(),
             load_per_engine: usize_f64(self.inner.proxy.total_load_units())
                 / usize_f64(active_engines),
@@ -863,20 +890,28 @@ impl Adaptive {
     }
 
     fn auto_tick(&self) {
-        let total = counter_sum(&self.inner.requests);
+        let requests = counter_sum(&self.inner.requests);
+        let prompt_tokens = counter_sum(&self.inner.prompt_tokens);
+        let completion_tokens = counter_sum(&self.inner.completion_tokens);
         let now = Instant::now();
-        let (rps, current, mode) = {
+        let (rps, prompt_tps, completion_tps, current, mode) = {
             let mut auto = self.inner.auto.lock();
             let elapsed = now.duration_since(auto.at).as_secs_f64();
-            auto.rps = if elapsed > 0.0 {
-                (total - auto.requests).max(0.0) / elapsed
-            } else {
-                0.0
-            };
+            auto.rps = counter_rate(requests, auto.requests, elapsed);
+            auto.prompt_tps = counter_rate(prompt_tokens, auto.prompt_tokens, elapsed);
+            auto.completion_tps = counter_rate(completion_tokens, auto.completion_tokens, elapsed);
             auto.at = now;
-            auto.requests = total;
+            auto.requests = requests;
+            auto.prompt_tokens = prompt_tokens;
+            auto.completion_tokens = completion_tokens;
             let runtime = self.inner.runtime.lock();
-            (auto.rps, runtime.active_profile.clone(), runtime.mode)
+            (
+                auto.rps,
+                auto.prompt_tps,
+                auto.completion_tps,
+                runtime.active_profile.clone(),
+                runtime.mode,
+            )
         };
         if !matches!(mode, Mode::Recommend | Mode::Auto) || self.inner.runtime.lock().phase.busy() {
             self.inner.auto.lock().candidate = None;
@@ -890,6 +925,9 @@ impl Adaptive {
             .max(1);
         let signal = Signal {
             requests_per_second: rps,
+            prompt_tokens_per_second: prompt_tps,
+            completion_tokens_per_second: completion_tps,
+            tokens_per_second: prompt_tps + completion_tps,
             inflight: self.inner.proxy.total_inflight(),
             load_per_engine: usize_f64(self.inner.proxy.total_load_units())
                 / usize_f64(active_engines),
@@ -995,6 +1033,9 @@ impl Condition {
     fn matches(&self, signal: &Signal) -> bool {
         let value = match self.metric {
             Metric::RequestsPerSecond => signal.requests_per_second,
+            Metric::PromptTokensPerSecond => signal.prompt_tokens_per_second,
+            Metric::CompletionTokensPerSecond => signal.completion_tokens_per_second,
+            Metric::TokensPerSecond => signal.tokens_per_second,
             Metric::Inflight => usize_f64(signal.inflight),
             Metric::LoadPerEngine => signal.load_per_engine,
         };
@@ -1055,6 +1096,14 @@ fn counter_sum(counter: &CounterVec) -> f64 {
                 .sum::<f64>()
         })
         .sum()
+}
+
+fn counter_rate(current: f64, previous: f64, elapsed_seconds: f64) -> f64 {
+    if elapsed_seconds.is_finite() && elapsed_seconds > 0.0 {
+        (current - previous).max(0.0) / elapsed_seconds
+    } else {
+        0.0
+    }
 }
 
 async fn wait_until(mut timeout: Duration, predicate: impl Fn() -> bool) -> anyhow::Result<()> {
@@ -1358,9 +1407,9 @@ mod tests {
             ],
             "transitions": [
                 {"from":"split","to":"unified","automatic":true,"allow_downtime":true,"estimated_downtime_seconds":540,
-                 "condition":{"metric":"requests_per_second","comparison":"above","threshold":2.5,"for_seconds":30}},
+                 "condition":{"metric":"completion_tokens_per_second","comparison":"above","threshold":400,"for_seconds":30}},
                 {"from":"unified","to":"split","automatic":true,"allow_downtime":true,"estimated_downtime_seconds":540,
-                 "condition":{"metric":"inflight","comparison":"above","threshold":4,"for_seconds":300}}
+                 "condition":{"metric":"load_per_engine","comparison":"above","threshold":4,"for_seconds":300}}
             ]
         }))
         .expect("config")
@@ -1404,15 +1453,24 @@ mod tests {
             .as_ref()
             .expect("condition");
         assert!(condition.matches(&Signal {
-            requests_per_second: 3.0,
+            completion_tokens_per_second: 401.0,
             inflight: 0,
-            load_per_engine: 0.0
+            load_per_engine: 0.0,
+            ..Signal::default()
         }));
         assert!(!condition.matches(&Signal {
-            requests_per_second: 2.0,
+            completion_tokens_per_second: 399.0,
             inflight: 99,
-            load_per_engine: 99.0
+            load_per_engine: 99.0,
+            ..Signal::default()
         }));
+    }
+
+    #[test]
+    fn token_counter_rates_are_reset_safe() {
+        assert!((counter_rate(1_250.0, 1_000.0, 5.0) - 50.0).abs() < f64::EPSILON);
+        assert!(counter_rate(10.0, 1_000.0, 5.0).abs() < f64::EPSILON);
+        assert!(counter_rate(10.0, 1.0, 0.0).abs() < f64::EPSILON);
     }
 
     #[tokio::test]

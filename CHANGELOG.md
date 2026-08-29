@@ -11,9 +11,10 @@
   publishes its downtime requirement and estimate. Target startup uses the
   ordinary health/warmup gates and failures attempt an automatic rollback.
 - Machine view adds an animated SVG Topology screen with per-GPU engine
-  grouping, intake airflow/temperature, live scaling signals, profile controls,
-  and an in-memory bearer prompt. The host agent reads only node-exporter's
-  `FP_TEMP` chassis-intake series.
+  grouping, token ingress/egress, GPU utilization, normalized serving load,
+  profile controls, and an in-memory bearer prompt. Adaptive policy can use
+  input, output, or total token throughput plus live in-flight/load signals;
+  temperature never participates in topology selection.
 - The node06 Flash-Next Compose defines its qualified TP4 pair and a
   default-stopped TP8 candidate as two named shapes. The controller and host
   deployment tools share the same filesystem lock; the initial rollout stays

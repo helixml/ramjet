@@ -136,19 +136,6 @@ class CollectorRates(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(content)
 
-    def test_parses_only_front_panel_intake_temperature(self):
-        metrics = """\
-node_ipmi_temperature_celsius{sensor="GPU1_TEMP"} 49
-node_ipmi_temperature_celsius{sensor="FP_TEMP"} 38
-node_ipmi_temperature_celsius{sensor="CPU1_TEMP"} 51
-"""
-        self.assertEqual(agent.parse_intake_temperature(metrics), 38.0)
-        self.assertIsNone(
-            agent.parse_intake_temperature(
-                'node_ipmi_temperature_celsius{sensor="GPU1_TEMP"} 49\n'
-            )
-        )
-
     def test_first_sample_has_null_rates_then_values(self):
         with tempfile.TemporaryDirectory() as root:
             proc = os.path.join(root, "proc")

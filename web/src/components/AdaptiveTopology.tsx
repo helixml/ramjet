@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { ArrowRight, Gauge, LockKeyhole, TimerReset, Wind } from "lucide-react"
+import { Activity, ArrowDownToLine, ArrowRight, ArrowUpFromLine, Gauge, LockKeyhole, TimerReset } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -22,18 +22,28 @@ function duration(seconds: number): string {
 }
 
 function metricLabel(metric: string): string {
-  return metric.replace("requests_per_second", "req/s").replaceAll("_", " ")
+  return metric
+    .replace("prompt_tokens_per_second", "input tok/s")
+    .replace("completion_tokens_per_second", "output tok/s")
+    .replace("tokens_per_second", "total tok/s")
+    .replace("requests_per_second", "req/s")
+    .replaceAll("_", " ")
 }
 
-function TurbineDiagram({
+function rate(value: number): string {
+  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}k`
+  return value.toFixed(value >= 100 ? 0 : 1)
+}
+
+function TokenFlowDiagram({
   profile,
   gpus,
-  intake,
+  signal,
   phase,
 }: {
   profile: AdaptiveProfile
   gpus: GpuSample[]
-  intake: number | null
+  signal: AdaptiveStatus["signal"]
   phase: string
 }) {
   const gpuToEngine = new Map<number, number>()
@@ -41,6 +51,7 @@ function TurbineDiagram({
     engine.gpus.forEach((gpu) => gpuToEngine.set(gpu, engineIndex)),
   )
   const busy = phase !== "idle" && phase !== "failed"
+  const flowSeconds = Math.max(0.7, Math.min(5, 5 - Math.log10(signal.tokens_per_second + 1)))
   return (
     <svg
       viewBox="0 0 1120 430"
@@ -84,20 +95,22 @@ function TurbineDiagram({
           strokeWidth={line === 2 ? 4 : 2}
           strokeDasharray="8 18"
           className={busy ? "airflow airflow-slow" : "airflow"}
+          style={{ animationDuration: `${flowSeconds + line * 0.08}s` }}
         />
       ))}
 
       <g transform="translate(110 215)">
         <circle r="74" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
         <circle r="57" fill="url(#core)" opacity=".7" filter="url(#glow)" />
-        <g className="fan-spin">
+        <g className="fan-spin" style={{ animationDuration: `${Math.max(1.2, flowSeconds * 1.4)}s` }}>
           {Array.from({ length: 12 }, (_, index) => (
             <path key={index} d="M0 -15 C19 -46 38 -55 50 -47 C30 -25 24 -8 10 3Z" fill="var(--primary)" opacity={0.25 + (index % 3) * 0.16} transform={`rotate(${index * 30})`} />
           ))}
         </g>
         <circle r="12" fill="var(--foreground)" />
-        <text y="108" textAnchor="middle" fill="var(--muted-foreground)" fontSize="13">CHASSIS INTAKE</text>
-        <text y="132" textAnchor="middle" fill="var(--foreground)" fontSize="25" fontWeight="650">{intake == null ? "—" : `${intake.toFixed(0)}°C`}</text>
+        <text y="108" textAnchor="middle" fill="var(--muted-foreground)" fontSize="13">TOKEN INTAKE</text>
+        <text y="132" textAnchor="middle" fill="var(--foreground)" fontSize="25" fontWeight="650">{rate(signal.prompt_tokens_per_second)}</text>
+        <text y="150" textAnchor="middle" fill="var(--muted-foreground)" fontSize="11">input tok/s</text>
       </g>
 
       <g transform="translate(270 92)">
@@ -115,7 +128,7 @@ function TurbineDiagram({
               <rect x="10" y="68" width={104 * Math.min(util, 100) / 100} height="8" rx="4" fill={hue} opacity=".9" />
               <circle cx="23" cy="25" r="8" fill={hue} opacity={util > 1 ? ".9" : ".24"} className={util > 1 ? "core-pulse" : ""} />
               <text x="40" y="30" fill="var(--foreground)" fontSize="14" fontWeight="650">GPU {gpuIndex}</text>
-              <text x="10" y="55" fill="var(--muted-foreground)" fontSize="12">{util.toFixed(0)}% · {gpu?.temp_c == null ? "—" : `${gpu.temp_c.toFixed(0)}°C`}</text>
+              <text x="10" y="55" fill="var(--muted-foreground)" fontSize="12">{util.toFixed(0)}% UTILIZATION</text>
               <text x="10" y="94" fill={hue} fontSize="10" letterSpacing=".08em">ENGINE {engineIndex + 1}</text>
             </g>
           )
@@ -125,21 +138,24 @@ function TurbineDiagram({
       <g transform="translate(872 215)">
         <circle r="92" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
         <circle r="72" fill="url(#core)" opacity=".45" />
-        <text y="-12" textAnchor="middle" fill="var(--muted-foreground)" fontSize="12" letterSpacing=".12em">THRUST MODE</text>
+        <text y="-12" textAnchor="middle" fill="var(--muted-foreground)" fontSize="12" letterSpacing=".12em">ACTIVE TOPOLOGY</text>
         <text y="18" textAnchor="middle" fill="var(--foreground)" fontSize="24" fontWeight="700">{profile.engines.length === 1 ? "TP8" : `${profile.engines.length} × TP4`}</text>
         <text y="43" textAnchor="middle" fill="var(--primary)" fontSize="12">{phase.replaceAll("_", " ").toUpperCase()}</text>
       </g>
       <path d="M970 180 L1080 215 L970 250Z" fill="url(#flow)" opacity=".8" filter="url(#glow)" />
+      <text x="1035" y="278" textAnchor="middle" fill="var(--muted-foreground)" fontSize="10" letterSpacing=".1em">OUTPUT</text>
+      <text x="1035" y="298" textAnchor="middle" fill="var(--foreground)" fontSize="17" fontWeight="650">{rate(signal.completion_tokens_per_second)} tok/s</text>
+      <text x="560" y="355" textAnchor="middle" fill="var(--muted-foreground)" fontSize="12">
+        SYSTEM LOAD {signal.load_per_engine.toFixed(1)} / ENGINE · {signal.inflight} IN FLIGHT · {rate(signal.tokens_per_second)} TOTAL TOK/S
+      </text>
     </svg>
   )
 }
 
 export function AdaptiveTopology({
   gpus,
-  intake,
 }: {
   gpus: GpuSample[]
-  intake: number | null
 }) {
   const [status, setStatus] = useState<AdaptiveStatus | null | undefined>()
   const [token, setToken] = useState("")
@@ -204,7 +220,7 @@ export function AdaptiveTopology({
 
   return (
     <div className="flex flex-col gap-3">
-      {active ? <TurbineDiagram profile={active} gpus={gpus} intake={intake} phase={status.phase} /> : null}
+      {active ? <TokenFlowDiagram profile={active} gpus={gpus} signal={status.signal} phase={status.phase} /> : null}
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1fr_360px]">
         <Card>
           <CardHeader>
@@ -245,7 +261,7 @@ export function AdaptiveTopology({
         </Card>
 
         <Card>
-          <CardHeader><CardTitle>Flight control</CardTitle><CardDescription>Auto acts only on transitions explicitly marked automatic.</CardDescription></CardHeader>
+          <CardHeader><CardTitle>Topology control</CardTitle><CardDescription>Auto evaluates measured token flow and serving load only on explicitly automatic transitions.</CardDescription></CardHeader>
           <CardContent className="flex flex-col gap-4">
             <div className="grid grid-cols-4 rounded-lg bg-muted p-1">
               {modes.map((mode) => <Button key={mode} variant="segment" data-active={status.mode === mode} disabled={working || !token} onClick={() => void changeMode(mode)}>{mode}</Button>)}
@@ -255,9 +271,12 @@ export function AdaptiveTopology({
               <input type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} placeholder="RJ_UPSTREAM_TOKEN" className="h-8 rounded-md border border-border bg-background px-2 font-mono text-xs text-foreground outline-none focus:ring-2 focus:ring-ring/40" />
             </label>
             <div className="grid grid-cols-3 gap-2">
-              <div className="rounded-lg bg-muted p-2"><Wind className="mb-1 size-3.5 text-primary" /><div className="text-lg font-semibold tabular-nums">{status.signal.requests_per_second.toFixed(1)}</div><div className="text-[10px] text-muted-foreground">req/s</div></div>
+              <div className="rounded-lg bg-muted p-2"><ArrowDownToLine className="mb-1 size-3.5 text-primary" /><div className="text-lg font-semibold tabular-nums">{rate(status.signal.prompt_tokens_per_second)}</div><div className="text-[10px] text-muted-foreground">input tok/s</div></div>
+              <div className="rounded-lg bg-muted p-2"><ArrowUpFromLine className="mb-1 size-3.5 text-primary" /><div className="text-lg font-semibold tabular-nums">{rate(status.signal.completion_tokens_per_second)}</div><div className="text-[10px] text-muted-foreground">output tok/s</div></div>
+              <div className="rounded-lg bg-muted p-2"><Activity className="mb-1 size-3.5 text-primary" /><div className="text-lg font-semibold tabular-nums">{rate(status.signal.tokens_per_second)}</div><div className="text-[10px] text-muted-foreground">total tok/s</div></div>
               <div className="rounded-lg bg-muted p-2"><Gauge className="mb-1 size-3.5 text-primary" /><div className="text-lg font-semibold tabular-nums">{status.signal.inflight}</div><div className="text-[10px] text-muted-foreground">in flight</div></div>
               <div className="rounded-lg bg-muted p-2"><Gauge className="mb-1 size-3.5 text-primary" /><div className="text-lg font-semibold tabular-nums">{status.signal.load_per_engine.toFixed(1)}</div><div className="text-[10px] text-muted-foreground">load / engine</div></div>
+              <div className="rounded-lg bg-muted p-2"><Activity className="mb-1 size-3.5 text-primary" /><div className="text-lg font-semibold tabular-nums">{status.signal.requests_per_second.toFixed(1)}</div><div className="text-[10px] text-muted-foreground">req/s</div></div>
             </div>
             {status.transitions.filter((item) => item.from === status.active_profile && item.condition).map((item) => <div key={item.to} className="rounded-lg border border-border p-2 text-[11px] text-muted-foreground">Auto → <span className="text-foreground">{item.to}</span> when {metricLabel(item.condition!.metric)} is {item.condition!.comparison} {item.condition!.threshold} for {duration(item.condition!.for_seconds)}</div>)}
             {status.recommendation ? <div className="rounded-lg border border-primary/30 bg-primary/5 p-2 text-xs">Recommendation: switch to <strong>{status.recommendation}</strong></div> : null}

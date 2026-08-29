@@ -65,10 +65,14 @@ published state is mode 0600.
 
 The first rollout stays in `manual` mode. The two automatic edges are present
 and visible for soak/recommendation work but cannot act until an operator
-selects `auto` through the authenticated UI/API. Split→TP8 observes a short
-request-rate burst; TP8→split observes sustained in-flight work. Their initial
-thresholds are policy candidates, not qualified performance claims, and must
-be tuned from recorded traffic plus a guarded TP8 crossover.
+selects `auto` through the authenticated UI/API. Split→TP8 observes delivered
+output-token throughput; TP8→split observes the live size- and phase-weighted
+load reservation per active engine. The status surface also publishes input,
+output, and total token rates, in-flight requests, and request rate. Temperature
+is not a topology signal; the independent intake-air guard remains only a
+safety boundary for request-generating node work. These initial thresholds are
+policy candidates, not qualified performance claims, and must be tuned from
+recorded traffic plus a guarded TP8 crossover.
 
 Every shape change has an estimated nine-minute outage. Ramjet fences all
 members and drains dispatched requests before stopping engines, reports zero

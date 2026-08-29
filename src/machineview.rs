@@ -246,8 +246,6 @@ pub struct Sample {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HostSample {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intake_temp_c: Option<f64>,
     pub cpu_pct: Option<f64>,
     pub load1: Option<f64>,
     pub mem_total_bytes: Option<f64>,
@@ -1016,7 +1014,6 @@ fn merge_samples(bucket: &[&Sample]) -> Sample {
     let host = bucket.iter().any(|sample| sample.host.is_some()).then(|| {
         let hosts: Vec<&HostSample> = bucket.iter().filter_map(|s| s.host.as_ref()).collect();
         HostSample {
-            intake_temp_c: mean(hosts.iter().map(|h| h.intake_temp_c)),
             cpu_pct: mean(hosts.iter().map(|h| h.cpu_pct)),
             load1: mean(hosts.iter().map(|h| h.load1)),
             mem_total_bytes: mean(hosts.iter().map(|h| h.mem_total_bytes)),
@@ -1371,7 +1368,6 @@ fn finite(value: Option<f64>) -> Option<f64> {
 }
 
 fn sanitize_host(mut host: HostSample) -> HostSample {
-    host.intake_temp_c = finite(host.intake_temp_c).map(|v| v.clamp(-40.0, 100.0));
     host.cpu_pct = finite(host.cpu_pct).map(|v| v.clamp(0.0, 100.0));
     host.load1 = finite(host.load1).map(|v| v.max(0.0));
     host.mem_total_bytes = finite(host.mem_total_bytes).map(|v| v.max(0.0));

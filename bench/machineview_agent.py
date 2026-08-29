@@ -31,8 +31,6 @@ import shutil
 import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_PORT = 8016
@@ -54,9 +52,6 @@ NVIDIA_SMI_EXTENDED_FIELDS = NVIDIA_SMI_FIELDS + (
 )
 NVIDIA_SMI_TIMEOUT_SECONDS = 3.0
 MAX_RAPL_DOMAINS = 8
-NODE_EXPORTER_URL = "http://127.0.0.1:9100/metrics"
-NODE_EXPORTER_TIMEOUT_SECONDS = 1.0
-MAX_NODE_EXPORTER_BYTES = 2 << 20
 
 
 def _to_float(raw):
@@ -304,42 +299,15 @@ def parse_loadavg(text):
         return None
 
 
-def parse_intake_temperature(text):
-    """Returns node-exporter's chassis intake temperature, when published."""
-    if not text:
-        return None
-    for line in text.splitlines():
-        if not line.startswith("node_ipmi_temperature_celsius{"):
-            continue
-        labels, separator, raw = line.partition("} ")
-        if not separator or 'sensor="FP_TEMP"' not in labels:
-            continue
-        try:
-            value = float(raw)
-        except ValueError:
-            return None
-        if value != value or value in (float("inf"), float("-inf")):
-            return None
-        return value
-    return None
-
-
 class Collector:
     """Stateful sampler: keeps previous counters to derive rates."""
 
-    def __init__(
-        self,
-        mounts,
-        proc_root="/proc",
-        rapl_root="/sys/class/powercap",
-        node_exporter_url=None,
-    ):
+    def __init__(self, mounts, proc_root="/proc", rapl_root="/sys/class/powercap"):
         self.mounts = mounts
         self.proc_root = proc_root
         self.rapl_root = rapl_root
         self.nvidia_smi = shutil.which("nvidia-smi")
         self.nvidia_smi_fields = NVIDIA_SMI_EXTENDED_FIELDS
-        self.node_exporter_url = node_exporter_url
         self.previous = {}
         self.lock = threading.Lock()
 
@@ -363,20 +331,6 @@ class Collector:
         if now <= prior_t or value < prior_value:
             return None
         return (value - prior_value) / (now - prior_t)
-
-    def _intake_temperature(self):
-        if not self.node_exporter_url:
-            return None
-        try:
-            with urllib.request.urlopen(
-                self.node_exporter_url, timeout=NODE_EXPORTER_TIMEOUT_SECONDS
-            ) as response:
-                body = response.read(MAX_NODE_EXPORTER_BYTES + 1)
-        except (OSError, urllib.error.URLError, TimeoutError):
-            return None
-        if len(body) > MAX_NODE_EXPORTER_BYTES:
-            return None
-        return parse_intake_temperature(body.decode("utf-8", errors="replace"))
 
     def _cpu_shares(self, now):
         """Returns (cpu_pct, iowait_pct); both None on the first sample."""
@@ -546,7 +500,6 @@ class Collector:
                 "io_pressure_pct": io_pressure,
                 "mem_pressure_pct": mem_pressure,
                 "cpu_watts": self._rapl_watts(now),
-                "intake_temp_c": self._intake_temperature(),
                 "disks": self._disks(),
             }
             if memory:
@@ -584,11 +537,6 @@ def main():
         help="comma-separated mount points reported as storage",
     )
     parser.add_argument(
-        "--node-exporter-url",
-        default=NODE_EXPORTER_URL,
-        help="loopback node-exporter metrics URL used for chassis intake temperature",
-    )
-    parser.add_argument(
         "--allow-remote",
         action="store_true",
         help="permit binding a non-loopback address (off by default)",
@@ -599,9 +547,7 @@ def main():
             "refusing non-loopback bind %r without --allow-remote" % args.bind
         )
     mounts = [mount for mount in args.mounts.split(",") if mount]
-    AgentHandler.collector = Collector(
-        mounts, node_exporter_url=args.node_exporter_url
-    )
+    AgentHandler.collector = Collector(mounts)
     server = ThreadingHTTPServer((args.bind, args.port), AgentHandler)
     print(
         "machineview agent on http://%s:%d/sample (mounts: %s, nvidia-smi: %s)"

@@ -721,7 +721,6 @@ export default function App() {
       {tab === "topology" ? (
         <AdaptiveTopology
           gpus={latest?.gpus ?? []}
-          intake={latestHost?.intake_temp_c ?? null}
         />
       ) : null}
 

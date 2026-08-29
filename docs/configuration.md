@@ -846,7 +846,7 @@ select only a configured profile ID and cannot provide Docker arguments.
       "from": "split-tp4", "to": "unified-tp8",
       "automatic": true, "allow_downtime": true,
       "estimated_downtime_seconds": 540,
-      "condition": {"metric": "requests_per_second", "comparison": "above", "threshold": 3.0, "for_seconds": 30}
+      "condition": {"metric": "completion_tokens_per_second", "comparison": "above", "threshold": 400.0, "for_seconds": 30}
     }
   ]
 }
@@ -854,10 +854,16 @@ select only a configured profile ID and cannot provide Docker arguments.
 
 Modes are `off`, `manual`, `recommend`, and `auto`. A transition is eligible
 for recommendation/automation only when `automatic` is true and its directional
-condition remains true for `for_seconds`. Metrics are
-`requests_per_second`, `inflight`, and `load_per_engine`; comparisons are
-`above` and `below`. An automatic transition that can interrupt serving must
-also set `allow_downtime: true`, otherwise startup fails closed.
+condition remains true for `for_seconds`. Workload metrics are
+`prompt_tokens_per_second`, `completion_tokens_per_second`,
+`tokens_per_second` (their sum), `inflight`, and `load_per_engine`;
+`requests_per_second` remains available as a coarse compatibility signal.
+Token rates are derived from Ramjet's own completed-response usage counters,
+while load is the live size- and phase-weighted reservation per active engine.
+No temperature measurement participates in recommendation, automation, or
+routing. Comparisons are `above` and `below`. An automatic transition that can
+interrupt serving must also set `allow_downtime: true`, otherwise startup fails
+closed.
 
 `GET /api/adaptive/status` is observation-only. `POST /api/adaptive/mode` and
 `POST /api/adaptive/transition` require the same bearer configured by

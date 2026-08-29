@@ -79,6 +79,8 @@ async fn main() -> anyhow::Result<()> {
     let adaptive = Adaptive::from_env(
         proxy.clone(),
         metrics.requests.clone(),
+        metrics.prompt_tokens.clone(),
+        metrics.completion_tokens.clone(),
         config.upstream_token.clone(),
     )
     .await
