@@ -1,5 +1,38 @@
 # node06 experiment journal
 
+## 2026-08-29 — authenticated and audited adaptive control surface
+
+Ramjet commit `fd2ef97` was built and transferred as
+`rust-r139-ui-auth-audit-fd2ef97`, image ID
+`sha256:09306f3ea029d6d125b1d3451fe6a40d6de4652077c6992ba677e691175f475f`.
+The LB-only rollout added a dedicated `RJ_UI_AUTH_TOKEN`, signed 30-day
+HttpOnly browser sessions, and an owner-only JSONL topology audit without
+recreating either TP4 engine. Both engine container identities and restart
+counts remained unchanged; the TP8 candidate remained stopped.
+
+Unauthenticated machine-view status, adaptive status, and adaptive audit calls
+all returned 401. Login returned 200, and the resulting cookie read all three
+protected surfaces. The production UI bundle contains the new login screen and
+does not contain `RJ_UPSTREAM_TOKEN`. `/var/lib/ramjet-adaptive/audit.jsonl`
+was created root-owned mode 0600 and recorded the reconciled
+`controller_started` event for `split-tp4`. No topology transition was
+requested or exercised.
+
+The first thermal-wrapper invocation stopped before generating work because
+its companion policy module had not yet been copied. After transferring and
+hash-verifying both guard files, one 65-input/1-output-token request passed
+under guard run `29302e73968d055380d94b9f682539b2`; maximum intake air was
+38C. Final health was `ok`, active upstream gauges were 1/1/0 for the two TP4
+engines and stopped TP8 candidate, LB and engines had zero restarts, and recent
+LB logs contained no fatal marker. Exact rollback evidence was corrected to
+the actual pre-rollout r138 image rather than the older Compose default.
+
+The admitted Compose and adaptive-policy SHA-256 values are
+`083c455b8da0c91acc9e4c995c313c1e60e9831cf767637868ca6d3ad72a51d5`
+and `39bbd0f4ca311ae431f7cbf6e9230510c0ce1beaea0e9fe9ee58dd57bd6c6b8a`.
+Owner-only evidence is retained below
+`.experiments/ui-auth-audit-fd2ef97/`.
+
 ## 2026-08-29 — adaptive topology corrected to serving load and token flow
 
 Ramjet commit `7d90a5f` was built and transferred as

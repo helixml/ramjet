@@ -11,7 +11,7 @@ The checkpoint and image are immutable inputs:
 - model payload: 185,502,232,570 bytes across 131 safetensors shards
 - linux/amd64 vLLM image: `sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
 - released ramjet Compose default: `v0.4.0@sha256:467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b`
-- node06-qualified live ramjet image: `rust-r138-adaptive-load-7d90a5f@sha256:7c6ec3968fc1d84d98b1a4c3195df94e9511ebba43be145288ea3c8ba2ad5bd2`
+- node06-qualified live ramjet image: `rust-r139-ui-auth-audit-fd2ef97@sha256:09306f3ea029d6d125b1d3451fe6a40d6de4652077c6992ba677e691175f475f`
 - exact-route manifest: `compat/qwen38-flash-next-r134.json`, SHA-256 `a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67`
 
 The day-zero vLLM image config labels its source/build revision as `unknown`.
@@ -254,13 +254,15 @@ prefix hits while regressing returning-probe TTFT by 15%, blocker TTFT p95 by
 qualified value.
 
 The checked-in Compose default follows the repository-wide released-image
-policy. The node06 production render supplies the separately qualified r138
+policy. The node06 production render supplies the separately qualified r139
 override explicitly until these Flash-Next changes are included in a tagged
 release. Every node06 `docker compose` invocation, including rollback and
 cleanup traps, must therefore carry the exact `LB_IMAGE` override; restoring
 the Compose file alone would select the older released default. The admitted
 node06 Compose SHA-256 is
-`9baa2f394279d36f1a26d4cc137ad67ca6767bd5f724aa372a2f97f5065ac3dc`.
+`083c455b8da0c91acc9e4c995c313c1e60e9831cf767637868ca6d3ad72a51d5`;
+the adaptive policy SHA-256 is
+`39bbd0f4ca311ae431f7cbf6e9230510c0ce1beaea0e9fe9ee58dd57bd6c6b8a`.
 
 The load balancer joins both the Flash serving network and the existing
 `qwen38_27b_default` bridge. The latter is observation-only: node06's host
