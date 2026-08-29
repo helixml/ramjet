@@ -1727,18 +1727,25 @@ impl MachineView {
         Some(Self { shared, task })
     }
 
-    /// Routes served on the metrics listener: the JSON API plus the static UI.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if constructing a redirect from constant headers fails.
-    pub fn router(&self) -> Router {
-        let mut router = Router::new()
+    /// Observation API routes served on the metrics listener.
+    pub fn api_router(&self) -> Router {
+        Router::new()
             .route("/api/machineview/summary", get(summary_handler))
             .route("/api/machineview/series", get(series_handler))
             .route("/api/machineview/tokens", get(tokens_handler))
             .route("/api/machineview/stream", get(stream_handler))
-            .with_state(self.shared.clone());
+            .with_state(self.shared.clone())
+    }
+
+    /// Static dashboard routes. These stay separate from the data API so an
+    /// authentication layer can protect observations while still serving the
+    /// login application.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if constructing a redirect from constant headers fails.
+    pub fn ui_router(&self) -> Router {
+        let mut router = Router::new();
         if self.shared.settings.ui_dir.is_some() {
             let ui_state = self.shared.clone();
             router = router
@@ -1780,6 +1787,12 @@ impl MachineView {
                 );
         }
         router
+    }
+
+    /// Historical combined router used by unauthenticated deployments and
+    /// focused machine-view tests.
+    pub fn router(&self) -> Router {
+        self.api_router().merge(self.ui_router())
     }
 
     pub async fn shutdown(self) {

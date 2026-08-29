@@ -816,6 +816,7 @@ select only a configured profile ID and cannot provide Docker arguments.
   "mode": "manual",
   "active_profile": "split-tp4",
   "state_path": "/var/lib/ramjet-adaptive/state.json",
+  "audit_path": "/var/lib/ramjet-adaptive/audit.jsonl",
   "docker_socket": "/var/run/docker.sock",
   "deployment_lock_path": "/run/lock/ramjet-deployment.lock",
   "poll_seconds": 5,
@@ -865,11 +866,33 @@ routing. Comparisons are `above` and `below`. An automatic transition that can
 interrupt serving must also set `allow_downtime: true`, otherwise startup fails
 closed.
 
-`GET /api/adaptive/status` is observation-only. `POST /api/adaptive/mode` and
-`POST /api/adaptive/transition` require the same bearer configured by
-`RJ_UPSTREAM_TOKEN`. The machine-view UI keeps that bearer only in page memory.
-It always shows whether a configured edge requires downtime and its operator
-estimate before enabling the action.
+Set `RJ_UI_AUTH_TOKEN` to a dedicated 32–256-byte value whenever adaptive
+control is enabled. It must not reuse `RJ_UPSTREAM_TOKEN`: the latter is an
+engine credential, while the UI token authorizes topology mutation and access
+to machine-view observations. The login endpoint exchanges the operator's
+token for a signed, HttpOnly, SameSite-Strict browser cookie that persists for
+30 days. The token is not retained in JavaScript or rendered elsewhere in the
+dashboard. The direct node06 UI is carried over the encrypted Tailscale path;
+internet-facing deployments should additionally terminate HTTPS at their
+authenticated reverse proxy.
+
+The static `/ui/` application remains readable so it can render the login
+screen. With `RJ_UI_AUTH_TOKEN` configured, every
+`/api/machineview/*` and `/api/adaptive/*` route, including the machine-view
+WebSocket, requires the signed session. `POST /api/ui/login` starts a session,
+`GET /api/ui/session` checks it, and `POST /api/ui/logout` clears it.
+`GET /api/adaptive/status` and `GET /api/adaptive/audit` are read-only after
+login; `POST /api/adaptive/mode` and `POST /api/adaptive/transition` mutate
+controller state. The UI always shows whether a configured edge requires
+downtime and its operator estimate before enabling the action.
+
+The controller appends schema-v1 JSON Lines to `audit_path`. The file and its
+parent must be owner-only (0600 and a non-group/world-writable directory). It
+records controller starts, mode changes, transition requests and outcomes,
+rollback outcomes, and each successful engine start/stop. Records contain
+timestamps, named profiles/containers, and bounded error details—never tokens,
+prompts, completions, engine bearers, or UI credentials. The dashboard reads
+only the newest 100 records from a bounded one-MiB tail.
 
 During a reconfiguration Ramjet first takes the common deployment lock, fences
 every topology member, drains in-flight requests, stops the source engines,

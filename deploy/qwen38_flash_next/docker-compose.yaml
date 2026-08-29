@@ -58,6 +58,9 @@ services:
     environment:
       RJ_UPSTREAM: ${RJ_UPSTREAM:-http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000,http://qwen38flashnext-tp8:8000}
       RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:-qwen-local}
+      # Dedicated dashboard/control credential. It must not reuse the engine
+      # bearer because the browser and serving plane have different authority.
+      RJ_UI_AUTH_TOKEN: ${RJ_UI_AUTH_TOKEN:?set RJ_UI_AUTH_TOKEN in protected mode-0600 .env}
       RJ_ADVERTISE_CTX_MARGIN: ${RJ_ADVERTISE_CTX_MARGIN:-8192}
       # Flash-Next admits valid six-figure output budgets. Preserve the
       # caller's limit instead of applying ramjet's legacy 100K sentinel shim.

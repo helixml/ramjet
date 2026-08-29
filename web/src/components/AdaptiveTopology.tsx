@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Activity, ArrowDownToLine, ArrowRight, ArrowUpFromLine, Gauge, LockKeyhole, TimerReset } from "lucide-react"
+import { Activity, ArrowDownToLine, ArrowRight, ArrowUpFromLine, Gauge, History, TimerReset } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
+  fetchAdaptiveAudit,
   fetchAdaptiveStatus,
   setAdaptiveMode,
   startAdaptiveTransition,
+  type AdaptiveAuditRecord,
   type AdaptiveMode,
   type AdaptiveProfile,
   type AdaptiveStatus,
@@ -158,12 +160,14 @@ export function AdaptiveTopology({
   gpus: GpuSample[]
 }) {
   const [status, setStatus] = useState<AdaptiveStatus | null | undefined>()
-  const [token, setToken] = useState("")
+  const [audit, setAudit] = useState<AdaptiveAuditRecord[]>([])
   const [error, setError] = useState<string | null>(null)
   const [working, setWorking] = useState(false)
   const refresh = useCallback(async () => {
     try {
-      setStatus(await fetchAdaptiveStatus())
+      const next = await fetchAdaptiveStatus()
+      setStatus(next)
+      if (next) setAudit(await fetchAdaptiveAudit())
       setError(null)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -182,7 +186,8 @@ export function AdaptiveTopology({
   const changeMode = async (mode: AdaptiveMode) => {
     setWorking(true)
     try {
-      setStatus(await setAdaptiveMode(mode, token))
+      setStatus(await setAdaptiveMode(mode))
+      setAudit(await fetchAdaptiveAudit())
       setError(null)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -202,7 +207,8 @@ export function AdaptiveTopology({
     if (!window.confirm(warning)) return
     setWorking(true)
     try {
-      setStatus(await startAdaptiveTransition(profile.id, token))
+      setStatus(await startAdaptiveTransition(profile.id))
+      setAudit(await fetchAdaptiveAudit())
       setError(null)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -249,7 +255,7 @@ export function AdaptiveTopology({
                       <div className="text-[11px] text-muted-foreground">
                         {edge.requires_downtime ? <><TimerReset className="mr-1 inline size-3" />~{duration(edge.estimated_downtime_seconds)} downtime</> : "live change"}
                       </div>
-                      <Button disabled={working || status.phase !== "idle" || status.mode === "off" || !token} onClick={() => void transitionTo(profile)}>
+                      <Button disabled={working || status.phase !== "idle" || status.mode === "off"} onClick={() => void transitionTo(profile)}>
                         Configure <ArrowRight />
                       </Button>
                     </div>
@@ -264,12 +270,8 @@ export function AdaptiveTopology({
           <CardHeader><CardTitle>Topology control</CardTitle><CardDescription>Auto evaluates measured token flow and serving load only on explicitly automatic transitions.</CardDescription></CardHeader>
           <CardContent className="flex flex-col gap-4">
             <div className="grid grid-cols-4 rounded-lg bg-muted p-1">
-              {modes.map((mode) => <Button key={mode} variant="segment" data-active={status.mode === mode} disabled={working || !token} onClick={() => void changeMode(mode)}>{mode}</Button>)}
+              {modes.map((mode) => <Button key={mode} variant="segment" data-active={status.mode === mode} disabled={working} onClick={() => void changeMode(mode)}>{mode}</Button>)}
             </div>
-            <label className="flex flex-col gap-1.5 text-xs text-muted-foreground">
-              <span className="flex items-center gap-1"><LockKeyhole className="size-3" /> Admin bearer · held only in this page</span>
-              <input type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} placeholder="RJ_UPSTREAM_TOKEN" className="h-8 rounded-md border border-border bg-background px-2 font-mono text-xs text-foreground outline-none focus:ring-2 focus:ring-ring/40" />
-            </label>
             <div className="grid grid-cols-3 gap-2">
               <div className="rounded-lg bg-muted p-2"><ArrowDownToLine className="mb-1 size-3.5 text-primary" /><div className="text-lg font-semibold tabular-nums">{rate(status.signal.prompt_tokens_per_second)}</div><div className="text-[10px] text-muted-foreground">input tok/s</div></div>
               <div className="rounded-lg bg-muted p-2"><ArrowUpFromLine className="mb-1 size-3.5 text-primary" /><div className="text-lg font-semibold tabular-nums">{rate(status.signal.completion_tokens_per_second)}</div><div className="text-[10px] text-muted-foreground">output tok/s</div></div>
@@ -285,6 +287,38 @@ export function AdaptiveTopology({
           </CardContent>
         </Card>
       </div>
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <History className="size-4 text-primary" />
+            <div>
+              <CardTitle>Engine change history</CardTitle>
+              <CardDescription>Durable controller and engine actions, newest first.</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {audit.length === 0 ? (
+            <div className="py-4 text-center text-xs text-muted-foreground">No engine changes recorded yet.</div>
+          ) : (
+            <div className="divide-y divide-border">
+              {audit.slice(-10).reverse().map((record) => (
+                <div key={`${record.timestamp_unix_ms}-${record.event}-${record.engine ?? ""}`} className="grid gap-1 py-2 text-xs md:grid-cols-[160px_180px_1fr] md:items-center">
+                  <time className="font-mono text-[11px] text-muted-foreground" dateTime={new Date(record.timestamp_unix_ms).toISOString()}>
+                    {new Date(record.timestamp_unix_ms).toLocaleString()}
+                  </time>
+                  <span className="font-medium">{record.event.replaceAll("_", " ")}</span>
+                  <span className="text-muted-foreground">
+                    {record.engine ?? record.target_profile ?? record.active_profile}
+                    {record.source ? ` · ${record.source}` : ""}
+                    {record.detail ? ` · ${record.detail}` : ""}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }

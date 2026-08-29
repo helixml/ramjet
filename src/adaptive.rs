@@ -10,7 +10,7 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     fs::{self, File, OpenOptions},
-    io,
+    io::{self, Read, Seek, SeekFrom, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
@@ -21,7 +21,7 @@ use anyhow::{Context, ensure};
 use axum::{
     Json, Router,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -29,7 +29,6 @@ use parking_lot::Mutex;
 use prometheus::{CounterVec, core::Collector};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::proxy::Proxy;
@@ -39,6 +38,8 @@ const MAX_CONFIG_BYTES: u64 = 1 << 20;
 const MIN_POLL_SECONDS: u64 = 2;
 const MAX_POLL_SECONDS: u64 = 300;
 const MAX_WAIT_SECONDS: u64 = 30 * 60;
+const MAX_AUDIT_READ_BYTES: u64 = 1 << 20;
+const MAX_AUDIT_RECORDS: usize = 100;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -74,6 +75,7 @@ pub struct Config {
     mode: Mode,
     active_profile: String,
     state_path: PathBuf,
+    audit_path: PathBuf,
     docker_socket: PathBuf,
     deployment_lock_path: PathBuf,
     #[serde(default = "default_poll_seconds")]
@@ -191,11 +193,16 @@ impl Config {
         }
         for (name, path) in [
             ("state_path", &self.state_path),
+            ("audit_path", &self.audit_path),
             ("docker_socket", &self.docker_socket),
             ("deployment_lock_path", &self.deployment_lock_path),
         ] {
             ensure!(path.is_absolute(), "adaptive {name} must be absolute");
         }
+        ensure!(
+            self.audit_path != self.state_path,
+            "adaptive audit_path must differ from state_path"
+        );
 
         let mut ids = HashSet::new();
         let mut containers = HashMap::<&str, &str>::new();
@@ -457,6 +464,26 @@ struct PersistedState {
     active_profile: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AuditRecord {
+    version: u32,
+    timestamp_unix_ms: u64,
+    event: String,
+    active_profile: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+struct AuditLog {
+    file: File,
+}
+
 struct AutoSample {
     at: Instant,
     requests: f64,
@@ -494,11 +521,11 @@ struct Inner {
     config: Config,
     proxy: Proxy,
     docker: Docker,
-    admin_token: String,
     requests: CounterVec,
     prompt_tokens: CounterVec,
     completion_tokens: CounterVec,
     runtime: Mutex<Runtime>,
+    audit: Mutex<AuditLog>,
     auto: Mutex<AutoSample>,
     operation: AsyncMutex<()>,
 }
@@ -517,15 +544,12 @@ impl Adaptive {
         requests: CounterVec,
         prompt_tokens: CounterVec,
         completion_tokens: CounterVec,
-        admin_token: Option<String>,
     ) -> anyhow::Result<Option<Self>> {
         let Some(path) = env::var_os(CONFIG_ENV) else {
             return Ok(None);
         };
-        let admin_token = admin_token
-            .filter(|token| !token.is_empty())
-            .context("adaptive control requires RJ_UPSTREAM_TOKEN")?;
         let config = Config::load(Path::new(&path), proxy.upstream_count())?;
+        let audit = AuditLog::open(&config.audit_path)?;
         let docker = Docker::new(&config.docker_socket)?;
         docker
             .ping()
@@ -563,7 +587,6 @@ impl Adaptive {
                 config,
                 proxy,
                 docker,
-                admin_token,
                 requests,
                 prompt_tokens,
                 completion_tokens,
@@ -575,6 +598,7 @@ impl Adaptive {
                     phase_started_at: unix_seconds(),
                     last_error: None,
                 }),
+                audit: Mutex::new(audit),
                 auto: Mutex::new(AutoSample {
                     requests: initial_requests,
                     prompt_tokens: initial_prompt_tokens,
@@ -586,12 +610,20 @@ impl Adaptive {
         };
         controller.reconcile_running_profile().await?;
         controller.persist()?;
+        controller.append_audit(
+            "controller_started",
+            None,
+            None,
+            None,
+            Some("topology authority reconciled".to_owned()),
+        )?;
         Ok(Some(controller))
     }
 
     pub fn router(&self) -> Router {
         Router::new()
             .route("/api/adaptive/status", get(Self::get_status))
+            .route("/api/adaptive/audit", get(Self::get_audit))
             .route("/api/adaptive/mode", post(Self::set_mode))
             .route("/api/adaptive/transition", post(Self::transition))
             .with_state(self.clone())
@@ -669,19 +701,36 @@ impl Adaptive {
     }
 
     #[allow(clippy::unused_async)] // Axum handlers return futures.
+    async fn get_audit(State(controller): State<Self>) -> Response {
+        match controller.inner.audit.lock().recent(MAX_AUDIT_RECORDS) {
+            Ok(records) => (StatusCode::OK, Json(records)).into_response(),
+            Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        }
+    }
+
+    #[allow(clippy::unused_async)] // Axum handlers return futures.
     async fn set_mode(
         State(controller): State<Self>,
-        headers: HeaderMap,
         Json(request): Json<ModeRequest>,
     ) -> Response {
-        if !controller.authorized(&headers) {
-            return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
-        }
         if controller.inner.runtime.lock().phase.busy() {
             return api_error(StatusCode::CONFLICT, "a topology transition is in progress");
         }
+        let previous = controller.inner.runtime.lock().mode;
         controller.inner.runtime.lock().mode = request.mode;
         if let Err(error) = controller.persist() {
+            controller.inner.runtime.lock().mode = previous;
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = controller.append_audit(
+            "mode_changed",
+            Some("manual"),
+            None,
+            None,
+            Some(format!("{previous:?} -> {:?}", request.mode).to_lowercase()),
+        ) {
+            controller.inner.runtime.lock().mode = previous;
+            let _ = controller.persist();
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
         }
         (StatusCode::OK, Json(controller.status())).into_response()
@@ -690,12 +739,8 @@ impl Adaptive {
     #[allow(clippy::unused_async)] // Axum handlers return futures.
     async fn transition(
         State(controller): State<Self>,
-        headers: HeaderMap,
         Json(request): Json<TransitionRequest>,
     ) -> Response {
-        if !controller.authorized(&headers) {
-            return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
-        }
         match controller.begin_transition(request.profile, "manual") {
             Ok(()) => (StatusCode::ACCEPTED, Json(controller.status())).into_response(),
             Err(error) => api_error(StatusCode::CONFLICT, &error.to_string()),
@@ -731,6 +776,19 @@ impl Adaptive {
             runtime.phase_started_at = unix_seconds();
             runtime.last_error = None;
         }
+        if let Err(error) = self.append_audit(
+            "transition_requested",
+            Some(source),
+            Some(target.clone()),
+            None,
+            None,
+        ) {
+            let mut runtime = self.inner.runtime.lock();
+            runtime.phase = Phase::Idle;
+            runtime.target_profile = None;
+            runtime.phase_started_at = unix_seconds();
+            return Err(error).context("write topology audit record");
+        }
         tracing::info!(target_profile = %target, source, "adaptive topology transition accepted");
         let controller = self.clone();
         tokio::spawn(async move {
@@ -753,8 +811,23 @@ impl Adaptive {
                 runtime.last_error = None;
                 drop(runtime);
                 if let Err(error) = self.persist() {
+                    self.audit_best_effort(
+                        "transition_failed",
+                        Some("controller"),
+                        Some(target.clone()),
+                        None,
+                        Some(format!("persist completed transition: {error}")),
+                    );
                     self.fail(format!("persist completed transition: {error:#}"));
+                    return;
                 }
+                self.audit_best_effort(
+                    "transition_completed",
+                    Some("controller"),
+                    None,
+                    None,
+                    None,
+                );
                 tracing::info!(active_profile = %target, "adaptive topology transition completed");
             }
             Err(error) => {
@@ -762,11 +835,34 @@ impl Adaptive {
                 self.set_phase(Phase::RollingBack);
                 let rollback = self.rollback(&target, &previous).await;
                 let detail = match rollback {
-                    Ok(()) => format!("transition failed and was rolled back: {error:#}"),
+                    Ok(()) => {
+                        self.audit_best_effort(
+                            "rollback_completed",
+                            Some("controller"),
+                            Some(previous.clone()),
+                            None,
+                            None,
+                        );
+                        format!("transition failed and was rolled back: {error:#}")
+                    }
                     Err(rollback) => {
+                        self.audit_best_effort(
+                            "rollback_failed",
+                            Some("controller"),
+                            Some(previous.clone()),
+                            None,
+                            Some(rollback.to_string()),
+                        );
                         format!("transition failed: {error:#}; rollback failed: {rollback:#}")
                     }
                 };
+                self.audit_best_effort(
+                    "transition_failed",
+                    Some("controller"),
+                    Some(target),
+                    None,
+                    Some(error.to_string()),
+                );
                 self.fail(detail);
             }
         }
@@ -796,11 +892,25 @@ impl Adaptive {
         for engine in &source.engines {
             self.inner.proxy.mark_upstream_unavailable(engine.upstream);
             self.inner.docker.stop(&engine.container).await?;
+            self.audit_best_effort(
+                "engine_stopped",
+                Some("transition"),
+                Some(to.to_owned()),
+                Some(engine.container.clone()),
+                None,
+            );
         }
         self.set_phase(Phase::Starting);
         for engine in &target.engines {
             self.inner.proxy.mark_upstream_unavailable(engine.upstream);
             self.inner.docker.start(&engine.container).await?;
+            self.audit_best_effort(
+                "engine_started",
+                Some("transition"),
+                Some(to.to_owned()),
+                Some(engine.container.clone()),
+                None,
+            );
         }
         self.set_phase(Phase::Stabilizing);
         self.wait_profile_ready(target).await?;
@@ -827,10 +937,24 @@ impl Adaptive {
         for engine in &failed.engines {
             self.inner.proxy.mark_upstream_unavailable(engine.upstream);
             self.inner.docker.stop(&engine.container).await?;
+            self.audit_best_effort(
+                "engine_stopped",
+                Some("rollback"),
+                Some(previous.id.clone()),
+                Some(engine.container.clone()),
+                None,
+            );
         }
         for engine in &previous.engines {
             self.inner.proxy.mark_upstream_unavailable(engine.upstream);
             self.inner.docker.start(&engine.container).await?;
+            self.audit_best_effort(
+                "engine_started",
+                Some("rollback"),
+                Some(previous.id.clone()),
+                Some(engine.container.clone()),
+                None,
+            );
         }
         self.wait_profile_ready(previous).await?;
         self.inner
@@ -1004,19 +1128,6 @@ impl Adaptive {
         runtime.last_error = Some(error);
     }
 
-    fn authorized(&self, headers: &HeaderMap) -> bool {
-        let Some(value) = headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-        else {
-            return false;
-        };
-        let Some(token) = value.strip_prefix("Bearer ") else {
-            return false;
-        };
-        digest(token.as_bytes()) == digest(self.inner.admin_token.as_bytes())
-    }
-
     fn persist(&self) -> anyhow::Result<()> {
         let runtime = self.inner.runtime.lock();
         let state = PersistedState {
@@ -1026,6 +1137,40 @@ impl Adaptive {
         };
         drop(runtime);
         write_state(&self.inner.config.state_path, &state)
+    }
+
+    fn append_audit(
+        &self,
+        event: &str,
+        source: Option<&str>,
+        target_profile: Option<String>,
+        engine: Option<String>,
+        detail: Option<String>,
+    ) -> anyhow::Result<()> {
+        let active_profile = self.inner.runtime.lock().active_profile.clone();
+        self.inner.audit.lock().append(&AuditRecord {
+            version: 1,
+            timestamp_unix_ms: unix_millis(),
+            event: event.to_owned(),
+            active_profile,
+            target_profile,
+            source: source.map(str::to_owned),
+            engine,
+            detail: detail.map(|value| value.chars().take(512).collect()),
+        })
+    }
+
+    fn audit_best_effort(
+        &self,
+        event: &str,
+        source: Option<&str>,
+        target_profile: Option<String>,
+        engine: Option<String>,
+        detail: Option<String>,
+    ) {
+        if let Err(error) = self.append_audit(event, source, target_profile, engine, detail) {
+            tracing::error!(%error, audit_event = event, "write topology audit record failed");
+        }
     }
 }
 
@@ -1076,8 +1221,12 @@ fn unix_seconds() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-fn digest(value: &[u8]) -> [u8; 32] {
-    Sha256::digest(value).into()
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 fn usize_f64(value: usize) -> f64 {
@@ -1116,6 +1265,79 @@ async fn wait_until(mut timeout: Duration, predicate: impl Fn() -> bool) -> anyh
     Ok(())
 }
 
+impl AuditLog {
+    fn open(path: &Path) -> anyhow::Result<Self> {
+        let parent = protected_parent(path, "adaptive audit")?;
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                ensure!(
+                    metadata.file_type().is_file(),
+                    "adaptive audit must be a regular file"
+                );
+                ensure!(
+                    metadata.permissions().mode().trailing_zeros() >= 6,
+                    "adaptive audit must be owner-only"
+                );
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect adaptive audit {}", path.display()));
+            }
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).append(true).create(true).mode(0o600);
+        let file = options
+            .open(path)
+            .with_context(|| format!("open adaptive audit {}", path.display()))?;
+        let metadata = file.metadata().context("inspect opened adaptive audit")?;
+        ensure!(metadata.is_file(), "adaptive audit must be a regular file");
+        ensure!(
+            metadata.permissions().mode().trailing_zeros() >= 6,
+            "adaptive audit must be owner-only"
+        );
+        File::open(parent)?.sync_all()?;
+        Ok(Self { file })
+    }
+
+    fn append(&mut self, record: &AuditRecord) -> anyhow::Result<()> {
+        let bytes = serde_json::to_vec(record).context("serialize topology audit record")?;
+        ensure!(bytes.len() <= 4096, "topology audit record is too large");
+        self.file
+            .write_all(&bytes)
+            .context("append topology audit record")?;
+        self.file.write_all(b"\n")?;
+        self.file
+            .sync_data()
+            .context("sync topology audit record")?;
+        Ok(())
+    }
+
+    fn recent(&self, limit: usize) -> anyhow::Result<Vec<AuditRecord>> {
+        let mut file = self.file.try_clone().context("clone topology audit file")?;
+        let length = file.metadata()?.len();
+        let offset = length.saturating_sub(MAX_AUDIT_READ_BYTES);
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes =
+            Vec::with_capacity(usize::try_from(length.saturating_sub(offset)).unwrap_or(0));
+        file.read_to_end(&mut bytes)?;
+        if offset > 0
+            && let Some(first_newline) = bytes.iter().position(|byte| *byte == b'\n')
+        {
+            bytes.drain(..=first_newline);
+        }
+        let mut records = bytes
+            .split(|byte| *byte == b'\n')
+            .rev()
+            .filter(|line| !line.is_empty())
+            .take(limit)
+            .map(|line| serde_json::from_slice::<AuditRecord>(line).context("parse audit record"))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        records.reverse();
+        Ok(records)
+    }
+}
+
 fn load_state(path: &Path) -> anyhow::Result<Option<PersistedState>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -1146,17 +1368,7 @@ fn load_state(path: &Path) -> anyhow::Result<Option<PersistedState>> {
 }
 
 fn write_state(path: &Path, state: &PersistedState) -> anyhow::Result<()> {
-    let parent = path.parent().context("adaptive state path has no parent")?;
-    let metadata = fs::symlink_metadata(parent)
-        .with_context(|| format!("inspect adaptive state parent {}", parent.display()))?;
-    ensure!(
-        metadata.file_type().is_dir(),
-        "adaptive state parent must be a directory"
-    );
-    ensure!(
-        metadata.permissions().mode() & 0o022 == 0,
-        "adaptive state parent must not be group/world writable"
-    );
+    let parent = protected_parent(path, "adaptive state")?;
     let mut nonce = [0_u8; 8];
     getrandom::fill(&mut nonce).context("generate adaptive state nonce")?;
     let temporary = parent.join(format!(
@@ -1182,6 +1394,23 @@ fn write_state(path: &Path, state: &PersistedState) -> anyhow::Result<()> {
     result?;
     File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+fn protected_parent<'a>(path: &'a Path, what: &str) -> anyhow::Result<&'a Path> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{what} path has no parent"))?;
+    let metadata = fs::symlink_metadata(parent)
+        .with_context(|| format!("inspect {what} parent {}", parent.display()))?;
+    ensure!(
+        metadata.file_type().is_dir(),
+        "{what} parent must be a directory"
+    );
+    ensure!(
+        metadata.permissions().mode() & 0o022 == 0,
+        "{what} parent must not be group/world writable"
+    );
+    Ok(parent)
 }
 
 fn acquire_deployment_lock(path: &Path) -> anyhow::Result<File> {
@@ -1390,6 +1619,7 @@ mod tests {
             "mode": "manual",
             "active_profile": "split",
             "state_path": "/var/lib/ramjet-adaptive/state.json",
+            "audit_path": "/var/lib/ramjet-adaptive/audit.jsonl",
             "docker_socket": "/var/run/docker.sock",
             "deployment_lock_path": "/run/lock/ramjet-node06-deployment.lock",
             "poll_seconds": 5,
@@ -1471,6 +1701,44 @@ mod tests {
         assert!((counter_rate(1_250.0, 1_000.0, 5.0) - 50.0).abs() < f64::EPSILON);
         assert!(counter_rate(10.0, 1_000.0, 5.0).abs() < f64::EPSILON);
         assert!(counter_rate(10.0, 1.0, 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn audit_is_owner_only_append_only_json_lines() {
+        let directory = PathBuf::from(format!(
+            "/tmp/rj-adaptive-audit-{}-{}",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.join("audit.jsonl");
+        let mut audit = AuditLog::open(&path).unwrap();
+        for event in ["controller_started", "transition_completed"] {
+            audit
+                .append(&AuditRecord {
+                    version: 1,
+                    timestamp_unix_ms: 123,
+                    event: event.to_owned(),
+                    active_profile: "split".to_owned(),
+                    target_profile: None,
+                    source: None,
+                    engine: None,
+                    detail: None,
+                })
+                .unwrap();
+        }
+        let records = audit.recent(10).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].event, "controller_started");
+        assert_eq!(records[1].event, "transition_completed");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(audit);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 
     #[tokio::test]

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added a dedicated dashboard login backed by signed, persistent HttpOnly
+  sessions. Adaptive control no longer reuses or renders `RJ_UPSTREAM_TOKEN`,
+  and authenticated machine-view/adaptive APIs share one browser session.
+- Added an owner-only JSONL topology audit trail plus a dashboard Engine Change
+  History view for controller, transition, rollback, and engine start/stop
+  events.
+
 ### Adaptive engine topology
 
 - An optional controller inside the Ramjet process can drain routing and
@@ -12,7 +19,8 @@
   ordinary health/warmup gates and failures attempt an automatic rollback.
 - Machine view adds an animated SVG Topology screen with per-GPU engine
   grouping, token ingress/egress, GPU utilization, normalized serving load,
-  profile controls, and an in-memory bearer prompt. Adaptive policy can use
+  profile controls, a persistent authenticated session, and change history.
+  Adaptive policy can use
   input, output, or total token throughput plus live in-flight/load signals;
   temperature never participates in topology selection.
 - The node06 Flash-Next Compose defines its qualified TP4 pair and a

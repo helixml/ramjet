@@ -18,6 +18,7 @@ use ramjet::{
     proxy::Proxy,
     router::{Router as LocalityRouter, RouterConfig},
     snapshot_route::SnapshotRouteConsumers,
+    ui_auth::UiAuth,
 };
 use tokio::{net::TcpListener, sync::broadcast};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -76,15 +77,20 @@ async fn main() -> anyhow::Result<()> {
         exact_inventories,
     )
     .context("initialize ramjet proxy")?;
+    let ui_auth = UiAuth::from_env().context("invalid UI authentication configuration")?;
     let adaptive = Adaptive::from_env(
         proxy.clone(),
         metrics.requests.clone(),
         metrics.prompt_tokens.clone(),
         metrics.completion_tokens.clone(),
-        config.upstream_token.clone(),
     )
     .await
     .context("initialize adaptive topology controller")?;
+    if adaptive.is_some() {
+        ui_auth
+            .as_ref()
+            .context("adaptive control requires RJ_UI_AUTH_TOKEN")?;
+    }
     let machineview_settings =
         machineview::Settings::from_env().context("invalid machineview configuration")?;
     let machineview = machineview::MachineView::start(
@@ -107,11 +113,23 @@ async fn main() -> anyhow::Result<()> {
             proxy: proxy.clone(),
             registry,
         });
+    if let Some(auth) = &ui_auth {
+        metrics_api = metrics_api.merge(auth.router());
+    }
     if let Some(view) = &machineview {
-        metrics_api = metrics_api.merge(view.router());
+        metrics_api = if let Some(auth) = &ui_auth {
+            metrics_api
+                .merge(view.ui_router())
+                .merge(auth.protect(view.api_router()))
+        } else {
+            metrics_api.merge(view.router())
+        };
     }
     if let Some(controller) = &adaptive {
-        metrics_api = metrics_api.merge(controller.router());
+        let auth = ui_auth
+            .as_ref()
+            .expect("adaptive UI authority checked above");
+        metrics_api = metrics_api.merge(auth.protect(controller.router()));
     }
     let api_listener = TcpListener::bind("0.0.0.0:8000")
         .await

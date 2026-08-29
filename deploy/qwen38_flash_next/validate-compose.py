@@ -112,6 +112,7 @@ def render() -> dict[str, Any]:
     environment.update(
         {
             "VLLM_API_KEY": "validator-token",
+            "RJ_UI_AUTH_TOKEN": "validator-ui-auth-token-that-is-long-enough",
             "ENGINE_RESTART_POLICY": "unless-stopped",
             "RJ_EXACT_ROUTE_CANARY_KEY": EXACT_CANARY_KEY,
         }
@@ -250,6 +251,10 @@ def validate(document: dict[str, Any]) -> None:
         fail("load balancer does not target the two TP4 engines plus fenced TP8 candidate")
     if environment.get("RJ_UPSTREAM_TOKEN") != "validator-token":
         fail("engine and load-balancer bearer authority differ")
+    if environment.get("RJ_UI_AUTH_TOKEN") != "validator-ui-auth-token-that-is-long-enough":
+        fail("dedicated UI authentication authority changed")
+    if environment.get("RJ_UI_AUTH_TOKEN") == environment.get("RJ_UPSTREAM_TOKEN"):
+        fail("UI and engine bearer authority must remain separate")
     exact_shape = {
         "RJ_TOKENIZER_MODE": "local-shadow",
         "RJ_TOKENIZER_PATH": "/models/qwen38-flash-next/tokenizer.json",
@@ -304,6 +309,8 @@ def validate(document: dict[str, Any]) -> None:
         if environment.get(key) != value:
             fail(f"load balancer routing shape changed: {key}")
     adaptive = json.loads(ADAPTIVE_CONFIG.read_text(encoding="utf-8"))
+    if adaptive.get("audit_path") != "/var/lib/ramjet-adaptive/audit.jsonl":
+        fail("adaptive audit path changed")
     if adaptive.get("mode") != "manual" or adaptive.get("active_profile") != "split-tp4":
         fail("adaptive rollout must start manual on the qualified TP4 profile")
     profile_engines = {

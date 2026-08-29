@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Activity, Moon, Sun } from "lucide-react"
+import { Activity, LogOut, Moon, Sun } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 
@@ -84,10 +84,12 @@ export function TopBar({
   hostname,
   live,
   mock,
+  onLogout,
 }: {
   hostname: string | null
   live: boolean
   mock: boolean
+  onLogout?: () => void
 }) {
   return (
     <header className="flex items-center justify-between gap-3">
@@ -116,6 +118,11 @@ export function TopBar({
           />
           {live ? "live" : "unreachable"}
         </span>
+        {onLogout ? (
+          <Button variant="ghost" size="icon" aria-label="Log out" onClick={onLogout}>
+            <LogOut />
+          </Button>
+        ) : null}
         <ThemeToggle />
       </div>
     </header>

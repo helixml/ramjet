@@ -3,6 +3,7 @@
   "mode": "manual",
   "active_profile": "split-tp4",
   "state_path": "/var/lib/ramjet-adaptive/state.json",
+  "audit_path": "/var/lib/ramjet-adaptive/audit.jsonl",
   "docker_socket": "/var/run/docker.sock",
   "deployment_lock_path": "/run/lock/ramjet-node06-deployment.lock",
   "poll_seconds": 5,

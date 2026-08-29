@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useDashboardData } from "@/hooks/useDashboardData"
 import { useTokenHistory } from "@/hooks/useTokenHistory"
 import { TopBar } from "@/components/TopBar"
@@ -9,6 +9,7 @@ import { HeatmapCard, buildScale } from "@/components/Heatmap"
 import { dayGrid, hourGrid, totals } from "@/lib/tokens"
 import { GpuGrid } from "@/components/GpuGrid"
 import { AdaptiveTopology } from "@/components/AdaptiveTopology"
+import { LoginScreen } from "@/components/LoginScreen"
 import { Meter } from "@/components/Meter"
 import { TabBar, useTabs, type TabDef } from "@/components/Tabs"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -27,7 +28,7 @@ import {
 import { useLiveStream } from "@/hooks/useLiveStream"
 import { sparkline, windowMean, TILE_WINDOW_MS } from "@/lib/sparkline"
 import { rollingAverage, windowLabel } from "@/lib/rolling"
-import type { Sample, ServingSample } from "@/lib/api"
+import { fetchUiSession, isMockMode, logoutUi, type Sample, type ServingSample } from "@/lib/api"
 
 type Row = { t: number } & Record<string, number | null>
 
@@ -117,7 +118,7 @@ function ChartGrid({ cards, loading }: { cards: ChartCardProps[]; loading?: bool
   )
 }
 
-export default function App() {
+function Dashboard({ onLogout }: { onLogout?: () => void }) {
   const [rangeSeconds, setRangeSeconds] = useState(3600)
   const { active: tab, select: selectTab } = useTabs(TABS, "overview")
   const { summary, series, error, mock } = useDashboardData(rangeSeconds)
@@ -584,6 +585,7 @@ export default function App() {
         hostname={summary?.hostname ?? null}
         live={error == null && summary != null}
         mock={mock}
+        onLogout={onLogout}
       />
 
       {/* The one filter row — everything below renders against this slice. */}
@@ -756,5 +758,40 @@ export default function App() {
         no Prometheus or Grafana required.
       </footer>
     </div>
+  )
+}
+
+export default function App() {
+  const [authenticated, setAuthenticated] = useState<boolean | null>(
+    isMockMode() ? true : null,
+  )
+
+  useEffect(() => {
+    if (authenticated != null) return
+    let cancelled = false
+    void fetchUiSession()
+      .then((session) => {
+        if (!cancelled) setAuthenticated(session.authenticated)
+      })
+      .catch(() => {
+        if (!cancelled) setAuthenticated(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [authenticated])
+
+  if (authenticated == null) {
+    return <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">checking control session…</div>
+  }
+  if (!authenticated) {
+    return <LoginScreen onAuthenticated={() => setAuthenticated(true)} />
+  }
+  return (
+    <Dashboard
+      onLogout={isMockMode() ? undefined : () => {
+        void logoutUi().finally(() => setAuthenticated(false))
+      }}
+    />
   )
 }

@@ -63,6 +63,14 @@ controller flock `/run/lock/ramjet-node06-deployment.lock` before mutating the
 stack. `/var/lib/ramjet-adaptive` must be root-owned mode 0700; its atomically
 published state is mode 0600.
 
+The same private directory contains `audit.jsonl`, an append-only mode-0600
+record of controller starts, mode changes, transition outcomes, and individual
+engine start/stop actions. The Topology page shows the most recent entries.
+Dashboard access uses the dedicated `RJ_UI_AUTH_TOKEN` from the protected
+mode-0600 `.env`; it must differ from `VLLM_API_KEY`/`RJ_UPSTREAM_TOKEN`.
+Successful login creates a signed HttpOnly 30-day browser session, so the
+engine credential and a reusable token field never appear in the dashboard.
+
 The first rollout stays in `manual` mode. The two automatic edges are present
 and visible for soak/recommendation work but cannot act until an operator
 selects `auto` through the authenticated UI/API. Split→TP8 observes delivered

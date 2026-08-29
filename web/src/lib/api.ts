@@ -212,6 +212,21 @@ export interface AdaptiveStatus {
   transitions: AdaptiveTransition[]
 }
 
+export interface AdaptiveAuditRecord {
+  version: number
+  timestamp_unix_ms: number
+  event: string
+  active_profile: string
+  target_profile?: string
+  source?: string
+  engine?: string
+  detail?: string
+}
+
+export interface UiSession {
+  authenticated: boolean
+}
+
 /** Frames pushed over `/api/machineview/stream`, tagged by `kind`. */
 export type StreamFrame =
   | {
@@ -239,11 +254,43 @@ export function isMockMode(): boolean {
 }
 
 async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(path, { headers: { accept: "application/json" } })
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    headers: { accept: "application/json" },
+  })
   if (!response.ok) {
     throw new Error(`${path}: HTTP ${response.status}`)
   }
   return (await response.json()) as T
+}
+
+export async function fetchUiSession(): Promise<UiSession> {
+  if (isMockMode()) return { authenticated: true }
+  return getJson<UiSession>("/api/ui/session")
+}
+
+export async function loginUi(token: string): Promise<UiSession> {
+  const response = await fetch("/api/ui/login", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({ token }),
+  })
+  const payload = (await response.json().catch(() => null)) as
+    | (UiSession & { error?: string })
+    | null
+  if (!response.ok) throw new Error(payload?.error ?? `HTTP ${response.status}`)
+  return payload ?? { authenticated: false }
+}
+
+export async function logoutUi(): Promise<void> {
+  if (isMockMode()) return
+  const response = await fetch("/api/ui/logout", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { accept: "application/json" },
+  })
+  if (!response.ok) throw new Error(`logout: HTTP ${response.status}`)
 }
 
 export function fetchSummary(): Promise<Summary> {
@@ -314,6 +361,7 @@ export async function fetchAdaptiveStatus(): Promise<AdaptiveStatus | null> {
     }
   }
   const response = await fetch("/api/adaptive/status", {
+    credentials: "same-origin",
     headers: { accept: "application/json" },
   })
   if (response.status === 404) return null
@@ -321,12 +369,27 @@ export async function fetchAdaptiveStatus(): Promise<AdaptiveStatus | null> {
   return (await response.json()) as AdaptiveStatus
 }
 
-async function postAdaptive<T>(path: string, token: string, body: unknown): Promise<T> {
+export async function fetchAdaptiveAudit(): Promise<AdaptiveAuditRecord[]> {
+  if (isMockMode()) {
+    return [
+      {
+        version: 1,
+        timestamp_unix_ms: Date.now() - 3600_000,
+        event: "controller_started",
+        active_profile: "split-tp4",
+        detail: "topology authority reconciled",
+      },
+    ]
+  }
+  return getJson<AdaptiveAuditRecord[]>("/api/adaptive/audit")
+}
+
+async function postAdaptive<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(path, {
     method: "POST",
+    credentials: "same-origin",
     headers: {
       accept: "application/json",
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
@@ -340,14 +403,12 @@ async function postAdaptive<T>(path: string, token: string, body: unknown): Prom
 
 export function setAdaptiveMode(
   mode: AdaptiveMode,
-  token: string,
 ): Promise<AdaptiveStatus> {
-  return postAdaptive("/api/adaptive/mode", token, { mode })
+  return postAdaptive("/api/adaptive/mode", { mode })
 }
 
 export function startAdaptiveTransition(
   profile: string,
-  token: string,
 ): Promise<AdaptiveStatus> {
-  return postAdaptive("/api/adaptive/transition", token, { profile })
+  return postAdaptive("/api/adaptive/transition", { profile })
 }
