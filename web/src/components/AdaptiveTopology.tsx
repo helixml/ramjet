@@ -3,6 +3,7 @@ import { Activity, ArrowDownToLine, ArrowRight, ArrowUpFromLine, Gauge, History,
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { TransitionDialog } from "@/components/TransitionDialog"
 import {
   fetchAdaptiveAudit,
   fetchAdaptiveStatus,
@@ -163,6 +164,8 @@ export function AdaptiveTopology({
   const [audit, setAudit] = useState<AdaptiveAuditRecord[]>([])
   const [error, setError] = useState<string | null>(null)
   const [working, setWorking] = useState(false)
+  const [pendingProfile, setPendingProfile] = useState<AdaptiveProfile | null>(null)
+  const [dialogError, setDialogError] = useState<string | null>(null)
   const refresh = useCallback(async () => {
     try {
       const next = await fetchAdaptiveStatus()
@@ -183,6 +186,16 @@ export function AdaptiveTopology({
     () => status?.profiles.find((profile) => profile.id === status.active_profile),
     [status],
   )
+  const pendingTransition = useMemo(
+    () => pendingProfile && status
+      ? status.transitions.find((item) => item.from === status.active_profile && item.to === pendingProfile.id)
+      : undefined,
+    [pendingProfile, status],
+  )
+  const closeTransitionDialog = useCallback(() => {
+    setPendingProfile(null)
+    setDialogError(null)
+  }, [])
   const changeMode = async (mode: AdaptiveMode) => {
     setWorking(true)
     try {
@@ -197,21 +210,17 @@ export function AdaptiveTopology({
   }
   const transitionTo = async (profile: AdaptiveProfile) => {
     if (!status) return
-    const edge = status.transitions.find(
-      (transition) => transition.from === status.active_profile && transition.to === profile.id,
-    )
-    if (!edge) return
-    const warning = edge.requires_downtime
-      ? `This drains traffic and is expected to take about ${duration(edge.estimated_downtime_seconds)}. Continue?`
-      : "Switch engine topology now?"
-    if (!window.confirm(warning)) return
     setWorking(true)
     try {
       setStatus(await startAdaptiveTransition(profile.id))
       setAudit(await fetchAdaptiveAudit())
       setError(null)
+      setDialogError(null)
+      setPendingProfile(null)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      const message = cause instanceof Error ? cause.message : String(cause)
+      setError(message)
+      setDialogError(message)
     } finally {
       setWorking(false)
     }
@@ -255,7 +264,7 @@ export function AdaptiveTopology({
                       <div className="text-[11px] text-muted-foreground">
                         {edge.requires_downtime ? <><TimerReset className="mr-1 inline size-3" />~{duration(edge.estimated_downtime_seconds)} downtime</> : "live change"}
                       </div>
-                      <Button disabled={working || status.phase !== "idle" || status.mode === "off"} onClick={() => void transitionTo(profile)}>
+                      <Button disabled={working || status.phase !== "idle" || status.mode === "off"} onClick={() => { setDialogError(null); setPendingProfile(profile) }}>
                         Configure <ArrowRight />
                       </Button>
                     </div>
@@ -319,6 +328,17 @@ export function AdaptiveTopology({
           )}
         </CardContent>
       </Card>
+      {pendingProfile && pendingTransition && active ? (
+        <TransitionDialog
+          current={active}
+          target={pendingProfile}
+          transition={pendingTransition}
+          working={working}
+          error={dialogError}
+          onCancel={closeTransitionDialog}
+          onConfirm={() => void transitionTo(pendingProfile)}
+        />
+      ) : null}
     </div>
   )
 }
