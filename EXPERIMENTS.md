@@ -1,5 +1,45 @@
 # node06 experiment journal
 
+## 2026-08-30 — r141: charts report the peak sample under the crosshair
+
+Ramjet commit `1c53b26` was built and transferred as
+`rust-r141-chart-peak-tooltip-1c53b26`, image ID
+`sha256:d4d88dc98442d5da5150e85e29b2b7a90527faa8bc1424409e3216729a895768`,
+16.0MB. Build wall time was 57.8s (the UI stage rebuilds the bundle) and the
+transfer 6.2s.
+
+The dashboard's serving counters are booked rather than sampled: a request's
+whole prompt and completion token count lands in the second it finished, so
+the 1 Hz throughput series is a comb of ~100k tok/s spikes separated by zeros.
+A one-hour window holds up to 1,300 points against a few hundred pixels of
+card, and Recharts snaps the crosshair to the sample nearest the cursor, so
+pointing at a spike reported `0` far more often than it reported the spike.
+`web/src/lib/downsample.ts` now collapses the data to one point per plotted
+pixel before it reaches the chart, keeping in each column the whole row where
+that card's series peak; the line and its tooltip therefore agree by
+construction. Idle columns still read zero and empty ones contribute no point,
+and the table view behind each card's toggle stays at full resolution.
+
+This is a UI-bundle change only. The rendered candidate differed from r140
+solely by the LB image line, and the LB-only recreate ran under the common
+deployment lock. Both TP4 engine container IDs were unchanged at
+`dad34f27ecfb…` and `90883a9047fc…` with zero restarts, the TP8 candidate
+remained stopped, and `ramjet_upstream_up` stayed 1/1/0. LB health returned
+200, the machine-view ring restored 17,277 samples and 300 token-hours, and a
+`chat` request returned 200 after the roll.
+
+The served UI bundle moved from `assets/index-CE0toOOa.js` to
+`assets/index-BwEM51uB.js`, whose content hash equals the locally built and
+gate-verified `web/dist` artifact. Rollback remains the same LB-only command
+with `LB_IMAGE=ghcr.io/helixml/ds4-loadbalancer:rust-r140-transition-dialog-d1f8772`
+(image ID `sha256:9b52bc178f6e6832afa0b368265bd133f484265206df50a1480a8d801e5cd86e`).
+
+The admitted Compose and adaptive-policy SHA-256 values remain
+`083c455b8da0c91acc9e4c995c313c1e60e9831cf767637868ca6d3ad72a51d5`
+and `39bbd0f4ca311ae431f7cbf6e9230510c0ce1beaea0e9fe9ee58dd57bd6c6b8a`.
+No request-generating benchmark was run: the change touches no Rust or
+routing code, and live traffic supplied the post-roll 200.
+
 ## 2026-08-29 — topology transition dialog and LB-only rollout
 
 Ramjet commit `d1f8772` was built and transferred as
