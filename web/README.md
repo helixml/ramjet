@@ -167,6 +167,30 @@ window. Because the fallback ratio is filled in by the 5 s sampler and not by
 the 1 Hz stream, an engine-reported fleet plots the polled series — following
 the live tail there would end the line minutes short of now.
 
+## What the crosshair reports
+
+Serving rates are booked, not sampled: the proxy's counters take a request's
+whole prompt and completion token count in the second it finished, so a 1 Hz
+throughput series is a comb — 100k tok/s in one second, zero in the next, and
+both are true. A one-hour window holds up to 1,300 points (400 polled plus the
+900-frame live tail) and a card is a few hundred pixels wide, so several
+samples land in every column. Recharts snaps the crosshair to the sample
+nearest the cursor, which is how pointing at a 100k spike used to read `0`:
+correct about a neighbouring sample, useless as a readout.
+
+`src/lib/downsample.ts` collapses the data to one point per plotted pixel
+before it reaches the chart, keeping in each column the single row where the
+card's series peak. The line and its tooltip then agree by construction — the
+value under the cursor is the value drawn there — and peaks survive rather
+than being averaged into a rate the box never reached.
+
+Whole rows are kept, never a per-series maximum: the tooltip's three numbers
+were measured in the same instant instead of being a composite of three that
+never occurred together, and its timestamp is a real sample's. Idle stays
+idle, because a column whose samples are all zero picks a zero and one with no
+samples contributes no point. The table view behind each card's header toggle
+is not downsampled, so full resolution is one click away.
+
 ## The two token heatmaps
 
 They sit in the Overview beside the GPU row, compact by design: `Tokens by

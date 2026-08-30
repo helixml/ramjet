@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   Area,
   AreaChart,
@@ -8,6 +9,29 @@ import {
   YAxis,
 } from "recharts"
 import { fmtClock, fmtClockFull } from "@/lib/format"
+import { peakBuckets } from "@/lib/downsample"
+
+/**
+ * Width the axis, its labels and the plot margins take out of the card, so
+ * the bucket count matches the pixels the line is actually drawn across.
+ */
+const PLOT_CHROME_PX = 56
+
+/** Tracks the rendered width of an element, in CSS pixels. */
+function useWidth<T extends HTMLElement>() {
+  const ref = useRef<T>(null)
+  const [width, setWidth] = useState(0)
+  useEffect(() => {
+    const node = ref.current
+    if (node == null || typeof ResizeObserver === "undefined") return
+    const observer = new ResizeObserver(([entry]) => {
+      setWidth(entry.contentRect.width)
+    })
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
+  return { ref, width }
+}
 
 export interface SeriesDef {
   key: string
@@ -113,14 +137,28 @@ export function TimeChart({
   height = 180,
 }: TimeChartProps) {
   const fillOpacity = stacked ? 0.45 : series.length === 1 ? 0.4 : 0
+  const { ref, width } = useWidth<HTMLDivElement>()
+  // One point per plotted pixel: fewer would move the crosshair off the
+  // column under the cursor, more would put several samples back under it
+  // and let the tooltip pick the wrong one again. Zero means unmeasured —
+  // the first paint draws every point, as it did before.
+  const buckets = width > 0 ? Math.max(Math.round(width - PLOT_CHROME_PX), 24) : 0
+  // The card definitions are rebuilt each render, so memoize on the series
+  // identity rather than on the array's.
+  const signature = series.map((def) => def.key).join(",")
+  const plotted = useMemo(
+    () => (buckets > 0 ? peakBuckets(data, signature.split(","), buckets, band) : data),
+    [data, signature, buckets, band],
+  )
   return (
     <div
+      ref={ref}
       style={height === "fill" ? undefined : { height }}
       className={height === "fill" ? "h-full min-h-[240px] w-full" : "w-full"}
     >
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart
-          data={data}
+          data={plotted}
           margin={{ top: 10, right: 6, bottom: 0, left: 0 }}
         >
           <CartesianGrid
