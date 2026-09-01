@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG RUST_DEPS_IMAGE=ghcr.io/helixml/ramjet:rust-deps-sha256-ad20746f3f4ad52fc14362114f420a157fe8e48e73943bdb046c34eddee427b2
+ARG RUST_DEPS_IMAGE=ghcr.io/helixml/ramjet:rust-deps-sha256-8f1715978ffee45a7f77ed483284c2d7587659286b60d381b890000eeed74d3c
 ARG OCI_REVISION=unknown
 FROM ${RUST_DEPS_IMAGE} AS build
 WORKDIR /src
@@ -15,7 +15,7 @@ RUN cargo build --release --locked --offline \
 FROM gcr.io/distroless/cc-debian12
 ARG OCI_REVISION
 LABEL org.opencontainers.image.source="https://github.com/helixml/ramjet"
-LABEL org.opencontainers.image.version="0.4.0"
+LABEL org.opencontainers.image.version="0.5.0"
 LABEL org.opencontainers.image.revision="${OCI_REVISION}"
 COPY --from=build /ramjet-snapshot-companion /ramjet-snapshot-companion
 COPY --from=build /ramjet-attestation-provisioner /ramjet-attestation-provisioner

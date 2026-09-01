@@ -28,6 +28,7 @@ import {
 import { useLiveStream } from "@/hooks/useLiveStream"
 import { sparkline, windowMean, TILE_WINDOW_MS } from "@/lib/sparkline"
 import { rollingAverage, windowLabel } from "@/lib/rolling"
+import { GPU_UTIL_WINDOW_MS, smoothedGpus } from "@/lib/gpus"
 import { fetchUiSession, isMockMode, logoutUi, type Sample, type ServingSample } from "@/lib/api"
 
 type Row = { t: number } & Record<string, number | null>
@@ -136,6 +137,7 @@ function Dashboard({ onLogout }: { onLogout?: () => void }) {
     return [...rows.filter((row) => row.t < from), ...liveRows]
   }, [rows, live.frames])
   const latest = summary?.latest ?? live.sample ?? null
+  const displayGpus = useMemo(() => smoothedGpus(points, latest), [points, latest])
 
   // Engine identity is positional and stable: slot 2 for A, 3 for B, …
   // (slot 1 stays the load balancer / aggregate color).
@@ -435,17 +437,31 @@ function Dashboard({ onLogout }: { onLogout?: () => void }) {
     series: [{ key: CACHE_HIT_KEY, label: "hit rate", color: "var(--chart-1)" }],
   }
 
-  const gpuSource = latest?.gpus ?? points[points.length - 1]?.gpus ?? []
+  const gpuSource = displayGpus
   const gpuDefs = gpuSource.map((gpu) => ({
     index: gpu.index,
     label: `GPU ${gpu.index}`,
     color: `hsl(${(gpu.index * 360) / Math.max(gpuSource.length, 1)}, var(--chart-saturation), var(--chart-lightness))`,
   }))
   const gpuCount = gpuDefs.length
+  const gpuRows = useMemo(
+    () =>
+      displayGpus.reduce(
+        (averaged, gpu) =>
+          rollingAverage(averaged, {
+            key: `gpu_${gpu.index}`,
+            windowMs: GPU_UTIL_WINDOW_MS,
+            outKey: `gpu_${gpu.index}`,
+          }),
+        rows,
+      ),
+    [displayGpus, rows],
+  )
   const gpuUtilCard: ChartCardProps = {
     ...shared,
+    data: gpuRows,
     title: "GPU utilization",
-    description: gpuCount > 1 ? "SM busy share per device" : "SM busy share",
+    description: `${gpuCount > 1 ? "SM busy share per device" : "SM busy share"} · ${GPU_UTIL_WINDOW_MS / 1000}s rolling average`,
     format: (v) => fmtPct(v),
     domain: [0, 100],
     height: 200,
@@ -722,7 +738,7 @@ function Dashboard({ onLogout }: { onLogout?: () => void }) {
 
       {tab === "topology" ? (
         <AdaptiveTopology
-          gpus={latest?.gpus ?? []}
+          gpus={displayGpus}
         />
       ) : null}
 

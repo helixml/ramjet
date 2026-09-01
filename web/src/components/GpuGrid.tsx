@@ -12,7 +12,18 @@ interface GpuView {
 }
 
 function collect(points: Sample[], latest: Sample | null): GpuView[] {
-  const source = latest?.gpus ?? points[points.length - 1]?.gpus ?? []
+  // An unsuccessful host-agent scrape is an empty inventory, not eight idle
+  // GPUs. Keep the most recent known inventory so a transient miss does not
+  // collapse the grid; individual absent values remain null in the trend.
+  let source = latest?.gpus?.length ? latest.gpus : []
+  if (source.length === 0) {
+    for (let index = points.length - 1; index >= 0; index -= 1) {
+      if ((points[index].gpus?.length ?? 0) > 0) {
+        source = points[index].gpus ?? []
+        break
+      }
+    }
+  }
   return source.map((gpu) => ({
     latest: gpu,
     trend: points.map((sample) => {

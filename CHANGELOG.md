@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-09-02
 
 - Added a dedicated dashboard login backed by signed, persistent HttpOnly
   sessions. Adaptive control no longer reuses or renders `RJ_UPSTREAM_TOKEN`,
@@ -27,6 +27,10 @@
   Adaptive policy can use
   input, output, or total token throughput plus live in-flight/load signals;
   temperature never participates in topology selection.
+- GPU utilization uses a bounded 15-second trailing average in the overview
+  chart and topology diagram. This aligns short NVML observations with the
+  token counter window, while missing host-agent samples remain unavailable
+  instead of being rendered as zero utilization.
 - The node06 Flash-Next Compose defines its qualified TP4 pair and a
   default-stopped TP8 candidate as two named shapes. The controller and host
   deployment tools share the same filesystem lock; the initial rollout stays
