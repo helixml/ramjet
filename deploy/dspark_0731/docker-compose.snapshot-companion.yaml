@@ -17,7 +17,7 @@
 
 x-snapshot-companion-production: &snapshot-companion-production
   profiles: [snapshot-companion]
-  image: ${SNAPSHOT_COMPANION_IMAGE:-ghcr.io/helixml/ramjet:companion-v0.4.0@sha256:6d00646e40c0a3fed78b8a33d8136e52a0c46f0d5287c84bca00e61f22474d34}
+  image: ${SNAPSHOT_COMPANION_IMAGE:-ghcr.io/helixml/ramjet:companion-v0.5.0@sha256:d6504e2a1cad6dc3a611084c0c2143ccb90d8025c372b59d3d91aac036e31d13}
   restart: unless-stopped
   init: true
   ipc: private
@@ -60,7 +60,7 @@ x-snapshot-companion-production: &snapshot-companion-production
 
 x-snapshot-attestation-provisioner: &snapshot-attestation-provisioner
   profiles: [snapshot-attestation]
-  image: ${SNAPSHOT_COMPANION_IMAGE:-ghcr.io/helixml/ramjet:companion-v0.4.0@sha256:6d00646e40c0a3fed78b8a33d8136e52a0c46f0d5287c84bca00e61f22474d34}
+  image: ${SNAPSHOT_COMPANION_IMAGE:-ghcr.io/helixml/ramjet:companion-v0.5.0@sha256:d6504e2a1cad6dc3a611084c0c2143ccb90d8025c372b59d3d91aac036e31d13}
   entrypoint: ["/ramjet-attestation-provisioner"]
   restart: "no"
   user: "0:12000"

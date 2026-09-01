@@ -21,8 +21,8 @@ ENGINE_IMAGE = (
     "0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3"
 )
 LB_IMAGE = (
-    "ghcr.io/helixml/ramjet:v0.4.0@sha256:"
-    "467e7edf40c8fcad29e741cbba52ca571cbae0261d94cff008aa6bcdb737ea1b"
+    "ghcr.io/helixml/ramjet:v0.5.0@sha256:"
+    "c3fc5723a0dba51f9bb8eced77648cf0b05788039e90fc638fbd8c19adec70d8"
 )
 EXACT_CANARY_KEY = "validator-exact-route-key-000000"
 ROUTING_SHAPE = {
