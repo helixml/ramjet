@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.5.0 — 2026-09-02
 
 - Added a dedicated dashboard login backed by signed, persistent HttpOnly
