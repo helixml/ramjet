@@ -16,6 +16,7 @@ import {
   type AdaptiveStatus,
   type GpuSample,
 } from "@/lib/api"
+import { GPU_UTIL_WINDOW_MS } from "@/lib/gpus"
 
 const modes: AdaptiveMode[] = ["off", "manual", "recommend", "auto"]
 
@@ -123,16 +124,19 @@ function TokenFlowDiagram({
           const y = Math.floor(gpuIndex / 4) * 132
           const engineIndex = gpuToEngine.get(gpuIndex) ?? 0
           const gpu = gpus.find((sample) => sample.index === gpuIndex)
-          const util = gpu?.util_pct ?? 0
+          const util = gpu?.util_pct
+          const utilValue = util ?? 0
           const hue = engineIndex === 0 ? "#00d5ff" : "#a855f7"
           return (
             <g key={gpuIndex} transform={`translate(${x} ${y})`}>
               <rect width="124" height="104" rx="14" fill="var(--card)" stroke={hue} strokeOpacity=".62" strokeWidth="2" />
               <rect x="10" y="68" width="104" height="8" rx="4" fill="var(--muted)" />
-              <rect x="10" y="68" width={104 * Math.min(util, 100) / 100} height="8" rx="4" fill={hue} opacity=".9" />
-              <circle cx="23" cy="25" r="8" fill={hue} opacity={util > 1 ? ".9" : ".24"} className={util > 1 ? "core-pulse" : ""} />
+              <rect x="10" y="68" width={104 * Math.min(utilValue, 100) / 100} height="8" rx="4" fill={hue} opacity=".9" />
+              <circle cx="23" cy="25" r="8" fill={hue} opacity={utilValue > 1 ? ".9" : ".24"} className={utilValue > 1 ? "core-pulse" : ""} />
               <text x="40" y="30" fill="var(--foreground)" fontSize="14" fontWeight="650">GPU {gpuIndex}</text>
-              <text x="10" y="55" fill="var(--muted-foreground)" fontSize="12">{util.toFixed(0)}% UTILIZATION</text>
+              <text x="10" y="55" fill="var(--muted-foreground)" fontSize="12">
+                {util == null ? "— UTILIZATION" : `${util.toFixed(0)}% · ${GPU_UTIL_WINDOW_MS / 1000}S AVG`}
+              </text>
               <text x="10" y="94" fill={hue} fontSize="10" letterSpacing=".08em">ENGINE {engineIndex + 1}</text>
             </g>
           )
