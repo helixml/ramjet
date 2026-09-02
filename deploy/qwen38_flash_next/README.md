@@ -11,7 +11,7 @@ The checkpoint and image are immutable inputs:
 - model payload: 185,502,232,570 bytes across 131 safetensors shards
 - linux/amd64 vLLM image: `sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
 - released ramjet Compose default: `v0.5.0@sha256:c3fc5723a0dba51f9bb8eced77648cf0b05788039e90fc638fbd8c19adec70d8`
-- node06-qualified live ramjet image: `rust-cd85aa3@sha256:c3fc5723a0dba51f9bb8eced77648cf0b05788039e90fc638fbd8c19adec70d8`
+- node06-qualified live ramjet image: `rust-ff8a4af@sha256:e4d71dbbe7050b336dbc1ff6ad28c3f2235ee963f29f4524cf8ed075dbbeb5b0`
 - exact-route manifest: `compat/qwen38-flash-next-r134.json`, SHA-256 `a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67`
 
 The day-zero vLLM image config labels its source/build revision as `unknown`.
@@ -222,6 +222,14 @@ authority, changes the router membership, and then admits only the new active
 set. The Compose replay envelope is the qualified 8,192 batches with a
 180-second total deadline against the engines' 10K-step publisher buffers;
 older generations stay observe-only until an engine starts a fresh generation.
+
+The 2026-09-02 node06 rollout recreated only the load balancer, then refreshed
+A and B serially while the peer remained healthy. Both active inventories
+became trusted and placement-ready after one guarded live cache event each;
+the parked TP8 inventory remained fenced. A guarded 48 KiB request through the
+load balancer returned HTTP 200, entered the full treatment cohort, tokenized
+successfully, and recorded an exact `kept_tie` decision. The final active
+inventories each held 10 resident blocks with no unknown or unlearned groups.
 
 The rollout advanced through 1%, 10%, and 100% stable session cohorts. The
 final independent-session gate tokenized 100/100 requests and exact placement
