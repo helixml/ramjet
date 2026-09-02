@@ -68,6 +68,7 @@ steps:
       - bash -n deploy/dspark_0731/validate-snapshot-companion-host.sh
       - bash -n deploy/dspark_0731/validate-snapshot-production-host.sh
       - bash -n deploy/dspark_0731/validate-persistent-jit-cache-host.sh
+      - sh -n deploy/qwen38_flash_next/install-route-journal-archive.sh
       - docker compose -f deploy/dspark_0731/docker-compose.yaml config --quiet
       - python3 deploy/dspark_0731/validate-persistent-jit-cache-compose.py
       - python3 deploy/dspark_0731/validate-snapshot-companion-compose.py
