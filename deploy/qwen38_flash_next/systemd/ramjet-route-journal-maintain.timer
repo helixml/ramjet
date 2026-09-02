@@ -1,0 +1,12 @@
+[Unit]
+Description=Create daily Ramjet journal archive and analysis
+
+[Timer]
+OnCalendar=*-*-* 01:15:00 UTC
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=5min
+Unit=ramjet-route-journal-maintain.service
+
+[Install]
+WantedBy=timers.target

@@ -339,3 +339,59 @@ a prompt reports `cached_tokens: 0`, and only the second and later repeats
 report a hit. The native counters agree exactly on those zeros, so the first
 repeat genuinely pays a full prefill. Steady-state repeats of a 5,099-token
 prompt reported 4,000 cached tokens against an 800-token block size.
+
+## Durable route-journal analysis
+
+`RJ_ROUTE_JOURNAL=true` emits content-free start and finish records to the
+load balancer's standard error. Docker's container log is not durable: removing
+or recreating the LB removes that history. Install the host collector after
+deploying the Compose stack:
+
+```bash
+sudo deploy/qwen38_flash_next/install-route-journal-archive.sh
+systemctl status ramjet-route-journal-collect.timer \
+  ramjet-route-journal-maintain.timer
+```
+
+The five-minute collector reads only `[route_journal]` lines, validates their
+bounded schema, and transactionally deduplicates them by Docker container ID,
+sequence, and event. It stores no prompts, generated text, token IDs, request
+or user identifiers, fingerprints, cache keys, credentials, or arbitrary
+application logs. The root-owned state is below `/var/lib/ramjet-journal`:
+
+- `journal.sqlite3` is the crash-safe collection ledger;
+- `segments/YYYY-MM-DD/<container-id>.jsonl.gz` is the daily replay input;
+- `reports/YYYY-MM-DD.json` contains delivered-cost/cache results and the
+  fixed alpha/cap counterfactual sweep.
+
+The daily timer runs at 01:15 UTC and retains 30 days. A report is partitioned
+by container identity because route sequence numbers restart when the LB is
+recreated. Each entry records the immutable image ID/reference and the Compose
+file authority observed through Docker metadata. Collection requires Docker's
+root-equivalent socket, so the oneshot service runs as root with a private
+network, a read-only host filesystem, an owner-only state directory, and no
+long-lived process.
+
+After first installation, produce a snapshot for the current UTC day without
+waiting for the daily timer:
+
+```bash
+sudo /usr/bin/python3 \
+  /usr/local/libexec/ramjet-route-journal/route_journal_archive.py \
+  --state-dir /var/lib/ramjet-journal \
+  maintain --day today --retention-days 30
+```
+
+Inspect only bounded status and summary fields during routine operations:
+
+```bash
+systemctl list-timers 'ramjet-route-journal-*'
+journalctl -u ramjet-route-journal-collect.service --since today
+jq '.containers[] | {container_id, records, overall}' \
+  /var/lib/ramjet-journal/reports/$(date -u +%F).json
+```
+
+The counterfactual replay holds each captured cache/load snapshot fixed. It can
+nominate an alpha or affinity-cap candidate, but cannot simulate how changed
+placements would alter later cache contents. Promote a candidate only through
+a guarded shadow or A/B qualification, never directly from the daily report.
