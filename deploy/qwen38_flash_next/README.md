@@ -215,6 +215,14 @@ to be connected, replayed, trusted, and hybrid-cache placement-ready before
 their inventories may influence routing. Unknown or unlearned cache-group
 kinds fence placement without affecting approximate serving.
 
+Runtime attestation follows adaptive serving membership: the parked TP8
+candidate is probed and remains fenced, but it cannot revoke exact placement
+for the active TP4 pair. Every topology transition first clears exact-route
+authority, changes the router membership, and then admits only the new active
+set. The Compose replay envelope is the qualified 8,192 batches with a
+180-second total deadline against the engines' 10K-step publisher buffers;
+older generations stay observe-only until an engine starts a fresh generation.
+
 The rollout advanced through 1%, 10%, and 100% stable session cohorts. The
 final independent-session gate tokenized 100/100 requests and exact placement
 agreed with the approximate route on 100/100, with both engine inventories
@@ -269,7 +277,7 @@ or rollback renders must carry an explicit immutable `LB_IMAGE` override on
 every `docker compose` invocation, including cleanup traps; ordinary
 production renders use the released default. The admitted node06 Compose
 SHA-256 is
-`681a966b6fce43fb80036c6d81eadc6e17e5e0c68121be9acb103b508da066ca`;
+`9dc3e797bee511d5f3b6bb6022c47471db7c054885c1141f4f982bd270c9a847`;
 the adaptive policy SHA-256 is
 `39bbd0f4ca311ae431f7cbf6e9230510c0ce1beaea0e9fe9ee58dd57bd6c6b8a`.
 

@@ -1031,10 +1031,17 @@ impl Proxy {
                 !active || idle_fenced || park_fenced
             })
             .collect::<Vec<_>>();
+        // Exact-route attestation has a separate authority from the router.
+        // Fence it before changing membership so neither an activation nor a
+        // deactivation can observe a marker for the previous topology.
+        self.inner
+            .tokenizer
+            .set_topology_active(&vec![false; next.len()]);
         anyhow::ensure!(
             self.inner.router.set_drained_mask(&drained),
             "adaptive topology cardinality no longer matches router"
         );
+        self.inner.tokenizer.set_topology_active(&next);
         self.inner.topology_active.write().clone_from(&next);
         Ok(())
     }
