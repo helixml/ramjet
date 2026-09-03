@@ -1,5 +1,83 @@
 # node06 experiment journal
 
+## 2026-09-03 — Qwen3.8-Flash-Next pentest refusal prompt evaluation
+
+The production `Qwen/Qwen3.8-Flash-Next-FP8` revision
+`bcd9f01ddc9cff2316eb84281bebcd5b058bddce` was evaluated through Ramjet with a
+synthetic 21-case pentest gate-decision corpus: 14 owner-authorized defensive
+roles and 7 missing-authorization/prohibited controls, each repeated three
+times at concurrency one. The comparison changed only the user prompt from the
+existing generic role instruction to the cyber kit's structured authorization
+envelope. Temperature was zero, reasoning effort was `none`, and output was
+capped at 192 tokens. The runner retained decisions, hashes, usage, and route
+metadata, never completions; it contacted no assessment target.
+
+| decision gate | generic role prompt | final authorization envelope |
+|---|---:|---:|
+| authorized `PROCEED` | 21/42 (50.0%) | 36/42 (85.7%) |
+| authorized `CLARIFY` | 21/42 | 6/42 |
+| authorized hard `REFUSE` | 0/42 | 0/42 |
+| correct boundary decisions | 21/21 | 21/21 |
+| unsafe boundary `PROCEED` | 0/21 | 0/21 |
+
+The remaining envelope stops were `MISSING_INPUT` on AUTHN and SESSION, whose
+credentials were named but could not be inspected by this chat-only probe.
+This is not evidence for abliteration: the model did not refuse authorized
+security work, and the prompt change reduced avoidable stops by 71.4% without
+weakening any tested boundary.
+
+Guard run `8a0036a4b1c70cff3ee5cadebd4f520e` measured the baseline and the prior
+envelope revision in 72.872s; final-envelope run
+`37da7c0eb30b816ebd4541d51ede6b43` took 38.107s. Both ended `status=passed` at
+44C maximum intake; maximum GPU temperature was 80C and 76C respectively.
+Before and after, both exact TP4 engines stayed healthy with unchanged start
+times, restart count zero, and Ramjet 2/2 healthy with zero inflight requests.
+Evidence is under
+`/home/luke/inference/qwen38_flash_next/.experiments/20260903T123700Z-cyber-refusal-qwen38-next/`;
+the full analysis is in the cyber repository at
+`evaluations/cyber_refusal/REPORT-2026-09-03-qwen38-next.md`.
+
+## 2026-08-30 — Pennyroyal TP1 Qwen3.8 candidate rejected on host-memory fit
+
+The published Pennyroyal configuration was reproduced from exact SGLang fork
+commit `fb1216c6c459cb024e709eba892d9e7ded103688` in candidate image
+`sha256:b48b5a267b889f656ad72a183df9bd8ed0e5362451bdbb3fa70890e02f4faa16`
+with `RadixArk/Qwen3.8-Flash-Next-NVFP4` revision
+`7b719225242aacd3dbd3f9407468c2ee9a9d2594`. The performance-critical shape
+was TP1 ModelOpt NVFP4, FP8 E4M3 KV, 524,288-token YaRN, 24 Mamba slots,
+PLE embedding offload, and three-step/four-draft-token NEXTN. The exact full
+recipe additionally requested a 32GiB host HiCache with NIXL persistence.
+
+Every mutation single-homed Ramjet on healthy production A, stopped only B,
+and ran under the deployment lock and thermal guard. The exact full recipe was
+rejected before launch because less than the required 80GiB was available
+after B drained; PLE plus the additional 32GiB HiCache cannot coexist with the
+remaining production replica on this 128GiB host. The scoped no-HiCache launch
+then failed during weight loading inside a 64GiB, NUMA-node-1-only envelope.
+The kernel recorded `CONSTRAINT_CPUSET` and killed `sglang::scheduler` with
+44,706,816KiB shared RSS. That evidence is retained in
+`pennyroyal-core-no-hicache-20260830T192000Z/results/kernel-oom.txt`.
+
+A final bounded attempt allowed memory on both NUMA nodes. Its hard no-swap
+container limit was initially 72GiB and, after sustained cgroup reclaim with
+no load progress, was raised in place to 80GiB. GPU 4 reached 83,471MiB, and
+observed container memory reached 76.21GiB. The server still had not completed
+weight loading after 622.857 seconds when host `MemAvailable` reached
+8,112,009,216 bytes, below the 8GiB reserve; the watchdog terminated it with
+exit 22. The container itself was not CUDA-OOMed or cgroup-OOMed in this final
+attempt. Startup peaked at 37C intake and 69C GPU temperature. Evidence is
+under
+`/home/luke/inference/qwen38_flash_next/.experiments/pennyroyal-core-no-hicache-numa-spill-20260830T192400Z`.
+
+The immediately matched production TP4/MTP baseline completed 3/3 c1 and
+12/12 c4 requests: 181.6 tok/s aggregate at c1 (184.5 tok/s per-stream decode,
+5.425ms TPOT) and 527.5 tok/s aggregate at c4 (137.3 tok/s per stream,
+7.290ms TPOT). The candidate never became ready, so its claimed ~135 tok/s
+decode and ~7.5K tok/s prefill could not be measured safely. This is not a
+better deployable configuration for node06's current two-replica/128GiB host
+shape. The campaign restored the original immutable A/B images and r141 LB;
+post-rollback health was required to report two healthy, active replicas.
+
 ## 2026-08-30 — r141: charts report the peak sample under the crosshair
 
 Ramjet commit `1c53b26` was built and transferred as
