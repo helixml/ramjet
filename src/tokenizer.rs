@@ -120,6 +120,7 @@ struct RuntimeAttestation {
     remote: RemoteTokenizer,
     identity_remote: RemoteTokenizer,
     ready: Arc<Vec<AtomicBool>>,
+    required: Arc<RwLock<Vec<bool>>>,
     admission_ready: Arc<Vec<AtomicBool>>,
     engine_core_incarnation_commitments: Arc<Vec<RwLock<Option<[u8; 32]>>>>,
     revision: Arc<AtomicU64>,
@@ -702,6 +703,15 @@ impl TokenizerObserver {
         }
     }
 
+    /// Limits exact-routing attestation to the replicas that currently own
+    /// the serving topology. An empty set fences exact routing during an
+    /// adaptive transition while ordinary routing is independently drained.
+    pub(crate) fn set_topology_active(&self, active: &[bool]) {
+        if let Some(attestation) = &self.attestation {
+            attestation.set_required(active);
+        }
+    }
+
     pub(crate) fn invalidate_admission(&self, upstream: usize) {
         if let Some(attestation) = &self.attestation {
             attestation.publish_admission(upstream, false);
@@ -904,6 +914,7 @@ impl RuntimeAttestation {
         identity_remote: RemoteTokenizer,
         metrics: Arc<Metrics>,
     ) -> Self {
+        let upstream_count = remote.upstreams.len();
         let ready = (0..remote.upstreams.len())
             .map(|_| AtomicBool::new(false))
             .collect();
@@ -919,6 +930,7 @@ impl RuntimeAttestation {
             remote,
             identity_remote,
             ready: Arc::new(ready),
+            required: Arc::new(RwLock::new(vec![true; upstream_count])),
             admission_ready: Arc::new(admission_ready),
             engine_core_incarnation_commitments: Arc::new(engine_core_incarnation_commitments),
             revision: Arc::new(AtomicU64::new(0)),
@@ -927,7 +939,27 @@ impl RuntimeAttestation {
     }
 
     fn all_ready(&self) -> bool {
-        !self.ready.is_empty() && self.ready.iter().all(|ready| ready.load(Ordering::Acquire))
+        let required = self.required.read();
+        let mut any_required = false;
+        for (ready, required) in self.ready.iter().zip(required.iter().copied()) {
+            if required {
+                any_required = true;
+                if !ready.load(Ordering::Acquire) {
+                    return false;
+                }
+            }
+        }
+        any_required
+    }
+
+    fn set_required(&self, required: &[bool]) {
+        assert_eq!(required.len(), self.ready.len());
+        let mut current = self.required.write();
+        if current.as_slice() == required {
+            return;
+        }
+        self.revision.fetch_add(1, Ordering::AcqRel);
+        current.clone_from_slice(required);
     }
 
     fn marker(&self) -> Option<u64> {
@@ -996,7 +1028,10 @@ impl RuntimeAttestation {
     }
 
     fn invalidate(&self, upstream: usize, outcome: &str) {
-        self.revision.fetch_add(1, Ordering::AcqRel);
+        let required = self.required.read();
+        if required.get(upstream).copied().unwrap_or(false) {
+            self.revision.fetch_add(1, Ordering::AcqRel);
+        }
         self.set(upstream, false, outcome);
     }
 
@@ -1004,8 +1039,12 @@ impl RuntimeAttestation {
         let Some(state) = self.ready.get(upstream) else {
             return false;
         };
-        self.revision.fetch_add(1, Ordering::AcqRel);
+        let required = self.required.read();
+        if required.get(upstream).copied().unwrap_or(false) {
+            self.revision.fetch_add(1, Ordering::AcqRel);
+        }
         state.store(false, Ordering::Release);
+        drop(required);
         let Some(url) = self.remote.upstreams.get(upstream) else {
             return false;
         };
@@ -1708,6 +1747,66 @@ mod tests {
         assert!(!attestation.all_ready());
         attestation.invalidate(0, "test");
         assert!(!attestation.still_ready(revision));
+        assert!(attestation.marker().is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn runtime_attestation_tracks_active_topology_only() {
+        let app = Router::new().route(
+            "/version",
+            get(|| async { axum::Json(serde_json::json!({"version": "v1"})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        let remote = RemoteTokenizer {
+            client: reqwest::Client::new(),
+            upstreams: vec![url.clone(), url],
+            token: None,
+            timeout: Duration::from_secs(1),
+        };
+        let attestation = RuntimeAttestation::new(
+            Arc::new(test_manifest("v1")),
+            Some(Arc::new(test_serving_runtime())),
+            remote.clone(),
+            remote,
+            metrics,
+        );
+        let matching_models = br#"{"data":[{"id":"model","root":"root","max_model_len":4096}]}"#;
+
+        assert!(attestation.check(0, matching_models).await);
+        assert!(
+            attestation.marker().is_none(),
+            "both replicas begin required"
+        );
+
+        attestation.set_required(&[true, false]);
+        let split_marker = attestation.marker().unwrap();
+        assert!(
+            !attestation
+                .check(
+                    1,
+                    br#"{"data":[{"id":"other","root":"root","max_model_len":4096}]}"#,
+                )
+                .await
+        );
+        attestation.invalidate(1, "inactive_probe");
+        assert!(
+            attestation.still_ready(split_marker),
+            "inactive replica probes must not revoke the active topology"
+        );
+
+        attestation.set_required(&[false, true]);
+        assert!(!attestation.still_ready(split_marker));
+        assert!(attestation.marker().is_none());
+        assert!(attestation.check(1, matching_models).await);
+        let tp8_marker = attestation.marker().unwrap();
+        attestation.invalidate(0, "inactive_probe");
+        assert!(attestation.still_ready(tp8_marker));
+
+        attestation.set_required(&[false, false]);
         assert!(attestation.marker().is_none());
         server.abort();
     }

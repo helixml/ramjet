@@ -11,7 +11,7 @@ The checkpoint and image are immutable inputs:
 - model payload: 185,502,232,570 bytes across 131 safetensors shards
 - linux/amd64 vLLM image: `sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
 - released ramjet Compose default: `v0.5.0@sha256:c3fc5723a0dba51f9bb8eced77648cf0b05788039e90fc638fbd8c19adec70d8`
-- node06-qualified live ramjet image: `rust-cd85aa3@sha256:c3fc5723a0dba51f9bb8eced77648cf0b05788039e90fc638fbd8c19adec70d8`
+- node06-qualified live ramjet image: `rust-ff8a4af@sha256:e4d71dbbe7050b336dbc1ff6ad28c3f2235ee963f29f4524cf8ed075dbbeb5b0`
 - exact-route manifest: `compat/qwen38-flash-next-r134.json`, SHA-256 `a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67`
 
 The day-zero vLLM image config labels its source/build revision as `unknown`.
@@ -215,6 +215,22 @@ to be connected, replayed, trusted, and hybrid-cache placement-ready before
 their inventories may influence routing. Unknown or unlearned cache-group
 kinds fence placement without affecting approximate serving.
 
+Runtime attestation follows adaptive serving membership: the parked TP8
+candidate is probed and remains fenced, but it cannot revoke exact placement
+for the active TP4 pair. Every topology transition first clears exact-route
+authority, changes the router membership, and then admits only the new active
+set. The Compose replay envelope is the qualified 8,192 batches with a
+180-second total deadline against the engines' 10K-step publisher buffers;
+older generations stay observe-only until an engine starts a fresh generation.
+
+The 2026-09-02 node06 rollout recreated only the load balancer, then refreshed
+A and B serially while the peer remained healthy. Both active inventories
+became trusted and placement-ready after one guarded live cache event each;
+the parked TP8 inventory remained fenced. A guarded 48 KiB request through the
+load balancer returned HTTP 200, entered the full treatment cohort, tokenized
+successfully, and recorded an exact `kept_tie` decision. The final active
+inventories each held 10 resident blocks with no unknown or unlearned groups.
+
 The rollout advanced through 1%, 10%, and 100% stable session cohorts. The
 final independent-session gate tokenized 100/100 requests and exact placement
 agreed with the approximate route on 100/100, with both engine inventories
@@ -269,7 +285,7 @@ or rollback renders must carry an explicit immutable `LB_IMAGE` override on
 every `docker compose` invocation, including cleanup traps; ordinary
 production renders use the released default. The admitted node06 Compose
 SHA-256 is
-`681a966b6fce43fb80036c6d81eadc6e17e5e0c68121be9acb103b508da066ca`;
+`9dc3e797bee511d5f3b6bb6022c47471db7c054885c1141f4f982bd270c9a847`;
 the adaptive policy SHA-256 is
 `39bbd0f4ca311ae431f7cbf6e9230510c0ce1beaea0e9fe9ee58dd57bd6c6b8a`.
 
@@ -339,3 +355,59 @@ a prompt reports `cached_tokens: 0`, and only the second and later repeats
 report a hit. The native counters agree exactly on those zeros, so the first
 repeat genuinely pays a full prefill. Steady-state repeats of a 5,099-token
 prompt reported 4,000 cached tokens against an 800-token block size.
+
+## Durable route-journal analysis
+
+`RJ_ROUTE_JOURNAL=true` emits content-free start and finish records to the
+load balancer's standard error. Docker's container log is not durable: removing
+or recreating the LB removes that history. Install the host collector after
+deploying the Compose stack:
+
+```bash
+sudo deploy/qwen38_flash_next/install-route-journal-archive.sh
+systemctl status ramjet-route-journal-collect.timer \
+  ramjet-route-journal-maintain.timer
+```
+
+The five-minute collector reads only `[route_journal]` lines, validates their
+bounded schema, and transactionally deduplicates them by Docker container ID,
+sequence, and event. It stores no prompts, generated text, token IDs, request
+or user identifiers, fingerprints, cache keys, credentials, or arbitrary
+application logs. The root-owned state is below `/var/lib/ramjet-journal`:
+
+- `journal.sqlite3` is the crash-safe collection ledger;
+- `segments/YYYY-MM-DD/<container-id>.jsonl.gz` is the daily replay input;
+- `reports/YYYY-MM-DD.json` contains delivered-cost/cache results and the
+  fixed alpha/cap counterfactual sweep.
+
+The daily timer runs at 01:15 UTC and retains 30 days. A report is partitioned
+by container identity because route sequence numbers restart when the LB is
+recreated. Each entry records the immutable image ID/reference and the Compose
+file authority observed through Docker metadata. Collection requires Docker's
+root-equivalent socket, so the oneshot service runs as root with a private
+network, a read-only host filesystem, an owner-only state directory, and no
+long-lived process.
+
+After first installation, produce a snapshot for the current UTC day without
+waiting for the daily timer:
+
+```bash
+sudo /usr/bin/python3 \
+  /usr/local/libexec/ramjet-route-journal/route_journal_archive.py \
+  --state-dir /var/lib/ramjet-journal \
+  maintain --day today --retention-days 30
+```
+
+Inspect only bounded status and summary fields during routine operations:
+
+```bash
+systemctl list-timers 'ramjet-route-journal-*'
+journalctl -u ramjet-route-journal-collect.service --since today
+jq '.containers[] | {container_id, records, overall}' \
+  /var/lib/ramjet-journal/reports/$(date -u +%F).json
+```
+
+The counterfactual replay holds each captured cache/load snapshot fixed. It can
+nominate an alpha or affinity-cap candidate, but cannot simulate how changed
+placements would alter later cache contents. Promote a candidate only through
+a guarded shadow or A/B qualification, never directly from the daily report.

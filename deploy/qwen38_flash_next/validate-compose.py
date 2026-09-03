@@ -271,6 +271,9 @@ def validate(document: dict[str, Any]) -> None:
         "RJ_KV_EVENT_MODE": "shadow",
         "RJ_KV_EVENT_LIVE_ENDPOINTS": "tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557,tcp://qwen38flashnext-tp8:5557",
         "RJ_KV_EVENT_REPLAY_ENDPOINTS": "tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558,tcp://qwen38flashnext-tp8:5558",
+        "RJ_KV_EVENT_REPLAY_LIMIT": "8192",
+        "RJ_KV_EVENT_REPLAY_TAIL_LIMIT": "64",
+        "RJ_KV_EVENT_TIMEOUT_MS": "180000",
         "RJ_ADAPTIVE_CONFIG_PATH": "/etc/ramjet/adaptive-config.json",
     }
     for key, value in exact_shape.items():

@@ -1,0 +1,12 @@
+[Unit]
+Description=Collect Ramjet route journal every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=15s
+RandomizedDelaySec=15s
+Unit=ramjet-route-journal-collect.service
+
+[Install]
+WantedBy=timers.target
