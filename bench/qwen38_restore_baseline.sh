@@ -32,6 +32,11 @@ evidence_dir=$(realpath -e -- "$1")
   fail "evidence directory is outside the deployment"
 [[ $(stat -c '%u:%a' "$evidence_dir") == 0:700 ]] ||
   fail "evidence directory must be root-owned mode 0700"
+single_compose=$evidence_dir/docker-compose.steer.yaml
+[[ -f $single_compose && ! -L $single_compose ]] ||
+  fail "evidence directory lacks the complete experiment Compose file"
+[[ $(stat -c '%u:%a' "$single_compose") == 0:600 ]] ||
+  fail "experiment Compose file must be root-owned mode 0600"
 [[ $(sha256sum "$canonical_compose" | awk '{print $1}') == "$canonical_sha" ]] ||
   fail "canonical Compose bytes drifted"
 
@@ -46,15 +51,15 @@ exec 9>"$lock_file"
 flock -n 9 || fail "another node06 deployment operation owns the lock"
 
 compose() {
-  local upstreams=$1 speculation_profiles=$2 speculation_mode=$3
-  local kv_live=$4 kv_replay=$5
-  shift 5
+  local compose_file=$1 upstreams=$2 speculation_profiles=$3 speculation_mode=$4
+  local kv_live=$5 kv_replay=$6
+  shift 6
   env LB_IMAGE="$lb_image" RJ_UPSTREAM="$upstreams" \
     RJ_ROUTE_SPECULATION_PROFILES="$speculation_profiles" \
     RJ_ROUTE_SPECULATION_MODE="$speculation_mode" \
     RJ_KV_EVENT_LIVE_ENDPOINTS="$kv_live" \
     RJ_KV_EVENT_REPLAY_ENDPOINTS="$kv_replay" \
-    docker compose -f "$canonical_compose" --project-directory "$deployment_dir" "$@"
+    docker compose -f "$compose_file" --project-directory "$deployment_dir" "$@"
 }
 
 wait_engine() {
@@ -90,17 +95,17 @@ wait_lb() {
 
 peer_before=$(docker inspect --format \
   '{{.Id}} {{.Image}} {{.State.StartedAt}} {{.RestartCount}}' "$peer")
-compose "$single_upstream" "$single_speculation_profile" off \
+compose "$single_compose" "$single_upstream" "$single_speculation_profile" off \
   "$single_kv_live" "$single_kv_replay" \
   up -d --no-deps --force-recreate ds4-loadbalancer \
   >"$evidence_dir/recovery-lb-single.txt" 2>&1
 wait_lb 1 1 || fail "single-home load balancer did not become ready"
-compose "$single_upstream" "$single_speculation_profile" off \
+compose "$canonical_compose" "$single_upstream" "$single_speculation_profile" off \
   "$single_kv_live" "$single_kv_replay" \
   up -d --no-deps --force-recreate "$engine" \
   >"$evidence_dir/recovery-engine.txt" 2>&1
 wait_engine || fail "exact baseline engine did not become ready"
-compose "$all_upstreams" "$all_speculation_profiles" prefer \
+compose "$canonical_compose" "$all_upstreams" "$all_speculation_profiles" prefer \
   "$all_kv_live" "$all_kv_replay" \
   up -d --no-deps --force-recreate ds4-loadbalancer \
   >"$evidence_dir/recovery-lb-all.txt" 2>&1
