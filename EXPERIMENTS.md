@@ -110,8 +110,13 @@ is a separate decision from this observe-mode measurement.
 
 The horizon gauge shipped labelled by upstream index (`0`,`1`,`2`) while every
 other per-upstream gauge uses the upstream URL; the follow-up commit aligns it
-so the Grafana row can join a replica's series. Until that image is rolled the
-gauge label differs from `ramjet_upstream_up`.
+so the Grafana row can join a replica's series. That fix merged as `0c7c7bc`
+and was rolled the same way (warm build 53.0s after the crate change,
+transfer 6.4s, render diff image line only, LB-only recreate 2.16s under the
+lock, engines untouched, `/health` ok, smoke 200); the live image is now
+`rust-0c7c7bc@sha256:f9215991a15a2d5ea223c84bfc4a2f7af423b0a3d4868423543c5d8a5315615f`
+and the gauge reads `upstream="http://qwen38flashnext-a:8000"` like
+`ramjet_upstream_up`.
 
 ### What to measure next
 
