@@ -3,6 +3,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::{
+    affinity_horizon::AffinityHorizonObservation,
     router::{Decision, Router, SpeculationPreference, SpeculationRouteObservation},
     shims::{Endpoint, sanitize_object},
 };
@@ -281,7 +282,11 @@ impl PreparedRequest {
         router: &Router,
         endpoint: Endpoint,
         load_floor: usize,
-    ) -> (Decision, SpeculationRouteObservation) {
+    ) -> (
+        Decision,
+        SpeculationRouteObservation,
+        AffinityHorizonObservation,
+    ) {
         router.route_prepared_profiled_with_load_floor(
             self.body.len(),
             &self.fingerprints,
@@ -359,6 +364,7 @@ mod tests {
             speculation_mode: crate::config::SpeculationRouteMode::Off,
             speculation_profiles: vec![crate::config::SpeculationProfile::Standard],
             affinity: Affinity::Prefix,
+            affinity_horizon: crate::affinity_horizon::AffinityHorizonConfig::off(),
         })
     }
 

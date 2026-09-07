@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         speculation_mode: config.route_speculation_mode,
         speculation_profiles: config.route_speculation_profiles.clone(),
         affinity: config.affinity,
+        affinity_horizon: config.route_affinity_horizon.clone(),
     }));
     let client = reqwest::Client::builder()
         .pool_max_idle_per_host(256)

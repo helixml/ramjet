@@ -1,4 +1,5 @@
 pub mod adaptive;
+pub mod affinity_horizon;
 pub mod block_digest;
 
 pub mod companion_attestation;

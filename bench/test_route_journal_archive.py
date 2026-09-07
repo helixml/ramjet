@@ -72,6 +72,22 @@ class RouteJournalArchiveTest(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_v11_affinity_horizon_fields_are_approved_and_v12_is_not(self):
+        record = start(1, 1_000)
+        record["v"] = 11
+        record["affinity_horizon"] = {"mode": "observe", "source": "fill", "outcome": "fresh"}
+        record["candidates"][0].update(
+            {"stale_blocks": 0, "horizon_ms": 300_000, "overlap_ages_ms": [[8, 1_000]]}
+        )
+        self.assertEqual(archive.decode_record(json.dumps(record)), record)
+        record["affinity_horizon"]["prompt"] = "leak"
+        with self.assertRaises(archive.ArchiveError):
+            archive.decode_record(json.dumps(record))
+        del record["affinity_horizon"]["prompt"]
+        record["v"] = 12
+        with self.assertRaises(archive.ArchiveError):
+            archive.decode_record(json.dumps(record))
+
     def test_parser_ignores_other_logs_and_rejects_bad_journal(self):
         record = start(1, 1_788_307_200_000)
         lines = [

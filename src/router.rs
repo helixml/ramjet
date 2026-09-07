@@ -1,4 +1,9 @@
-use std::{cmp::Ordering, collections::HashSet, num::NonZeroUsize, sync::Arc};
+use std::{
+    cmp::Ordering,
+    num::NonZeroUsize,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -6,7 +11,13 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use url::Url;
 
-use crate::config::{Affinity, SpeculationProfile, SpeculationRouteMode};
+use crate::{
+    affinity_horizon::{
+        AffinityHorizonConfig, AffinityHorizonMode, AffinityHorizonObservation,
+        AffinityHorizonOutcome, HorizonEstimator, Locality,
+    },
+    config::{Affinity, SpeculationProfile, SpeculationRouteMode},
+};
 
 #[derive(Clone, Debug)]
 pub struct RouterConfig {
@@ -22,6 +33,7 @@ pub struct RouterConfig {
     pub speculation_mode: SpeculationRouteMode,
     pub speculation_profiles: Vec<SpeculationProfile>,
     pub affinity: Affinity,
+    pub affinity_horizon: AffinityHorizonConfig,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -213,11 +225,20 @@ pub struct CandidateState {
     pub load_units: usize,
     pub request_load_units: usize,
     pub healthy: bool,
+    /// Served leading blocks older than this replica's eviction horizon.
+    /// `overlap_blocks` already excludes them when the horizon is enforced.
+    pub stale_blocks: usize,
+    /// Eviction horizon applied to this candidate; `None` is unbounded.
+    pub horizon_ms: Option<u64>,
+    /// Run-length `[blocks, age_ms]` of the served chain, freshest first,
+    /// so offline replay can re-score any horizon.
+    pub overlap_ages_ms: Vec<[u64; 2]>,
 }
 
 struct UpstreamState {
-    index: HashSet<u64>,
-    lru: LruCache<u64, ()>,
+    /// Fingerprint to the instant its last successful response completed.
+    lru: LruCache<u64, Instant>,
+    horizon: HorizonEstimator,
     inflight: usize,
     load: usize,
     healthy: bool,
@@ -245,12 +266,17 @@ struct Inner {
 #[derive(Clone, Debug)]
 struct Score {
     index: usize,
+    /// Overlap the policy scored with: horizon-fresh under enforce, raw
+    /// otherwise.
     overlap: usize,
     affinity: usize,
     load: usize,
     request_load: usize,
     weighted: f64,
     healthy: bool,
+    stale: usize,
+    horizon_ms: Option<u64>,
+    ages: Vec<[u64; 2]>,
 }
 
 fn compare_scores(
@@ -353,6 +379,9 @@ fn decision_from_scores(scores: &[Score], total_blocks: usize, rotation: usize) 
             load_units: score.load,
             request_load_units: score.request_load,
             healthy: score.healthy,
+            stale_blocks: score.stale,
+            horizon_ms: score.horizon_ms,
+            overlap_ages_ms: score.ages.clone(),
         })
         .collect();
     Decision {
@@ -390,11 +419,12 @@ impl Router {
         let capacity = NonZeroUsize::new(config.index_capacity).expect("positive index capacity");
         let load_estimator = RequestLoadEstimator::from_router_config(&config);
         let states = config
-            .upstreams
-            .iter()
-            .map(|_| UpstreamState {
-                index: HashSet::with_capacity(config.index_capacity.min(4_096)),
+            .affinity_horizon
+            .estimators(config.upstreams.len())
+            .into_iter()
+            .map(|horizon| UpstreamState {
                 lru: LruCache::new(capacity),
+                horizon,
                 inflight: 0,
                 load: 0,
                 healthy: true,
@@ -430,6 +460,7 @@ impl Router {
             1,
             SpeculationPreference::Neutral,
             true,
+            Instant::now(),
         )
         .0
     }
@@ -447,6 +478,7 @@ impl Router {
                 1,
                 SpeculationPreference::Neutral,
                 true,
+                Instant::now(),
             )
             .0;
         (decision, fingerprints)
@@ -464,14 +496,45 @@ impl Router {
     }
 
     pub(crate) fn route_prepared(&self, body_bytes: usize, fingerprints: &[u64]) -> Decision {
+        self.route_prepared_at(body_bytes, fingerprints, Instant::now())
+    }
+
+    /// Routes at an explicit instant so tests can age the served index
+    /// deterministically. Production paths pass `Instant::now()`.
+    pub(crate) fn route_prepared_at(
+        &self,
+        body_bytes: usize,
+        fingerprints: &[u64],
+        now: Instant,
+    ) -> Decision {
         self.route_fingerprints(
             body_bytes,
             fingerprints,
             1,
             SpeculationPreference::Neutral,
             true,
+            now,
         )
         .0
+    }
+
+    /// Like [`Self::route_prepared_at`], returning the horizon observation.
+    #[cfg(test)]
+    pub(crate) fn route_prepared_observed_at(
+        &self,
+        body_bytes: usize,
+        fingerprints: &[u64],
+        now: Instant,
+    ) -> (Decision, AffinityHorizonObservation) {
+        let (decision, _, horizon) = self.route_fingerprints(
+            body_bytes,
+            fingerprints,
+            1,
+            SpeculationPreference::Neutral,
+            true,
+            now,
+        );
+        (decision, horizon)
     }
 
     #[cfg(test)]
@@ -487,6 +550,7 @@ impl Router {
             load_floor,
             SpeculationPreference::Neutral,
             true,
+            Instant::now(),
         )
         .0
     }
@@ -498,7 +562,9 @@ impl Router {
         fingerprints: &[u64],
         preference: SpeculationPreference,
     ) -> (Decision, SpeculationRouteObservation) {
-        self.route_prepared_profiled_with_load_floor(body_bytes, fingerprints, 1, preference)
+        let (decision, speculation, _) =
+            self.route_prepared_profiled_with_load_floor(body_bytes, fingerprints, 1, preference);
+        (decision, speculation)
     }
 
     pub(crate) fn route_prepared_profiled_with_load_floor(
@@ -507,10 +573,22 @@ impl Router {
         fingerprints: &[u64],
         load_floor: usize,
         preference: SpeculationPreference,
-    ) -> (Decision, SpeculationRouteObservation) {
-        self.route_fingerprints(body_bytes, fingerprints, load_floor, preference, true)
+    ) -> (
+        Decision,
+        SpeculationRouteObservation,
+        AffinityHorizonObservation,
+    ) {
+        self.route_fingerprints(
+            body_bytes,
+            fingerprints,
+            load_floor,
+            preference,
+            true,
+            Instant::now(),
+        )
     }
 
+    #[allow(clippy::too_many_lines)] // One locked pass builds both scorings.
     fn route_fingerprints(
         &self,
         body_bytes: usize,
@@ -518,61 +596,119 @@ impl Router {
         load_floor: usize,
         preference: SpeculationPreference,
         advance_rotation: bool,
-    ) -> (Decision, SpeculationRouteObservation) {
+        now: Instant,
+    ) -> (
+        Decision,
+        SpeculationRouteObservation,
+        AffinityHorizonObservation,
+    ) {
         let mut inner = self.inner.lock();
         let next_rotation = inner.rr.wrapping_add(1);
         if advance_rotation {
             inner.rr = next_rotation;
         }
         let rotation = next_rotation % inner.states.len();
-        let mut scores = inner
+        let horizon_mode = self.config.affinity_horizon.mode;
+        let localities = inner
             .states
             .iter()
-            .enumerate()
-            .map(|(index, state)| {
-                let overlap = if self.config.affinity == Affinity::Prefix {
-                    fingerprints
-                        .iter()
-                        .take_while(|fingerprint| state.index.contains(fingerprint))
-                        .count()
+            .map(|state| {
+                if self.config.affinity == Affinity::Prefix {
+                    Locality::walk(
+                        fingerprints,
+                        |fingerprint| state.lru.peek(fingerprint).copied(),
+                        state.horizon.horizon(now),
+                        now,
+                    )
                 } else {
-                    0
-                };
-                let affinity = overlap.min(self.config.max_overlap_blocks);
-                let request_load = self
-                    .load_estimator
-                    .estimate_blocks(body_bytes, overlap)
-                    .max(load_floor.clamp(1, self.config.max_load_units));
-                let additional_load = if self.config.projected_load {
-                    request_load.saturating_sub(1)
-                } else {
-                    0
-                };
-                let projected_load = state.load.saturating_add(additional_load);
-                Score {
-                    index,
-                    overlap,
-                    affinity,
-                    load: state.load,
-                    request_load,
-                    #[allow(clippy::cast_precision_loss)]
-                    weighted: affinity as f64 - self.config.alpha * projected_load as f64,
-                    healthy: state.serving(),
+                    Locality::default()
                 }
             })
             .collect::<Vec<_>>();
-        let candidate_count = scores.len();
-        scores.sort_by(|left, right| {
-            compare_scores(
-                left,
-                right,
-                rotation,
-                candidate_count,
-                preference,
-                &self.config.speculation_profiles,
-                false,
-            )
-        });
+        let cap = self.config.max_overlap_blocks;
+        let score = |use_fresh: bool| {
+            inner
+                .states
+                .iter()
+                .zip(&localities)
+                .enumerate()
+                .map(|(index, (state, locality))| {
+                    let overlap = if use_fresh {
+                        locality.fresh_overlap
+                    } else {
+                        locality.raw_overlap
+                    };
+                    let affinity = overlap.min(cap);
+                    let request_load = self
+                        .load_estimator
+                        .estimate_blocks(body_bytes, overlap)
+                        .max(load_floor.clamp(1, self.config.max_load_units));
+                    let additional_load = if self.config.projected_load {
+                        request_load.saturating_sub(1)
+                    } else {
+                        0
+                    };
+                    let projected_load = state.load.saturating_add(additional_load);
+                    Score {
+                        index,
+                        overlap,
+                        affinity,
+                        load: state.load,
+                        request_load,
+                        #[allow(clippy::cast_precision_loss)]
+                        weighted: affinity as f64 - self.config.alpha * projected_load as f64,
+                        healthy: state.serving(),
+                        stale: locality.stale_blocks(),
+                        horizon_ms: locality.horizon_ms,
+                        ages: locality.ages.clone(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let candidate_count = localities.len();
+        let sort = |scores: &mut Vec<Score>, profile_tie_break: bool| {
+            scores.sort_by(|left, right| {
+                compare_scores(
+                    left,
+                    right,
+                    rotation,
+                    candidate_count,
+                    preference,
+                    &self.config.speculation_profiles,
+                    profile_tie_break,
+                )
+            });
+        };
+        let enforce = horizon_mode == AffinityHorizonMode::Enforce;
+        let mut scores = score(enforce);
+        sort(&mut scores, false);
+        let horizon_observation = if horizon_mode == AffinityHorizonMode::Off {
+            AffinityHorizonObservation::off()
+        } else {
+            let mut alternative = score(!enforce);
+            sort(&mut alternative, false);
+            let outcome = if localities.iter().all(|locality| locality.raw_overlap == 0) {
+                AffinityHorizonOutcome::NoOverlap
+            } else if scores[0].index != alternative[0].index {
+                if enforce {
+                    AffinityHorizonOutcome::Moved
+                } else {
+                    AffinityHorizonOutcome::WouldMove
+                }
+            } else if localities
+                .iter()
+                .any(|locality| locality.fresh_overlap.min(cap) < locality.raw_overlap.min(cap))
+            {
+                AffinityHorizonOutcome::Trimmed
+            } else {
+                AffinityHorizonOutcome::Fresh
+            };
+            AffinityHorizonObservation {
+                mode: horizon_mode.label(),
+                source: self.config.affinity_horizon.source_label(),
+                outcome: outcome.label(),
+            }
+        };
         let profile_outcome = speculation_route_outcome(
             &scores,
             self.config.speculation_mode,
@@ -582,17 +718,7 @@ impl Router {
         if self.config.speculation_mode == SpeculationRouteMode::Prefer
             && profile_outcome == SpeculationRouteOutcome::Moved
         {
-            scores.sort_by(|left, right| {
-                compare_scores(
-                    left,
-                    right,
-                    rotation,
-                    candidate_count,
-                    preference,
-                    &self.config.speculation_profiles,
-                    true,
-                )
-            });
+            sort(&mut scores, true);
         }
         let decision = decision_from_scores(&scores, fingerprints.len(), rotation);
         (
@@ -601,23 +727,56 @@ impl Router {
                 preference,
                 outcome: profile_outcome,
             },
+            horizon_observation,
         )
     }
 
+    /// Records a served prefix without any fill accounting.
     pub fn observe(&self, upstream: usize, fingerprints: &[u64]) {
-        if fingerprints.is_empty() {
-            return;
-        }
+        self.observe_at(upstream, fingerprints, None, Instant::now());
+    }
+
+    /// Records a completed response: the served prefix becomes fresh on this
+    /// replica and `new_kv_tokens` (uncached prompt plus completion) advances
+    /// its fill-model horizon.
+    pub fn observe_served(
+        &self,
+        upstream: usize,
+        fingerprints: &[u64],
+        new_kv_tokens: Option<u64>,
+    ) {
+        self.observe_at(upstream, fingerprints, new_kv_tokens, Instant::now());
+    }
+
+    pub(crate) fn observe_at(
+        &self,
+        upstream: usize,
+        fingerprints: &[u64],
+        new_kv_tokens: Option<u64>,
+        now: Instant,
+    ) {
         let mut inner = self.inner.lock();
         let Some(state) = inner.states.get_mut(upstream) else {
             return;
         };
-        for fingerprint in fingerprints {
-            if let Some((evicted, ())) = state.lru.push(*fingerprint, ()) {
-                state.index.remove(&evicted);
-            }
-            state.index.insert(*fingerprint);
+        if let Some(tokens) = new_kv_tokens {
+            state.horizon.record_fill(tokens, now);
         }
+        for fingerprint in fingerprints {
+            state.lru.push(*fingerprint, now);
+        }
+    }
+
+    /// Current eviction horizon per upstream; `None` is unbounded.
+    #[must_use]
+    pub fn affinity_horizons(&self) -> Vec<Option<Duration>> {
+        let now = Instant::now();
+        self.inner
+            .lock()
+            .states
+            .iter()
+            .map(|state| state.horizon.horizon(now))
+            .collect()
     }
 
     pub fn acquire(self: &Arc<Self>, upstream: usize, units: usize) -> LoadGuard {
@@ -743,7 +902,7 @@ impl Router {
             .lock()
             .states
             .get(upstream)
-            .map(|state| (state.inflight, state.load, state.index.len(), state.healthy))
+            .map(|state| (state.inflight, state.load, state.lru.len(), state.healthy))
     }
 }
 
@@ -945,6 +1104,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::affinity_horizon::AffinityHorizonSource;
 
     fn config() -> RouterConfig {
         RouterConfig {
@@ -963,6 +1123,7 @@ mod tests {
             speculation_mode: SpeculationRouteMode::Off,
             speculation_profiles: vec![SpeculationProfile::Standard; 2],
             affinity: Affinity::Prefix,
+            affinity_horizon: AffinityHorizonConfig::off(),
         }
     }
 
@@ -1478,5 +1639,173 @@ mod tests {
         assert_eq!(decision.total_blocks, expected.len());
         router.observe(decision.candidates[0], &fingerprints);
         assert!(router.route(&body).overlap_blocks > 0);
+    }
+
+    fn horizon_router(mode: AffinityHorizonMode, source: AffinityHorizonSource) -> Router {
+        let mut configured = config();
+        configured.affinity_horizon = AffinityHorizonConfig {
+            mode,
+            source: Some(source),
+        };
+        Router::new(configured)
+    }
+
+    fn candidate(decision: &Decision, index: usize) -> &CandidateState {
+        decision
+            .candidate_state
+            .iter()
+            .find(|state| state.index == index)
+            .unwrap()
+    }
+
+    #[test]
+    fn off_mode_records_block_ages_but_never_scores_them() {
+        let router = Router::new(config());
+        let chain = (1..=40).collect::<Vec<u64>>();
+        let start = Instant::now();
+        router.observe_at(1, &chain, Some(10_000), start);
+        let (decision, observation) =
+            router.route_prepared_observed_at(1, &chain, start + Duration::from_hours(24));
+        assert_eq!(decision.candidates[0], 1);
+        assert_eq!(decision.outcome, Outcome::Overlap);
+        assert_eq!(observation, AffinityHorizonObservation::off());
+        let warm = candidate(&decision, 1);
+        assert_eq!(warm.overlap_blocks, 40);
+        assert_eq!(warm.stale_blocks, 0);
+        assert_eq!(warm.horizon_ms, None);
+        assert_eq!(warm.overlap_ages_ms, vec![[40, 86_400_000]]);
+        assert!(candidate(&decision, 0).overlap_ages_ms.is_empty());
+    }
+
+    #[test]
+    fn enforce_drops_a_stale_prefix_and_reports_the_move() {
+        let router = Arc::new(horizon_router(
+            AffinityHorizonMode::Enforce,
+            AffinityHorizonSource::Static { seconds: 60 },
+        ));
+        let chain = (1..=40).collect::<Vec<u64>>();
+        let start = Instant::now();
+        router.observe_at(1, &chain, None, start);
+        // Raw scoring would keep the warm replica despite one unit of load.
+        let _guard = router.acquire(1, 1);
+
+        let (decision, observation) =
+            router.route_prepared_observed_at(1, &chain, start + Duration::from_secs(30));
+        assert_eq!(decision.candidates[0], 1);
+        assert_eq!(observation.outcome, "fresh");
+        assert_eq!(observation.mode, "enforce");
+        assert_eq!(observation.source, "static");
+        assert_eq!(candidate(&decision, 1).horizon_ms, Some(60_000));
+
+        let (decision, observation) =
+            router.route_prepared_observed_at(1, &chain, start + Duration::from_mins(2));
+        assert_eq!(decision.candidates[0], 0, "stale prefix must not win");
+        assert_eq!(observation.outcome, "moved");
+        assert_eq!(decision.outcome, Outcome::Load);
+        let stale = candidate(&decision, 1);
+        assert_eq!(stale.overlap_blocks, 0);
+        assert_eq!(stale.affinity_blocks, 0);
+        assert_eq!(stale.stale_blocks, 40);
+        assert_eq!(stale.overlap_ages_ms, vec![[40, 120_000]]);
+        // A cold request reserves its full prefill on the stale replica too.
+        assert_eq!(
+            stale.request_load_units,
+            candidate(&decision, 0).request_load_units
+        );
+    }
+
+    #[test]
+    fn observe_mode_keeps_raw_placement_and_reports_what_would_change() {
+        let router = Arc::new(horizon_router(
+            AffinityHorizonMode::Observe,
+            AffinityHorizonSource::Static { seconds: 60 },
+        ));
+        let chain = (1..=40).collect::<Vec<u64>>();
+        let start = Instant::now();
+        router.observe_at(1, &chain, None, start);
+        let _guard = router.acquire(1, 1);
+        let (decision, observation) =
+            router.route_prepared_observed_at(1, &chain, start + Duration::from_mins(2));
+        assert_eq!(decision.candidates[0], 1, "observe must not move traffic");
+        assert_eq!(observation.outcome, "would_move");
+        let warm = candidate(&decision, 1);
+        assert_eq!(warm.overlap_blocks, 40);
+        assert_eq!(warm.affinity_blocks, 32);
+        assert_eq!(warm.stale_blocks, 40);
+        assert_eq!(warm.horizon_ms, Some(60_000));
+    }
+
+    #[test]
+    fn a_served_response_refreshes_only_the_blocks_it_touched() {
+        let router = horizon_router(
+            AffinityHorizonMode::Enforce,
+            AffinityHorizonSource::Static { seconds: 60 },
+        );
+        let start = Instant::now();
+        router.observe_at(1, &[1, 2, 3, 4], None, start);
+        router.observe_at(1, &[1, 2], None, start + Duration::from_secs(100));
+        let (decision, observation) =
+            router.route_prepared_observed_at(1, &[1, 2, 3, 4], start + Duration::from_secs(130));
+        assert_eq!(decision.candidates[0], 1);
+        assert_eq!(observation.outcome, "trimmed");
+        let warm = candidate(&decision, 1);
+        assert_eq!(warm.overlap_blocks, 2);
+        assert_eq!(warm.stale_blocks, 2);
+        assert_eq!(warm.overlap_ages_ms, vec![[2, 30_000], [2, 130_000]]);
+    }
+
+    #[test]
+    fn fill_horizon_calibrates_from_tokens_the_router_served() {
+        let router = horizon_router(
+            AffinityHorizonMode::Enforce,
+            AffinityHorizonSource::Fill {
+                capacity_tokens: vec![Some(1_000), Some(1_000)],
+            },
+        );
+        let chain = (1..=8).collect::<Vec<u64>>();
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        router.observe_at(1, &chain, Some(600), start);
+
+        // Under one capacity of fill nothing has been evicted, however old.
+        let (decision, observation) = router.route_prepared_observed_at(1, &chain, at(3_600));
+        assert_eq!(decision.candidates[0], 1);
+        assert_eq!(observation.outcome, "fresh");
+        assert_eq!(candidate(&decision, 1).horizon_ms, None);
+
+        // 1,200 tokens now cover the capacity: the horizon is the age of the
+        // oldest fill still needed, which is the chain's own age.
+        router.observe_at(1, &[100, 101], Some(600), at(10));
+        let (decision, _) = router.route_prepared_observed_at(1, &chain, at(20));
+        assert_eq!(candidate(&decision, 1).horizon_ms, Some(20_000));
+        assert_eq!(candidate(&decision, 1).overlap_blocks, 8);
+        assert_eq!(router.affinity_horizons()[0], None);
+
+        // Another 600 tokens push the chain's fill out of the capacity window.
+        router.observe_at(1, &[200, 201], Some(600), at(30));
+        let (decision, observation) = router.route_prepared_observed_at(1, &chain, at(40));
+        let stale = candidate(&decision, 1);
+        assert_eq!(stale.horizon_ms, Some(30_000));
+        assert_eq!(stale.overlap_blocks, 0);
+        assert_eq!(stale.stale_blocks, 8);
+        assert_ne!(observation.outcome, "fresh");
+
+        // Serving the chain again makes it the newest fill.
+        router.observe_at(1, &chain, Some(100), at(40));
+        let (decision, observation) = router.route_prepared_observed_at(1, &chain, at(41));
+        assert_eq!(decision.candidates[0], 1);
+        assert_eq!(candidate(&decision, 1).overlap_blocks, 8);
+        assert_eq!(observation.outcome, "fresh");
+    }
+
+    #[test]
+    fn horizon_without_any_served_prefix_reports_no_overlap() {
+        let router = horizon_router(
+            AffinityHorizonMode::Enforce,
+            AffinityHorizonSource::Static { seconds: 1 },
+        );
+        let (decision, observation) = router.route_prepared_observed_at(1, &[9], Instant::now());
+        assert_eq!(observation.outcome, "no_overlap");
+        assert_eq!(decision.outcome, Outcome::RoundRobin);
     }
 }

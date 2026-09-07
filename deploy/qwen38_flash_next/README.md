@@ -285,7 +285,7 @@ or rollback renders must carry an explicit immutable `LB_IMAGE` override on
 every `docker compose` invocation, including cleanup traps; ordinary
 production renders use the released default. The admitted node06 Compose
 SHA-256 is
-`9dc3e797bee511d5f3b6bb6022c47471db7c054885c1141f4f982bd270c9a847`;
+`e59dd53e2456dc3e07810041b72b0b521111f9e46e18954c6dc6ee6bd2dffc9d`;
 the adaptive policy SHA-256 is
 `39bbd0f4ca311ae431f7cbf6e9230510c0ce1beaea0e9fe9ee58dd57bd6c6b8a`.
 

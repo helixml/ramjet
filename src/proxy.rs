@@ -1299,7 +1299,7 @@ impl Proxy {
         } else {
             None
         };
-        let (approximate_decision, speculation_profile) =
+        let (approximate_decision, speculation_profile, affinity_horizon) =
             prepared.route_profiled(&self.inner.router, endpoint, decode_load_units);
         self.inner
             .metrics
@@ -1310,6 +1310,7 @@ impl Proxy {
                 speculation_profile.outcome.label(),
             ])
             .inc();
+        self.record_affinity_horizon(affinity_horizon, &approximate_decision);
         let session_affinity =
             self.inner
                 .session_affinity
@@ -1389,6 +1390,7 @@ impl Proxy {
                 output_limit,
                 decode_load_units,
                 prefix_single_flight,
+                affinity_horizon,
             },
         );
 
@@ -1692,7 +1694,9 @@ impl Proxy {
             }
             if status == StatusCode::OK && endpoint != Endpoint::Other {
                 self.record_usage(endpoint_label, &usage, started.elapsed(), first_token);
-                self.inner.router.observe(upstream, &fingerprints);
+                self.inner
+                    .router
+                    .observe_served(upstream, &fingerprints, new_kv_tokens(&usage));
                 if tokenizer_selected && let Some(route_snapshot) = exact_route_snapshot {
                     self.inner.tokenizer.submit(
                         endpoint,
@@ -1897,6 +1901,40 @@ impl Proxy {
             upstream,
             label,
         })
+    }
+
+    /// Publishes the horizon effect of one approximate decision. Observation
+    /// only: nothing here feeds back into placement.
+    fn record_affinity_horizon(
+        &self,
+        observation: crate::affinity_horizon::AffinityHorizonObservation,
+        decision: &Decision,
+    ) {
+        self.inner
+            .metrics
+            .route_affinity_horizon
+            .with_label_values(&[observation.mode, observation.outcome])
+            .inc();
+        for candidate in &decision.candidate_state {
+            let horizon = candidate.horizon_ms.map_or(f64::INFINITY, |horizon_ms| {
+                #[allow(clippy::cast_precision_loss)]
+                let seconds = horizon_ms as f64 / 1_000.0;
+                seconds
+            });
+            self.inner
+                .metrics
+                .route_affinity_horizon_seconds
+                .with_label_values(&[&candidate.index.to_string()])
+                .set(horizon);
+        }
+        if decision.total_blocks > 0
+            && let Some(chosen) = decision.candidate_state.first()
+        {
+            self.inner
+                .metrics
+                .route_stale_overlap
+                .observe(usize_to_f64(chosen.stale_blocks));
+        }
     }
 
     fn record_decision(&self, decision: &Decision) {
@@ -3025,6 +3063,27 @@ fn text_error(status: StatusCode, message: &str) -> Response<Body> {
         .expect("valid error response")
 }
 
+/// KV tokens a completed response newly wrote on its engine: the uncached
+/// prompt plus the completion. `None` when the response carried no usable
+/// prompt usage, in which case the fill model records nothing rather than a
+/// guess.
+fn new_kv_tokens(usage: &Accumulator) -> Option<u64> {
+    let prompt = usage
+        .prompt
+        .filter(|value| value.is_finite() && *value >= 0.0)?;
+    let cached = usage
+        .cached
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(0.0);
+    let completion = usage
+        .completion
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(0.0);
+    let fresh = (prompt - cached).max(0.0) + completion;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(fresh.round() as u64)
+}
+
 #[allow(clippy::cast_precision_loss)]
 fn usize_to_f64(value: usize) -> f64 {
     value as f64
@@ -3184,6 +3243,7 @@ mod tests {
             speculation_mode: config.route_speculation_mode,
             speculation_profiles: config.route_speculation_profiles.clone(),
             affinity: config.affinity,
+            affinity_horizon: config.route_affinity_horizon.clone(),
         }));
         Proxy::new(config, reqwest::Client::new(), metrics, router, inventories).unwrap()
     }
@@ -3749,6 +3809,7 @@ mod tests {
             speculation_mode: config.route_speculation_mode,
             speculation_profiles: config.route_speculation_profiles.clone(),
             affinity: config.affinity,
+            affinity_horizon: config.route_affinity_horizon.clone(),
         }));
         let client = reqwest::Client::new();
         let tokenizer = TokenizerObserver::with_test_attestation(
@@ -4294,6 +4355,7 @@ mod tests {
             speculation_mode: config.route_speculation_mode,
             speculation_profiles: config.route_speculation_profiles.clone(),
             affinity: config.affinity,
+            affinity_horizon: config.route_affinity_horizon.clone(),
         }));
         let proxy = Proxy::new(
             config,

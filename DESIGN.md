@@ -68,7 +68,15 @@ the same prefix-tree property engine radix caches key on, approximated
 without engine cooperation.
 
 Per upstream: LRU fingerprint index (`RJ_ROUTE_INDEX_CAPACITY`=100k ≈
-covers ~200MB of distinct prompt text) populated on every 2xx response.
+covers ~200MB of distinct prompt text) populated on every 2xx response. Each
+entry carries the instant its last response completed. With
+`RJ_ROUTE_AFFINITY_HORIZON_MODE=enforce` only leading blocks younger than the
+replica's eviction horizon count as overlap; the engine's prefix cache is an
+LRU, so residency really is a step in block age. The horizon is a fixed age
+(`static`) or the age of the oldest served fill still inside the engine's KV
+capacity (`fill`, self-calibrated from response usage). Default `off` keeps the
+count-only behaviour while journal v11 still records block ages for offline
+horizon sweeps.
 
 ```
 affinity(u) = min(overlapBlocks(u), RJ_ROUTE_MAX_OVERLAP_BLOCKS)  # default 32

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added default-off time-decayed prefix affinity
+  (`RJ_ROUTE_AFFINITY_HORIZON_MODE=observe|enforce`). Served fingerprint
+  blocks older than a replica's estimated eviction horizon earn no routing
+  credit; the horizon is a fixed age or an LRU fill model calibrated from the
+  engine's KV capacity and the tokens ramjet has served. Route journal v11
+  records per-candidate block ages and `bench/route_replay.py --horizons`
+  sweeps horizons offline. New metrics: `ramjet_route_affinity_horizon_total`,
+  `ramjet_route_affinity_horizon_seconds`, `ramjet_route_stale_overlap_blocks`.
+
 ## 0.5.0 — 2026-09-02
 
 - Added a dedicated dashboard login backed by signed, persistent HttpOnly

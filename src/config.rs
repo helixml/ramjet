@@ -9,6 +9,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::{
+    affinity_horizon::{AffinityHorizonConfig, AffinityHorizonMode, AffinityHorizonSource},
     engine_park::{EngineParkConfig, ParkActuator, SleepLevel},
     idle_drain::{IdleDrainConfig, IdleDrainMode, IdleDrainRelease},
 };
@@ -36,6 +37,9 @@ const MIN_DSPARK_QUARANTINE_CONSECUTIVE_WINDOWS: usize = 3;
 const MIN_DSPARK_QUARANTINE_PROPOSED_TOKENS: usize = 256;
 const MAX_DSPARK_GUARD_EXPECTED_POSITIONS: usize = 16;
 const MAX_PREFIX_SINGLE_FLIGHT_CAPACITY: usize = 100_000;
+/// A week is far beyond any measured eviction horizon; the bound keeps the
+/// millisecond age arithmetic clear of overflow.
+const MAX_AFFINITY_HORIZON_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_UPSTREAM_WARMUP_STABLE_SECONDS: usize = 15 * 60;
 const MAX_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES: usize = 60;
 
@@ -79,6 +83,7 @@ pub struct Config {
     pub route_prefix_single_flight_capacity: usize,
     pub route_prefix_single_flight_max_load_delta: usize,
     pub affinity: Affinity,
+    pub route_affinity_horizon: AffinityHorizonConfig,
     pub session_affinity_mode: SessionAffinityMode,
     pub session_affinity_key: Option<SecretString>,
     pub session_affinity_bonus_blocks: usize,
@@ -506,6 +511,8 @@ impl Config {
             "load" => Affinity::Load,
             value => return Err(invalid("RJ_AFFINITY", value.to_owned(), "prefix or load")),
         };
+        let route_affinity_horizon =
+            affinity_horizon_settings(&mut get, upstreams.len(), affinity)?;
         let route_prefix_single_flight_mode = match get("RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE")
             .as_deref()
             .unwrap_or("off")
@@ -782,6 +789,7 @@ impl Config {
             route_prefix_single_flight_capacity,
             route_prefix_single_flight_max_load_delta,
             affinity,
+            route_affinity_horizon,
             session_affinity_mode: session_affinity.mode,
             session_affinity_key: session_affinity.key,
             session_affinity_bonus_blocks: session_affinity.bonus_blocks,
@@ -1615,6 +1623,146 @@ fn speculation_route_settings(
     Ok((mode, profiles))
 }
 
+/// Parses the time-decayed affinity policy.
+///
+/// The mode is the single rollback flip: `off` leaves both horizon inputs
+/// inert. A non-off mode needs exactly one source. The `static` source takes
+/// one fixed age for every replica; the `fill` source takes one KV capacity
+/// in tokens per replica (or one value applied to all) and derives the
+/// horizon from served fill. An input that belongs to the other source is an
+/// error rather than silently ignored, so an operator cannot believe a
+/// setting applies when it does not.
+fn affinity_horizon_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    upstreams: usize,
+    affinity: Affinity,
+) -> Result<AffinityHorizonConfig, ConfigError> {
+    let mode = match get("RJ_ROUTE_AFFINITY_HORIZON_MODE")
+        .as_deref()
+        .unwrap_or("off")
+    {
+        "off" => AffinityHorizonMode::Off,
+        "observe" => AffinityHorizonMode::Observe,
+        "enforce" => AffinityHorizonMode::Enforce,
+        value => {
+            return Err(invalid(
+                "RJ_ROUTE_AFFINITY_HORIZON_MODE",
+                value.to_owned(),
+                "off, observe, or enforce",
+            ));
+        }
+    };
+    if mode == AffinityHorizonMode::Off {
+        return Ok(AffinityHorizonConfig::off());
+    }
+    if affinity != Affinity::Prefix {
+        return Err(invalid(
+            "RJ_ROUTE_AFFINITY_HORIZON_MODE",
+            mode.label().to_owned(),
+            "off unless RJ_AFFINITY=prefix",
+        ));
+    }
+    let seconds = get("RJ_ROUTE_AFFINITY_HORIZON_SECONDS").filter(|value| !value.is_empty());
+    let capacities = value_list(get, "RJ_ROUTE_KV_CAPACITY_TOKENS")?;
+    let source = match get("RJ_ROUTE_AFFINITY_HORIZON_SOURCE")
+        .as_deref()
+        .unwrap_or("static")
+    {
+        "static" => {
+            if !capacities.is_empty() {
+                return Err(invalid(
+                    "RJ_ROUTE_KV_CAPACITY_TOKENS",
+                    "<redacted>".to_owned(),
+                    "unset when RJ_ROUTE_AFFINITY_HORIZON_SOURCE=static",
+                ));
+            }
+            static_affinity_horizon(seconds)?
+        }
+        "fill" => {
+            if let Some(raw) = seconds {
+                return Err(invalid(
+                    "RJ_ROUTE_AFFINITY_HORIZON_SECONDS",
+                    raw,
+                    "unset when RJ_ROUTE_AFFINITY_HORIZON_SOURCE=fill",
+                ));
+            }
+            fill_affinity_horizon(get, upstreams)?
+        }
+        value => {
+            return Err(invalid(
+                "RJ_ROUTE_AFFINITY_HORIZON_SOURCE",
+                value.to_owned(),
+                "static or fill",
+            ));
+        }
+    };
+    Ok(AffinityHorizonConfig {
+        mode,
+        source: Some(source),
+    })
+}
+
+fn static_affinity_horizon(seconds: Option<String>) -> Result<AffinityHorizonSource, ConfigError> {
+    let Some(raw) = seconds else {
+        return Err(invalid(
+            "RJ_ROUTE_AFFINITY_HORIZON_SECONDS",
+            String::new(),
+            "a positive integer when RJ_ROUTE_AFFINITY_HORIZON_SOURCE=static",
+        ));
+    };
+    let seconds = raw
+        .parse::<u64>()
+        .ok()
+        .filter(|value| (1..=MAX_AFFINITY_HORIZON_SECONDS).contains(value))
+        .ok_or_else(|| {
+            invalid(
+                "RJ_ROUTE_AFFINITY_HORIZON_SECONDS",
+                raw.clone(),
+                "a positive integer of at most one week",
+            )
+        })?;
+    Ok(AffinityHorizonSource::Static { seconds })
+}
+
+fn fill_affinity_horizon(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    upstreams: usize,
+) -> Result<AffinityHorizonSource, ConfigError> {
+    let parsed = value_list(get, "RJ_ROUTE_KV_CAPACITY_TOKENS")?
+        .into_iter()
+        .map(|value| match value.as_str() {
+            "-" => Ok(None),
+            raw => raw
+                .parse::<u64>()
+                .ok()
+                .filter(|capacity| *capacity > 0)
+                .map(Some)
+                .ok_or(()),
+        })
+        .collect::<Result<Vec<_>, ()>>()
+        .ok()
+        .filter(|parsed| !parsed.is_empty())
+        .ok_or_else(|| {
+            invalid(
+                "RJ_ROUTE_KV_CAPACITY_TOKENS",
+                "<redacted>".to_owned(),
+                "positive integer KV capacities in tokens, or - for an unknown replica, when RJ_ROUTE_AFFINITY_HORIZON_SOURCE=fill",
+            )
+        })?;
+    let capacity_tokens = if parsed.len() == 1 {
+        vec![parsed[0]; upstreams]
+    } else if parsed.len() == upstreams {
+        parsed
+    } else {
+        return Err(invalid(
+            "RJ_ROUTE_KV_CAPACITY_TOKENS",
+            "<redacted>".to_owned(),
+            "one value or one value per upstream",
+        ));
+    };
+    Ok(AffinityHorizonSource::Fill { capacity_tokens })
+}
+
 fn parsed_list<T: std::str::FromStr>(
     get: &mut impl FnMut(&str) -> Option<String>,
     key: &'static str,
@@ -2389,6 +2537,7 @@ mod tests {
         assert_eq!(config.route_prefix_single_flight_capacity, 1_024);
         assert_eq!(config.route_prefix_single_flight_max_load_delta, 1);
         assert_eq!(config.affinity, Affinity::Prefix);
+        assert_eq!(config.route_affinity_horizon, AffinityHorizonConfig::off());
         assert_eq!(config.session_affinity_mode, SessionAffinityMode::Off);
         assert!(config.session_affinity_key.is_none());
         assert_eq!(config.session_affinity_bonus_blocks, 4);
@@ -2476,6 +2625,157 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One table covers every rejected combination.
+    fn affinity_horizon_is_explicit_single_sourced_and_prefix_only() {
+        let stat = Config::from_lookup(|key| match key {
+            "RJ_ROUTE_AFFINITY_HORIZON_MODE" => Some("observe".to_owned()),
+            "RJ_ROUTE_AFFINITY_HORIZON_SECONDS" => Some("900".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            stat.route_affinity_horizon,
+            AffinityHorizonConfig {
+                mode: AffinityHorizonMode::Observe,
+                source: Some(AffinityHorizonSource::Static { seconds: 900 }),
+            }
+        );
+
+        let fill = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some("http://a:8000,http://b:8000".to_owned()),
+            "RJ_ROUTE_AFFINITY_HORIZON_MODE" => Some("enforce".to_owned()),
+            "RJ_ROUTE_AFFINITY_HORIZON_SOURCE" => Some("fill".to_owned()),
+            "RJ_ROUTE_KV_CAPACITY_TOKENS" => Some("2667258".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            fill.route_affinity_horizon,
+            AffinityHorizonConfig {
+                mode: AffinityHorizonMode::Enforce,
+                source: Some(AffinityHorizonSource::Fill {
+                    capacity_tokens: vec![Some(2_667_258), Some(2_667_258)],
+                }),
+            }
+        );
+
+        // A replica whose capacity has never been observed is marked `-` and
+        // is modelled as never evicting rather than with an invented number.
+        let partial = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some("http://a:8000,http://b:8000,http://tp8:8000".to_owned()),
+            "RJ_ROUTE_AFFINITY_HORIZON_MODE" => Some("observe".to_owned()),
+            "RJ_ROUTE_AFFINITY_HORIZON_SOURCE" => Some("fill".to_owned()),
+            "RJ_ROUTE_KV_CAPACITY_TOKENS" => Some("2667258,3033380,-".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            partial.route_affinity_horizon.source,
+            Some(AffinityHorizonSource::Fill {
+                capacity_tokens: vec![Some(2_667_258), Some(3_033_380), None],
+            })
+        );
+
+        // Off keeps every horizon input inert: the mode is the rollback flip.
+        let off = Config::from_lookup(|key| match key {
+            "RJ_ROUTE_AFFINITY_HORIZON_SECONDS" => Some("garbage".to_owned()),
+            "RJ_ROUTE_KV_CAPACITY_TOKENS" => Some("0".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(off.route_affinity_horizon, AffinityHorizonConfig::off());
+
+        let rejected: [(&str, Vec<(&str, &str)>); 10] = [
+            (
+                "RJ_ROUTE_AFFINITY_HORIZON_MODE",
+                vec![("RJ_ROUTE_AFFINITY_HORIZON_MODE", "shadow")],
+            ),
+            (
+                "RJ_ROUTE_AFFINITY_HORIZON_MODE",
+                vec![
+                    ("RJ_AFFINITY", "load"),
+                    ("RJ_ROUTE_AFFINITY_HORIZON_MODE", "observe"),
+                    ("RJ_ROUTE_AFFINITY_HORIZON_SECONDS", "60"),
+                ],
+            ),
+            (
+                "RJ_ROUTE_AFFINITY_HORIZON_SECONDS",
+                vec![("RJ_ROUTE_AFFINITY_HORIZON_MODE", "observe")],
+            ),
+            (
+                "RJ_ROUTE_AFFINITY_HORIZON_SECONDS",
+                vec![
+                    ("RJ_ROUTE_AFFINITY_HORIZON_MODE", "observe"),
+                    ("RJ_ROUTE_AFFINITY_HORIZON_SECONDS", "0"),
+                ],
+            ),
+            (
+                "RJ_ROUTE_KV_CAPACITY_TOKENS",
+                vec![
+                    ("RJ_ROUTE_AFFINITY_HORIZON_MODE", "observe"),
+                    ("RJ_ROUTE_AFFINITY_HORIZON_SECONDS", "60"),
+                    ("RJ_ROUTE_KV_CAPACITY_TOKENS", "100"),
+                ],
+            ),
+            (
+                "RJ_ROUTE_AFFINITY_HORIZON_SECONDS",
+                vec![
+                    ("RJ_ROUTE_AFFINITY_HORIZON_MODE", "enforce"),
+                    ("RJ_ROUTE_AFFINITY_HORIZON_SOURCE", "fill"),
+                    ("RJ_ROUTE_AFFINITY_HORIZON_SECONDS", "60"),
+                    ("RJ_ROUTE_KV_CAPACITY_TOKENS", "100"),
+                ],
+            ),
+            (
+                "RJ_ROUTE_KV_CAPACITY_TOKENS",
+                vec![
+                    ("RJ_ROUTE_AFFINITY_HORIZON_MODE", "enforce"),
+                    ("RJ_ROUTE_AFFINITY_HORIZON_SOURCE", "fill"),
+                ],
+            ),
+            (
+                "RJ_ROUTE_KV_CAPACITY_TOKENS",
+                vec![
+                    ("RJ_ROUTE_AFFINITY_HORIZON_MODE", "enforce"),
+                    ("RJ_ROUTE_AFFINITY_HORIZON_SOURCE", "fill"),
+                    ("RJ_ROUTE_KV_CAPACITY_TOKENS", "0"),
+                ],
+            ),
+            (
+                "RJ_ROUTE_KV_CAPACITY_TOKENS",
+                vec![
+                    ("RJ_UPSTREAM", "http://a:8000,http://b:8000"),
+                    ("RJ_ROUTE_AFFINITY_HORIZON_MODE", "enforce"),
+                    ("RJ_ROUTE_AFFINITY_HORIZON_SOURCE", "fill"),
+                    ("RJ_ROUTE_KV_CAPACITY_TOKENS", "100,200,300"),
+                ],
+            ),
+            (
+                "RJ_ROUTE_AFFINITY_HORIZON_SOURCE",
+                vec![
+                    ("RJ_ROUTE_AFFINITY_HORIZON_MODE", "enforce"),
+                    ("RJ_ROUTE_AFFINITY_HORIZON_SOURCE", "events"),
+                ],
+            ),
+        ];
+        for (expected_key, settings) in rejected {
+            let error = Config::from_lookup(|key| {
+                settings
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| (*value).to_owned())
+            })
+            .unwrap_err();
+            match error {
+                ConfigError::InvalidValue { key, .. } => {
+                    assert_eq!(key, expected_key, "settings {settings:?}");
+                }
+                other => panic!("unexpected error {other:?} for {settings:?}"),
+            }
+        }
     }
 
     #[test]

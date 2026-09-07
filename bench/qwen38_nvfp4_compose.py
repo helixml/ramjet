@@ -7,8 +7,8 @@ import os
 import pathlib
 
 
-SOURCE_SHA256 = "9dc3e797bee511d5f3b6bb6022c47471db7c054885c1141f4f982bd270c9a847"
-OUTPUT_SHA256 = "88d03c3146792f4f58632cea1654ae3ab545faf62e33f2eb4ca22ba796552651"
+SOURCE_SHA256 = "e59dd53e2456dc3e07810041b72b0b521111f9e46e18954c6dc6ee6bd2dffc9d"
+OUTPUT_SHA256 = "158ed933a0b68bdb16026729adf9e29b9ded7a32784663df0dd277516abcb422"
 REVISION = "103a7608316173ca6edd49929544244de7ffda70"
 
 
@@ -141,6 +141,16 @@ def render(source):
             "      - --max-num-batched-tokens=8192\n",
             "      - --max-num-batched-tokens=8192\n      - --moe-backend=marlin\n",
             2,
+        ),
+        (
+            # The rejected recipe's two engines have no observed fill capacity
+            # for the horizon model; keep the policy off with an honest pair.
+            "      RJ_ROUTE_AFFINITY_HORIZON_MODE: ${RJ_ROUTE_AFFINITY_HORIZON_MODE:-observe}\n"
+            "      RJ_ROUTE_AFFINITY_HORIZON_SOURCE: ${RJ_ROUTE_AFFINITY_HORIZON_SOURCE:-fill}\n"
+            "      RJ_ROUTE_KV_CAPACITY_TOKENS: ${RJ_ROUTE_KV_CAPACITY_TOKENS:-2667258,3033380,-}\n",
+            "      RJ_ROUTE_AFFINITY_HORIZON_MODE: ${RJ_ROUTE_AFFINITY_HORIZON_MODE:-off}\n"
+            "      RJ_ROUTE_AFFINITY_HORIZON_SOURCE: ${RJ_ROUTE_AFFINITY_HORIZON_SOURCE:-fill}\n"
+            "      RJ_ROUTE_KV_CAPACITY_TOKENS: ${RJ_ROUTE_KV_CAPACITY_TOKENS:--,-}\n",
         ),
     )
     for replacement in replacements:
