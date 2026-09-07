@@ -1921,10 +1921,12 @@ impl Proxy {
                 let seconds = horizon_ms as f64 / 1_000.0;
                 seconds
             });
+            // Same label value as `ramjet_upstream_up` and the load gauges so
+            // dashboards can join the horizon to a replica's other series.
             self.inner
                 .metrics
                 .route_affinity_horizon_seconds
-                .with_label_values(&[&candidate.index.to_string()])
+                .with_label_values(&[&self.upstream_label(candidate.index)])
                 .set(horizon);
         }
         if decision.total_blocks > 0
