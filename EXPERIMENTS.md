@@ -64,6 +64,55 @@ pruning, idle growth, bounded age runs) and finished in about 1.1s warm;
 strict Clippy over all targets and the 30 replay/archive Python tests pass.
 Nothing has been deployed and no node06 number exists yet.
 
+### Rollout: observe mode live on node06 (2026-09-07)
+
+Merged as ramjet PR #258 (`ebfde29`; Drone build 630 passed in 55s lint, 79s
+test, 28s Python, 12s Compose) and the Grafana row as infra PR #75. The warm
+`bench/build_transfer.sh rust-ebfde29 --node06` build took 7.8s and the
+transfer 6.0s for a 16.0MB image; image ID
+`sha256:7026354782091698d56955741bb3c205f99b9b4c1f565eb93a608a06ae9a77b1`.
+Before the mutation the v11-capable archiver was installed under
+`/usr/local/libexec/ramjet-route-journal` and a collect run succeeded against
+the old LB, the on-box Compose file (previous SHA-256 `9dc3e797…`, kept as
+`docker-compose.yaml.pre-rust-ebfde29`) was replaced by the merged file
+(SHA-256 `e59dd53e2456dc3e07810041b72b0b521111f9e46e18954c6dc6ee6bd2dffc9d`),
+the on-box validator passed, and the baseline-versus-candidate render diff
+was exactly the three horizon environment lines plus the image line. The
+LB-only recreate under the common deployment lock took 2.09s; both TP4
+engines kept their container IDs and zero restarts, `/health` returned
+`ok` with 2/2 active replicas, and the boot log carried the intended config.
+
+Two direct 17,056-token allocations (one per engine) and four LB requests
+plus one repeat exercised the path: `ramjet_route_affinity_horizon_total`
+counted `observe/no_overlap` 11 and `observe/fresh` 1, the repeat routed as
+`overlap`, the journal emitted `"v":11` records carrying
+`"affinity_horizon":{"mode":"observe","source":"fill","outcome":"fresh"}` and
+per-candidate ages, and the archiver collected them. All three horizon gauges
+read +Inf as expected: with 2.67M/3.03M-token capacities a replica must serve
+one full capacity of new KV through ramjet before its horizon becomes finite,
+so the dashboard row will stay at "unbounded" for the first hours of traffic.
+The rollback is the same LB-only recreate with
+`LB_IMAGE=ghcr.io/helixml/ramjet:rust-ff8a4af@sha256:e4d71dbbe7050b336dbc1ff6ad28c3f2235ee963f29f4524cf8ed075dbbeb5b0`
+and the `.pre-rust-ebfde29` file, or `RJ_ROUTE_AFFINITY_HORIZON_MODE=off`.
+
+One consequence is not new but is worth stating. After the recreate both
+exact-route KV inventories stayed fenced (`ramjet_kv_event_trusted` 0,
+`ramjet_kv_event_generation` 0, live batches `observe_only`, zero replay
+batches). `src/kv_fence.rs` keeps a late subscriber observe-only when the
+engine's first live sequence already exceeds the 8,192-batch replay envelope,
+and engine A has published events since 2026-09-02 and B since 2026-09-05.
+Exact placement therefore falls back to the approximate route until an engine
+starts a fresh generation, exactly as the deployment README states; serving
+health and approximate routing are unaffected. The 2026-09-02 rollout
+refreshed A and B serially after its LB recreate for this reason. A serial
+engine refresh (B first while A serves, then A) restores exact placement and
+is a separate decision from this observe-mode measurement.
+
+The horizon gauge shipped labelled by upstream index (`0`,`1`,`2`) while every
+other per-upstream gauge uses the upstream URL; the follow-up commit aligns it
+so the Grafana row can join a replica's series. Until that image is rolled the
+gauge label differs from `ramjet_upstream_up`.
+
 ### What to measure next
 
 Enable it LB-only on the Flash-Next stack in observe mode with the fill source
