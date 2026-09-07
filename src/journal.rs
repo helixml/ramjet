@@ -6,6 +6,7 @@ use std::{
 use serde::Serialize;
 
 use crate::{
+    affinity_horizon::AffinityHorizonObservation,
     config::Config,
     prefix_single_flight::PrefixSingleFlightObservation,
     prepare::OutputLimitObservation,
@@ -15,7 +16,7 @@ use crate::{
     usage::Accumulator,
 };
 
-const VERSION: u8 = 10;
+const VERSION: u8 = 11;
 
 pub struct RouteJournal {
     enabled: bool,
@@ -30,6 +31,7 @@ pub(crate) struct RouteAnnotations {
     pub(crate) output_limit: OutputLimitObservation,
     pub(crate) decode_load_units: usize,
     pub(crate) prefix_single_flight: PrefixSingleFlightObservation,
+    pub(crate) affinity_horizon: AffinityHorizonObservation,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +64,7 @@ pub struct StartRecord<'a> {
     session_affinity: Option<SessionAffinityObservation>,
     output_limit: OutputLimitObservation,
     prefix_single_flight: PrefixSingleFlightObservation,
+    affinity_horizon: AffinityHorizonObservation,
     candidates: &'a [CandidateState],
 }
 
@@ -160,6 +163,7 @@ impl RouteJournal {
             session_affinity: annotations.session_affinity,
             output_limit: annotations.output_limit,
             prefix_single_flight: annotations.prefix_single_flight,
+            affinity_horizon: annotations.affinity_horizon,
             candidates: &decision.candidate_state,
         }
     }
@@ -236,6 +240,7 @@ mod tests {
     };
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One record exercises the complete field surface.
     fn start_record_is_privacy_bounded() {
         let config = Config::from_lookup(|key| {
             (key == "RJ_UPSTREAM")
@@ -253,6 +258,9 @@ mod tests {
                 load_units: 0,
                 request_load_units: 1,
                 healthy: true,
+                stale_blocks: 728,
+                horizon_ms: Some(300_000),
+                overlap_ages_ms: vec![[32, 12_000], [728, 900_000]],
             }],
             overlap_blocks: 760,
             total_blocks: 760,
@@ -274,6 +282,7 @@ mod tests {
             speculation_mode: crate::config::SpeculationRouteMode::Off,
             speculation_profiles: vec![crate::config::SpeculationProfile::Standard],
             affinity: Affinity::Prefix,
+            affinity_horizon: crate::affinity_horizon::AffinityHorizonConfig::off(),
         });
         let prepared = PreparedRequest::new(
             Endpoint::Chat,
@@ -302,6 +311,11 @@ mod tests {
                 output_limit: prepared.output_limit,
                 decode_load_units: 1,
                 prefix_single_flight: PrefixSingleFlightObservation::off(),
+                affinity_horizon: AffinityHorizonObservation {
+                    mode: "observe",
+                    source: "fill",
+                    outcome: "would_move",
+                },
             },
         ))
         .unwrap();
@@ -319,10 +333,16 @@ mod tests {
         }
         assert!(encoded.contains("\"chosen\":1"));
         assert!(encoded.contains("\"served_chosen\":1"));
-        assert!(encoded.contains("\"v\":10"));
+        assert!(encoded.contains("\"v\":11"));
         assert!(
             encoded.contains("\"prefix_single_flight\":{\"mode\":\"off\",\"outcome\":\"off\"}")
         );
+        assert!(encoded.contains(
+            "\"affinity_horizon\":{\"mode\":\"observe\",\"source\":\"fill\",\"outcome\":\"would_move\"}"
+        ));
+        assert!(encoded.contains(
+            "\"stale_blocks\":728,\"horizon_ms\":300000,\"overlap_ages_ms\":[[32,12000],[728,900000]]"
+        ));
         assert!(encoded.contains("\"phase_aware_load\":false"));
         assert!(encoded.contains("\"decode_load_unit_tokens\":0"));
         assert!(encoded.contains("\"decode_max_load_units\":4"));
@@ -358,7 +378,7 @@ mod tests {
         };
 
         let encoded = serde_json::to_string(&record).unwrap();
-        assert!(encoded.contains("\"v\":10"));
+        assert!(encoded.contains("\"v\":11"));
         assert!(encoded.contains("\"upstream\":1"));
         assert!(encoded.contains("\"request_load_units\":4"));
         for forbidden in ["prompt_text", "token_ids", "fingerprint"] {

@@ -1089,6 +1089,9 @@ mod tests {
             load_units,
             request_load_units: 1,
             healthy: true,
+            stale_blocks: 0,
+            horizon_ms: None,
+            overlap_ages_ms: Vec::new(),
         }
     }
 

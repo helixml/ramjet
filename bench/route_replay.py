@@ -5,11 +5,17 @@ Usage:
   docker logs ds4-loadbalancer 2>&1 | python3 route_replay.py -
   python3 route_replay.py trace.log --alphas 1,2,4,8 --caps 8,16,32,64
   python3 route_replay.py trace.log --projected-loads off,on
+  python3 route_replay.py trace.log --horizons inf,60,300,900
 
 The journal deliberately excludes prompts and fingerprints. Replay therefore
 holds each observed cache-overlap/load snapshot fixed and asks which upstream
 another alpha/affinity cap would have chosen. It does not simulate how changed
 placements would alter future cache contents or overlapping request lifetimes.
+
+Journal v11 records the age of every served leading block per candidate, so
+`--horizons` re-scores each decision as if blocks older than the given horizon
+(seconds, or `inf`) had already been evicted. It replays the LB's own step
+model; it cannot see the engine's real free queue.
 """
 
 import argparse
@@ -28,6 +34,127 @@ def parse_numbers(raw, cast):
     if not values or any(not math.isfinite(float(value)) or value < 0 for value in values):
         raise argparse.ArgumentTypeError("values must be finite and non-negative")
     return values
+
+
+def parse_horizons(raw):
+    """Comma-separated horizons in seconds; `inf` means no eviction."""
+    values = []
+    for item in raw.split(","):
+        label = item.strip().lower()
+        if not label:
+            continue
+        if label == "inf":
+            value = None
+        else:
+            try:
+                seconds = float(label)
+            except ValueError as error:
+                raise argparse.ArgumentTypeError(
+                    "horizons must be inf or finite non-negative seconds"
+                ) from error
+            if not math.isfinite(seconds) or seconds < 0:
+                raise argparse.ArgumentTypeError(
+                    "horizons must be inf or finite non-negative seconds"
+                )
+            value = int(round(seconds * 1000))
+        if value not in values:
+            values.append(value)
+    if not values:
+        raise argparse.ArgumentTypeError("horizons must include inf or a value in seconds")
+    return values
+
+
+def horizon_label(horizon_ms):
+    return "inf" if horizon_ms is None else f"{horizon_ms / 1000:g}"
+
+
+def affinity_horizon_outcome(record):
+    value = record.get("affinity_horizon")
+    if value is None:
+        return "legacy"
+    if isinstance(value, dict) and isinstance(value.get("outcome"), str):
+        return value["outcome"]
+    return "invalid"
+
+
+def _affinity_horizon_mode(record):
+    value = record.get("affinity_horizon")
+    return value.get("mode") if isinstance(value, dict) else None
+
+
+def _valid_age_runs(ages):
+    return isinstance(ages, list) and all(
+        isinstance(run, list)
+        and len(run) == 2
+        and all(type(item) is int and item >= 0 for item in run)
+        for run in ages
+    )
+
+
+def raw_overlap(record, candidate):
+    """Structural served overlap regardless of age.
+
+    Under an enforced horizon the journal's `overlap_blocks` is already the
+    fresh count, and the trimmed remainder is in `stale_blocks`.
+    """
+    overlap = candidate["overlap_blocks"]
+    if _affinity_horizon_mode(record) == "enforce":
+        stale = candidate.get("stale_blocks", 0)
+        if type(stale) is not int or stale < 0:
+            raise ValueError(
+                f"route-journal seq {record.get('seq', 'unknown')} candidate "
+                f"{candidate.get('upstream', 'unknown')}: enforce records need a "
+                "non-negative integer stale_blocks"
+            )
+        overlap += stale
+    return overlap
+
+
+def credited_overlap(record, candidate, horizon_ms):
+    """Leading served blocks no older than `horizon_ms`; `None` keeps them all."""
+    overlap = raw_overlap(record, candidate)
+    if horizon_ms is None:
+        return overlap
+    ages = candidate.get("overlap_ages_ms")
+    if not _valid_age_runs(ages):
+        raise ValueError(
+            f"route-journal seq {record.get('seq', 'unknown')} candidate "
+            f"{candidate.get('upstream', 'unknown')}: horizon replay requires "
+            "overlap_ages_ms (journal v11 or newer)"
+        )
+    fresh = 0
+    for blocks, age_ms in ages:
+        if age_ms > horizon_ms:
+            break
+        fresh += blocks
+    return min(fresh, overlap)
+
+
+def affinity_horizon_record_mismatch(record):
+    """Whether a v11 record's credited overlap disagrees with its own ages."""
+    observation = record.get("affinity_horizon")
+    if not isinstance(observation, dict):
+        return False
+    cap = record.get("max_affinity_blocks")
+    if type(cap) is not int or cap < 0:
+        return True
+    enforce = observation.get("mode") == "enforce"
+    try:
+        for candidate in record.get("candidates", []):
+            if enforce:
+                horizon_ms = candidate.get("horizon_ms")
+                if horizon_ms is not None and (type(horizon_ms) is not int or horizon_ms < 0):
+                    return True
+                expected = credited_overlap(record, candidate, horizon_ms)
+            else:
+                expected = raw_overlap(record, candidate)
+            if candidate["overlap_blocks"] != expected:
+                return True
+            if candidate["affinity_blocks"] != min(expected, cap):
+                return True
+    except (KeyError, TypeError, ValueError):
+        return True
+    return False
 
 
 def parse_projected_loads(raw):
@@ -65,7 +192,7 @@ def records(lines):
         version = record.get("v")
         if (
             type(version) is int
-            and version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+            and version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
             and record.get("event") in ("start", "finish")
         ):
             yield record
@@ -197,7 +324,7 @@ def session_affinity_choice(record, alpha=None, bonus_blocks=None, max_load_delt
     return _session_affinity_decision(record, alpha, bonus_blocks, max_load_delta)[0]
 
 
-def choose(record, alpha, cap, tie_break=None, projected_load=False):
+def choose(record, alpha, cap, tie_break=None, projected_load=False, horizon_ms=None):
     candidates = record["candidates"]
     rotation = record.get("rotation", 0)
     count = len(candidates)
@@ -205,6 +332,10 @@ def choose(record, alpha, cap, tie_break=None, projected_load=False):
         return None
     tie_break = tie_break or record.get("score_tie_break", "load-neutral")
     scored_loads = {}
+    overlaps = {
+        candidate["upstream"]: credited_overlap(record, candidate, horizon_ms)
+        for candidate in candidates
+    }
     for candidate in candidates:
         load = candidate["load_units"]
         if projected_load:
@@ -225,15 +356,14 @@ def choose(record, alpha, cap, tie_break=None, projected_load=False):
             return -1 if left_healthy else 1
         left_load = scored_loads[left["upstream"]]
         right_load = scored_loads[right["upstream"]]
-        left_score = min(left["overlap_blocks"], cap) - alpha * left_load
-        right_score = min(right["overlap_blocks"], cap) - alpha * right_load
+        left_overlap = overlaps[left["upstream"]]
+        right_overlap = overlaps[right["upstream"]]
+        left_score = min(left_overlap, cap) - alpha * left_load
+        right_score = min(right_overlap, cap) - alpha * right_load
         if left_score != right_score:
             return -1 if left_score > right_score else 1
-        if (
-            left["overlap_blocks"] != right["overlap_blocks"]
-            and (tie_break == "overlap" or left_load == right_load)
-        ):
-            return -1 if left["overlap_blocks"] > right["overlap_blocks"] else 1
+        if left_overlap != right_overlap and (tie_break == "overlap" or left_load == right_load):
+            return -1 if left_overlap > right_overlap else 1
         left_rotation = (left["upstream"] + rotation) % count
         right_rotation = (right["upstream"] + rotation) % count
         if left_rotation == right_rotation:
@@ -252,6 +382,7 @@ def replay(
     session_bonus_blocks=None,
     session_max_load_delta=None,
     projected_loads=None,
+    horizons=None,
 ):
     paired_records = [
         (record, finishes[record["seq"]])
@@ -300,9 +431,15 @@ def replay(
 
     rows = []
     policies = [None] if projected_loads is None else projected_loads
+    horizon_policies = [None] if horizons is None else horizons
+    horizon_mismatches = sum(affinity_horizon_record_mismatch(record) for record in starts)
     for alpha in alphas:
         for cap in caps:
-            for projected_load in policies:
+            for projected_load, horizon_ms in (
+                (projected_load, horizon_ms)
+                for projected_load in policies
+                for horizon_ms in horizon_policies
+            ):
                 choices = []
                 agreements = 0
                 overlaps = []
@@ -314,13 +451,14 @@ def replay(
                         cap,
                         tie_break,
                         projected_load=bool(projected_load),
+                        horizon_ms=horizon_ms,
                     )
                     if selected is None:
                         continue
                     choices.append(selected)
                     agreements += selected == record.get("chosen")
                     candidate = next(item for item in record["candidates"] if item["upstream"] == selected)
-                    overlaps.append(candidate["overlap_blocks"])
+                    overlaps.append(credited_overlap(record, candidate, horizon_ms))
                     loads.append(candidate["load_units"])
                 route_counts = {str(route): choices.count(route) for route in sorted(set(choices))}
                 session_replayed = [
@@ -376,6 +514,13 @@ def replay(
                         != reproduced
                         for record, reproduced in zip(starts, session_record_replayed, strict=True)
                     ),
+                    "affinity_horizon_counts": {
+                        str(outcome): sum(
+                            1 for record in starts if affinity_horizon_outcome(record) == outcome
+                        )
+                        for outcome in sorted({affinity_horizon_outcome(record) for record in starts})
+                    },
+                    "affinity_horizon_record_mismatches": horizon_mismatches,
                     "mean_overlap_blocks": round(sum(overlaps) / len(overlaps), 2) if overlaps else None,
                     "mean_observed_load_units": round(sum(loads) / len(loads), 2) if loads else None,
                     "paired_finishes": len(paired),
@@ -400,6 +545,8 @@ def replay(
                 }
                 if projected_load is not None:
                     row["projected_load"] = projected_load
+                if horizons is not None:
+                    row["horizon_s"] = horizon_label(horizon_ms)
                 rows.append(row)
     return rows
 
@@ -462,6 +609,14 @@ def main(argv=None):
             "candidate with load_units + request_load_units - 1"
         ),
     )
+    parser.add_argument(
+        "--horizons",
+        type=parse_horizons,
+        help=(
+            "sweep eviction horizons in seconds (inf for none); credits only served "
+            "leading blocks no older than the horizon, from journal v11 block ages"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit one JSON object per policy")
     args = parser.parse_args(argv)
     if args.session_bonus_blocks is not None and args.session_bonus_blocks < 0:
@@ -508,6 +663,7 @@ def main(argv=None):
             args.session_bonus_blocks,
             args.session_max_load_delta,
             args.projected_loads,
+            args.horizons,
         )
     except ValueError as error:
         parser.error(str(error))
@@ -516,8 +672,9 @@ def main(argv=None):
             print(json.dumps(row, sort_keys=True))
     else:
         projected_header = " projected" if args.projected_loads is not None else ""
+        horizon_header = " horizon_s" if args.horizons is not None else ""
         print(
-            f"alpha cap{projected_header} requests agree% moves routes mean_overlap "
+            f"alpha cap{projected_header}{horizon_header} requests agree% moves routes mean_overlap "
             "mean_load paired first_byte ttft_ms cache% warm/cold warm_ttft cold_ttft"
         )
         for row in rows:
@@ -527,8 +684,11 @@ def main(argv=None):
                 if args.projected_loads is not None
                 else ""
             )
+            horizon_value = (
+                f" {row['horizon_s']:>9}" if args.horizons is not None else ""
+            )
             print(
-                f"{row['alpha']:>5g} {row['cap']:>3}{projected_value} {row['requests']:>8} "
+                f"{row['alpha']:>5g} {row['cap']:>3}{projected_value}{horizon_value} {row['requests']:>8} "
                 f"{row['agreement_pct']:>6.1f} {row['counterfactual_migrations']:>5} {routes:>12} "
                 f"{row['mean_overlap_blocks']:>12.2f} {row['mean_observed_load_units']:>9.2f} "
                 f"{row['paired_finishes']:>6} "

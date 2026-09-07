@@ -76,6 +76,10 @@ resolving across the rename.
 | `RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MIN_BLOCKS` | `8` | Leading approximate fingerprint blocks (16KiB at the default chunk size) that identify one bounded flight. |
 | `RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY` | `1024` | Maximum concurrently tracked prefix flights; a full table fails open to ordinary routing. |
 | `RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA` | `1` | Maximum active load-unit disadvantage allowed when joining the flight's engine. |
+| `RJ_ROUTE_AFFINITY_HORIZON_MODE` | `off` | `off`, observation-only `observe`, or `enforce` time-decayed affinity: served prefix blocks older than the replica's eviction horizon earn no credit. |
+| `RJ_ROUTE_AFFINITY_HORIZON_SOURCE` | `static` | `static` applies one fixed age; `fill` derives each replica's horizon from the KV tokens ramjet has served against its capacity. |
+| `RJ_ROUTE_AFFINITY_HORIZON_SECONDS` | unset | Fixed horizon age; required by the `static` source, rejected with `fill`. At most one week. |
+| `RJ_ROUTE_KV_CAPACITY_TOKENS` | unset | Engine KV capacity in tokens, one value or one per upstream (vLLM logs `GPU KV cache size: N tokens` per incarnation; re-read it after an engine restart). `-` marks a replica whose capacity has not been observed, which is modelled as never evicting. Required by the `fill` source, rejected with `static`. |
 | `RJ_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
 | `RJ_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary; `0` disables the legacy strip. |
 | `RJ_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
@@ -99,6 +103,24 @@ the bounded counterfactual without changing placement. `prefer` is deliberately
 a final tie-break after serving health, weighted locality/load score, and raw
 prefix overlap; it cannot trade a warmer prefix or a less-loaded replica for an
 engine profile. `RJ_ROUTE_SPECULATION_MODE=off` is the instant rollback.
+
+Time-decayed affinity treats residency as the step function an LRU prefix
+cache actually implements: a served block is present while it is younger than
+the block the engine is currently evicting, and gone once it is older. The
+router stamps every served fingerprint with the instant its response completed
+and credits only the leading blocks inside the replica's horizon. `observe`
+scores exactly as before and only publishes what the horizon would have changed
+(`ramjet_route_affinity_horizon_total`, `ramjet_route_affinity_horizon_seconds`,
+`ramjet_route_stale_overlap_blocks`); `enforce` scores with the fresh overlap
+and re-reserves the stale remainder as cold prefill. The `fill` source is
+unbounded until a replica has served one capacity of new KV, then reports the
+age of the oldest fill still inside that capacity. It counts only responses
+proxied through ramjet, so direct engine traffic makes it optimistic, and an
+untrusted zero `cached_tokens` makes it conservative. Journal v11 records the
+block ages, so a default-mode capture can be swept offline with
+`bench/route_replay.py --horizons` before either mode is enabled.
+`RJ_ROUTE_AFFINITY_HORIZON_MODE=off` is the instant rollback and leaves both
+source inputs inert.
 
 `GET /health` returns opaque replica ordinals, serving health, DSpark
 reliability state, inflight work, load units, and index size. It returns `200 ok` when every replica is healthy,

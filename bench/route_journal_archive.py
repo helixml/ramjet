@@ -42,7 +42,7 @@ START_FIELDS = {
     "chunk_bytes", "load_unit_bytes", "max_load_units", "phase_aware_load",
     "decode_load_unit_tokens", "decode_max_load_units", "decode_load_units",
     "projected_load", "score_tie_break", "exact_canary", "session_affinity",
-    "output_limit", "prefix_single_flight", "candidates",
+    "output_limit", "prefix_single_flight", "affinity_horizon", "candidates",
 }
 FINISH_FIELDS = {
     "v", "event", "seq", "unix_ms", "result", "upstream", "request_load_units",
@@ -52,7 +52,7 @@ FINISH_FIELDS = {
 NESTED_FIELDS = {
     "candidates": {
         "upstream", "rank", "overlap_blocks", "affinity_blocks", "load_units",
-        "request_load_units", "healthy",
+        "request_load_units", "healthy", "stale_blocks", "horizon_ms", "overlap_ages_ms",
     },
     "session_affinity": {
         "policy_version", "bonus_blocks", "max_load_delta", "outcome", "primary",
@@ -63,6 +63,7 @@ NESTED_FIELDS = {
         "effective_source", "mutation", "stream_mode",
     },
     "prefix_single_flight": {"mode", "outcome"},
+    "affinity_horizon": {"mode", "source", "outcome"},
 }
 
 
@@ -206,7 +207,7 @@ def decode_record(payload: str) -> dict:
     seq = record.get("seq")
     event = record.get("event")
     unix_ms = record.get("unix_ms")
-    if not isinstance(version, int) or isinstance(version, bool) or not 1 <= version <= 10:
+    if not isinstance(version, int) or isinstance(version, bool) or not 1 <= version <= 11:
         raise ArchiveError("route-journal version is unsupported")
     if not isinstance(seq, int) or isinstance(seq, bool) or seq <= 0:
         raise ArchiveError("route-journal sequence is invalid")

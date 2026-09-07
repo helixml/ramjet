@@ -66,6 +66,9 @@ pub struct Metrics {
     pub route_affinity: Histogram,
     pub route_speculation_profile: CounterVec,
     pub route_prefix_single_flight: CounterVec,
+    pub route_affinity_horizon: CounterVec,
+    pub route_affinity_horizon_seconds: GaugeVec,
+    pub route_stale_overlap: Histogram,
     pub session_affinity: CounterVec,
     pub upstream_inflight: GaugeVec,
     pub upstream_load_units: GaugeVec,
@@ -444,6 +447,23 @@ impl Metrics {
                 "ramjet_route_prefix_single_flight_total",
                 "Bounded concurrent cold-prefix coalescing decisions by mode and outcome",
                 &["mode", "outcome"],
+            )?,
+            route_affinity_horizon: counter(
+                "ramjet_route_affinity_horizon_total",
+                "Time-decayed affinity decisions by bounded mode and outcome",
+                &["mode", "outcome"],
+            )?,
+            route_affinity_horizon_seconds: gauge(
+                "ramjet_route_affinity_horizon_seconds",
+                "Estimated prefix-cache eviction horizon per upstream; +Inf while unbounded",
+                &["upstream"],
+            )?,
+            route_stale_overlap: Histogram::with_opts(
+                HistogramOpts::new(
+                    "ramjet_route_stale_overlap_blocks",
+                    "Served leading blocks on the chosen upstream older than its eviction horizon",
+                )
+                .buckets(vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]),
             )?,
             session_affinity: counter(
                 "ramjet_session_affinity_total",
@@ -825,6 +845,15 @@ impl Metrics {
                     .with_label_values(&[endpoint, outcome]);
             }
         }
+        for mode in ["off", "observe", "enforce"] {
+            for outcome in crate::affinity_horizon::AffinityHorizonOutcome::ALL
+                .map(crate::affinity_horizon::AffinityHorizonOutcome::label)
+            {
+                metrics
+                    .route_affinity_horizon
+                    .with_label_values(&[mode, outcome]);
+            }
+        }
         for mode in ["off", "shadow", "prefer"] {
             for preference in ["neutral", "standard", "mtp"] {
                 for outcome in crate::router::SpeculationRouteOutcome::ALL
@@ -1009,6 +1038,9 @@ impl Metrics {
             Box::new(self.route_affinity.clone()),
             Box::new(self.route_speculation_profile.clone()),
             Box::new(self.route_prefix_single_flight.clone()),
+            Box::new(self.route_affinity_horizon.clone()),
+            Box::new(self.route_affinity_horizon_seconds.clone()),
+            Box::new(self.route_stale_overlap.clone()),
             Box::new(self.session_affinity.clone()),
             Box::new(self.upstream_inflight.clone()),
             Box::new(self.upstream_load_units.clone()),
@@ -1194,6 +1226,15 @@ mod tests {
             .set(0.8);
         metrics.prompt_tokens.with_label_values(&["chat"]).inc();
         metrics.cached_tokens.with_label_values(&["chat"]).inc();
+        metrics
+            .route_affinity_horizon
+            .with_label_values(&["observe", "would_move"])
+            .inc();
+        metrics
+            .route_affinity_horizon_seconds
+            .with_label_values(&["0"])
+            .set(f64::INFINITY);
+        metrics.route_stale_overlap.observe(3.0);
         metrics
             .cache_requests
             .with_label_values(&["chat", "partial"])

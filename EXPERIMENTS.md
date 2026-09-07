@@ -1,5 +1,85 @@
 # node06 experiment journal
 
+## 2026-09-07 — time-decayed prefix affinity calibrated to the eviction horizon (local foundation, not deployed)
+
+The approximate router credited a served fingerprint chain for as long as the
+100k-entry LRU held it, which on the two-TP4 Flash-Next stack is effectively
+forever: 100k blocks of 2KiB text is roughly 50M tokens against engine KV
+caches of 2,667,258 (A) and 3,033,380 (B) tokens in their current
+incarnations. A prefix served an hour ago therefore still pulled its follow-up onto
+that replica even when the engine had long since evicted it, and because the
+warm-looking replica is usually the busier one, the request paid a cold prefill
+on the loaded side. The idea came from reading a KV-cache survey that framed
+provider prompt caching as a five-minute TTL: a cached prefix has a half-life,
+and the router should know it.
+
+The engine's real rule is sharper than a TTL. vLLM frees blocks into an LRU
+queue and evicts from its head, so residency is a step function in block age:
+everything younger than the block currently being evicted is present, and
+everything older is gone. That age is the eviction horizon. `src/affinity_horizon.rs`
+models exactly that. The router now stamps every served fingerprint with the
+instant its response completed and, under `RJ_ROUTE_AFFINITY_HORIZON_MODE`,
+credits only leading blocks no older than the replica's horizon. Ages along a
+matched chain are non-decreasing (a later shorter request refreshes the shared
+head and leaves the session tail older), so the credit stays prefix-closed like
+the engine's.
+
+Two horizon sources exist. `static` applies one fixed age and is the right
+first observe-mode capture. `fill` derives the horizon from the LB's own served
+accounting: each completed response adds its uncached prompt plus completion
+tokens as fill, and the horizon is the age of the oldest fill sample still
+needed to cover the configured `RJ_ROUTE_KV_CAPACITY_TOKENS`. It is unbounded
+until a replica has been filled once, grows while the replica is idle, and
+shortens under churn, which is what an LRU does. It sees only traffic proxied
+through ramjet, so direct engine cells make it optimistic; Qwen's untrusted
+zero `cached_tokens` makes it conservative. Both caveats are documented rather
+than patched over.
+
+`observe` scores exactly as before and publishes the counterfactual:
+`ramjet_route_affinity_horizon_total{mode,outcome}` with bounded outcomes
+`no_overlap`, `fresh`, `trimmed`, `would_move`/`moved`, the per-upstream
+`ramjet_route_affinity_horizon_seconds` gauge (+Inf while unbounded), and a
+`ramjet_route_stale_overlap_blocks` histogram for the chosen replica. `enforce`
+scores with fresh overlap, so a stale chain also re-reserves its full cold
+prefill instead of the one-unit warm reservation. Route journal v11 records
+per-candidate `stale_blocks`, `horizon_ms`, and run-length `overlap_ages_ms`
+regardless of mode, and `bench/route_replay.py --horizons inf,60,300,900`
+re-scores a capture against any horizon; the archive tool admits the new
+fields and nothing else. Configuration is explicit and single-sourced: a
+non-off mode requires `RJ_AFFINITY=prefix`, `static` requires the seconds
+value and rejects a capacity, `fill` requires the capacity list (one value or
+one per upstream) and rejects the seconds value, and `off` leaves every input
+inert so the rollback is one flip.
+
+The Grafana dashboard gains a folded "Prefix affinity horizon" row (outcome
+rate, would-move share, per-upstream horizon, stale-block quantiles), and the
+canonical Flash-Next Compose file now defaults the LB to observe mode with the
+fill source; the validator pins that shape.
+
+Local qualification only. The lib suite grew to 635 tests (router: enforce
+moves a stale chain, observe reports `would_move` without moving, a partial
+refresh keeps only the shared head fresh, fill calibrates from served tokens
+and re-credits a re-served chain; module: unbounded-until-filled, sample
+pruning, idle growth, bounded age runs) and finished in about 1.1s warm;
+strict Clippy over all targets and the 30 replay/archive Python tests pass.
+Nothing has been deployed and no node06 number exists yet.
+
+### What to measure next
+
+Enable it LB-only on the Flash-Next stack in observe mode with the fill source
+and `RJ_ROUTE_KV_CAPACITY_TOKENS=2667258,3033380,-` (the logged `GPU KV cache
+size` of the current A and B incarnations; the TP8 profile has never run, so
+its capacity is unknown and marked `-`, which is modelled as never evicting),
+journal on, for a normal production window. The capacities are per engine
+incarnation: re-read the log line after any engine restart. The promotion evidence is the `would_move` share of decisions with
+overlap, the stale-block histogram on chosen replicas, and a replay sweep
+showing that the recorded horizon separates warm TTFT from cold TTFT better
+than `inf`. A `would_move` share near zero means the current workload never
+outlives the engine cache and the feature stays off; a material share
+justifies one alpha-style crossover in `enforce`. Do not compare against the
+2026-08-26 alpha crossover cells: those primed prefixes seconds before use and
+cannot exhibit staleness.
+
 ## 2026-09-04 — Qwen3.8 authorized-action v2 steering (candidate retained, not deployed)
 
 The sibling `cyber/dir-steering/` corpus was broadened from offensive-only

@@ -3,7 +3,10 @@ import unittest
 from unittest import mock
 
 from route_replay import (
+    affinity_horizon_record_mismatch,
     choose,
+    credited_overlap,
+    parse_horizons,
     parse_projected_loads,
     records,
     replay,
@@ -23,6 +26,25 @@ def start(chosen=0, rotation=0, left=(40, 0), right=(0, 0)):
             {"upstream": 1, "rank": 1, "overlap_blocks": right[0], "affinity_blocks": min(right[0], 32), "load_units": right[1], "request_load_units": 1, "healthy": True},
         ],
     }
+
+
+def aged_start(mode="observe", horizon_ms=None):
+    """A v11 record: upstream 0 served a 40-block chain, 4 blocks recently."""
+    record = start(left=(40, 1), right=(0, 0))
+    record["v"] = 11
+    record["max_affinity_blocks"] = 32
+    record["affinity_horizon"] = {"mode": mode, "source": "static", "outcome": "trimmed"}
+    record["candidates"][0].update(
+        {
+            "stale_blocks": 36 if mode == "enforce" else 0,
+            "horizon_ms": horizon_ms,
+            "overlap_ages_ms": [[4, 5_000], [36, 900_000]],
+        }
+    )
+    record["candidates"][1].update(
+        {"stale_blocks": 0, "horizon_ms": horizon_ms, "overlap_ages_ms": []}
+    )
+    return record
 
 
 class RouteReplayTest(unittest.TestCase):
@@ -125,12 +147,62 @@ class RouteReplayTest(unittest.TestCase):
 
     def test_boolean_and_future_journal_versions_are_not_accepted(self):
         boolean = {**start(), "v": True}
-        future = {**start(), "v": 11}
+        future = {**start(), "v": 12}
         self.assertEqual(
             list(records([__import__("json").dumps(boolean), __import__("json").dumps(future)])),
             [],
         )
         self.assertEqual(list(records(["[]", "true", '"string"'])), [])
+
+    def test_v11_horizon_replay_credits_only_blocks_inside_the_horizon(self):
+        record = aged_start()
+        # inf keeps the whole served chain and reproduces the raw choice.
+        self.assertEqual(choose(record, alpha=4, cap=32, horizon_ms=None), 0)
+        # A 60s horizon keeps the 4 fresh leading blocks: 4 - 4*1 = 0 beats 0 - 0.
+        self.assertEqual(choose(record, alpha=4, cap=32, horizon_ms=60_000), 0)
+        # A 1s horizon drops everything: the loaded replica loses to the idle one.
+        self.assertEqual(choose(record, alpha=4, cap=32, horizon_ms=1_000), 1)
+        self.assertEqual(credited_overlap(record, record["candidates"][0], 60_000), 4)
+        self.assertEqual(credited_overlap(record, record["candidates"][0], 1_000), 0)
+        self.assertEqual(credited_overlap(record, record["candidates"][0], None), 40)
+
+    def test_enforce_records_reconstruct_raw_overlap_from_stale_blocks(self):
+        record = aged_start(mode="enforce", horizon_ms=60_000)
+        left = record["candidates"][0]
+        left["overlap_blocks"] = 4
+        left["affinity_blocks"] = 4
+        left["stale_blocks"] = 36
+        self.assertEqual(credited_overlap(record, left, None), 40)
+        self.assertEqual(credited_overlap(record, left, 60_000), 4)
+        self.assertFalse(affinity_horizon_record_mismatch(record))
+        left["affinity_blocks"] = 5
+        self.assertTrue(affinity_horizon_record_mismatch(record))
+
+    def test_horizon_replay_fails_closed_without_block_ages(self):
+        record = start(left=(40, 1), right=(0, 0))
+        with self.assertRaises(ValueError):
+            choose(record, alpha=4, cap=32, horizon_ms=60_000)
+        with self.assertRaises(ValueError):
+            replay([record], {}, [4], [32], horizons=[60_000])
+        # Without a horizon sweep legacy records replay exactly as before.
+        rows = replay([record], {}, [4], [32])
+        self.assertNotIn("horizon_s", rows[0])
+        self.assertEqual(rows[0]["affinity_horizon_counts"], {"legacy": 1})
+        self.assertEqual(rows[0]["affinity_horizon_record_mismatches"], 0)
+
+    def test_horizon_sweep_labels_rows_and_counts_observed_outcomes(self):
+        rows = replay([aged_start()], {}, [4], [32], horizons=[None, 60_000, 1_000])
+        self.assertEqual([row["horizon_s"] for row in rows], ["inf", "60", "1"])
+        self.assertEqual([row["agreement_pct"] for row in rows], [100.0, 100.0, 0.0])
+        self.assertEqual([row["mean_overlap_blocks"] for row in rows], [40.0, 4.0, 0.0])
+        self.assertEqual(rows[0]["affinity_horizon_counts"], {"trimmed": 1})
+        self.assertEqual(rows[0]["affinity_horizon_record_mismatches"], 0)
+
+    def test_horizon_parser_accepts_inf_and_seconds_only(self):
+        self.assertEqual(parse_horizons("inf, 60,0.5,60"), [None, 60_000, 500])
+        for raw in ("", "-1", "nan", "soon"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                parse_horizons(raw)
 
     def test_projected_load_replay_uses_candidate_request_cost(self):
         record = start(chosen=1, left=(512, 9), right=(0, 0))

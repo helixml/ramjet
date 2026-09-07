@@ -185,7 +185,13 @@ class DashboardSourceTest(unittest.TestCase):
 
     def test_idle_drain_panels_are_grouped_in_one_row(self) -> None:
         rows = [p for p in self.document["panels"] if p["type"] == "row"]
-        self.assertEqual([row["title"] for row in rows], ["Idle drain (idle power parking)"])
+        self.assertEqual(
+            [row["title"] for row in rows],
+            [
+                "Idle drain (idle power parking)",
+                "Prefix affinity horizon (time-decayed affinity)",
+            ],
+        )
         row = rows[0]
         self.assertTrue(row["collapsed"], "the policy is off by default; keep the row folded")
         self.assertEqual(
@@ -353,3 +359,38 @@ class ConfigMapMirrorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_affinity_horizon_panels_read_the_exported_series(self) -> None:
+        # Observe mode publishes only counters, a gauge, and a histogram; the
+        # panels must read those and explain an empty result while it is off.
+        row = next(
+            p for p in self.document["panels"]
+            if p["type"] == "row" and p["title"].startswith("Prefix affinity horizon")
+        )
+        self.assertTrue(row["collapsed"], "the policy is observe-only; keep the row folded")
+        titles = [panel["title"] for panel in row["panels"]]
+        self.assertEqual(
+            titles,
+            [
+                "Affinity horizon outcomes (per min)",
+                "Would-move share of decisions with overlap (1h)",
+                "Estimated eviction horizon per upstream",
+                "Stale overlap on the chosen replica (blocks)",
+            ],
+        )
+        outcomes = self._panel("Affinity horizon outcomes (per min)")["targets"][0]["expr"]
+        self.assertIn("rate(ramjet_route_affinity_horizon_total", outcomes)
+        self.assertIn("sum by (outcome)", outcomes)
+        self.assertIn('outcome!~"off|no_overlap"', outcomes)
+        share = self._panel("Would-move share of decisions with overlap (1h)")["targets"][0]["expr"]
+        self.assertIn('outcome=~"would_move|moved"', share)
+        self.assertIn('outcome=~"fresh|trimmed|would_move|moved"', share)
+        horizon = self._panel("Estimated eviction horizon per upstream")
+        self.assertEqual(horizon["targets"][0]["expr"], "ramjet_route_affinity_horizon_seconds")
+        self.assertEqual(horizon["targets"][0]["legendFormat"], "{{upstream}}")
+        stale = self._panel("Stale overlap on the chosen replica (blocks)")
+        for target in stale["targets"]:
+            self.assertIn("ramjet_route_stale_overlap_blocks_bucket", target["expr"])
+        for title in titles:
+            defaults = self._panel(title)["fieldConfig"]["defaults"]
+            self.assertEqual(defaults.get("noValue"), "affinity horizon is off", title)

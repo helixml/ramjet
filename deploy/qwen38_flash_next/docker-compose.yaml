@@ -90,6 +90,13 @@ services:
       RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MIN_BLOCKS: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MIN_BLOCKS:-8}
       RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY:-1024}
       RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA:-1}
+      # Time-decayed affinity, observation-only: publishes what each replica's
+      # prefix-cache eviction horizon would change without moving traffic.
+      # Capacities are the engines' logged `GPU KV cache size` for the current
+      # A/B incarnations; the TP8 profile has not run, so it is unknown (`-`).
+      RJ_ROUTE_AFFINITY_HORIZON_MODE: ${RJ_ROUTE_AFFINITY_HORIZON_MODE:-observe}
+      RJ_ROUTE_AFFINITY_HORIZON_SOURCE: ${RJ_ROUTE_AFFINITY_HORIZON_SOURCE:-fill}
+      RJ_ROUTE_KV_CAPACITY_TOKENS: ${RJ_ROUTE_KV_CAPACITY_TOKENS:-2667258,3033380,-}
       RJ_ROUTE_JOURNAL: ${RJ_ROUTE_JOURNAL:-true}
       RJ_TOKENIZER_MODE: local-shadow
       RJ_TOKENIZER_PROFILE: qwen3.8-flash-next
