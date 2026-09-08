@@ -4,15 +4,15 @@ set -Eeuo pipefail
 
 deployment_dir=/home/luke/inference/qwen38_flash_next
 canonical_compose=$deployment_dir/docker-compose.yaml
-canonical_sha=9dc3e797bee511d5f3b6bb6022c47471db7c054885c1141f4f982bd270c9a847
+canonical_sha=b618c4238f86e8aa1b17278a6b9bb792bd2bc06931df1956767b246ee5698889
 lock_file=/run/lock/ramjet-node06-deployment.lock
 engine=qwen38flashnext-b
 peer=qwen38flashnext-a
 model=qwen3.8-flash-next
-model_revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
-baseline_image='vllm/vllm-openai@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3'
-plugin_image='qwen38-steering:0.3.0'
-lb_image='ghcr.io/helixml/ramjet:rust-ff8a4af@sha256:e4d71dbbe7050b336dbc1ff6ad28c3f2235ee963f29f4524cf8ed075dbbeb5b0'
+model_revision=fc694b54fb0174e0913e6adf86691ef85a4ead47
+baseline_image='vllm/vllm-openai@sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93'
+plugin_image='qwen38-steering:0.4.0'
+lb_image='ghcr.io/helixml/ramjet:rust-0c7c7bc@sha256:f9215991a15a2d5ea223c84bfc4a2f7af423b0a3d4868423543c5d8a5315615f'
 all_upstreams='http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000,http://qwen38flashnext-tp8:8000'
 single_upstream='http://qwen38flashnext-a:8000'
 all_profiles='mtp,standard,mtp'

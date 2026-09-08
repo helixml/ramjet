@@ -130,9 +130,14 @@ def register() -> None:
     import torch
     from safetensors.torch import load_file, save_file
     from vllm.distributed import get_tensor_model_parallel_rank
-    from vllm.models.qwen3_8_flash_next.nvidia.model import (
-        Qwen3_8FlashNextDecoderLayer,
-    )
+    try:
+        from vllm.models.qwen4_exp.nvidia.model import (
+            Qwen4ExpDecoderLayer as Qwen3_8FlashNextDecoderLayer,
+        )
+    except ModuleNotFoundError:
+        from vllm.models.qwen3_8_flash_next.nvidia.model import (
+            Qwen3_8FlashNextDecoderLayer,
+        )
 
     layer_count = 48
     hidden_size = 2560

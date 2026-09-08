@@ -6,31 +6,48 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
+import re
 
 
 SERVICE_MARKER = "  qwen38flashnext-b:\n    <<: *vllm-engine\n    container_name: qwen38flashnext-b\n"
-KV_LIVE = "      RJ_KV_EVENT_LIVE_ENDPOINTS: tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557,tcp://qwen38flashnext-tp8:5557\n"
-KV_REPLAY = "      RJ_KV_EVENT_REPLAY_ENDPOINTS: tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558,tcp://qwen38flashnext-tp8:5558\n"
-ADAPTIVE = "      RJ_ADAPTIVE_CONFIG_PATH: /etc/ramjet/adaptive-config.json\n"
+ADAPTIVE_RE = r"^      RJ_ADAPTIVE_CONFIG_PATH: /etc/ramjet/adaptive-config\.json\n"
+
+def kv_lines(name: str, port: str) -> str:
+    suffix = "5557" if port == "live" else "5558"
+    return (
+        rf"^      RJ_KV_EVENT_{name.upper()}_ENDPOINTS: "
+        rf"(?:\$\{{RJ_KV_EVENT_{name.upper()}_ENDPOINTS:-)?"
+        rf"tcp://qwen38flashnext-a:{suffix},tcp://qwen38flashnext-b:{suffix},"
+        rf"tcp://qwen38flashnext-tp8:{suffix}\}}?\n"
+    )
+
+
+def kv_replacement(name: str, port: str) -> str:
+    suffix = "5557" if port == "live" else "5558"
+    return (
+        f"      RJ_KV_EVENT_{name.upper()}_ENDPOINTS: "
+        f"${{RJ_KV_EVENT_{name.upper()}_ENDPOINTS:-tcp://qwen38flashnext-a:{suffix},"
+        f"tcp://qwen38flashnext-b:{suffix},tcp://qwen38flashnext-tp8:{suffix}}}\n"
+    )
 
 
 def render(source: str, args: argparse.Namespace) -> str:
     if source.count(SERVICE_MARKER) != 1:
         raise ValueError("canonical Compose has an unexpected engine-B shape")
     if (
-        source.count(KV_LIVE) != 1
-        or source.count(KV_REPLAY) != 1
-        or source.count(ADAPTIVE) != 1
+        len(re.findall(kv_lines("live", "live"), source, re.M)) != 1
+        or len(re.findall(kv_lines("replay", "replay"), source, re.M)) != 1
+        or len(re.findall(ADAPTIVE_RE, source, re.M)) != 1
     ):
         raise ValueError("canonical Compose has an unexpected KV-event shape")
     if not args.image.startswith("qwen38-steering:"):
         raise ValueError("candidate image must be an explicit qwen38-steering tag")
 
-    model_mount = (
+    model_mount = getattr(args, "model_mount", None) or (
         "${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}"
         ":/workspace/model:ro"
     )
-    cache_mount = (
+    cache_mount = getattr(args, "cache_mount", None) or (
         "${VLLM_CACHE_DIR:-/prod/engine-cache-vllm-qwen38flashnext}:/root/.cache"
     )
     extra = [
@@ -86,19 +103,11 @@ def render(source: str, args: argparse.Namespace) -> str:
         raise ValueError("canonical Compose has an unexpected engine-B command")
     engine = engine.replace(tp_marker, tp_marker + "      - --enforce-eager\n")
     rendered = rendered[:engine_start] + engine + rendered[engine_end:]
-    rendered = rendered.replace(
-        KV_LIVE,
-        "      RJ_KV_EVENT_LIVE_ENDPOINTS: "
-        "${RJ_KV_EVENT_LIVE_ENDPOINTS:-tcp://qwen38flashnext-a:5557,"
-        "tcp://qwen38flashnext-b:5557,tcp://qwen38flashnext-tp8:5557}\n",
-    )
-    rendered = rendered.replace(
-        KV_REPLAY,
-        "      RJ_KV_EVENT_REPLAY_ENDPOINTS: "
-        "${RJ_KV_EVENT_REPLAY_ENDPOINTS:-tcp://qwen38flashnext-a:5558,"
-        "tcp://qwen38flashnext-b:5558,tcp://qwen38flashnext-tp8:5558}\n",
-    )
-    return rendered.replace(ADAPTIVE, "")
+    rendered = re.sub(kv_lines("live", "live"), kv_replacement("live", "live"),
+                      rendered, count=1, flags=re.M)
+    rendered = re.sub(kv_lines("replay", "replay"), kv_replacement("replay", "replay"),
+                      rendered, count=1, flags=re.M)
+    return re.sub(ADAPTIVE_RE, "", rendered, count=1, flags=re.M)
 
 
 def write_exclusive(path: pathlib.Path, content: str) -> None:
@@ -122,6 +131,8 @@ def main() -> None:
     parser.add_argument("--control-file", type=pathlib.Path)
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--layers", default="all")
+    parser.add_argument("--model-mount", help="override the /workspace/model volume mount")
+    parser.add_argument("--cache-mount", help="override the /root/.cache volume mount")
     args = parser.parse_args()
     if args.mode == "capture" and args.capture_dir is None:
         parser.error("capture mode requires --capture-dir")
