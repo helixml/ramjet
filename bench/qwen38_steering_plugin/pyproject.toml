@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qwen38-steering"
-version = "0.3.0"
+version = "0.4.0"
 description = "Capture and apply Qwen3.8 Flash-Next FFN steering directions in vLLM"
 requires-python = ">=3.12"
 
