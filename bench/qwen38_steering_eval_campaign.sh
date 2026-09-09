@@ -79,11 +79,20 @@ export CYBER_EVAL_API_KEY=$VLLM_API_KEY
 exec 9>"$lock_file"
 flock -n 9 || fail "another node06 deployment operation owns the lock"
 
+capacity_for() {
+  local ups=$1 n i out=""
+  IFS=, read -ra parts <<< "$ups"
+  n=${#parts[@]}
+  for ((i = 0; i < n; i++)); do out+="${out:+,}-"; done
+  printf '%s' "$out"
+}
+
 compose() {
   local file=$1 upstreams=$2 speculation_profiles=$3 speculation_mode=$4
   local kv_live=$5 kv_replay=$6
   shift 6
   env LB_IMAGE="$lb_image" RJ_UPSTREAM="$upstreams" \
+    RJ_ROUTE_KV_CAPACITY_TOKENS="$(capacity_for "$upstreams")" \
     RJ_ROUTE_SPECULATION_PROFILES="$speculation_profiles" \
     RJ_ROUTE_SPECULATION_MODE="$speculation_mode" \
     RJ_KV_EVENT_LIVE_ENDPOINTS="$kv_live" \
@@ -116,6 +125,11 @@ wait_lb() {
       .active_replicas == $healthy and .total_replicas == $total
     ' <<<"$health" >/dev/null; do
     ((SECONDS < deadline)) || return 1
+    if [[ $(docker inspect --format '{{.RestartCount}}' ds4-loadbalancer 2>/dev/null) != 0 ]]; then
+      echo "wait_lb: load balancer is crash-looping (RestartCount != 0)" >&2
+      docker logs --tail 20 ds4-loadbalancer >&2 2>&1 || true
+      return 1
+    fi
     sleep 2
   done
 }

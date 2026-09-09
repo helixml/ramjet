@@ -56,10 +56,19 @@ export BENCH_TOKEN=$VLLM_API_KEY
 exec 9>"$lock_file"
 flock -n 9 || fail "another node06 deployment operation owns the lock"
 
+capacity_for() {
+  local ups=$1 n i out=""
+  IFS=, read -ra parts <<< "$ups"
+  n=${#parts[@]}
+  for ((i = 0; i < n; i++)); do out+="${out:+,}-"; done
+  printf '%s' "$out"
+}
+
 compose() {
   local file=$1 upstreams=$2 profiles=$3 mode=$4 live=$5 replay=$6
   shift 6
   env LB_IMAGE="$lb_image" RJ_UPSTREAM="$upstreams" \
+    RJ_ROUTE_KV_CAPACITY_TOKENS="$(capacity_for "$upstreams")" \
     RJ_ROUTE_SPECULATION_PROFILES="$profiles" RJ_ROUTE_SPECULATION_MODE="$mode" \
     RJ_KV_EVENT_LIVE_ENDPOINTS="$live" RJ_KV_EVENT_REPLAY_ENDPOINTS="$replay" \
     docker compose -f "$file" --project-directory "$deployment_dir" "$@"
@@ -80,6 +89,11 @@ wait_lb() {
   until health=$(curl -fsS --max-time 5 http://127.0.0.1:8006/health 2>/dev/null) &&
     jq -e --argjson healthy "$healthy" --argjson total "$total" '.status == "ok" and .healthy_replicas == $healthy and .active_replicas == $healthy and .total_replicas == $total' <<<"$health" >/dev/null; do
     ((SECONDS < deadline)) || return 1
+    if [[ $(docker inspect --format '{{.RestartCount}}' ds4-loadbalancer 2>/dev/null) != 0 ]]; then
+      echo "wait_lb: load balancer is crash-looping (RestartCount != 0)" >&2
+      docker logs --tail 20 ds4-loadbalancer >&2 2>&1 || true
+      return 1
+    fi
     sleep 2
   done
 }
