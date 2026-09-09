@@ -119,6 +119,20 @@ run_ladder() {
     --reps "$ladder_reps" --out "$output"
 }
 
+serve_probe() {
+  # A routed completion through the shared LB is the only serving proof that
+  # works while an upstream is isolated (/health can report degraded with no
+  # per-replica detail).
+  local deadline=$((SECONDS + 120))
+  until curl -fsS --max-time 30 -H "Authorization: Bearer $VLLM_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"reply with the single word ok\"}],\"max_tokens\":4}" \
+    http://127.0.0.1:8006/v1/chat/completions >/dev/null; do
+    ((SECONDS < deadline)) || fail "shared LB stopped serving while engine B was isolated"
+    sleep 5
+  done
+}
+
 engine_mutated=0
 rollback() {
   local original_rc=$? rollback_rc=0
@@ -158,10 +172,10 @@ docker inspect "$engine" | jq -e --arg image "$plugin_image_id" '
   (.[0].Config.Cmd | any(. == "--enforce-eager"))
 ' >/dev/null || fail "steering plugin is not admitted"
 
+serve_probe
 curl -fsS --max-time 5 http://127.0.0.1:8006/health | jq -e '
-  .replicas[0].active and .replicas[0].healthy and
-  (.replicas[1].healthy | not)
-' >/dev/null || fail "LB must still serve peer A while isolated B is up"
+  if .replicas then (.replicas[1].healthy | not) else .status == "degraded" end
+' >/dev/null || fail "isolated B must not be routed by the shared LB"
 
 run_ladder "$experiment_dir/steered-ladder.jsonl"
 python3 - "$experiment_dir/steered-ladder.jsonl" <<'PY'
