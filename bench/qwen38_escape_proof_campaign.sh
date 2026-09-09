@@ -160,7 +160,8 @@ benign_smoke() {
     -d "$(jq -nc --arg m "$model" --arg p "$prompt" \
       '{model:$m,messages:[{role:"user",content:$p}],max_tokens:48,temperature:0}')" \
     http://127.0.0.1:8041/v1/chat/completions \
-    | jq -r '.choices[0].message.content | gsub("[[:space:]]+";" ") | .[0:80]' \
+    | jq -r '.choices[0].message | (.content // .reasoning_content // "")
+      | gsub("[[:space:]]+";" ") | .[0:80]' \
     >"$experiment_dir/benign-$label.txt" || fail "benign smoke $label request failed"
   [[ -s $experiment_dir/benign-$label.txt ]] || fail "benign smoke $label empty"
 }
