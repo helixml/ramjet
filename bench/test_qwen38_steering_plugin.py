@@ -6,7 +6,7 @@ import unittest
 
 
 MODULE = (
-    pathlib.Path(__file__).with_name("qwen38_steering_plugin")
+    pathlib.Path(__file__).with_name("steering_plugin")
     / "src"
     / "qwen38_steering"
     / "__init__.py"
