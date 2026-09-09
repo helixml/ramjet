@@ -224,7 +224,11 @@ def register() -> None:
             and get_tensor_model_parallel_rank() == 0
         )
         if capture_active:
+            # Fixed-slot attention metadata pads zero-span sequences whose
+            # boundary duplicates the real sequence end, duplicating its row.
+            nonzero = (query_start_loc[1:] > query_start_loc[:-1])
             ends = (query_start_loc[1:] - 1).to(device=mlp_out.device, dtype=torch.long)
+            ends = ends[nonzero.to(device=ends.device)]
             selected = mlp_out.index_select(0, ends).detach().float().cpu()
             if layer_id == 0:
                 _CAPTURE = {

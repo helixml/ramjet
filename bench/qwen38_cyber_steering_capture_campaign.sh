@@ -15,7 +15,7 @@ plugin_image='qwen38-steering:0.4.0'
 lb_image='ghcr.io/helixml/ramjet:rust-0c7c7bc@sha256:f9215991a15a2d5ea223c84bfc4a2f7af423b0a3d4868423543c5d8a5315615f'
 all_upstreams='http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000,http://qwen38flashnext-tp8:8000'
 single_upstream='http://qwen38flashnext-a:8000'
-all_profiles='mtp,standard,mtp'
+all_profiles='standard,standard,standard'
 all_kv_live='tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557,tcp://qwen38flashnext-tp8:5557'
 all_kv_replay='tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558,tcp://qwen38flashnext-tp8:5558'
 single_kv_live='tcp://qwen38flashnext-a:5557'
@@ -126,7 +126,7 @@ rollback() {
     wait_engine "$baseline_image" || rollback_rc=1
   fi
   if ((lb_mutated)); then
-    recreate_lb "$canonical_compose" "$all_upstreams" "$all_profiles" prefer "$all_kv_live" "$all_kv_replay" 2 3 || rollback_rc=1
+    recreate_lb "$canonical_compose" "$all_upstreams" "$all_profiles" off "$all_kv_live" "$all_kv_replay" 2 3 || rollback_rc=1
   fi
   record_state "$experiment_dir/final.txt" || rollback_rc=1
   ((rollback_rc == 0)) || { echo "qwen cyber steering capture: rollback verification failed" >&2; exit 3; }

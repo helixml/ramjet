@@ -13,7 +13,7 @@ baseline_image='vllm/vllm-openai@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07
 lb_image='ghcr.io/helixml/ramjet:rust-ff8a4af@sha256:e4d71dbbe7050b336dbc1ff6ad28c3f2235ee963f29f4524cf8ed075dbbeb5b0'
 all_upstreams='http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000,http://qwen38flashnext-tp8:8000'
 single_upstream='http://qwen38flashnext-a:8000'
-all_profiles='mtp,standard,mtp'
+all_profiles='standard,standard,standard'
 all_kv_live='tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557,tcp://qwen38flashnext-tp8:5557'
 all_kv_replay='tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558,tcp://qwen38flashnext-tp8:5558'
 single_kv_live='tcp://qwen38flashnext-a:5557'
@@ -123,7 +123,7 @@ rollback() {
     wait_engine "$baseline_image" || rollback_rc=1
   fi
   if ((lb_mutated)); then
-    recreate_lb "$canonical_compose" "$all_upstreams" "$all_profiles" prefer "$all_kv_live" "$all_kv_replay" 2 3 || rollback_rc=1
+    recreate_lb "$canonical_compose" "$all_upstreams" "$all_profiles" off "$all_kv_live" "$all_kv_replay" 2 3 || rollback_rc=1
   fi
   record_state "$experiment_dir/final.txt" || rollback_rc=1
   ((rollback_rc == 0)) || { echo "qwen cyber steering sweep: rollback verification failed" >&2; exit 3; }
