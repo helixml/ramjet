@@ -94,3 +94,43 @@ class ComposeRenderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+ISO_SOURCE = SOURCE + """
+networks:
+  machineview-host:
+    external: true
+"""
+
+
+class ComposeIsolateTests(unittest.TestCase):
+    def test_isolate_moves_experiment_engine_onto_its_own_network(self):
+        args = argparse.Namespace(
+            mode="steer",
+            image="qwen38-steering:0.1.0",
+            capture_dir=None,
+            vector=compose.pathlib.Path("/private/vector.safetensors"),
+            control_file=None,
+            scale=0.5,
+            layers="20-23",
+            isolate=True,
+        )
+        rendered = compose.render(ISO_SOURCE, args)
+        engine = rendered[rendered.index("  qwen38flashnext-b:") :]
+        engine = engine[: engine.index("  qwen38flashnext-tp8:")]
+        self.assertIn("    networks:\n      - steer_isolated", engine)
+        self.assertIn("networks:\n  steer_isolated: {}", rendered)
+        self.assertIn("  machineview-host:", rendered)
+
+    def test_default_render_untouched_by_isolate_support(self):
+        args = argparse.Namespace(
+            mode="steer",
+            image="qwen38-steering:0.1.0",
+            capture_dir=None,
+            vector=compose.pathlib.Path("/private/vector.safetensors"),
+            control_file=None,
+            scale=0.5,
+            layers="20-23",
+        )
+        rendered = compose.render(SOURCE, args)
+        self.assertNotIn("steer_isolated", rendered)

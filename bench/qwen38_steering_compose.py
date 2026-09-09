@@ -93,6 +93,8 @@ def render(source: str, args: argparse.Namespace) -> str:
                     f'      QWEN38_STEERING_LAYERS: "{args.layers}"',
                 ]
             )
+    if getattr(args, "isolate", False):
+        extra += ["    networks:", "      - steer_isolated"]
     replacement = SERVICE_MARKER + "\n".join(extra) + "\n"
     rendered = source.replace(SERVICE_MARKER, replacement)
     engine_start = rendered.index(SERVICE_MARKER)
@@ -107,7 +109,14 @@ def render(source: str, args: argparse.Namespace) -> str:
                       rendered, count=1, flags=re.M)
     rendered = re.sub(kv_lines("replay", "replay"), kv_replacement("replay", "replay"),
                       rendered, count=1, flags=re.M)
-    return re.sub(ADAPTIVE_RE, "", rendered, count=1, flags=re.M)
+    rendered = re.sub(ADAPTIVE_RE, "", rendered, count=1, flags=re.M)
+    if getattr(args, "isolate", False):
+        if re.search(r"(?m)^networks:$", rendered) is None:
+            raise ValueError("canonical Compose has no top-level networks block")
+        rendered = re.sub(
+            r"(?m)^networks:$", "networks:\n  steer_isolated: {}", rendered, count=1
+        )
+    return rendered
 
 
 def write_exclusive(path: pathlib.Path, content: str) -> None:
@@ -133,6 +142,12 @@ def main() -> None:
     parser.add_argument("--layers", default="all")
     parser.add_argument("--model-mount", help="override the /workspace/model volume mount")
     parser.add_argument("--cache-mount", help="override the /root/.cache volume mount")
+    parser.add_argument(
+        "--isolate",
+        action="store_true",
+        help="attach the experiment engine to its own network only, so the "
+        "shared load balancer cannot route production traffic to it",
+    )
     args = parser.parse_args()
     if args.mode == "capture" and args.capture_dir is None:
         parser.error("capture mode requires --capture-dir")

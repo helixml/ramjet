@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Escape-ladder steering evaluation on node06 engine B (guarded window).
-# Baseline receipts are expected from a prior run; this window measures the
-# steered replica only and always rolls back to the production baseline.
+# NEVER touches the shared load balancer: the candidate compose isolates
+# engine B on its own network, so the LB routes around it while A keeps
+# serving. All experiment traffic goes straight to 127.0.0.1:8041.
 set -Eeuo pipefail
 
 deployment_dir=/home/luke/inference/qwen38_flash_next
@@ -12,17 +13,6 @@ engine=qwen38flashnext-b
 peer=qwen38flashnext-a
 model=qwen3.8-flash-next
 baseline_image='vllm/vllm-openai@sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93'
-lb_image='ghcr.io/helixml/ramjet:rust-0c7c7bc@sha256:f9215991a15a2d5ea223c84bfc4a2f7af423b0a3d4868423543c5d8a5315615f'
-all_upstreams='http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000,http://qwen38flashnext-tp8:8000'
-single_upstream='http://qwen38flashnext-a:8000'
-all_speculation_profiles='standard,standard,standard'
-single_speculation_profile='standard'
-all_speculation_mode='off'
-single_speculation_mode='off'
-all_kv_live='tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557,tcp://qwen38flashnext-tp8:5557'
-all_kv_replay='tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558,tcp://qwen38flashnext-tp8:5558'
-single_kv_live='tcp://qwen38flashnext-a:5557'
-single_kv_replay='tcp://qwen38flashnext-a:5558'
 ladder_reps=${QWEN38_LADDER_REPS:-1}
 
 fail() {
@@ -46,6 +36,8 @@ runner=$(realpath -e -- "$0")
 [[ $ladder_reps =~ ^[1-3]$ ]] || fail "ladder repetitions must be 1, 2, or 3"
 
 candidate_compose=$experiment_dir/docker-compose.steer.yaml
+grep -q "steer_isolated" "$candidate_compose" ||
+  fail "candidate Compose must be rendered with --isolate (never commandeer the shared LB)"
 plugin_image_id=$(cat "$experiment_dir/image-id.txt")
 for artifact in ladder_probe.py ladder_cases.json steering-vector.safetensors \
   "$candidate_compose" "$experiment_dir/image-id.txt" \
@@ -75,25 +67,10 @@ export LLM_KEY=$VLLM_API_KEY
 exec 9>"$lock_file"
 flock -n 9 || fail "another node06 deployment operation owns the lock"
 
-capacity_for() {
-  local ups=$1 n i out=""
-  IFS=, read -ra parts <<< "$ups"
-  n=${#parts[@]}
-  for ((i = 0; i < n; i++)); do out+="${out:+,}-"; done
-  printf '%s' "$out"
-}
-
-compose() {
-  local file=$1 upstreams=$2 speculation_profiles=$3 speculation_mode=$4
-  local kv_live=$5 kv_replay=$6
-  shift 6
-  env LB_IMAGE="$lb_image" RJ_UPSTREAM="$upstreams" \
-    RJ_ROUTE_KV_CAPACITY_TOKENS="$(capacity_for "$upstreams")" \
-    RJ_ROUTE_SPECULATION_PROFILES="$speculation_profiles" \
-    RJ_ROUTE_SPECULATION_MODE="$speculation_mode" \
-    RJ_KV_EVENT_LIVE_ENDPOINTS="$kv_live" \
-    RJ_KV_EVENT_REPLAY_ENDPOINTS="$kv_replay" \
-    docker compose -f "$file" --project-directory "$deployment_dir" "$@"
+engine_up() {
+  local file=$1
+  docker compose -f "$file" --project-directory "$deployment_dir" \
+    up -d --no-deps --force-recreate "$engine"
 }
 
 wait_engine() {
@@ -112,32 +89,13 @@ wait_engine() {
   done
 }
 
-wait_lb() {
-  local expected_healthy=$1 expected_total=$2
-  local deadline=$((SECONDS + 90)) health
-  until health=$(curl -fsS --max-time 5 http://127.0.0.1:8006/health 2>/dev/null) &&
-    jq -e --argjson healthy "$expected_healthy" --argjson total "$expected_total" '
-      .status == "ok" and .healthy_replicas == $healthy and
-      .active_replicas == $healthy and .total_replicas == $total
-    ' <<<"$health" >/dev/null; do
+wait_lb_b_back() {
+  local deadline=$((SECONDS + 180))
+  until curl -fsS --max-time 5 http://127.0.0.1:8006/health 2>/dev/null |
+    jq -e '.status == "ok" and .healthy_replicas >= 2' >/dev/null; do
     ((SECONDS < deadline)) || return 1
-    if [[ $(docker inspect --format '{{.RestartCount}}' ds4-loadbalancer 2>/dev/null) != 0 ]]; then
-      echo "wait_lb: load balancer is crash-looping (RestartCount != 0)" >&2
-      docker logs --tail 20 ds4-loadbalancer >&2 2>&1 || true
-      return 1
-    fi
-    sleep 2
+    sleep 3
   done
-}
-
-recreate_lb() {
-  local file=$1 upstreams=$2 speculation_profiles=$3 speculation_mode=$4
-  local kv_live=$5 kv_replay=$6 expected_healthy=$7 expected_total=$8
-  compose "$file" "$upstreams" "$speculation_profiles" \
-    "$speculation_mode" "$kv_live" "$kv_replay" \
-    up -d --no-deps --force-recreate ds4-loadbalancer \
-    >"$experiment_dir/lb-$expected_healthy-recreate.txt" 2>&1
-  wait_lb "$expected_healthy" "$expected_total"
 }
 
 record_state() {
@@ -161,24 +119,16 @@ run_ladder() {
     --reps "$ladder_reps" --out "$output"
 }
 
-lb_mutated=0
 engine_mutated=0
 rollback() {
   local original_rc=$? rollback_rc=0
   trap - EXIT INT TERM
   set +e
   if ((engine_mutated)); then
-    compose "$canonical_compose" "$single_upstream" \
-      "$single_speculation_profile" "$single_speculation_mode" \
-      "$single_kv_live" "$single_kv_replay" \
-      up -d --no-deps --force-recreate "$engine" \
+    engine_up "$canonical_compose" \
       >"$experiment_dir/rollback-engine.txt" 2>&1 || rollback_rc=1
     wait_engine "$baseline_image" || rollback_rc=1
-  fi
-  if ((lb_mutated)); then
-    recreate_lb "$canonical_compose" "$all_upstreams" "$all_speculation_profiles" \
-      "$all_speculation_mode" "$all_kv_live" "$all_kv_replay" 2 3 ||
-      rollback_rc=1
+    wait_lb_b_back || rollback_rc=1
   fi
   record_state "$experiment_dir/final.txt" || rollback_rc=1
   if ((rollback_rc != 0)); then
@@ -197,15 +147,8 @@ bash "$experiment_dir/capture_node06.sh" --local --profile qwen38-flash-next \
   >"$experiment_dir/preflight.txt"
 record_state "$experiment_dir/initial.txt"
 
-recreate_lb "$candidate_compose" "$single_upstream" "$single_speculation_profile" \
-  "$single_speculation_mode" "$single_kv_live" "$single_kv_replay" 1 1
-lb_mutated=1
-
 engine_mutated=1
-compose "$candidate_compose" "$single_upstream" "$single_speculation_profile" \
-  "$single_speculation_mode" "$single_kv_live" "$single_kv_replay" \
-  up -d --no-deps --force-recreate "$engine" \
-  >"$experiment_dir/candidate-recreate.txt" 2>&1
+engine_up "$candidate_compose" >"$experiment_dir/candidate-recreate.txt" 2>&1
 wait_engine "$plugin_image_id" || fail "steered engine did not become ready"
 
 docker inspect "$engine" | jq -e --arg image "$plugin_image_id" '
@@ -214,6 +157,11 @@ docker inspect "$engine" | jq -e --arg image "$plugin_image_id" '
   (.[0].Config.Env | any(startswith("QWEN38_STEERING_VECTOR="))) and
   (.[0].Config.Cmd | any(. == "--enforce-eager"))
 ' >/dev/null || fail "steering plugin is not admitted"
+
+curl -fsS --max-time 5 http://127.0.0.1:8006/health | jq -e '
+  .replicas[0].active and .replicas[0].healthy and
+  (.replicas[1].healthy | not)
+' >/dev/null || fail "LB must still serve peer A while isolated B is up"
 
 run_ladder "$experiment_dir/steered-ladder.jsonl"
 python3 - "$experiment_dir/steered-ladder.jsonl" <<'PY'

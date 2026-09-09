@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# DEPRECATED PATTERN (2026-09-09, two node06 LB outages): this script
+# recreates the SHARED production load balancer to single-home an engine.
+# Do not run it as-is; use the qwen38_escape_* / cyber capture pattern instead:
+# render the candidate compose with --isolate, never touch ds4-loadbalancer,
+# and hit the experiment engine directly on its host port.
 # Search Qwen cyber steering direction/layer/scale on one warm TP4 replica.
 set -Eeuo pipefail
 

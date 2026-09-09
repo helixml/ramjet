@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Escape-proof RESTORE window: return the fleet to the exact production
-# baseline after a proof window left engine B steered + LB single-homed to B.
+# Escape-proof RESTORE window: return engine B to the exact production
+# baseline (canonical Compose -> rejoins the shared network; the load
+# balancer recovers it on its own and is never recreated). Peer A serves
+# the entire window.
 set -Eeuo pipefail
 
 deployment_dir=/home/luke/inference/qwen38_flash_next
@@ -10,17 +12,6 @@ lock_file=/run/lock/ramjet-node06-deployment.lock
 engine=qwen38flashnext-b
 peer=qwen38flashnext-a
 baseline_image='vllm/vllm-openai@sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93'
-lb_image='ghcr.io/helixml/ramjet:rust-0c7c7bc@sha256:f9215991a15a2d5ea223c84bfc4a2f7af423b0a3d4868423543c5d8a5315615f'
-all_upstreams='http://qwen38flashnext-a:8000,http://qwen38flashnext-b:8000,http://qwen38flashnext-tp8:8000'
-single_upstream='http://qwen38flashnext-a:8000'
-all_speculation_profiles='standard,standard,standard'
-single_speculation_profile='standard'
-all_speculation_mode='off'
-single_speculation_mode='off'
-all_kv_live='tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557,tcp://qwen38flashnext-tp8:5557'
-all_kv_replay='tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558,tcp://qwen38flashnext-tp8:5558'
-single_kv_live='tcp://qwen38flashnext-a:5557'
-single_kv_replay='tcp://qwen38flashnext-a:5558'
 
 fail() {
   echo "qwen escape restore: $*" >&2
@@ -56,25 +47,9 @@ VLLM_API_KEY=${VLLM_API_KEY:-}
 exec 9>"$lock_file"
 flock -n 9 || fail "another node06 deployment operation owns the lock"
 
-capacity_for() {
-  local ups=$1 n i out=""
-  IFS=, read -ra parts <<< "$ups"
-  n=${#parts[@]}
-  for ((i = 0; i < n; i++)); do out+="${out:+,}-"; done
-  printf '%s' "$out"
-}
-
-compose() {
-  local file=$1 upstreams=$2 speculation_profiles=$3 speculation_mode=$4
-  local kv_live=$5 kv_replay=$6
-  shift 6
-  env LB_IMAGE="$lb_image" RJ_UPSTREAM="$upstreams" \
-    RJ_ROUTE_KV_CAPACITY_TOKENS="$(capacity_for "$upstreams")" \
-    RJ_ROUTE_SPECULATION_PROFILES="$speculation_profiles" \
-    RJ_ROUTE_SPECULATION_MODE="$speculation_mode" \
-    RJ_KV_EVENT_LIVE_ENDPOINTS="$kv_live" \
-    RJ_KV_EVENT_REPLAY_ENDPOINTS="$kv_replay" \
-    docker compose -f "$file" --project-directory "$deployment_dir" "$@"
+engine_up() {
+  docker compose -f "$canonical_compose" --project-directory "$deployment_dir" \
+    up -d --no-deps --force-recreate "$engine"
 }
 
 wait_engine() {
@@ -93,32 +68,13 @@ wait_engine() {
   done
 }
 
-wait_lb() {
-  local expected_healthy=$1 expected_total=$2
-  local deadline=$((SECONDS + 90)) health
-  until health=$(curl -fsS --max-time 5 http://127.0.0.1:8006/health 2>/dev/null) &&
-    jq -e --argjson healthy "$expected_healthy" --argjson total "$expected_total" '
-      .status == "ok" and .healthy_replicas == $healthy and
-      .active_replicas == $healthy and .total_replicas == $total
-    ' <<<"$health" >/dev/null; do
+wait_lb_b_back() {
+  local deadline=$((SECONDS + 180))
+  until curl -fsS --max-time 5 http://127.0.0.1:8006/health 2>/dev/null |
+    jq -e '.status == "ok" and .healthy_replicas >= 2' >/dev/null; do
     ((SECONDS < deadline)) || return 1
-    if [[ $(docker inspect --format '{{.RestartCount}}' ds4-loadbalancer 2>/dev/null) != 0 ]]; then
-      echo "wait_lb: load balancer is crash-looping (RestartCount != 0)" >&2
-      docker logs --tail 20 ds4-loadbalancer >&2 2>&1 || true
-      return 1
-    fi
-    sleep 2
+    sleep 3
   done
-}
-
-recreate_lb() {
-  local file=$1 upstreams=$2 speculation_profiles=$3 speculation_mode=$4
-  local kv_live=$5 kv_replay=$6 expected_healthy=$7 expected_total=$8
-  compose "$file" "$upstreams" "$speculation_profiles" \
-    "$speculation_mode" "$kv_live" "$kv_replay" \
-    up -d --no-deps --force-recreate ds4-loadbalancer \
-    >"$experiment_dir/lb-$expected_healthy-recreate.txt" 2>&1
-  wait_lb "$expected_healthy" "$expected_total"
 }
 
 record_state() {
@@ -134,23 +90,16 @@ record_state() {
   } >"$output"
 }
 
-restore_engine=0
-restore_lb_full=0
+engine_restored=0
 rollback() {
   local original_rc=$? rollback_rc=0
   trap - EXIT INT TERM
   set +e
-  if ((restore_engine)); then
-    compose "$canonical_compose" "$single_upstream" "$single_speculation_profile" \
-      "$single_speculation_mode" "$single_kv_live" "$single_kv_replay" \
-      up -d --no-deps --force-recreate "$engine" \
-      >"$experiment_dir/retry-engine.txt" 2>&1 || rollback_rc=1
+  if ((engine_restored == 0)); then
+    engine_up >"$experiment_dir/retry-engine.txt" 2>&1 || rollback_rc=1
     wait_engine "$baseline_image" || rollback_rc=1
   fi
-  if ((restore_lb_full)); then
-    recreate_lb "$canonical_compose" "$all_upstreams" "$all_speculation_profiles" \
-      "$all_speculation_mode" "$all_kv_live" "$all_kv_replay" 2 3 || rollback_rc=1
-  fi
+  wait_lb_b_back || rollback_rc=1
   if ((rollback_rc != 0)); then
     echo "qwen escape restore: recovery retry failed" >&2
     exit 3
@@ -162,24 +111,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 record_state "$experiment_dir/initial.txt"
-
-# Keep serving while B reloads: LB single-homes A first.
-recreate_lb "$canonical_compose" "$single_upstream" "$single_speculation_profile" \
-  "$single_speculation_mode" "$single_kv_live" "$single_kv_replay" 1 1
-
-restore_engine=1
-compose "$canonical_compose" "$single_upstream" "$single_speculation_profile" \
-  "$single_speculation_mode" "$single_kv_live" "$single_kv_replay" \
-  up -d --no-deps --force-recreate "$engine" \
-  >"$experiment_dir/restore-engine.txt" 2>&1
+engine_up >"$experiment_dir/restore-engine.txt" 2>&1
+engine_restored=1
 wait_engine "$baseline_image" || fail "baseline engine did not become ready"
-restore_engine=0
-
-restore_lb_full=1
-recreate_lb "$canonical_compose" "$all_upstreams" "$all_speculation_profiles" \
-  "$all_speculation_mode" "$all_kv_live" "$all_kv_replay" 2 3
-restore_lb_full=0
-
+wait_lb_b_back || fail "load balancer did not recover B on its own"
 rm -f "$experiment_dir/steered-live.flag"
 record_state "$experiment_dir/final.txt"
 printf '%s\n' "production baseline restored; steered-live flag cleared"

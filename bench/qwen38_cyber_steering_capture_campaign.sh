@@ -35,6 +35,8 @@ runner=$(realpath -e -- "$0")
 
 capture_dir=$experiment_dir/captures
 candidate_compose=$experiment_dir/docker-compose.capture.yaml
+grep -q "steer_isolated" "$candidate_compose" ||
+  fail "candidate Compose must be rendered with --isolate (never commandeer the shared LB)"
 plugin_image_id=$(cat "$experiment_dir/image-id.txt")
 [[ $plugin_image_id =~ ^sha256:[0-9a-f]{64}$ ]] || fail "plugin image ID is invalid"
 for artifact in qwen38_steering.py qwen38_cyber_eval.py qwen38_cyber_cases.json \
@@ -114,19 +116,16 @@ record_state() {
   } >"$output"
 }
 
-lb_mutated=0
 engine_mutated=0
 rollback() {
   local original_rc=$? rollback_rc=0
   trap - EXIT INT TERM
   set +e
   if ((engine_mutated)); then
-    compose "$canonical_compose" "$single_upstream" mtp off "$single_kv_live" "$single_kv_replay" \
+    docker compose -f "$canonical_compose" --project-directory "$deployment_dir" \
       up -d --no-deps --force-recreate "$engine" >"$experiment_dir/rollback-engine.txt" 2>&1 || rollback_rc=1
     wait_engine "$baseline_image" || rollback_rc=1
-  fi
-  if ((lb_mutated)); then
-    recreate_lb "$canonical_compose" "$all_upstreams" "$all_profiles" off "$all_kv_live" "$all_kv_replay" 2 3 || rollback_rc=1
+    wait_lb 2 3 || rollback_rc=1
   fi
   record_state "$experiment_dir/final.txt" || rollback_rc=1
   ((rollback_rc == 0)) || { echo "qwen cyber steering capture: rollback verification failed" >&2; exit 3; }
@@ -139,12 +138,13 @@ trap 'exit 143' TERM
 peer_before=$(docker inspect --format '{{.Id}} {{.Image}} {{.State.StartedAt}} {{.RestartCount}}' "$peer")
 bash "$experiment_dir/capture_node06.sh" --local --profile qwen38-flash-next >"$experiment_dir/preflight.txt"
 record_state "$experiment_dir/initial.txt"
-recreate_lb "$candidate_compose" "$single_upstream" mtp off "$single_kv_live" "$single_kv_replay" 1 1
-lb_mutated=1
 engine_mutated=1
-compose "$candidate_compose" "$single_upstream" mtp off "$single_kv_live" "$single_kv_replay" \
+docker compose -f "$candidate_compose" --project-directory "$deployment_dir" \
   up -d --no-deps --force-recreate "$engine" >"$experiment_dir/candidate-recreate.txt" 2>&1
 wait_engine "$plugin_image_id" || fail "capture engine did not become ready"
+curl -fsS --max-time 5 http://127.0.0.1:8006/health | jq -e '
+  .replicas[0].active and .replicas[0].healthy and (.replicas[1].healthy | not)
+' >/dev/null || fail "peer A must keep serving while isolated B is the capture replica"
 
 python3 "$experiment_dir/qwen38_steering.py" capture \
   --base-url http://127.0.0.1:8041/v1 --model "$model" --model-revision "$model_revision" \
