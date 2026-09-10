@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qwen38-steering"
-version = "0.4.1"
+version = "0.5.3"
 description = "Capture and apply Qwen3.8 Flash-Next FFN steering directions in vLLM"
 requires-python = ">=3.12"
 
@@ -16,3 +16,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.entry-points."vllm.endpoint_plugins"]
+qwen38_steer_admin = "qwen38_steering:SteerAdminEndpoint"
