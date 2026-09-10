@@ -4,9 +4,14 @@ One-file node06 deployment for two NUMA-local TP4 vLLM engines behind ramjet,
 serving NVIDIA's ModelOpt NVFP4 quantisation of GLM-5.3-Flash. This is the
 whole deployment; do not add an overlay.
 
-**Status: unqualified admission artefact.** No GPU has run this configuration.
-Every gate below is GPU-free and has passed; nothing beyond them has been
-measured. Do not treat a green preflight as permission to serve traffic.
+**Status: rejected at the live loader gate on node06 (2026-09-10).** The exact
+checkpoint and argv pass every GPU-free check, and all four TP ranks load the
+weights, but the pinned runtime cannot initialize this NoPE sparse-MLA model on
+SM120. Its packed FP8 cache writer requires `pe_dim=64`; GLM-5.3-Flash has
+`qk_rope_head_dim=0`. Explicit BF16 KV is also rejected because the only SM120
+sparse-MLA backend supports quantized KV. No correctness, TPS, or concurrency
+number exists for this candidate. Do not deploy it until a reviewed immutable
+runtime includes the NoPE SM120 kernel path and the full gate is rerun.
 
 ## Why this exists beside `deploy/glm53_flash`
 
@@ -16,8 +21,9 @@ repository that carries no detected licence. That recipe is explicitly not
 promotable and must not be pushed to a registry, so its 2026-08-27
 qualification can never become production.
 
-This deployment removes that blocker. Both halves are first-party and already
-present on the box:
+This deployment removes the licence blocker, but live qualification exposed a
+separate runtime-kernel blocker. Both inputs are first-party and present on the
+box:
 
 - NVIDIA's own checkpoint, published under MIT from `zai-org/GLM-5.3-Flash`.
 - The exact immutable `vllm/vllm-openai` digest already qualified and running
@@ -47,7 +53,9 @@ Manifold-Constrained Hyper-Connections and one MTP layer. It is natively
 multimodal and declares 1,048,576 positions.
 
 NVFP4 covers the weights and activations of transformer-block linear
-operators at group size 16, with an FP8 KV cache. `lm_head`, the embeddings,
+operators at group size 16, with an FP8 KV cache. The pinned runtime rejects
+that cache during live profiling because its `fp8_ds_mla` path requires
+`pe_dim=64`, while this model is NoPE. `lm_head`, the embeddings,
 `self_attn`, many `shared_experts`/`mlp.gate` tensors, and the entire vision
 tower stay in higher precision.
 
@@ -56,8 +64,8 @@ each), TP4 puts **47.6GiB of weights on each GPU**, leaving roughly 38GiB per
 GPU for KV, KDA state, activations and graphs at `--gpu-memory-utilization
 0.90`. Both TP4 engines resident is about 381GiB of the box's 764GiB.
 
-The KV cache is unusually cheap for the context length because only 11 layers
-cache per token, and they cache an MLA latent at FP8. The 34 KDA layers hold a
+The KV cache would be structurally cheaper than ordinary full attention because
+only 11 layers cache an MLA latent per token at FP8. The 34 KDA layers hold a
 constant per-sequence state instead, which vLLM promotes to float32 for its
 accelerated GDN backend. This is a structural observation from the config, not
 a measurement: the real allocation comes from the engine's own profiling run
@@ -111,19 +119,44 @@ engine or a model, so the live smoke stays mandatory.
 
 ## Canary rollout
 
-Download the exact revision outside any benchmark timing, verify it, then hold
-the common deployment lock and start **one** named engine:
+Download the exact revision outside any benchmark timing and verify it. node06
+normally runs Qwen on both TP4 pairs, so starting the GLM service without first
+withdrawing canonical Qwen B would assign two engines to GPUs 4-7. Do not
+recreate or single-home the shared load balancer. Use the guarded canary owner:
 
 ```bash
-flock --nonblock /run/lock/ramjet-node06-deployment.lock \
-  docker compose -f docker-compose.yaml up -d --no-deps glm53nvidia-b
+experiment=.experiments/$(date -u +%Y%m%dT%H%M%SZ)-canary
+install -d -o root -g root -m 0700 "$experiment"
+install -m 0755 node06-canary.sh node06-restore-qwen-b.sh "$experiment/"
+install -m 0644 /home/luke/inference/qwen38_flash_next/node06_gpu_guard.py \
+  /home/luke/inference/qwen38_flash_next/node06_operational_moratorium.py \
+  "$experiment/"
+
+qwen_compose_sha=$(sha256sum \
+  /home/luke/inference/qwen38_flash_next/docker-compose.yaml | awk '{print $1}')
+EXPECTED_QWEN_COMPOSE_SHA256="$qwen_compose_sha" \
+  python3 "$experiment/node06_gpu_guard.py" \
+    --label "$(basename "$experiment")" \
+    --output "$experiment/thermal.jsonl" -- \
+    env EXPECTED_QWEN_COMPOSE_SHA256="$qwen_compose_sha" \
+      bash "$experiment/node06-canary.sh" "$experiment"
 ```
 
-Model load, JIT and graph capture are GPU work that no request-process wrapper
-covers. Isolate the one TP4 pair, watch intake air, GPU telemetry and driver
-errors throughout, and start only at 46C intake or below. Every
-request-generating command afterwards must be a child of
-`bench/node06_gpu_guard.py`.
+The owner pins both operational Compose byte streams, holds the common lock,
+stops only `qwen38flashnext-b`, proves the unchanged load balancer serves Qwen
+through A, proves GPUs 4-7 are free, and then starts only `glm53nvidia-b` in a
+different Compose project/network. It verifies the candidate image, argv,
+devices, direct health, and Qwen A identity. A failure or thermal termination
+stops GLM and recreates Qwen B from its exact canonical file. Success leaves
+GLM B isolated on loopback `:8061` for separately guarded direct tests; the
+shared LB continues to report Qwen B down and serves through A.
+
+Model load, JIT and graph capture are GPU work. Keep the activation owner under
+the intake guard, watch its journal plus driver errors throughout, and start
+only at 46C intake or below. Every request-generating command afterwards must
+be a child of `bench/node06_gpu_guard.py`. When the direct window ends, restore
+Qwen B through `node06-restore-qwen-b.sh` under a fresh guard journal; the
+unchanged LB discovers it again without a recreate.
 
 The checked-in defaults deliberately reduce the card's 1M context and its
 recommended concurrency to a 262K, four-sequence, MTP-off loader canary. That

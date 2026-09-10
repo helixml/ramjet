@@ -23,7 +23,7 @@ x-glm-engine: &glm-engine
   entrypoint: ["vllm", "serve"]
   # Canary posture: a loader that dies must stay dead for inspection rather
   # than loop on eight shared GPUs.
-  restart: ${ENGINE_RESTART_POLICY:-"no"}
+  restart: ${ENGINE_RESTART_POLICY:-no}
   ipc: host
   init: true
   shm_size: 32gb
@@ -58,9 +58,10 @@ x-glm-command: &glm-command
   - --tensor-parallel-size=4
   - --enable-expert-parallel
   - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
-  # NVFP4 linear weights/activations with an FP8 KV cache, exactly as the
-  # checkpoint's own hf_quant_config.json declares. Pinned rather than
-  # auto-detected so a checkpoint swap fails instead of silently re-deciding.
+  # NVFP4 linear weights/activations with the checkpoint's FP8 KV cache.
+  # This exact setting currently reproduces the pinned runtime's SM120 NoPE
+  # kernel gap (fp8_ds_mla requires pe_dim=64 while GLM has pe_dim=0). Keep it
+  # pinned as an admission/reproduction artefact; README documents the block.
   - --quantization=modelopt_fp4
   - --kv-cache-dtype=fp8
   # Canary reductions from the card's 1M context: they minimise the first GPU

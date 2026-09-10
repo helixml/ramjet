@@ -1,10 +1,68 @@
 # node06 experiment journal
 
-## 2026-09-10 — nvidia/GLM-5.3-Flash-NVFP4 fits node06 and runs on the image we already ship (GPU-free)
+## 2026-09-10 — NVIDIA GLM-5.3-Flash NVFP4 rejected: stock SM120 sparse-MLA has no NoPE KV path
 
-Question: would `nvidia/GLM-5.3-Flash-NVFP4` fit and work on node06? Answer:
-yes on both counts, and it needs no new engine image. Everything below is
-read-only or GPU-free. No engine, load balancer, or GPU allocation was touched;
+Question: can the official `nvidia/GLM-5.3-Flash-NVFP4` revision
+`423acf37583782c51c142d145aef733d72943d93` replace only Qwen B on node06,
+pass correctness, and proceed to guarded TPS/concurrency measurements? Answer:
+**no on the pinned vLLM image.** The candidate failed the live loader gate, so
+no inference request and no performance cell ran. Qwen A served production
+throughout; each failure path recreated canonical Qwen B and the shared load
+balancer was never recreated.
+
+The exact checkpoint downloaded to
+`/prod/models/nvidia/GLM-5.3-Flash-NVFP4-423acf37583782c51c142d145aef733d72943d93`
+in 49m22.67s. `verify-model.py` admitted the pinned metadata, 33 complete
+shards, no partials, and 204,439,103,396 tensor bytes. The immutable runtime
+image was
+`vllm/vllm-openai@sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93`
+(vLLM `0.28.1rc1.dev472+gd9105ea80`). Its GPU-free full config builder passed
+the FP8 candidate in 34.59s.
+
+The guarded FP8 run is
+`/home/luke/inference/glm53_flash_nvidia/.experiments/20260910T110722Z-canary-r2`.
+All four TP ranks loaded 44.52GiB each in 138.0, 138.0, 151.6, and 169.9s.
+TileLang JIT then completed and CUDA-graph/cache profiling reached the first MLA
+cache write. The worker failed with:
+
+```text
+concat_and_cache_mla ... pe_dim must be 64 for fp8_ds_mla
+```
+
+The checkpoint is NoPE sparse MLA: `qk_nope_head_dim=256`,
+`qk_rope_head_dim=0`, `kv_lora_rank=512`, `index_topk=2048`, and
+`index_kpool=4`. The pinned SM120 backend canonicalizes the checkpoint's FP8
+request to the packed `fp8_ds_mla` format, whose writer requires a 64-element
+RoPE section. This is an attention/KV kernel incompatibility after clean weight
+loading, not a weight-fit, ModelOpt, memory, or thermal failure.
+
+A single-variable negative control pinned `--kv-cache-dtype=bfloat16`. Its
+GPU-free engine config passed in 29.03s, but the guarded live run at
+`/home/luke/inference/glm53_flash_nvidia/.experiments/20260910T113103Z-canary-bf16-kv`
+failed before loading weights: `TRITON_MLA` does not support sparse attention,
+and `FLASHINFER_MLA_SPARSE_SM120` does not support BF16 KV. The runtime's
+`nvfp4_ds_mla` cache format is documented in its own source as SM100-only, so
+there is no third supported dtype to tune on these SM120 GPUs.
+
+This exactly matches upstream vLLM issue
+[#53963](https://github.com/vllm-project/vllm/issues/53963). The NoPE SM120
+implementation PRs [#53969](https://github.com/vllm-project/vllm/pull/53969)
+and [#55277](https://github.com/vllm-project/vllm/pull/55277) were still open at
+qualification time. An unmerged source overlay was not introduced into the
+production node. The loader can be retried only after a reviewed immutable
+runtime carries that support; correctness remains the next gate, before TPS or
+concurrency.
+
+Both guarded campaigns stayed below 43C chassis intake and had no OOM, Xid,
+container restart, or Qwen A identity change. The canary owner now fails fast
+when an engine exits and retains the exact rollback and LB-isolation checks.
+
+## 2026-09-10 — NVIDIA GLM-5.3-Flash NVFP4 passed GPU-free shape checks
+
+Question: would `nvidia/GLM-5.3-Flash-NVFP4` fit and appear supported by the
+existing node06 image? Answer: yes at the metadata/config layer. Everything
+below is read-only or GPU-free. No engine, load balancer, or GPU allocation was
+touched;
 `qwen38flashnext-a` served throughout and `qwen38flashnext-b` was left on its
 running steering image.
 

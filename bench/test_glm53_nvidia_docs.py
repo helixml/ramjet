@@ -49,10 +49,12 @@ class Glm53NvidiaDocumentationTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIn(key, self.readme)
 
-    def test_readme_states_the_deployment_is_unqualified(self):
+    def test_readme_states_the_live_loader_rejection(self):
         for claim in (
-            "unqualified admission artefact",
-            "No GPU has run this configuration",
+            "rejected at the live loader gate",
+            "pe_dim=64",
+            "qk_rope_head_dim=0",
+            "No correctness, TPS, or concurrency",
             "bench/node06_gpu_guard.py",
             "do not add an overlay",
         ):
