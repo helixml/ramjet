@@ -36,6 +36,13 @@ engines or enable MTP based on loader success alone.
   `0xSero/glm53-flash-nvfp4-sm120-exact-docker` at
   `8370bb04335bb07b6ee85907dd83cd1d300fa462`.
 
+`deploy/glm53_flash_nvidia` is the licence-clean successor candidate: NVIDIA's
+own MIT-licensed NVFP4 checkpoint of the same model family, on the official
+`vllm/vllm-openai` digest already qualified for the Qwen deployment. It has
+passed only GPU-free gates and does not supersede this recipe's 2026-08-27
+measurements until it is qualified on node06. Both deployments bind the same
+load-balancer ports, so only one may own the box at a time.
+
 The third-party repository carries no detected license and replaces six whole
 SGLang source files. Its image is therefore an internal experimental candidate,
 not a redistributable or promotable production artifact. Do not push it to a
