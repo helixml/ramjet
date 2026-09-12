@@ -91,6 +91,50 @@ watch_for = """
   """
 
 [[sources]]
+name = "GLM-5.3 SM120 runtime"
+kind = "gh-repo"
+id = "ormandj/sglang-glm53-flash-sm120"
+why = """
+  Exact SGLang runtime, image recipe, and launch profile behind the isolated
+  GLM-5.3-Flash SM120 TP2 canary on node06.
+  """
+watch_for = """
+  A release newer than v0.4.3 with reproducible SM120 measurements, especially
+  an individually attributed decode or prefill improvement. Also watch for a
+  qualified DFlash2 profile, a newer integrated SGLang/FlashInfer base, or a
+  change to the KDA/NoPE memory layout that alters the four-sequence ceiling.
+  """
+
+[[sources]]
+name = "GLM-5.3 SM120 W4A16 checkpoint"
+kind = "hf-repo"
+id = "ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO"
+why = """
+  Exact 90-shard target checkpoint qualified on node06 at immutable revision
+  ee0989a944b0e213589191d7fca63af825a0741e.
+  """
+watch_for = """
+  Weight, tokenizer, quantization-metadata, calibration-scale, or architecture
+  revisions. Mutable Hub main is never an in-place update: any revision needs
+  a fresh agent-correctness, prefill, decode, and concurrency qualification.
+  """
+
+[[sources]]
+name = "GLM-5.3 DFlash2 drafter"
+kind = "hf-repo"
+id = "incoai/GLM-5.3-Flash-DFlash2"
+why = """
+  The published approximately 1B-parameter DFlash2 draft is the clearest new
+  candidate for increasing GLM per-stream decode. It is not deployed: access
+  is gated and its CC-BY-NC-ND-4.0 terms do not authorize commercial use.
+  """
+watch_for = """
+  Final publisher benchmarks, a production-compatible license, an ungated or
+  separately licensed checkpoint, and an exact SGLang SM120 launch profile.
+  Do not download or deploy it merely because the repository revision changes.
+  """
+
+[[sources]]
 name = "Qwen"
 kind = "hf-org"
 id = "Qwen"
@@ -205,6 +249,20 @@ watch_for = """
   Hybrid/linear-attention scheduling work, KV-event schema changes, and
   sleep-mode fixes -- level-1 sleep frees VRAM but did not return ~38GiB of
   host memory on wake when we measured it.
+  """
+
+[[sources]]
+name = "vLLM model recipes"
+kind = "gh-repo"
+id = "vllm-project/recipes"
+why = """
+  Publishes vLLM's maintained GLM-5.3-Flash launch recipe, including built-in
+  MTP, the external DFlash2 option, and the exact NVFP4 checkpoint selection.
+  """
+watch_for = """
+  A GLM-5.3-Flash recipe explicitly qualified on SM120/RTX PRO 6000 after the
+  NoPE/KDA support lands in a released vLLM image, with measured cold prefill,
+  per-stream decode, aggregate throughput, and memory at concurrency four.
   """
 
 [[sources]]
