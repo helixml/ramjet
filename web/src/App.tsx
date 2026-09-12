@@ -12,7 +12,13 @@ import { AdaptiveTopology } from "@/components/AdaptiveTopology"
 import { LoginScreen } from "@/components/LoginScreen"
 import { Meter } from "@/components/Meter"
 import { TabBar, useTabs, type TabDef } from "@/components/Tabs"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   endpointLabel,
@@ -29,7 +35,14 @@ import { useLiveStream } from "@/hooks/useLiveStream"
 import { sparkline, windowMean, TILE_WINDOW_MS } from "@/lib/sparkline"
 import { rollingAverage, windowLabel } from "@/lib/rolling"
 import { GPU_UTIL_WINDOW_MS, smoothedGpus } from "@/lib/gpus"
-import { fetchUiSession, isMockMode, logoutUi, type Sample, type ServingSample } from "@/lib/api"
+import {
+  fetchUiSession,
+  isMockMode,
+  logoutUi,
+  type ModelTokenHistory,
+  type Sample,
+  type ServingSample,
+} from "@/lib/api"
 
 type Row = { t: number } & Record<string, number | null>
 
@@ -116,6 +129,74 @@ function ChartGrid({ cards, loading }: { cards: ChartCardProps[]; loading?: bool
         <ChartCard key={card.title} {...card} loading={loading} />
       ))}
     </div>
+  )
+}
+
+function ModelTokenUsageCard({
+  models,
+  days,
+  loading,
+  error,
+}: {
+  models: ModelTokenHistory[]
+  days: number
+  loading: boolean
+  error: string | null
+}) {
+  const rows = useMemo(
+    () =>
+      models
+        .map((history) => ({ model: history.model, ...totals(history.buckets) }))
+        .sort((a, b) => b.total - a.total || a.model.localeCompare(b.model)),
+    [models],
+  )
+  const allTokens = rows.reduce((sum, row) => sum + row.total, 0)
+
+  return (
+    <Card aria-busy={loading || undefined}>
+      <CardHeader>
+        <CardTitle>Token use by model</CardTitle>
+        <CardDescription>
+          {error
+            ? `breakdown unavailable — ${error}`
+            : `${days} days · cached tokens are included in prompt`}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-2">
+        {loading ? (
+          Array.from({ length: 2 }, (_, index) => (
+            <Skeleton key={index} className="h-12 w-full rounded-md" />
+          ))
+        ) : rows.length === 0 ? (
+          <div className="text-muted-foreground py-2 text-xs">No per-model usage recorded yet.</div>
+        ) : (
+          rows.map((row) => (
+            <div key={row.model} className="rounded-md border border-border/70 px-2.5 py-2">
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="min-w-0 truncate text-xs font-medium" title={row.model}>
+                  {row.model}
+                </span>
+                <span className="shrink-0 font-mono text-xs tabular-nums">
+                  {fmtCount(row.total)}
+                </span>
+              </div>
+              <div className="text-muted-foreground mt-1 flex flex-wrap gap-x-2 text-[10px] tabular-nums">
+                <span>prompt {fmtCount(row.prompt)}</span>
+                <span>cached {fmtCount(row.cached)}</span>
+                <span>generated {fmtCount(row.completion)}</span>
+                <span>{fmtCount(row.requests)} requests</span>
+              </div>
+              <div className="bg-muted mt-1.5 h-1 overflow-hidden rounded-full">
+                <div
+                  className="bg-primary h-full rounded-full"
+                  style={{ width: `${allTokens > 0 ? (row.total / allTokens) * 100 : 0}%` }}
+                />
+              </div>
+            </div>
+          ))
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
@@ -493,6 +574,12 @@ function Dashboard({ onLogout }: { onLogout?: () => void }) {
   const historyLoading = tokens == null && tokensError == null
   const historyCards = (
     <div className="flex flex-col gap-3">
+      <ModelTokenUsageCard
+        models={tokens?.models ?? []}
+        days={historyWindow}
+        loading={historyLoading}
+        error={tokensError}
+      />
       <HeatmapCard
         title="Tokens by day"
         description={

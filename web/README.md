@@ -53,8 +53,10 @@ Two stores, two time scales. The ring answers "what is the box doing now"
 at seconds of resolution and is bounded by `RJ_MACHINEVIEW_RETENTION_SECONDS`
 (a day by default, a week at most). The token history answers "when does this
 box get used" from the same `ramjet_*` counters at one bucket an hour, so a
-month of it costs 720 small records — that is what the Overview's two
-token heatmaps read.
+month of it costs 720 small records per series. The Overview keeps the
+aggregate heatmaps and also splits prompt, cached-prompt, generated-token, and
+successful-request volume by each statically configured model. Aggregate and
+per-model histories are persisted.
 
 ## Development
 
