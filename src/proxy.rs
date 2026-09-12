@@ -1861,10 +1861,7 @@ impl Proxy {
             self.inner
                 .metrics
                 .upstream_requests
-                .with_label_values(&[
-                    &self.upstream_label(upstream),
-                    response.status().as_str(),
-                ])
+                .with_label_values(&[&self.upstream_label(upstream), response.status().as_str()])
                 .inc();
             return Err("http");
         }
