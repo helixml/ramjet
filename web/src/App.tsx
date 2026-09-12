@@ -186,7 +186,14 @@ function ModelTokenUsageCard({
                 <span>generated {fmtCount(row.completion)}</span>
                 <span>{fmtCount(row.requests)} requests</span>
               </div>
-              <div className="bg-muted mt-1.5 h-1 overflow-hidden rounded-full">
+              <div
+                className="bg-muted mt-1.5 h-1 overflow-hidden rounded-full"
+                role="progressbar"
+                aria-label={`${row.model} share of model token use`}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={allTokens > 0 ? Math.round((row.total / allTokens) * 100) : 0}
+              >
                 <div
                   className="bg-primary h-full rounded-full"
                   style={{ width: `${allTokens > 0 ? (row.total / allTokens) * 100 : 0}%` }}
