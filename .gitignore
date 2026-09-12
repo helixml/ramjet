@@ -8,3 +8,6 @@ __pycache__/
 
 # Watchlist scan state (local, per-machine)
 watchlist/.last-scan.json
+bench/steering_plugin/build/
+bench/steering_plugin/src/*.egg-info/
+bench/steering_plugin/dist/

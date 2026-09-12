@@ -1,5 +1,37 @@
 # node06 experiment journal
 
+## 2026-09-09 — two load-balancer outages from steering windows (postmortem + new rule)
+
+Both incidents today came from one pattern: experiment campaigns recreated
+the **shared production** `ds4-loadbalancer` to single-home the fleet onto
+one engine, then mutated that engine.
+
+1. **08:00Z, capture window (r2):** the campaign passed the new
+   `RJ_UPSTREAM` (1 value) without `RJ_ROUTE_KV_CAPACITY_TOKENS` (3-value
+   default) → boot rejection → LB crash-looped ~8 h. Rollback then hit a
+   latent `adaptive-config.json` image-pin drift (B re-imaged to NVFP4
+   09-07, config still pinned the old digest; the check is startup-only)
+   and could not restore. Operator-recovered. Details:
+   `bench/steering-capture-incident-2026-09-09.md`.
+2. **13:42Z, escape-proof window:** pins were correct this time, but the
+   campaign single-homed the LB onto engine B and *then* restarted B —
+   zero serving capacity for the whole load window while engine A sat
+   warm and healthy behind the LB. Operator SIGTERM'd the guard (trap
+   reaped the tree, released the lock) and restored the LB; the rollback
+   had already returned B to baseline.
+
+**Rule (red line, all experiment windows):** a window against one engine
+must keep the shared LB untouched and at least one *other* engine serving
+production traffic the entire time. Isolate the experiment engine by
+rendering the candidate compose with `--isolate` (own docker network ⇒
+the LB's name resolution fails and it routes around; host-published port
+`:8041` still works) and drive all experiment traffic directly to that
+engine. Restore = recreate the engine from canonical compose; the LB
+recovers it on its own. The rewritten `qwen38_escape_*` and
+`qwen38_cyber_steering_capture_campaign` follow this shape; the older
+`qwen38_steering_{capture,eval}` and `qwen38_cyber_steering_sweep`
+campaigns carry a DEPRECATED-PATTERN header and must not be revived as-is.
+
 ## 2026-09-12 — GLM SM120 6K prefill admitted; 8K rejected; vLLM still blocked
 
 Question: can the isolated GLM-5.3-Flash engine B improve cold prefill,

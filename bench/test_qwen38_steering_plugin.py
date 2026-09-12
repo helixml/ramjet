@@ -6,7 +6,7 @@ import unittest
 
 
 MODULE = (
-    pathlib.Path(__file__).with_name("qwen38_steering_plugin")
+    pathlib.Path(__file__).with_name("steering_plugin")
     / "src"
     / "qwen38_steering"
     / "__init__.py"
@@ -82,3 +82,42 @@ class PathPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SteerAdminTests(unittest.TestCase):
+    BASE = {
+        "direction_index": 1,
+        "generation": 4,
+        "layers": "20-23",
+        "scale": 0.5,
+    }
+
+    def test_scale_patch_merges_and_bumps_generation(self):
+        merged = PLUGIN.apply_steer_patch(self.BASE, {"scale": 1.25}, 48, 4)
+        self.assertEqual(merged["scale"], 1.25)
+        self.assertEqual(merged["direction_index"], 1)
+        self.assertEqual(merged["generation"], 5)
+
+    def test_out_of_range_scale_rejected(self):
+        for bad in (8.5, -8.5, float("nan"), "x"):
+            with self.assertRaises(ValueError):
+                PLUGIN.apply_steer_patch(self.BASE, {"scale": bad}, 48, 4)
+
+    def test_unknown_field_and_bad_layers_rejected(self):
+        with self.assertRaises(ValueError):
+            PLUGIN.apply_steer_patch(self.BASE, {"mode": "turbo"}, 48, 4)
+        with self.assertRaises(ValueError):
+            PLUGIN.apply_steer_patch(self.BASE, {"layers": "44-99"}, 48, 4)
+        with self.assertRaises(ValueError):
+            PLUGIN.apply_steer_patch(self.BASE, {"direction_index": 9}, 48, 4)
+
+    def test_atomic_write_roundtrips_through_reader(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = pathlib.Path(raw) / "control.json"
+            merged = PLUGIN.apply_steer_patch(self.BASE, {"scale": 0.0}, 48, 4)
+            PLUGIN.write_control_atomic(path, merged)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            scale, layers, index, _ = PLUGIN._read_control(path, 48, 4)
+            self.assertEqual(scale, 0.0)
+            self.assertEqual(index, 1)
+            self.assertEqual(layers, frozenset({20, 21, 22, 23}))

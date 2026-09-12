@@ -130,9 +130,14 @@ def register() -> None:
     import torch
     from safetensors.torch import load_file, save_file
     from vllm.distributed import get_tensor_model_parallel_rank
-    from vllm.models.qwen3_8_flash_next.nvidia.model import (
-        Qwen3_8FlashNextDecoderLayer,
-    )
+    try:
+        from vllm.models.qwen4_exp.nvidia.model import (
+            Qwen4ExpDecoderLayer as Qwen3_8FlashNextDecoderLayer,
+        )
+    except ModuleNotFoundError:
+        from vllm.models.qwen3_8_flash_next.nvidia.model import (
+            Qwen3_8FlashNextDecoderLayer,
+        )
 
     layer_count = 48
     hidden_size = 2560
@@ -219,7 +224,11 @@ def register() -> None:
             and get_tensor_model_parallel_rank() == 0
         )
         if capture_active:
+            # Fixed-slot attention metadata pads zero-span sequences whose
+            # boundary duplicates the real sequence end, duplicating its row.
+            nonzero = (query_start_loc[1:] > query_start_loc[:-1])
             ends = (query_start_loc[1:] - 1).to(device=mlp_out.device, dtype=torch.long)
+            ends = ends[nonzero.to(device=ends.device)]
             selected = mlp_out.index_select(0, ends).detach().float().cpu()
             if layer_id == 0:
                 _CAPTURE = {
@@ -274,3 +283,144 @@ def register() -> None:
 
 
 __all__ = ["parse_layers", "register"]
+
+
+CONTROL_ADMIN_FIELDS = {"scale", "layers", "direction_index"}
+
+
+def apply_steer_patch(
+    document: dict,
+    patch: dict,
+    layer_count: int,
+    direction_count: int,
+) -> dict:
+    """Merge a /steer patch into a control document and validate the result."""
+    if set(patch) - CONTROL_ADMIN_FIELDS:
+        raise ValueError("steer patch has unknown fields")
+    merged = dict(document)
+    if "scale" in patch:
+        try:
+            scale = float(patch["scale"])
+        except (TypeError, ValueError) as error:
+            raise ValueError("steer scale must be a number") from error
+        if not -8.0 <= scale <= 8.0:
+            raise ValueError("steer scale must be within [-8, 8]")
+        merged["scale"] = scale
+    if "layers" in patch:
+        selected = parse_layers(str(patch["layers"]), layer_count)
+        merged["layers"] = patch["layers"]
+        del selected
+    if "direction_index" in patch:
+        try:
+            index = int(patch["direction_index"])
+        except (TypeError, ValueError) as error:
+            raise ValueError("steer direction_index must be an integer") from error
+        if not 0 <= index < direction_count:
+            raise ValueError("steer direction_index is outside the bundle")
+        merged["direction_index"] = index
+    missing = {"direction_index", "layers", "scale"} - set(merged)
+    if missing:
+        raise ValueError(f"control document is missing fields: {sorted(missing)}")
+    merged["generation"] = int(merged.get("generation", 0)) + 1
+    return merged
+
+
+def read_vector_shape(path: pathlib.Path) -> tuple[int, int]:
+    """Return (layer_count, direction_count) from a steering vector/bundle."""
+    from safetensors import safe_open
+
+    with safe_open(str(path), framework="pt") as handle:
+        for key in handle.keys():
+            dims = tuple(handle.get_tensor(key).shape)
+            if len(dims) == 3:
+                return int(dims[1]), int(dims[0])
+            if len(dims) == 2:
+                return int(dims[0]), 1
+    raise RuntimeError("steering bundle contains no usable direction tensor")
+
+
+def write_control_atomic(path: pathlib.Path, document: dict) -> None:
+    payload = json.dumps(document, sort_keys=True).encode()
+    directory = path.parent
+    staging = directory / f".{path.name}.tmp-{os.getpid()}"
+    descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(staging, path)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+
+
+class SteerAdminEndpoint:
+    """vLLM endpoint plugin: ds4-style /steer dial for a steered replica."""
+
+    name = "qwen38_steer_admin"
+    required_tasks = None
+
+    async def init_state(self, engine_client, state, args) -> None:
+        return None
+
+    def attach_router(self, app) -> None:
+        from fastapi import Body
+        from fastapi.responses import JSONResponse
+
+        @app.get("/steer")
+        def steer_read():
+            control = self._control_path()
+            if control is None:
+                return JSONResponse({"detail": "steering control not configured"}, 503)
+            try:
+                layer_count, direction_count = read_vector_shape(
+                    self._vector_path()
+                )
+                document = json.loads(control.read_text())
+                scale, layers, direction_index, _ = _read_control(
+                    control, layer_count, direction_count
+                )
+            except Exception as error:
+                return JSONResponse({"detail": str(error)}, 500)
+            return {
+                "scale": scale,
+                "layers": document.get("layers"),
+                "direction_index": direction_index,
+                "generation": document.get("generation"),
+            }
+
+        @app.post("/steer")
+        def steer_set(patch: dict = Body(...)):
+            control = self._control_path()
+            if control is None:
+                return JSONResponse({"detail": "steering control not configured"}, 503)
+            try:
+                layer_count, direction_count = read_vector_shape(
+                    self._vector_path()
+                )
+                document = json.loads(control.read_text())
+                merged = apply_steer_patch(
+                    document, patch, layer_count, direction_count
+                )
+                write_control_atomic(control, merged)
+            except Exception as error:
+                return JSONResponse({"detail": str(error)}, 400)
+            return {
+                "scale": merged["scale"],
+                "layers": merged["layers"],
+                "direction_index": merged["direction_index"],
+                "generation": merged["generation"],
+            }
+
+    @staticmethod
+    def _control_path() -> pathlib.Path | None:
+        value = os.environ.get(CONTROL_FILE_ENV)
+        return pathlib.Path(value) if value else None
+
+    @staticmethod
+    def _vector_path() -> pathlib.Path:
+        value = os.environ.get(VECTOR_ENV)
+        if not value:
+            raise RuntimeError("steering vector env is not set")
+        return _existing_regular_file(value)

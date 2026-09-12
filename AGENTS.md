@@ -876,6 +876,18 @@ production is stopped or isolated, then a bounded dual-pair cell; do not jump
 directly to the 52/64-app long-context boundary. Every sustained candidate
 request gate, context sweep, capacity cell, or matrix must run under
 `node06_gpu_guard.py` with a fresh mode-0600 JSONL journal. Candidate engine
+
+**RED LINE (2026-09-09, two outages):** experiment windows NEVER recreate or
+re-`up` the shared `ds4-loadbalancer`, and never single-home `RJ_UPSTREAM`.
+Keep the LB on its full canonical upstream set (peer keeps serving) and
+isolate the experiment engine instead: render the candidate compose with
+`dir-steering/deployment/steering_compose.py --isolate` (cyber repo), hit it
+directly on `127.0.0.1:8041`,
+and restore by recreating the engine from the canonical file — the LB
+recovers it without being touched. See EXPERIMENTS.md 2026-09-09 and cyber `dir-steering/`.
+Steering science and node06 steering campaigns live in cyber
+`dir-steering/deployment/`; this repo keeps only the generic runtime plugin
+`bench/steering_plugin/` (image `qwen38-steering:*`, built from its Dockerfile).
 container startup, model load, and JIT occur before `candidate_gate.py` and are
 therefore outside this request-process wrapper: isolate one TP4 pair and watch
 BMC/facility plus driver telemetry manually until a container-aware rollout
@@ -992,7 +1004,8 @@ All benches are in `bench/` and mirrored to
 
 ```bash
 ssh node06
-export BENCH_TOKEN=$(grep -o 'Bearer [A-Za-z0-9_-]*' /etc/caddy/Caddyfile | head -1 | cut -d' ' -f2)
+# The Caddyfile references {$BUNKER_API_KEY}; the literal lives in its env file.
+export BENCH_TOKEN=$(grep -m1 '^BUNKER_API_KEY=' /etc/caddy/node06.env | cut -d= -f2- | tr -d '"'"'")
 ```
 
 ## Fast iteration rules
