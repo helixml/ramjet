@@ -199,6 +199,7 @@ fn log_startup(config: &Config) {
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         upstreams = ?config.upstreams,
+        multi_model = !config.upstream_models.is_empty(),
         upstream_admission_mode = ?config.upstream_admission_mode,
         upstream_admission_timeout_ms = config.upstream_admission_timeout_ms,
         upstream_warmup_mode = ?config.upstream_warmup_mode,

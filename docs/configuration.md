@@ -54,6 +54,7 @@ resolving across the rename.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `RJ_UPSTREAM` | `http://ds4-flash:8000` | Comma-separated OpenAI-compatible engine URLs. |
+| `RJ_UPSTREAM_MODELS` | unset | Optional dense model ownership map: exactly one model ID per `RJ_UPSTREAM` entry. Enables model-aware routing and combined `/v1/models`; duplicate IDs represent replicas of one model. |
 | `RJ_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
 | `RJ_UPSTREAM_WARMUP_MODE` | `off` | `off`, observation-only `shadow`, or `enforce` passive admission for a replica recovering from observed health loss. HTTP admission only. |
 | `RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES` | `3` | Successful existing readiness probes required after recovery before passive warmup admits the replica. |
@@ -84,6 +85,24 @@ resolving across the rename.
 | `RJ_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary; `0` disables the legacy strip. |
 | `RJ_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
 | `RUST_LOG` | `info` | Standard tracing filter, for example `ramjet=debug`. |
+
+When `RJ_UPSTREAM_MODELS` is set, every proxied request must carry a valid
+top-level `model` string. Ramjet dispatches it only to upstreams whose mapping
+exactly matches that ID; neither ordinary retry nor fail-open may cross the
+model boundary. Unknown models return `404`, while missing or malformed model
+selection returns `400`. `GET /v1/models` concurrently queries every mapped
+upstream, accepts only the model record matching that upstream's configured
+ID, deduplicates replicas, applies the normal advertised-context margin, and
+returns the combined list. Unset preserves the homogeneous-fleet behavior and
+proxies model discovery from one selected replica.
+
+The mapping is static startup authority, not service discovery. Use the exact
+`--served-model-name` advertised by each engine, and repeat an ID for multiple
+replicas of the same model. A successful readiness probe must advertise its
+configured ID before that upstream becomes healthy. Heterogeneous deployments
+must keep tokenizer/exact-KV features scoped to compatible models; the node06
+Qwen/GLM recipe disables them because one shared tokenizer or KV-event geometry
+cannot describe both engines.
 
 Decode load uses only the already journaled, low-cardinality effective output
 bucket. A bounded bucket reserves its upper edge; `4097+`, unset, and invalid

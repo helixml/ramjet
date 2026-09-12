@@ -18,9 +18,18 @@ pub struct PreparedRequest {
     pub fingerprints: Vec<u64>,
     pub tokenizer_body: Option<Bytes>,
     pub output_limit: OutputLimitObservation,
+    pub(crate) requested_model: RequestedModel,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RequestedModel {
+    Missing,
+    Invalid,
+    Named(String),
 }
 
 const OUTPUT_LIMIT_POLICY_VERSION: u8 = 1;
+const MAX_REQUESTED_MODEL_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum OutputLimitBucket {
@@ -230,8 +239,19 @@ impl PreparedRequest {
         prepare_tokenizer_body: bool,
     ) -> Self {
         let parsed = serde_json::from_slice::<Value>(raw).ok();
-        let (body, object, output_limit) = match parsed {
+        let (body, object, output_limit, requested_model) = match parsed {
             Some(Value::Object(mut object)) => {
+                let requested_model = match object.get("model") {
+                    None | Some(Value::Null) => RequestedModel::Missing,
+                    Some(Value::String(model))
+                        if !model.is_empty()
+                            && model.len() <= MAX_REQUESTED_MODEL_BYTES
+                            && !model.chars().any(char::is_control) =>
+                    {
+                        RequestedModel::Named(model.clone())
+                    }
+                    Some(_) => RequestedModel::Invalid,
+                };
                 let requested = output_limit(endpoint, &object);
                 let had_max_tokens = object.contains_key("max_tokens");
                 let had_max_completion_tokens = object.contains_key("max_completion_tokens");
@@ -250,9 +270,14 @@ impl PreparedRequest {
                 } else {
                     raw.to_vec()
                 };
-                (body, Some(object), output_limit)
+                (body, Some(object), output_limit, requested_model)
             }
-            _ => (raw.to_vec(), None, OutputLimitObservation::unparseable()),
+            _ => (
+                raw.to_vec(),
+                None,
+                OutputLimitObservation::unparseable(),
+                RequestedModel::Invalid,
+            ),
         };
         let fingerprints = router.fingerprints_preparsed(&body, object.as_ref());
         let tokenizer_body = prepare_tokenizer_body
@@ -268,6 +293,7 @@ impl PreparedRequest {
             fingerprints,
             tokenizer_body,
             output_limit,
+            requested_model,
         }
     }
 
@@ -404,6 +430,27 @@ mod tests {
             PreparedRequest::new(Endpoint::Chat, raw, 100_000, &router).body,
             raw
         );
+    }
+
+    #[test]
+    fn extracts_model_ownership_from_the_single_request_parse() {
+        let router = router();
+        for (body, expected) in [
+            (
+                br#"{"model":"glm-5.3-flash","messages":[]}"#.as_slice(),
+                RequestedModel::Named("glm-5.3-flash".to_owned()),
+            ),
+            (br#"{"messages":[]}"#.as_slice(), RequestedModel::Missing),
+            (br#"{"model":null}"#.as_slice(), RequestedModel::Missing),
+            (br#"{"model":""}"#.as_slice(), RequestedModel::Invalid),
+            (br#"{"model":7}"#.as_slice(), RequestedModel::Invalid),
+            (b"not-json".as_slice(), RequestedModel::Invalid),
+        ] {
+            assert_eq!(
+                PreparedRequest::new(Endpoint::Chat, body, 100_000, &router).requested_model,
+                expected
+            );
+        }
     }
 
     #[test]
