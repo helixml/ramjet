@@ -35,11 +35,15 @@ WORKLOAD_COUNTERS = (
         "vllm",
         "vllm:generation_tokens_total",
         "vllm:request_success_total",
+        "vllm:prompt_tokens_total",
+        "vllm:prompt_tokens_cached_total",
     ),
     (
         "sglang",
         "sglang:generation_tokens_total",
         "sglang:num_requests_total",
+        "sglang:prompt_tokens_total",
+        "sglang:cached_tokens_total",
     ),
 )
 
@@ -99,8 +103,14 @@ def fetch_speculative(url, timeout=10):
 
 
 def workload_values(body):
-    """Parse the minimal native counters shared by vLLM and SGLang cells."""
-    for backend, generation_name, requests_name in WORKLOAD_COUNTERS:
+    """Parse native workload counters shared by vLLM and SGLang cells."""
+    for (
+        backend,
+        generation_name,
+        requests_name,
+        prompt_name,
+        cached_prompt_name,
+    ) in WORKLOAD_COUNTERS:
         generation_tokens = metric_value(body, generation_name)
         finished_requests = metric_value(body, requests_name)
         if generation_tokens is not None and finished_requests is not None:
@@ -108,11 +118,15 @@ def workload_values(body):
                 "backend": backend,
                 "generation_tokens": generation_tokens,
                 "finished_requests": finished_requests,
+                "prompt_tokens": metric_value(body, prompt_name),
+                "cached_prompt_tokens": metric_value(body, cached_prompt_name),
             }
     return {
         "backend": None,
         "generation_tokens": None,
         "finished_requests": None,
+        "prompt_tokens": None,
+        "cached_prompt_tokens": None,
     }
 
 

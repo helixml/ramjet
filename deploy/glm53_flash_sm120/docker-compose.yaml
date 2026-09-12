@@ -75,11 +75,11 @@ services:
       - --attention-backend=dsa
       - --linear-attn-backend=triton
       - --context-length=524288
-      - --max-total-tokens=524288
+      - --max-total-tokens=${GLM53_MAX_TOTAL_TOKENS:-500000}
       - --kv-cache-dtype=fp8_e4m3
       - --mem-fraction-static=0.99
-      - --chunked-prefill-size=4096
-      - --max-prefill-tokens=4096
+      - --chunked-prefill-size=${GLM53_CHUNKED_PREFILL_SIZE:-6144}
+      - --max-prefill-tokens=${GLM53_MAX_PREFILL_TOKENS:-6144}
       - --max-running-requests=4
       - --max-mamba-cache-size=28
       - --mamba-ssm-dtype=bfloat16

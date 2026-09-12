@@ -70,3 +70,24 @@ The accepted node06 concurrency curve uses `bench/codebench.py` with
 under a fresh guard journal and must be rejected if SGLang request/generation
 counters do not exactly match response usage or if a late JIT marker lands
 inside the measured interval.
+
+Cold-prefill experiments use the same one-file deployment. The admitted
+defaults are 6,144 for both `GLM53_CHUNKED_PREFILL_SIZE` and
+`GLM53_MAX_PREFILL_TOKENS`, with `GLM53_MAX_TOTAL_TOKENS=500000`; set all three
+together when reproducing the measured memory/capacity trade.
+An 8,192-token candidate failed serving warmup with the full pool (125MiB free
+for a 256MiB sparse-attention output) and again at 500,000 tokens (244.94MiB
+free). `node06-prefill-6144-rollout.sh` is the one-time guarded, B-only
+transition owner from the former 4,096/524,288 recipe. It keeps the
+500,000-token pool to leave about 53MiB of margin
+above the proportional 192MiB output allocation. It requires the 600W inference
+ceiling on GPUs 4-5, verifies Qwen A before and after, and starts the guard's
+1,500-second inference budget only after model load, graph capture, and
+readiness. It fails immediately if the engine exits; a failed candidate is
+stopped instead of initiating another model load during a thermal abort.
+The admitted measurements reconciled native prompt, cached-prompt, generation,
+and request counters. Against 4,096, the 6,144 setting improved 8K cold prefill
+by 7.4%, c4 aggregate output by 4.7%, and c4 per-stream decode by 2.9%; 32K and
+64K cold prefill improved only about 1%. The 24,288-token (4.6%) pool reduction
+is therefore part of the accepted performance/capacity contract, not free
+headroom.

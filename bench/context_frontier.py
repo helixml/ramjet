@@ -7,8 +7,12 @@ Set BENCH_TOKEN (or VLLM_API_KEY). CONTEXT_TOKENS is a comma-separated target
 list (default: 2000,8000,32000,64000,128000), MAX_OUTPUT_TOKENS defaults to
 256. METRICS_URLS optionally lists comma-separated engine /metrics endpoints;
 METRICS_URL remains a supported single-endpoint alias. Set
+BENCH_IGNORE_EOS=1 when every decode sample must reach MAX_OUTPUT_TOKENS. Set
 BENCH_REQUIRE_RECONCILED_SPECULATION=1 to require exact client/native request,
-prompt-token, generation-token, and speculative-decoding reconciliation.
+prompt-token, cached-prompt-token, and generation-token reconciliation. vLLM
+must also expose exactly reconciled speculative-decoding counters; SGLang does
+not currently publish cumulative proposed/accepted-token counters, so its
+speculation field is explicitly unavailable rather than inferred from gauges.
 
 Run this sequentially, preferably through the production router so its load
 reservation protects unrelated traffic. Every cold prompt diverges at block
@@ -26,7 +30,7 @@ import sys
 import time
 import urllib.request
 
-from engine_metrics import metric_value, speculative_delta
+from engine_metrics import metric_value, speculative_delta, workload_values
 
 
 BASE = sys.argv[1].rstrip("/")
@@ -41,6 +45,7 @@ TARGETS = [
     if value.strip()
 ]
 MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "256"))
+IGNORE_EOS = os.environ.get("BENCH_IGNORE_EOS", "0")
 METRICS_URLS = [
     value.strip()
     for value in os.environ.get("METRICS_URLS", os.environ.get("METRICS_URL", "")).split(",")
@@ -59,6 +64,9 @@ if RUNS <= 0 or MAX_OUTPUT_TOKENS <= 1 or not TARGETS or min(TARGETS) <= 0:
 if REQUIRE_RECONCILED not in {"0", "1"}:
     raise SystemExit("BENCH_REQUIRE_RECONCILED_SPECULATION must be 0 or 1")
 REQUIRE_RECONCILED = REQUIRE_RECONCILED == "1"
+if IGNORE_EOS not in {"0", "1"}:
+    raise SystemExit("BENCH_IGNORE_EOS must be 0 or 1")
+IGNORE_EOS = IGNORE_EOS == "1"
 if REQUIRE_RECONCILED and not METRICS_URLS:
     raise SystemExit(
         "BENCH_REQUIRE_RECONCILED_SPECULATION=1 requires METRICS_URLS or METRICS_URL"
@@ -68,10 +76,7 @@ FILLER = (
     "The subsystem records each transaction in an append-only ledger and "
     "reconciles the balance against the upstream snapshot on every commit. "
 )
-METRIC_NAMES = {
-    "prompt_tokens": "vllm:prompt_tokens_total",
-    "generation_tokens": "vllm:generation_tokens_total",
-    "finished_requests": "vllm:request_success_total",
+VLLM_SPEC_METRICS = {
     "draft_steps": "vllm:spec_decode_num_drafts_total",
     "proposed_tokens": "vllm:spec_decode_num_draft_tokens_total",
     "accepted_tokens": "vllm:spec_decode_num_accepted_tokens_total",
@@ -113,6 +118,7 @@ def request(prompt, max_tokens=MAX_OUTPUT_TOKENS):
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0,
+        "ignore_eos": IGNORE_EOS,
         "stream": True,
         "stream_options": {"include_usage": True},
     }
@@ -178,20 +184,34 @@ def metric_snapshot():
     if not METRICS_URLS:
         return None
     try:
-        snapshot = {key: 0.0 for key in METRIC_NAMES}
-        available = {key: True for key in METRIC_NAMES}
+        snapshot = None
         for metrics_url in METRICS_URLS:
             with urllib.request.urlopen(metrics_url, timeout=30) as response:
                 body = response.read().decode("utf-8", "replace")
-            for key, name in METRIC_NAMES.items():
-                value = metric_value(body, name)
-                if value is None:
-                    available[key] = False
-                elif available[key]:
-                    snapshot[key] += value
-        return {
-            key: snapshot[key] if available[key] else None for key in METRIC_NAMES
-        }
+            current = workload_values(body)
+            if not current["backend"]:
+                return None
+            current.update(
+                {
+                    key: (
+                        metric_value(body, name)
+                        if current["backend"] == "vllm"
+                        else None
+                    )
+                    for key, name in VLLM_SPEC_METRICS.items()
+                }
+            )
+            if snapshot is None:
+                snapshot = current
+                continue
+            if snapshot["backend"] != current["backend"]:
+                return None
+            for key in current:
+                if key == "backend":
+                    continue
+                left, right = snapshot[key], current[key]
+                snapshot[key] = None if left is None or right is None else left + right
+        return snapshot
     except Exception:
         return None
 
@@ -220,20 +240,23 @@ def reconcile(samples, before, after):
     client = {
         "requests": len(good),
         "prompt_tokens": sum(sample["prompt_tokens"] for sample in good),
+        "cached_prompt_tokens": sum(sample["cached_tokens"] for sample in good),
         "generation_tokens": sum(sample["completion_tokens"] for sample in good),
     }
+    backend = before.get("backend") if before else None
     speculative = speculative_delta(
         before,
         after,
         client["generation_tokens"],
         client["requests"],
-        expected_enabled=True,
+        expected_enabled=True if backend == "vllm" else None,
     )
     engine = {key: None for key in client}
     if before is not None and after is not None:
         for client_key, engine_key in (
             ("requests", "finished_requests"),
             ("prompt_tokens", "prompt_tokens"),
+            ("cached_prompt_tokens", "cached_prompt_tokens"),
             ("generation_tokens", "generation_tokens"),
         ):
             left = before.get(engine_key)
@@ -244,7 +267,9 @@ def reconcile(samples, before, after):
         key: None if engine[key] is None else engine[key] == client[key]
         for key in client
     }
-    comparisons = (*matches.values(), speculative.get("reconciled"))
+    comparisons = tuple(matches.values())
+    if backend == "vllm":
+        comparisons += (speculative.get("reconciled"),)
     if any(value is False for value in comparisons):
         contaminated = True
     elif all(value is True for value in comparisons):
@@ -255,6 +280,7 @@ def reconcile(samples, before, after):
         "client": client,
         "engine": engine,
         "matches": matches,
+        "backend": backend,
         "speculation": speculative,
         "contaminated": contaminated,
         "reconciled": contaminated is False,
@@ -297,6 +323,7 @@ print(json.dumps({
     "runs": RUNS,
     "targets": TARGETS,
     "max_output_tokens": MAX_OUTPUT_TOKENS,
+    "ignore_eos": IGNORE_EOS,
     "metrics_endpoints": len(METRICS_URLS),
     "require_reconciled_speculation": REQUIRE_RECONCILED,
     "salt": SALT,
