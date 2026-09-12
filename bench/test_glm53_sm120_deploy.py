@@ -1,4 +1,5 @@
 import pathlib
+import shutil
 import subprocess
 import unittest
 
@@ -8,6 +9,10 @@ DEPLOY = ROOT / "deploy/glm53_flash_sm120"
 
 
 class Glm53Sm120DeployTests(unittest.TestCase):
+    @unittest.skipUnless(
+        shutil.which("docker"),
+        "Docker Compose is validated in the deployment lane",
+    )
     def test_compose_semantic_validator_passes(self):
         result = subprocess.run(
             ["python3", str(DEPLOY / "validate-compose.py")],
