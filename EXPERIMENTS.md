@@ -1,5 +1,85 @@
 # node06 experiment journal
 
+## 2026-09-12 — GLM SM120 6K prefill admitted; 8K rejected; vLLM still blocked
+
+Question: can the isolated GLM-5.3-Flash engine B improve cold prefill,
+aggregate output, or per-stream decode without changing Qwen A? Answer:
+**yes with 6,144-token prefill chunks and a 500,000-token shared pool.** The
+trade gives up 24,288 token slots (4.6%) and is therefore recorded as an
+explicit capacity/performance choice, not free headroom. Qwen A's container
+identity, image, start time, restart count, and health remained unchanged.
+
+`bench/context_frontier.py` now reconciles backend-neutral request, prompt,
+cached-prompt, and generation counters for both vLLM and SGLang. Its reported
+prefill rate is effective uncached prompt tokens divided by TTFT, including
+scheduler and first-token overhead. `BENCH_IGNORE_EOS=1` forces every decode
+sample to 256 output tokens. SGLang does not publish cumulative speculative
+proposed/accepted counters, so speculation is reported as unavailable rather
+than inferred from a gauge. The GPU-free gate passed agentbench validation,
+723 Python tests, all Rust tests, Clippy, and the locked release build.
+
+The 4,096-token control at a 450W ceiling produced 5,174, 5,434, 5,897, and
+5,881 effective tok/s at 2K, 8K, 32K, and 64K context. A forced-length
+8K/64K ABBA at 450W/600W showed no power response: prefill stayed within
+5,413-5,431 and 5,883-5,887 tok/s while candidate GPUs drew only 223-233W.
+The inference ceiling remains 600W as requested, but it is not the limiter.
+
+An 8,192-token candidate with the full 524,288-token pool loaded target and
+NextN weights and captured every graph, then failed built-in serving warmup.
+The SM120 sparse-attention path requested a 256MiB output with only 124.94MiB
+free. Capping the pool at 500,000 freed exactly 120MiB, but the same allocation
+still had only 244.94MiB free. Both failures occurred before readiness or a
+benchmark request, had no container OOM kill, restart, Xid, or thermal event,
+and stopped only GLM B. The rollout owner was fixed to fail immediately when
+the engine exits instead of polling until its 40-minute readiness deadline.
+
+The 6,144/500,000 candidate passed the same warmup, became ready in 1,036
+seconds, and passed its direct smoke. The complete and repeat frontiers used
+fresh guard journals and exact native counter reconciliation:
+
+| context | 4K control prefill | 6K candidate prefill | change | 6K cold / warm decode |
+|---|---:|---:|---:|---:|
+| 2K | 5,174 tok/s | 5,174 tok/s | 0.0% | 161.3 / 165.7 tok/s |
+| 8K | 5,415 tok/s forced controls | 5,817 tok/s | **+7.4%** | 154.6 / 164.5 tok/s |
+| 32K | 5,897 tok/s | 5,961 tok/s | +1.1% | 151.2 / 157.4 tok/s |
+| 64K | 5,884 tok/s forced controls | 5,951 tok/s | +1.1% | 164.3 / 171.8 tok/s |
+
+Early frontier and c4 passes exposed late text-shape Triton loads and were
+retained only as warmup; the table and c4 result below come from subsequent
+intervals with no late-load marker.
+
+The clean c4 code cell completed 20/20 requests at **388.2 aggregate tok/s** and
+**109.4 per-stream tok/s**, versus the retained 4K result of 370.7 and 106.3:
++4.7% aggregate and +2.9% per stream. Native requests and all 5,120 generated
+tokens reconciled exactly. Its guard passed at 42C intake and 62C peak GLM GPU;
+the long-context repeat passed at 42C intake and 73C peak GPU. No late JIT
+marker landed in a measured interval.
+
+The current backend survey did not identify a second safe live candidate.
+[vLLM v0.29.0](https://github.com/vllm-project/vllm/releases/tag/v0.29.0)
+still lacks merged SM120 NoPE support; the required
+[#55277](https://github.com/vllm-project/vllm/pull/55277) is open/dirty.
+Its promising FlashKDA prefill
+[#55737](https://github.com/vllm-project/vllm/pull/55737) and masked-MHA NoPE
+prefill [#55738](https://github.com/vllm-project/vllm/pull/55738) changes are
+also open and blocked/dirty. SGLang's small-batch SM120 BA projection
+[#38635](https://github.com/sgl-project/sglang/pull/38635) is blocked, while
+the metadata fusion [#38213](https://github.com/sgl-project/sglang/pull/38213)
+is already enabled in the canary and claims no isolated end-to-end result.
+Compact NoPE storage [#38430](https://github.com/sgl-project/sglang/pull/38430)
+adds capacity rather than a demonstrated speedup and remains open.
+
+Decision: promote 6,144/6,144/500,000 as the deployment defaults; retain
+`--max-running-requests=4`, adaptive EAGLE 5/1/6, and every other engine knob.
+Leave GLM B loopback/LB-isolated on GPUs 4-5 at the measured settings and
+600W ceiling, with GPUs 6-7 free. Evidence is under
+`20260912T1058Z-prefill8192`, `20260912T1124Z-prefill8192-500k`,
+`20260912T1142Z-prefill6144-500k`, `20260912T1201Z-prefill6144-frontier-r2`,
+`20260912T1204Z-prefill6144-repeat`,
+`20260912T1213Z-prefill6144-frontier-final`, and
+`20260912T1216Z-prefill6144-c4-clean` in
+the GLM experiment directory on node06.
+
 ## 2026-09-12 — GLM-5.3-Flash SM120 TP2 runs beside Qwen A; parser fixed and c4 retained
 
 Question: can a new W4A16 NVFP4 GLM-5.3-Flash quant run on node06 engine B

@@ -49,6 +49,22 @@ class Glm53Sm120DeployTests(unittest.TestCase):
             canary.index('glm_serve_probe || fail'),
         )
 
+    def test_prefill_candidate_bounds_memory_and_defers_inference_budget(self):
+        compose = (DEPLOY / "docker-compose.yaml").read_text()
+        rollout = (DEPLOY / "node06-prefill-6144-rollout.sh").read_text()
+        self.assertIn("${GLM53_CHUNKED_PREFILL_SIZE:-6144}", compose)
+        self.assertIn("${GLM53_MAX_PREFILL_TOKENS:-6144}", compose)
+        self.assertIn("${GLM53_MAX_TOTAL_TOKENS:-500000}", compose)
+        self.assertIn("GLM53_CHUNKED_PREFILL_SIZE=6144", rollout)
+        self.assertIn("GLM53_MAX_PREFILL_TOKENS=6144", rollout)
+        self.assertIn("GLM53_MAX_TOTAL_TOKENS=500000", rollout)
+        self.assertIn('.State.Status == "running"', rollout)
+        self.assertIn("exact failed 8K warmup", rollout)
+        self.assertLess(
+            rollout.index("start_inference_budget\n"),
+            rollout.index('glm_probe || fail'),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

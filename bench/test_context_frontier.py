@@ -15,6 +15,8 @@ class FrontierHandler(BaseHTTPRequestHandler):
     request_calls = 0
     metrics_calls = 0
     contaminate = False
+    backend = "vllm"
+    ignore_eos_values = []
 
     def log_message(self, _format, *_args):
         return
@@ -23,7 +25,10 @@ class FrontierHandler(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             self.send_error(404)
             return
-        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        request = json.loads(
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        )
+        self.__class__.ignore_eos_values.append(request.get("ignore_eos"))
         self.__class__.request_calls += 1
         event = {
             "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}],
@@ -49,14 +54,23 @@ class FrontierHandler(BaseHTTPRequestHandler):
             self.__class__.contaminate and self.__class__.metrics_calls > 0
         )
         self.__class__.metrics_calls += 1
-        values = {
-            "vllm:prompt_tokens_total": 10 * calls,
-            "vllm:generation_tokens_total": 2 * calls + contamination,
-            "vllm:request_success_total": calls,
-            "vllm:spec_decode_num_drafts_total": calls,
-            "vllm:spec_decode_num_draft_tokens_total": 3 * calls,
-            "vllm:spec_decode_num_accepted_tokens_total": 2 * calls,
-        }
+        if self.__class__.backend == "sglang":
+            values = {
+                "sglang:prompt_tokens_total": 10 * calls,
+                "sglang:cached_tokens_total": 0,
+                "sglang:generation_tokens_total": 2 * calls + contamination,
+                "sglang:num_requests_total": calls,
+            }
+        else:
+            values = {
+                "vllm:prompt_tokens_total": 10 * calls,
+                "vllm:prompt_tokens_cached_total": 0,
+                "vllm:generation_tokens_total": 2 * calls + contamination,
+                "vllm:request_success_total": calls,
+                "vllm:spec_decode_num_drafts_total": calls,
+                "vllm:spec_decode_num_draft_tokens_total": 3 * calls,
+                "vllm:spec_decode_num_accepted_tokens_total": 2 * calls,
+            }
         body = "".join(
             f'{name}{{model_name="model"}} {value}\n'
             for name, value in values.items()
@@ -69,10 +83,12 @@ class FrontierHandler(BaseHTTPRequestHandler):
 
 
 class ContextFrontierTest(unittest.TestCase):
-    def run_frontier(self, *, contaminate=False):
+    def run_frontier(self, *, contaminate=False, backend="vllm"):
         FrontierHandler.request_calls = 0
         FrontierHandler.metrics_calls = 0
         FrontierHandler.contaminate = contaminate
+        FrontierHandler.backend = backend
+        FrontierHandler.ignore_eos_values = []
         server = ThreadingHTTPServer(("127.0.0.1", 0), FrontierHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -84,6 +100,7 @@ class ContextFrontierTest(unittest.TestCase):
             "MAX_OUTPUT_TOKENS": "2",
             "METRICS_URL": base + "/metrics",
             "BENCH_REQUIRE_RECONCILED_SPECULATION": "1",
+            "BENCH_IGNORE_EOS": "1",
             "SALT": "test-only",
         }
         try:
@@ -108,6 +125,7 @@ class ContextFrontierTest(unittest.TestCase):
         result = self.run_frontier()
         self.assertEqual(result.returncode, 0, result.stderr)
         report = self.report(result)
+        self.assertTrue(all(FrontierHandler.ignore_eos_values))
         self.assertIsNotNone(report["cold"]["ttft_ms_mean"])
         self.assertIn("ttft_ms_median", report["cold"])
         self.assertIn("ttft_ms_p95", report["cold"])
@@ -116,12 +134,22 @@ class ContextFrontierTest(unittest.TestCase):
             self.assertTrue(reconciliation["reconciled"])
             self.assertEqual(
                 reconciliation["client"],
-                {"requests": 2, "prompt_tokens": 20, "generation_tokens": 4},
+                {
+                    "requests": 2,
+                    "prompt_tokens": 20,
+                    "cached_prompt_tokens": 0,
+                    "generation_tokens": 4,
+                },
             )
             self.assertEqual(reconciliation["engine"], reconciliation["client"])
             self.assertEqual(
                 reconciliation["matches"],
-                {"requests": True, "prompt_tokens": True, "generation_tokens": True},
+                {
+                    "requests": True,
+                    "prompt_tokens": True,
+                    "cached_prompt_tokens": True,
+                    "generation_tokens": True,
+                },
             )
             self.assertTrue(reconciliation["speculation"]["reconciled"])
             self.assertEqual(report[f"{phase}_dspark"]["draft_tokens"], 6)
@@ -137,6 +165,18 @@ class ContextFrontierTest(unittest.TestCase):
             report["cold_reconciliation"]["matches"]["generation_tokens"]
         )
         self.assertEqual(report["measurement_error"], "native_metrics_not_reconciled")
+
+    def test_sglang_reconciles_workload_with_explicitly_unavailable_speculation(self):
+        result = self.run_frontier(backend="sglang")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = self.report(result)
+        for phase in ("cold", "warm"):
+            reconciliation = report[f"{phase}_reconciliation"]
+            self.assertTrue(reconciliation["reconciled"])
+            self.assertEqual(reconciliation["backend"], "sglang")
+            self.assertEqual(reconciliation["speculation"]["state"], "unavailable")
+            self.assertFalse(reconciliation["speculation"]["reconciled"])
+            self.assertIsNone(report[f"{phase}_dspark"])
 
 
 if __name__ == "__main__":

@@ -22,7 +22,31 @@ sglang:num_requests_total{is_streaming="true"} 3
 '''
         self.assertEqual(
             workload_values(body),
-            {"backend": "sglang", "generation_tokens": 22, "finished_requests": 5},
+            {
+                "backend": "sglang",
+                "generation_tokens": 22,
+                "finished_requests": 5,
+                "prompt_tokens": None,
+                "cached_prompt_tokens": None,
+            },
+        )
+
+    def test_workload_values_includes_sglang_prefill_and_cache_counters(self):
+        body = '''
+sglang:generation_tokens_total{is_streaming="true"} 12
+sglang:num_requests_total{is_streaming="true"} 3
+sglang:prompt_tokens_total{is_streaming="true"} 8192
+sglang:cached_tokens_total{cache_source="device"} 4096
+'''
+        self.assertEqual(
+            workload_values(body),
+            {
+                "backend": "sglang",
+                "generation_tokens": 12,
+                "finished_requests": 3,
+                "prompt_tokens": 8192,
+                "cached_prompt_tokens": 4096,
+            },
         )
 
     def test_workload_delta_reconciles_sglang_and_rejects_contamination(self):
