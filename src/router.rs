@@ -175,6 +175,50 @@ pub struct Decision {
 }
 
 impl Decision {
+    /// Restricts this request to the upstreams that own its selected model.
+    ///
+    /// Candidate state retains full upstream cardinality because exact-route
+    /// diagnostics bind to one inventory per configured upstream. Ineligible
+    /// replicas are made non-serving and moved behind the eligible score set;
+    /// the dispatch order itself contains only eligible replicas, so neither
+    /// ordinary routing nor fail-open can cross a model boundary.
+    pub(crate) fn restrict_to(&mut self, eligible: &[bool]) -> bool {
+        if eligible.len() != self.candidate_state.len()
+            || self
+                .candidate_state
+                .iter()
+                .any(|candidate| candidate.index >= eligible.len())
+        {
+            return false;
+        }
+        self.candidates
+            .retain(|candidate| eligible.get(*candidate).copied().unwrap_or(false));
+        if self.candidates.is_empty() {
+            return false;
+        }
+        for candidate in &mut self.candidate_state {
+            candidate.healthy &= eligible[candidate.index];
+        }
+        self.candidate_state
+            .sort_by_key(|candidate| !eligible[candidate.index]);
+        for (rank, candidate) in self.candidate_state.iter_mut().enumerate() {
+            candidate.rank = rank;
+        }
+        let selected = self.candidates[0];
+        let winner = self
+            .candidate_state
+            .iter()
+            .find(|candidate| candidate.index == selected)
+            .expect("eligible candidate state must exist");
+        self.overlap_blocks = winner.overlap_blocks;
+        self.affinity_blocks = winner.affinity_blocks;
+        self.load_units = winner.request_load_units;
+        if self.candidates.len() == 1 {
+            self.outcome = Outcome::Single;
+        }
+        true
+    }
+
     /// Preserve a bounded decode reservation after any exact-prefix
     /// recomputation has adjusted candidate-specific prefill work.
     pub(crate) fn apply_request_load_floor(&mut self, load_floor: usize) {
@@ -1186,6 +1230,33 @@ mod tests {
                 .all(|candidate| candidate.request_load_units == 4)
         );
         assert_eq!(decision.load_units, 4);
+    }
+
+    #[test]
+    fn model_restriction_fences_dispatch_and_fail_open_but_keeps_full_state() {
+        let router = Router::new(config());
+        router.set_healthy(0, false);
+        router.set_healthy(1, true);
+        let mut decision = router.route_prepared(1, &[]);
+        assert_eq!(decision.candidates[0], 1);
+
+        assert!(decision.restrict_to(&[true, false]));
+        assert_eq!(decision.candidates, [0]);
+        assert_eq!(decision.candidate_state.len(), 2);
+        assert_eq!(decision.candidate_state[0].index, 0);
+        assert!(!decision.candidate_state[0].healthy);
+        assert_eq!(decision.candidate_state[1].index, 1);
+        assert!(!decision.candidate_state[1].healthy);
+        assert_eq!(decision.outcome, Outcome::Single);
+    }
+
+    #[test]
+    fn model_restriction_rejects_empty_or_wrong_cardinality_masks() {
+        let router = Router::new(config());
+        for mask in [&[][..], &[false, false][..], &[true][..]] {
+            let mut decision = router.route_prepared(1, &[]);
+            assert!(!decision.restrict_to(mask));
+        }
     }
 
     #[test]

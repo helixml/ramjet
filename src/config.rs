@@ -42,10 +42,15 @@ const MAX_PREFIX_SINGLE_FLIGHT_CAPACITY: usize = 100_000;
 const MAX_AFFINITY_HORIZON_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_UPSTREAM_WARMUP_STABLE_SECONDS: usize = 15 * 60;
 const MAX_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES: usize = 60;
+const MAX_UPSTREAM_MODEL_BYTES: usize = 256;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub upstreams: Vec<Url>,
+    /// Exact model ID owned by each upstream. Empty preserves the legacy
+    /// homogeneous-fleet contract in which every upstream may serve every
+    /// request and `/v1/models` is proxied from one selected replica.
+    pub upstream_models: Vec<String>,
     pub upstream_token: Option<String>,
     pub upstream_admission_mode: UpstreamAdmissionMode,
     pub upstream_admission_timeout_ms: usize,
@@ -465,6 +470,31 @@ impl Config {
         if upstreams.is_empty() {
             return Err(ConfigError::NoUpstreams);
         }
+        let upstream_models = match get("RJ_UPSTREAM_MODELS") {
+            None => Vec::new(),
+            Some(raw) => {
+                let models = raw.split(',').map(str::trim).collect::<Vec<_>>();
+                if models.len() != upstreams.len() {
+                    return Err(invalid(
+                        "RJ_UPSTREAM_MODELS",
+                        raw,
+                        "exactly one model ID per RJ_UPSTREAM entry",
+                    ));
+                }
+                if models.iter().any(|model| {
+                    model.is_empty()
+                        || model.len() > MAX_UPSTREAM_MODEL_BYTES
+                        || model.chars().any(char::is_control)
+                }) {
+                    return Err(invalid(
+                        "RJ_UPSTREAM_MODELS",
+                        raw,
+                        "non-empty model IDs of at most 256 bytes without control characters",
+                    ));
+                }
+                models.into_iter().map(str::to_owned).collect()
+            }
+        };
         let upstream_token = get("RJ_UPSTREAM_TOKEN").filter(|value| !value.is_empty());
 
         let route_alpha = parse(
@@ -737,6 +767,7 @@ impl Config {
 
         Ok(Self {
             upstreams,
+            upstream_models,
             upstream_token,
             upstream_admission_mode,
             upstream_warmup_mode,
@@ -2249,6 +2280,45 @@ mod tests {
             "RJ_UPSTREAM" => Some("http://a:8000,http://b:8000".to_owned()),
             other => overrides.get(other).map(|value| (*value).to_owned()),
         })
+    }
+
+    #[test]
+    fn upstream_model_ownership_is_explicit_dense_and_bounded() {
+        let legacy = two_upstreams(&[]).unwrap();
+        assert!(legacy.upstream_models.is_empty());
+
+        let mapped =
+            two_upstreams(&[("RJ_UPSTREAM_MODELS", "qwen3.8-flash-next, glm-5.3-flash")]).unwrap();
+        assert_eq!(
+            mapped.upstream_models,
+            ["qwen3.8-flash-next", "glm-5.3-flash"]
+        );
+
+        for invalid_models in [
+            "qwen3.8-flash-next",
+            "qwen3.8-flash-next,",
+            "qwen3.8-flash-next,glm-5.3-flash,third",
+            "qwen3.8-flash-next,glm\n5.3-flash",
+        ] {
+            let error = two_upstreams(&[("RJ_UPSTREAM_MODELS", invalid_models)])
+                .expect_err("an ambiguous model ownership map must fail startup");
+            assert!(
+                matches!(
+                    error,
+                    ConfigError::InvalidValue {
+                        key: "RJ_UPSTREAM_MODELS",
+                        ..
+                    }
+                ),
+                "{invalid_models:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_model_ownership_allows_replicas_of_the_same_model() {
+        let config = two_upstreams(&[("RJ_UPSTREAM_MODELS", "model-a,model-a")]).unwrap();
+        assert_eq!(config.upstream_models, ["model-a", "model-a"]);
     }
 
     /// The seconds-suffixed names are the deployment contract. A half-finished

@@ -1,0 +1,70 @@
+# Ramjet-only node06 deployment joining the independently owned Qwen TP4 and
+# GLM TP2 engine networks. Engine lifecycles remain with their source Compose
+# projects; this file may recreate only the stateless load balancer.
+name: qwen38_glm53_multimodel
+
+services:
+  ds4-loadbalancer:
+    image: ${LB_IMAGE:?set LB_IMAGE to an immutable tag@sha256 reference}
+    container_name: ${LB_CONTAINER_NAME:-ds4-loadbalancer}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${LB_API_PORT:-8006}:8000"
+      - "127.0.0.1:${LB_METRICS_PORT:-8007}:9090"
+      - "100.89.187.17:${LB_TAILSCALE_METRICS_PORT:-8007}:9090"
+    volumes:
+      - /var/lib/ramjet-machineview:/machineview
+    networks:
+      - qwen-engine
+      - glm-engine
+      - machineview-host
+    environment:
+      RJ_UPSTREAM: http://qwen38flashnext-a:8000,http://glm53sm120-b:8000
+      RJ_UPSTREAM_MODELS: qwen3.8-flash-next,glm-5.3-flash
+      # SGLang accepts the unused bearer header; Qwen requires it. The shared
+      # value therefore remains the narrowest credential contract supported by
+      # the current Ramjet upstream client.
+      RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:?set VLLM_API_KEY in protected mode-0600 .env}
+      RJ_UI_AUTH_TOKEN: ${RJ_UI_AUTH_TOKEN:?set RJ_UI_AUTH_TOKEN in protected mode-0600 .env}
+      RJ_ADVERTISE_CTX_MARGIN: "8192"
+      RJ_MAX_TOKENS_STRIP: "0"
+      RJ_AFFINITY: prefix
+      RJ_ROUTE_ALPHA: "4"
+      RJ_ROUTE_CHUNK_BYTES: "2048"
+      RJ_ROUTE_MAX_PREFIX_BYTES: "2097152"
+      RJ_ROUTE_MAX_OVERLAP_BLOCKS: "32"
+      RJ_ROUTE_LOAD_UNIT_BYTES: "32768"
+      RJ_ROUTE_MAX_LOAD_UNITS: "8"
+      RJ_ROUTE_PHASE_AWARE_LOAD: "true"
+      RJ_ROUTE_DECODE_LOAD_UNIT_TOKENS: "256"
+      RJ_ROUTE_DECODE_MAX_LOAD_UNITS: "4"
+      RJ_ROUTE_PROJECTED_LOAD: "false"
+      RJ_ROUTE_SPECULATION_MODE: "off"
+      RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE: "off"
+      RJ_ROUTE_AFFINITY_HORIZON_MODE: "off"
+      RJ_ROUTE_JOURNAL: "true"
+      # One tokenizer, compatibility manifest, or KV-event geometry cannot be
+      # authority for both model families. These remain explicitly off until
+      # Ramjet supports per-model instances of those features.
+      RJ_TOKENIZER_MODE: "off"
+      RJ_EXACT_ROUTE_MODE: "off"
+      RJ_KV_EVENT_MODE: "off"
+      RJ_SNAPSHOT_ROUTE_MODE: "off"
+      RJ_UPSTREAM_ADMISSION_MODE: http
+      RJ_UPSTREAM_WARMUP_MODE: enforce
+      RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES: "3"
+      RJ_UPSTREAM_WARMUP_STABLE_SECONDS: "30"
+      RJ_IDLE_DRAIN_MODE: "off"
+      RJ_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
+      RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json
+
+networks:
+  qwen-engine:
+    external: true
+    name: qwen38_flash_next_default
+  glm-engine:
+    external: true
+    name: glm53_flash_sm120_default
+  machineview-host:
+    external: true
+    name: qwen38_27b_default

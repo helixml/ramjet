@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io,
     sync::{
         Arc,
@@ -16,6 +17,7 @@ use axum::{
 use futures_util::StreamExt;
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{
     sync::mpsc,
@@ -41,7 +43,7 @@ use crate::{
     kv_consumer::SharedFencedInventory,
     metrics::Metrics,
     prefix_single_flight::{PrefixSingleFlight, PrefixSingleFlightConfig, PrefixSingleFlightGuard},
-    prepare::PreparedRequest,
+    prepare::{PreparedRequest, RequestedModel},
     router::{Decision, LoadGuard, Router},
     session::OpaqueSession,
     session_affinity::SessionAffinity,
@@ -231,6 +233,12 @@ struct HealthResponse {
     active_replicas: usize,
     total_replicas: usize,
     replicas: Vec<ReplicaHealth>,
+}
+
+#[derive(Serialize)]
+struct ModelListResponse {
+    object: &'static str,
+    data: Vec<Value>,
 }
 
 #[derive(Serialize)]
@@ -1260,6 +1268,11 @@ impl Proxy {
         let opaque_session = opaque_session_id(&parts.headers);
         let endpoint = shims::endpoint(parts.uri.path());
         let endpoint_label = endpoint.label();
+        if !self.inner.config.upstream_models.is_empty()
+            && is_models_request(&parts.method, &parts.uri)
+        {
+            return self.serve_models_aggregated(endpoint_label, started).await;
+        }
         let Ok(raw_body) = to_bytes(inbound_body, MAX_REQUEST_BODY).await else {
             return json_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -1299,8 +1312,41 @@ impl Proxy {
         } else {
             None
         };
-        let (approximate_decision, speculation_profile, affinity_horizon) =
+        let (mut approximate_decision, speculation_profile, affinity_horizon) =
             prepared.route_profiled(&self.inner.router, endpoint, decode_load_units);
+        if !self.inner.config.upstream_models.is_empty() {
+            let model = match &prepared.requested_model {
+                RequestedModel::Named(model) => model,
+                RequestedModel::Missing | RequestedModel::Invalid => {
+                    self.record_error(
+                        endpoint_label,
+                        "model_required",
+                        StatusCode::BAD_REQUEST,
+                        started.elapsed(),
+                    );
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        "a valid model is required for this deployment",
+                    );
+                }
+            };
+            let eligible = self
+                .inner
+                .config
+                .upstream_models
+                .iter()
+                .map(|configured| configured == model)
+                .collect::<Vec<_>>();
+            if !approximate_decision.restrict_to(&eligible) {
+                self.record_error(
+                    endpoint_label,
+                    "model_not_found",
+                    StatusCode::NOT_FOUND,
+                    started.elapsed(),
+                );
+                return json_error(StatusCode::NOT_FOUND, "model not found");
+            }
+        }
         self.inner
             .metrics
             .route_speculation_profile
@@ -1506,13 +1552,7 @@ impl Proxy {
             );
         }
         let pre_route_tokens = pre_route_tokens.map(|tokens| tokens.tokens);
-        let is_models = parts.method == Method::GET
-            && parts
-                .uri
-                .path()
-                .trim_end_matches('/')
-                .ends_with("/v1/models")
-            && status == StatusCode::OK;
+        let is_models = is_models_request(&parts.method, &parts.uri) && status == StatusCode::OK;
         if is_models {
             return self
                 .serve_models(
@@ -1743,6 +1783,105 @@ impl Proxy {
             result,
             "request complete"
         );
+    }
+
+    /// Fan out model discovery only when explicit per-upstream ownership is
+    /// configured. Each engine's advertised record must match its configured
+    /// ID; unexpected aliases are not exposed and cannot become routing
+    /// authority. Replica duplicates collapse to one stable model entry.
+    async fn serve_models_aggregated(&self, endpoint: &str, started: Instant) -> Response<Body> {
+        let results = futures_util::stream::iter(0..self.inner.config.upstreams.len())
+            .map(|upstream| async move {
+                let result = self.fetch_configured_model(upstream).await;
+                (upstream, result)
+            })
+            .buffer_unordered(MAX_CONCURRENT_UPSTREAM_PROBES)
+            .collect::<Vec<_>>()
+            .await;
+        let mut models = BTreeMap::new();
+        for (upstream, result) in results {
+            match result {
+                Ok(model) => {
+                    let id = self.inner.config.upstream_models[upstream].clone();
+                    models.entry(id).or_insert(model);
+                    self.record_upstream_request(upstream, StatusCode::OK);
+                }
+                Err(reason) => {
+                    self.inner
+                        .metrics
+                        .upstream_errors
+                        .with_label_values(&[endpoint, reason])
+                        .inc();
+                    tracing::warn!(upstream, reason, "model discovery source unavailable");
+                }
+            }
+        }
+        if models.is_empty() {
+            self.record_error(
+                endpoint,
+                "models_unavailable",
+                StatusCode::BAD_GATEWAY,
+                started.elapsed(),
+            );
+            return json_error(StatusCode::BAD_GATEWAY, "model discovery unavailable");
+        }
+        let encoded = serde_json::to_vec(&ModelListResponse {
+            object: "list",
+            data: models.into_values().collect(),
+        })
+        .unwrap_or_else(|_| br#"{"object":"list","data":[]}"#.to_vec());
+        let body =
+            shims::shrink_advertised_context(&encoded, self.inner.config.advertise_ctx_margin);
+        self.record_request(endpoint, StatusCode::OK, false, started.elapsed());
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .expect("valid combined model response")
+    }
+
+    async fn fetch_configured_model(&self, upstream: usize) -> Result<Value, &'static str> {
+        let expected = self
+            .inner
+            .config
+            .upstream_models
+            .get(upstream)
+            .ok_or("configuration")?;
+        let uri = Uri::from_static("/v1/models");
+        let url = upstream_url(&self.inner.config.upstreams[upstream], &uri);
+        let mut request = self.inner.client.get(url).timeout(Duration::from_secs(5));
+        if let Some(token) = &self.inner.config.upstream_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| upstream_error_reason(&error))?;
+        if response.status() != StatusCode::OK {
+            self.inner
+                .metrics
+                .upstream_requests
+                .with_label_values(&[
+                    &self.upstream_label(upstream),
+                    response.status().as_str(),
+                ])
+                .inc();
+            return Err("http");
+        }
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_PROBE_BODY as u64)
+        {
+            return Err("response_too_large");
+        }
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| upstream_error_reason(&error))?;
+        if body.len() > MAX_PROBE_BODY {
+            return Err("response_too_large");
+        }
+        advertised_model(&body, expected).ok_or("model_mismatch")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2668,6 +2807,12 @@ impl Proxy {
             Err(error) => (false, upstream_error_reason(&error), None),
         };
         if let Some(models_body) = models_body {
+            if let Some(expected) = self.inner.config.upstream_models.get(upstream)
+                && advertised_model(&models_body, expected).is_none()
+            {
+                healthy = false;
+                reason = "model_mismatch";
+            }
             if self.inner.config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility {
                 let compatibility = self
                     .inner
@@ -3005,6 +3150,19 @@ fn upstream_error_reason(error: &reqwest::Error) -> &'static str {
     }
 }
 
+fn is_models_request(method: &Method, uri: &Uri) -> bool {
+    method == Method::GET && uri.path().trim_end_matches('/').ends_with("/v1/models")
+}
+
+fn advertised_model(body: &[u8], expected: &str) -> Option<Value> {
+    let root = serde_json::from_slice::<Value>(body).ok()?;
+    root.get("data")?
+        .as_array()?
+        .iter()
+        .find(|model| model.get("id").and_then(Value::as_str) == Some(expected))
+        .cloned()
+}
+
 fn json_error(status: StatusCode, message: &str) -> Response<Body> {
     let body = serde_json::json!({"error": {"message": message, "type": status.as_str()}});
     Response::builder()
@@ -3223,6 +3381,22 @@ mod tests {
         let config = Config::from_lookup(|key| match key {
             "RJ_UPSTREAM" => Some(joined.clone()),
             "RJ_UPSTREAM_TOKEN" => Some(token.to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        proxy_for_config(config, Arc::from([]))
+    }
+
+    fn proxy_for_models(upstreams: &[Url], models: &[&str]) -> Proxy {
+        let joined = upstreams
+            .iter()
+            .map(Url::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        let models = models.join(",");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_MODELS" => Some(models.clone()),
             _ => None,
         })
         .unwrap();
@@ -4132,6 +4306,183 @@ mod tests {
                 .get_sample_count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn multi_model_mode_combines_discovery_and_routes_only_to_the_owner() {
+        let qwen_requests = Arc::new(AtomicUsize::new(0));
+        let qwen_counter = Arc::clone(&qwen_requests);
+        let qwen = AxumRouter::new().fallback(any(move |request: Request<Body>| {
+            let counter = Arc::clone(&qwen_counter);
+            async move {
+                if is_models_request(request.method(), request.uri()) {
+                    return Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"object":"list","data":[{"id":"qwen3.8-flash-next","object":"model","max_model_len":262144},{"id":"unconfigured-qwen-alias","object":"model"}]}"#,
+                        ))
+                        .unwrap();
+                }
+                counter.fetch_add(1, Ordering::Relaxed);
+                let body = to_bytes(request.into_body(), MAX_REQUEST_BODY).await.unwrap();
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request["model"], "qwen3.8-flash-next");
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"engine":"qwen"}"#))
+                    .unwrap()
+            }
+        }));
+        let glm_requests = Arc::new(AtomicUsize::new(0));
+        let glm_counter = Arc::clone(&glm_requests);
+        let glm = AxumRouter::new().fallback(any(move |request: Request<Body>| {
+            let counter = Arc::clone(&glm_counter);
+            async move {
+                if is_models_request(request.method(), request.uri()) {
+                    return Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"object":"list","data":[{"id":"glm-5.3-flash","object":"model","context_length":524288}]}"#,
+                        ))
+                        .unwrap();
+                }
+                counter.fetch_add(1, Ordering::Relaxed);
+                let body = to_bytes(request.into_body(), MAX_REQUEST_BODY).await.unwrap();
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request["model"], "glm-5.3-flash");
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"engine":"glm"}"#))
+                    .unwrap()
+            }
+        }));
+        let (qwen_url, qwen_task) = start_upstream(qwen).await;
+        let (glm_url, glm_task) = start_upstream(glm).await;
+        let proxy = proxy_for_models(
+            &[qwen_url, glm_url],
+            &["qwen3.8-flash-next", "glm-5.3-flash"],
+        );
+
+        let models = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/models")
+            .body(Body::empty())
+            .unwrap();
+        let response = proxy.serve(models).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get("x-ramjet-upstream").is_none());
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let models: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(models["object"], "list");
+        assert_eq!(models["data"].as_array().unwrap().len(), 2);
+        assert_eq!(models["data"][0]["id"], "glm-5.3-flash");
+        assert_eq!(models["data"][0]["context_length"], 507_904);
+        assert_eq!(models["data"][1]["id"], "qwen3.8-flash-next");
+        assert_eq!(models["data"][1]["max_model_len"], 245_760);
+
+        for (model, expected_upstream, expected_body) in [
+            (
+                "qwen3.8-flash-next",
+                "0",
+                br#"{"engine":"qwen"}"#.as_slice(),
+            ),
+            ("glm-5.3-flash", "1", br#"{"engine":"glm"}"#.as_slice()),
+        ] {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .body(Body::from(format!(
+                    r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}]}}"#
+                )))
+                .unwrap();
+            let response = proxy.serve(request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-ramjet-upstream"], expected_upstream);
+            assert_eq!(
+                to_bytes(response.into_body(), 1024).await.unwrap(),
+                expected_body
+            );
+        }
+        assert_eq!(qwen_requests.load(Ordering::Relaxed), 1);
+        assert_eq!(glm_requests.load(Ordering::Relaxed), 1);
+        qwen_task.abort();
+        glm_task.abort();
+    }
+
+    #[tokio::test]
+    async fn multi_model_mode_rejects_missing_invalid_and_unknown_models_without_dispatch() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let upstream = AxumRouter::new().fallback(any(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::OK, "should not be called")
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let proxy = proxy_for_models(&[url], &["qwen3.8-flash-next"]);
+        for (body, expected) in [
+            (r#"{"messages":[]}"#, StatusCode::BAD_REQUEST),
+            (r#"{"model":7,"messages":[]}"#, StatusCode::BAD_REQUEST),
+            (
+                r#"{"model":"unknown","messages":[]}"#,
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .body(Body::from(body))
+                .unwrap();
+            assert_eq!(proxy.serve(request).await.status(), expected);
+        }
+        assert_eq!(requests.load(Ordering::Relaxed), 0);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn multi_model_fail_open_never_crosses_model_ownership() {
+        let qwen_requests = Arc::new(AtomicUsize::new(0));
+        let qwen_counter = Arc::clone(&qwen_requests);
+        let qwen = AxumRouter::new().fallback(any(move || {
+            let counter = Arc::clone(&qwen_counter);
+            async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::SERVICE_UNAVAILABLE, "qwen unavailable")
+            }
+        }));
+        let glm_requests = Arc::new(AtomicUsize::new(0));
+        let glm_counter = Arc::clone(&glm_requests);
+        let glm = AxumRouter::new().fallback(any(move || {
+            let counter = Arc::clone(&glm_counter);
+            async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::OK, "wrong model")
+            }
+        }));
+        let (qwen_url, qwen_task) = start_upstream(qwen).await;
+        let (glm_url, glm_task) = start_upstream(glm).await;
+        let proxy = proxy_for_models(
+            &[qwen_url, glm_url],
+            &["qwen3.8-flash-next", "glm-5.3-flash"],
+        );
+        proxy.publish_upstream_health(0, false);
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                r#"{"model":"qwen3.8-flash-next","messages":[]}"#,
+            ))
+            .unwrap();
+        let response = proxy.serve(request).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let _ = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(qwen_requests.load(Ordering::Relaxed), 1);
+        assert_eq!(glm_requests.load(Ordering::Relaxed), 0);
+        qwen_task.abort();
+        glm_task.abort();
     }
 
     #[tokio::test]
@@ -5465,6 +5816,33 @@ mod tests {
         assert!(proxy.router().state(0).unwrap().3);
         let response = Proxy::health(State(proxy)).await;
         assert_eq!(response.status(), StatusCode::OK);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn multi_model_probe_requires_the_configured_model_id() {
+        let upstream = AxumRouter::new().fallback(any(|| async {
+            (
+                StatusCode::OK,
+                [("content-type", "application/json")],
+                r#"{"object":"list","data":[{"id":"different-model"}]}"#,
+            )
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let proxy = proxy_for_models(&[url], &["glm-5.3-flash"]);
+        proxy.probe(0).await;
+        assert!(!proxy.router().state(0).unwrap().3);
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .upstream_probe_errors
+                .with_label_values(&[&proxy.upstream_label(0), "model_mismatch"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
         task.abort();
     }
 
