@@ -53,7 +53,9 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         if self.path != "/metrics":
             self.send_error(404)
             return
-        after = self.__class__.metrics_calls > 0
+        # codebench reads speculative and workload counters from the same
+        # endpoint before and after a cell.
+        after = self.__class__.metrics_calls >= 2
         self.__class__.metrics_calls += 1
         values = {
             "vllm:spec_decode_num_drafts_total": 1 if after else 0,
@@ -63,6 +65,10 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                 self.__class__.engine_generation_tokens if after else 0
             ),
             "vllm:request_success_total": 1 if after else 0,
+            "sglang:generation_tokens_total": (
+                self.__class__.engine_generation_tokens if after else 0
+            ),
+            "sglang:num_requests_total": 1 if after else 0,
         }
         body = "".join(f"{name} {value}\n" for name, value in values.items()).encode()
         self.send_response(200)
@@ -87,6 +93,7 @@ class CodebenchTest(unittest.TestCase):
             "BENCH_TOKEN": "test-only",
             "METRICS_URL": base + "/metrics",
             "BENCH_REQUIRE_RECONCILED_SPECULATION": "1",
+            "BENCH_REQUIRE_RECONCILED_ENGINE_COUNTERS": "1",
         }
         try:
             return subprocess.run(
@@ -123,6 +130,7 @@ class CodebenchTest(unittest.TestCase):
         self.assertIsNotNone(observation["tpot_ms"])
         self.assertIsNotNone(report["tpot_ms_p95"])
         self.assertTrue(report["dspark"]["reconciled"])
+        self.assertTrue(report["engine"]["reconciled"])
         self.assertNotIn("measurement_error", report)
 
     def test_required_native_reconciliation_fails_contaminated_interval(self):

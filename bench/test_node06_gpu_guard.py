@@ -125,6 +125,10 @@ class Node06GpuGuardTests(unittest.TestCase):
             nvidia_smi="/usr/bin/nvidia-smi",
             air_metrics_url="http://127.0.0.1:9100/metrics",
             max_runtime_seconds=guard.DEFAULT_MAX_RUNTIME_SECONDS,
+            runtime_start_signal=False,
+            runtime_start_timeout_seconds=(
+                guard.DEFAULT_RUNTIME_START_TIMEOUT_SECONDS
+            ),
             command=command,
         )
 
@@ -184,6 +188,57 @@ class Node06GpuGuardTests(unittest.TestCase):
             record = final_record(output)
             self.assertEqual(record["reason"], "runtime_limit")
             self.assertEqual(record["thresholds"]["max_runtime_seconds"], 1)
+
+    def test_deferred_runtime_limit_starts_only_after_child_signal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "journal.jsonl"
+            command = (
+                "import os,time; time.sleep(1.1); "
+                "os.write(int(os.environ['RAMJET_GPU_GUARD_RUNTIME_START_FD']), b'1'); "
+                "time.sleep(0.1)"
+            )
+            args = self.args(output, [sys.executable, "-c", command])
+            args.max_runtime_seconds = 1
+            args.runtime_start_signal = True
+            args.poll_seconds = 0.25
+            code = self.run_guard(args, SequenceSampler([sample([50] * 8)]))
+            self.assertEqual(code, 0)
+            record = final_record(output)
+            self.assertEqual(record["status"], "passed")
+            self.assertEqual(record["thresholds"]["runtime_start"], "signal")
+            self.assertGreaterEqual(record["runtime_limit_started_seconds"], 1)
+
+    def test_deferred_runtime_limit_still_caps_inference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "journal.jsonl"
+            command = (
+                "import os,time; "
+                "os.write(int(os.environ['RAMJET_GPU_GUARD_RUNTIME_START_FD']), b'1'); "
+                "time.sleep(30)"
+            )
+            args = self.args(output, [sys.executable, "-c", command])
+            args.max_runtime_seconds = 1
+            args.runtime_start_signal = True
+            args.poll_seconds = 0.25
+            code = self.run_guard(args, SequenceSampler([sample([50] * 8)]))
+            self.assertEqual(code, guard.EXIT_RUNTIME_LIMIT)
+            self.assertEqual(final_record(output)["reason"], "runtime_limit")
+
+    def test_deferred_runtime_start_is_itself_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "journal.jsonl"
+            args = self.args(
+                output,
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+            )
+            args.runtime_start_signal = True
+            args.runtime_start_timeout_seconds = 1
+            args.poll_seconds = 0.25
+            code = self.run_guard(args, SequenceSampler([sample([50] * 8)]))
+            self.assertEqual(code, guard.EXIT_RUNTIME_LIMIT)
+            self.assertEqual(
+                final_record(output)["reason"], "runtime_start_timeout"
+            )
 
     def run_guard(self, args, sampler):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(

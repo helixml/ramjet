@@ -67,7 +67,9 @@ def checks(parsed, engine, config) -> dict[str, bool]:
         "architecture": model.architectures == [EXPECTED_ARCHITECTURE],
         "no_remote_code": engine.trust_remote_code is False,
         "hybrid": getattr(model, "is_hybrid", False) is True,
-        # NVFP4 weights with an FP8 KV cache, as the checkpoint declares.
+        # NVFP4 weights with the checkpoint's FP8 KV request. This proves only
+        # config construction: live SM120 profiling rejects the canonicalized
+        # fp8_ds_mla layout because this model is NoPE (pe_dim=0).
         "quantization": model.quantization == "modelopt_fp4",
         "kv_cache_dtype": cache.cache_dtype == "fp8",
         # Topology and the canary's bounded first GPU exposure.
@@ -106,7 +108,13 @@ def preflight(path: pathlib.Path) -> None:
 
     failed = sorted(name for name, passed in checks(parsed, engine, config).items() if not passed)
     if failed:
-        raise PreflightError("candidate engine shape changed: " + ",".join(failed))
+        detail = (
+            f" (cache_dtype={config.cache_config.cache_dtype},"
+            f" model_dtype={config.model_config.dtype})"
+        )
+        raise PreflightError(
+            "candidate engine shape changed: " + ",".join(failed) + detail
+        )
 
     # Resolving the parsers proves the registered names exist in this image.
     from vllm.reasoning import ReasoningParserManager

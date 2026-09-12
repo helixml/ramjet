@@ -17,7 +17,12 @@ import threading
 import time
 import urllib.request
 
-from engine_metrics import fetch_speculative, speculative_delta
+from engine_metrics import (
+    fetch_speculative,
+    fetch_workload,
+    speculative_delta,
+    workload_delta,
+)
 
 
 BASE = sys.argv[1].rstrip("/")
@@ -58,6 +63,12 @@ REQUIRE_RECONCILED = os.environ.get(
 if REQUIRE_RECONCILED not in {"0", "1"}:
     raise SystemExit("BENCH_REQUIRE_RECONCILED_SPECULATION must be 0 or 1")
 REQUIRE_RECONCILED = REQUIRE_RECONCILED == "1"
+REQUIRE_ENGINE_RECONCILED = os.environ.get(
+    "BENCH_REQUIRE_RECONCILED_ENGINE_COUNTERS", "0"
+)
+if REQUIRE_ENGINE_RECONCILED not in {"0", "1"}:
+    raise SystemExit("BENCH_REQUIRE_RECONCILED_ENGINE_COUNTERS must be 0 or 1")
+REQUIRE_ENGINE_RECONCILED = REQUIRE_ENGINE_RECONCILED == "1"
 
 
 def percentile(values, fraction):
@@ -180,11 +191,29 @@ def metric_snapshot():
         return None
 
 
+def workload_snapshot():
+    if not METRICS_URLS:
+        return None
+    try:
+        snapshots = [fetch_workload(url, timeout=30) for url in METRICS_URLS]
+        backends = {snapshot.get("backend") for snapshot in snapshots}
+        if len(backends) != 1 or None in backends:
+            return None
+        return {
+            "backend": snapshots[0]["backend"],
+            "generation_tokens": sum(item["generation_tokens"] for item in snapshots),
+            "finished_requests": sum(item["finished_requests"] for item in snapshots),
+        }
+    except Exception:
+        return None
+
+
 warmup, _ = run_batch()
 if not warmup or not all(item.get("ok") for item in warmup.values()):
     raise SystemExit("warmup failed: " + json.dumps(warmup, sort_keys=True))
 
 metrics_before = metric_snapshot()
+workload_before = workload_snapshot()
 batches = []
 requests = []
 measurement_started = time.perf_counter()
@@ -218,6 +247,12 @@ dspark = speculative_delta(
     sum(item.get("completion_tokens", 0) for item in good),
     len(good),
     expected_enabled=os.environ.get("BENCH_SPEC_MODE", "enabled") == "enabled",
+)
+engine = workload_delta(
+    workload_before,
+    workload_snapshot(),
+    sum(item.get("completion_tokens", 0) for item in good),
+    len(good),
 )
 result = {
     "schema_version": 2,
@@ -285,12 +320,17 @@ result = {
         for route in sorted({item.get("route") for item in good if item.get("route") is not None})
     },
     "dspark": dspark,
+    "engine": engine,
 }
 errors = [item["error"] for item in requests if not item.get("ok")]
 if errors:
     result["errors"] = errors
-measurement_ok = not REQUIRE_RECONCILED or dspark.get("reconciled") is True
-if not measurement_ok:
+speculation_ok = not REQUIRE_RECONCILED or dspark.get("reconciled") is True
+engine_ok = not REQUIRE_ENGINE_RECONCILED or engine.get("reconciled") is True
+measurement_ok = speculation_ok and engine_ok
+if not speculation_ok:
     result["measurement_error"] = "speculation_not_reconciled"
+elif not engine_ok:
+    result["measurement_error"] = "engine_counters_not_reconciled"
 print(json.dumps(result, sort_keys=True))
 raise SystemExit(0 if not errors and measurement_ok else 1)

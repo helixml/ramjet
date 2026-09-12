@@ -1,10 +1,146 @@
 # node06 experiment journal
 
-## 2026-09-10 — nvidia/GLM-5.3-Flash-NVFP4 fits node06 and runs on the image we already ship (GPU-free)
+## 2026-09-12 — GLM-5.3-Flash SM120 TP2 runs beside Qwen A; parser fixed and c4 retained
 
-Question: would `nvidia/GLM-5.3-Flash-NVFP4` fit and work on node06? Answer:
-yes on both counts, and it needs no new engine image. Everything below is
-read-only or GPU-free. No engine, load balancer, or GPU allocation was touched;
+Question: can a new W4A16 NVFP4 GLM-5.3-Flash quant run on node06 engine B
+while Qwen3.8-Flash-Next A continues serving, pass the agent/tool contract, and
+produce a clean concurrency curve? Answer: **yes as an LB-isolated canary after
+one narrow SGLang parser correction.** It is not promoted into Ramjet routing.
+
+The checkpoint is
+`ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO` at immutable revision
+`ee0989a944b0e213589191d7fca63af825a0741e`. All 90 safetensor shards passed
+`hf cache verify`; Hugging Face's local `.cache/huggingface` metadata was the
+only extra state. The initial runtime was
+`ghcr.io/ormandj/sglang-glm53-flash-sm120@sha256:ec4243f940a179a27fea21895077efd47cd050501f99a1d2a5fecf7df2e7be71`
+(v0.4.3 source revision `386684975edf3cbce15c4b12df37908366e2aa8b`).
+The isolated Compose assigns host GPUs 4-5, TP2, 524,288 context/KV tokens,
+FP8 E4M3 KV, sparse-MLA DSA, adaptive EAGLE 5/1/6, four running requests, and
+loopback port 8062. Qwen B was stopped only after draining; Qwen A and the
+shared LB were never recreated or reconfigured.
+
+The base-image rollout became ready in 1,448.7 seconds, including 893.2 seconds
+for target weights, 52.8 seconds for NextN, PCIe all-reduce tuning, graph
+capture, and serving-coverage warmups. Intake stayed at 42C; candidate GPUs
+peaked at 57/55C and 221/213W during loading. Native startup selected
+`flashinfer_sparse_mla` for SM120. Each rank used 81.44GB for target weights,
+3.20GB for NextN, about 2.16GB for 28 KDA/Mamba state slots, 3.55GB for the
+524,288-token target KV pool, and 0.32GB for draft KV. SGLang defaulted missing
+FP8 KV scales to 1.0, so correctness remained a hard gate.
+
+The first deterministic five-case agent gate transported 5/5 responses but
+validated only 4/5. The required streamed nullable argument was returned as a
+string instead of JSON null. Native SGLang deltas reconciled exactly at five
+requests and 122 generated tokens. Inspection proved the cause in the `glm47`
+streaming parser: JSON Schema `type: ["string", "null"]` is inferred as
+`string`, so the formatter quotes the raw `null` token. The marker parser itself
+was correct.
+
+`Dockerfile.nullable-parser` derives from the exact base and refuses to patch
+unless the upstream parser SHA-256 is
+`4de49ef0ea1ced956e95b1ad7cfabee5823731230cb5549dc05caff49ec0bcf2`.
+It buffers only the exact nullable-string union until the XML argument closes,
+emitting JSON null for `null` and a quoted JSON string otherwise. The patched
+parser SHA-256 is
+`8ed76f9da2aa782b3e9374d00687186624fd383e98acf9ba0d6ac9759e1425d7`;
+the live node-local image is
+`sha256:024a988fd0c0e15d80e382073c05657b2d57f52611c324599508cdb62b9debb8`.
+Its B-only rollout became ready in 1,023 seconds, passed the guard in 1,026.5
+seconds, and peaked at 42C intake, 57C GPU, and 771.36W full-box power. Qwen A's
+container ID, image, start time, and restart count remained unchanged.
+
+The corrected agent gate passed 5/5 with empty protocol-error lists. SGLang
+reconciled exactly at five requests and 127 generated tokens. It took 1.78
+seconds, reached 71.4 output tok/s with 291.8ms TTFT p95, and its fresh guard
+journal passed at 42C intake. The first agent/code shapes device-loaded Triton
+kernels after built-in startup warmup; those intervals were treated as warmup,
+not performance evidence. Clean repeats then produced:
+
+| concurrency / max output | requests | aggregate output median | per-stream decode median | TTFT median / p95 | TPOT median / p95 | late loads |
+|---|---:|---:|---:|---:|---:|---:|
+| c1 / 256 | 3/3 | 153.5 tok/s | 164.8 tok/s | 105.7 / 113.0ms | 6.09 / 6.32ms | warmup only |
+| c2 / 256 | 6/6 | 246.3 tok/s | 137.1 tok/s | 177.7 / 193.4ms | 7.33 / 7.78ms | 0 |
+| c4 / 256 | 12/12 | **370.7 tok/s** | 106.3 tok/s | 263.9 / 267.1ms | 9.44 / 9.83ms | 0 |
+| c8 / 256 | 24/24 | 358.3 tok/s | 97.2 tok/s | 1,427.9 / 3,077.9ms | 10.33 / 12.16ms | 0 |
+
+Every cell used a fresh intake guard journal and exact SGLang
+request/generation reconciliation. Intake stayed 42C; the clean c8 repeat
+peaked at 62C GPU and 781.27W full-box power. c8 loses 3.3% aggregate throughput
+versus c4 while median TTFT rises 5.4x, demonstrating queueing above the four
+running-request/KDA-state ceiling.
+
+Decision: retain `--max-running-requests=4`; do not spend the remaining 0.72GB
+device margin on more per-sequence KDA state. Keep the candidate LB-isolated
+with Qwen A serving production and GPUs 6-7 free. The node-local derived image
+is valid canary evidence but is not durable promotion authority; publish it by
+immutable registry digest and repin Compose before adding it to Ramjet routing.
+Evidence is retained under
+`/home/luke/inference/glm53_flash_sm120/.experiments/20260912T085607Z-glm53-qualification`
+and the adjacent rollout/TPS experiment directories.
+
+## 2026-09-10 — NVIDIA GLM-5.3-Flash NVFP4 rejected: stock SM120 sparse-MLA has no NoPE KV path
+
+Question: can the official `nvidia/GLM-5.3-Flash-NVFP4` revision
+`423acf37583782c51c142d145aef733d72943d93` replace only Qwen B on node06,
+pass correctness, and proceed to guarded TPS/concurrency measurements? Answer:
+**no on the pinned vLLM image.** The candidate failed the live loader gate, so
+no inference request and no performance cell ran. Qwen A served production
+throughout; each failure path recreated canonical Qwen B and the shared load
+balancer was never recreated.
+
+The exact checkpoint downloaded to
+`/prod/models/nvidia/GLM-5.3-Flash-NVFP4-423acf37583782c51c142d145aef733d72943d93`
+in 49m22.67s. `verify-model.py` admitted the pinned metadata, 33 complete
+shards, no partials, and 204,439,103,396 tensor bytes. The immutable runtime
+image was
+`vllm/vllm-openai@sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93`
+(vLLM `0.28.1rc1.dev472+gd9105ea80`). Its GPU-free full config builder passed
+the FP8 candidate in 34.59s.
+
+The guarded FP8 run is
+`/home/luke/inference/glm53_flash_nvidia/.experiments/20260910T110722Z-canary-r2`.
+All four TP ranks loaded 44.52GiB each in 138.0, 138.0, 151.6, and 169.9s.
+TileLang JIT then completed and CUDA-graph/cache profiling reached the first MLA
+cache write. The worker failed with:
+
+```text
+concat_and_cache_mla ... pe_dim must be 64 for fp8_ds_mla
+```
+
+The checkpoint is NoPE sparse MLA: `qk_nope_head_dim=256`,
+`qk_rope_head_dim=0`, `kv_lora_rank=512`, `index_topk=2048`, and
+`index_kpool=4`. The pinned SM120 backend canonicalizes the checkpoint's FP8
+request to the packed `fp8_ds_mla` format, whose writer requires a 64-element
+RoPE section. This is an attention/KV kernel incompatibility after clean weight
+loading, not a weight-fit, ModelOpt, memory, or thermal failure.
+
+A single-variable negative control pinned `--kv-cache-dtype=bfloat16`. Its
+GPU-free engine config passed in 29.03s, but the guarded live run at
+`/home/luke/inference/glm53_flash_nvidia/.experiments/20260910T113103Z-canary-bf16-kv`
+failed before loading weights: `TRITON_MLA` does not support sparse attention,
+and `FLASHINFER_MLA_SPARSE_SM120` does not support BF16 KV. The runtime's
+`nvfp4_ds_mla` cache format is documented in its own source as SM100-only, so
+there is no third supported dtype to tune on these SM120 GPUs.
+
+This exactly matches upstream vLLM issue
+[#53963](https://github.com/vllm-project/vllm/issues/53963). The NoPE SM120
+implementation PRs [#53969](https://github.com/vllm-project/vllm/pull/53969)
+and [#55277](https://github.com/vllm-project/vllm/pull/55277) were still open at
+qualification time. An unmerged source overlay was not introduced into the
+production node. The loader can be retried only after a reviewed immutable
+runtime carries that support; correctness remains the next gate, before TPS or
+concurrency.
+
+Both guarded campaigns stayed below 43C chassis intake and had no OOM, Xid,
+container restart, or Qwen A identity change. The canary owner now fails fast
+when an engine exits and retains the exact rollback and LB-isolation checks.
+
+## 2026-09-10 — NVIDIA GLM-5.3-Flash NVFP4 passed GPU-free shape checks
+
+Question: would `nvidia/GLM-5.3-Flash-NVFP4` fit and appear supported by the
+existing node06 image? Answer: yes at the metadata/config layer. Everything
+below is read-only or GPU-free. No engine, load balancer, or GPU allocation was
+touched;
 `qwen38flashnext-a` served throughout and `qwen38flashnext-b` was left on its
 running steering image.
 

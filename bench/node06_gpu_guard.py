@@ -66,6 +66,8 @@ DEFAULT_AIR_METRICS_URL = "http://127.0.0.1:9100/metrics"
 # thermal ceiling.
 DEFAULT_MAX_RUNTIME_SECONDS = 1500
 MAX_RUNTIME_SECONDS = 1500
+DEFAULT_RUNTIME_START_TIMEOUT_SECONDS = 2400
+MAX_RUNTIME_START_TIMEOUT_SECONDS = 3600
 
 SCHEMA_VERSION = 1
 DEFAULT_NVIDIA_SMI = "/usr/bin/nvidia-smi"
@@ -858,6 +860,20 @@ def exec_shim(command: list[str]) -> int:
     if launched != b"1":
         raise GuardError("inherited GPU guard launch was revoked")
 
+    runtime_start_descriptor = -1
+    if "RAMJET_GPU_GUARD_RUNTIME_START_FD" in os.environ:
+        try:
+            runtime_start_descriptor = int(
+                os.environ["RAMJET_GPU_GUARD_RUNTIME_START_FD"]
+            )
+            runtime_start_info = os.fstat(runtime_start_descriptor)
+        except (ValueError, OSError) as error:
+            raise GuardError(
+                "inherited GPU guard runtime-start signal is invalid"
+            ) from error
+        if not stat.S_ISFIFO(runtime_start_info.st_mode):
+            raise GuardError("inherited GPU guard runtime-start signal is invalid")
+
     watched = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
     interrupted_signal = 0
 
@@ -879,14 +895,20 @@ def exec_shim(command: list[str]) -> int:
         )
         child_environment = os.environ.copy()
         child_environment.update(capability.environment)
+        pass_descriptors = [capability.descriptor]
+        if runtime_start_descriptor >= 0:
+            pass_descriptors.append(runtime_start_descriptor)
         child = subprocess.Popen(
             command,
             env=child_environment,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
-            pass_fds=(capability.descriptor,),
+            pass_fds=tuple(pass_descriptors),
         )
         capability.close()
+        if runtime_start_descriptor >= 0:
+            os.close(runtime_start_descriptor)
+            runtime_start_descriptor = -1
         try:
             tree = ChildTree(child.pid)
         except GuardError:
@@ -899,6 +921,8 @@ def exec_shim(command: list[str]) -> int:
     finally:
         if capability is not None:
             capability.close()
+        if runtime_start_descriptor >= 0:
+            os.close(runtime_start_descriptor)
 
     orphaned = False
     try:
@@ -991,6 +1015,14 @@ def run_guard(
             "workload_grace_seconds": args.workload_grace_seconds,
             "termination_grace_seconds": args.termination_grace_seconds,
             "max_runtime_seconds": args.max_runtime_seconds,
+            "runtime_start": (
+                "signal" if args.runtime_start_signal else "immediate"
+            ),
+            "runtime_start_timeout_seconds": (
+                args.runtime_start_timeout_seconds
+                if args.runtime_start_signal
+                else None
+            ),
         },
     }
     journal.append(
@@ -1030,6 +1062,8 @@ def run_guard(
     capability: GuardCapability | None = None
     launch_read_descriptor = -1
     launch_write_descriptor = -1
+    runtime_start_read_descriptor = -1
+    runtime_start_write_descriptor = -1
     previous_subreaper: bool | None = None
     interrupted_signal = 0
 
@@ -1094,10 +1128,14 @@ def run_guard(
             time.sleep(args.poll_seconds)
 
         if preflight_passed:
-            # The continuous-inference clock starts when the workload starts,
-            # not when the guard does: waiting for a cool start is not
-            # inference and must not consume the caller's budget.
+            # Waiting for a cool start never consumes the continuous-inference
+            # budget. Deployment commands can additionally defer this clock
+            # through model load and graph capture, then signal immediately
+            # before their first request-generating inference.
             workload_started = time.monotonic()
+            runtime_limit_started = (
+                None if args.runtime_start_signal else workload_started
+            )
             child_environment = os.environ.copy()
             capability = create_guard_capability(
                 args.expected_gpus, args.abort_c, run_id
@@ -1116,16 +1154,28 @@ def run_guard(
             child_environment["RAMJET_GPU_GUARD_PRESERVE_ROLLBACK_OWNER"] = (
                 "1" if args.preserve_rollback_owner else "0"
             )
+            pass_descriptors = [capability.descriptor, launch_read_descriptor]
+            if args.runtime_start_signal:
+                runtime_start_read_descriptor, runtime_start_write_descriptor = (
+                    os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+                )
+                child_environment["RAMJET_GPU_GUARD_RUNTIME_START_FD"] = str(
+                    runtime_start_write_descriptor
+                )
+                pass_descriptors.append(runtime_start_write_descriptor)
             previous_subreaper = set_child_subreaper(True)
             child = subprocess.Popen(
                 [sys.executable, str(pathlib.Path(__file__).resolve()), "--exec-shim", *args.command],
                 env=child_environment,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
-                pass_fds=(capability.descriptor, launch_read_descriptor),
+                pass_fds=tuple(pass_descriptors),
             )
             os.close(launch_read_descriptor)
             launch_read_descriptor = -1
+            if runtime_start_write_descriptor >= 0:
+                os.close(runtime_start_write_descriptor)
+                runtime_start_write_descriptor = -1
             capability.close()
             try:
                 child_tree = ChildTree(child.pid)
@@ -1147,6 +1197,26 @@ def run_guard(
             os.close(launch_write_descriptor)
             launch_write_descriptor = -1
             del child_environment
+
+            def update_runtime_limit_start() -> None:
+                nonlocal runtime_limit_started, runtime_start_read_descriptor
+                if runtime_limit_started is not None:
+                    return
+                try:
+                    signal_value = os.read(runtime_start_read_descriptor, 2)
+                except BlockingIOError:
+                    return
+                if signal_value == b"":
+                    return
+                if signal_value != b"1":
+                    raise GuardError("runtime-start signal is invalid")
+                runtime_limit_started = time.monotonic()
+                record["runtime_limit_started_seconds"] = round(
+                    runtime_limit_started - started, 3
+                )
+                os.close(runtime_start_read_descriptor)
+                runtime_start_read_descriptor = -1
+
             while True:
                 if interrupted_signal:
                     record["reason"] = "interrupted"
@@ -1157,6 +1227,7 @@ def run_guard(
                 except subprocess.TimeoutExpired:
                     returncode = None
                 child_tree.observe()
+                update_runtime_limit_start()
                 if returncode is not None:
                     record["child_exit_code"] = child_exit_code(returncode)
                     try:
@@ -1186,7 +1257,19 @@ def run_guard(
                         }
                         result = EXIT_THERMAL
                         break
-                    if time.monotonic() - workload_started >= args.max_runtime_seconds:
+                    now = time.monotonic()
+                    if (
+                        runtime_limit_started is None
+                        and now - workload_started
+                        >= args.runtime_start_timeout_seconds
+                    ):
+                        record["reason"] = "runtime_start_timeout"
+                        result = EXIT_RUNTIME_LIMIT
+                        break
+                    if (
+                        runtime_limit_started is not None
+                        and now - runtime_limit_started >= args.max_runtime_seconds
+                    ):
                         record["reason"] = "runtime_limit"
                         result = EXIT_RUNTIME_LIMIT
                         break
@@ -1240,8 +1323,26 @@ def run_guard(
                 # same loop as the thermal ceiling and terminates by the same
                 # path, so a run that is cool but simply long is stopped with
                 # the identical bounded workload/owner grace.
-                elapsed = time.monotonic() - workload_started
-                if elapsed >= args.max_runtime_seconds:
+                elapsed = (
+                    None
+                    if runtime_limit_started is None
+                    else time.monotonic() - runtime_limit_started
+                )
+                if (
+                    runtime_limit_started is None
+                    and time.monotonic() - workload_started
+                    >= args.runtime_start_timeout_seconds
+                ):
+                    record["reason"] = "runtime_start_timeout"
+                    record["trigger"] = {
+                        "elapsed_seconds": round(
+                            time.monotonic() - workload_started, 3
+                        )
+                    }
+                    checkpoint(True)
+                    result = EXIT_RUNTIME_LIMIT
+                    break
+                if elapsed is not None and elapsed >= args.max_runtime_seconds:
                     record["reason"] = "runtime_limit"
                     record["trigger"] = {"elapsed_seconds": round(elapsed, 3)}
                     checkpoint(True)
@@ -1256,7 +1357,12 @@ def run_guard(
     finally:
         if capability is not None:
             capability.close()
-        for descriptor in (launch_read_descriptor, launch_write_descriptor):
+        for descriptor in (
+            launch_read_descriptor,
+            launch_write_descriptor,
+            runtime_start_read_descriptor,
+            runtime_start_write_descriptor,
+        ):
             if descriptor >= 0:
                 os.close(descriptor)
         if child is not None and child_tree is not None and child_tree.live():
@@ -1321,6 +1427,20 @@ def parser() -> argparse.ArgumentParser:
         help="terminate the workload after this much continuous inference",
     )
     result.add_argument(
+        "--runtime-start-signal",
+        action="store_true",
+        help=(
+            "start the continuous-inference clock only after the child writes "
+            "the byte 1 to RAMJET_GPU_GUARD_RUNTIME_START_FD"
+        ),
+    )
+    result.add_argument(
+        "--runtime-start-timeout-seconds",
+        type=float,
+        default=DEFAULT_RUNTIME_START_TIMEOUT_SECONDS,
+        help="fail if a deferred child does not begin inference within this time",
+    )
+    result.add_argument(
         "--preserve-rollback-owner",
         action="store_true",
         help="preserve only a rollback-capable root until the owner grace expires",
@@ -1351,6 +1471,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise GuardError("thermal-abort threshold is invalid")
     if not 1 <= args.max_runtime_seconds <= MAX_RUNTIME_SECONDS:
         raise GuardError("continuous inference limit is invalid")
+    if not (
+        1
+        <= args.runtime_start_timeout_seconds
+        <= MAX_RUNTIME_START_TIMEOUT_SECONDS
+    ):
+        raise GuardError("runtime-start timeout is invalid")
     if not 0 <= args.cooldown_timeout_seconds <= 1800:
         raise GuardError("cooldown timeout is invalid")
     if not 0.25 <= args.poll_seconds <= 1:

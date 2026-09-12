@@ -97,7 +97,6 @@ def fail(message: str) -> None:
 
 def render() -> dict[str, Any]:
     environment = os.environ.copy()
-    environment.update({"ENGINE_RESTART_POLICY": "no"})
     result = subprocess.run(
         ["docker", "compose", "-f", str(COMPOSE), "config", "--format", "json"],
         check=False,
