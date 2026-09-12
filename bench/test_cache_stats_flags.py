@@ -39,6 +39,7 @@ DEPLOYMENTS = {
     "dspark_0731": "vllm",
     "qwen38_27b": "sglang",
     "glm53_flash": "sglang",
+    "glm53_flash_sm120": "sglang",
     "glm53_flash_nvidia": "vllm",
 }
 

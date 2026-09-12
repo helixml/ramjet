@@ -611,7 +611,12 @@ preflight until the lower threshold is reached.
 Guarded runs remain capped at **25 minutes of continuous inference**
 (`--max-runtime-seconds`, default and maximum 1500, exit code 79). The clock
 starts with the workload, not the guard, so cool-start waiting does not consume
-it.
+it. A deployment that performs model load and graph capture inside the guarded
+child uses `--runtime-start-signal`; the child writes exactly `1` to the
+inherited `RAMJET_GPU_GUARD_RUNTIME_START_FD` immediately before its first
+request. Loading remains thermally watched but does not consume the inference
+budget. `--runtime-start-timeout-seconds` independently bounds a child that
+never reaches inference.
 
 ### Access policy (2026-08-19)
 

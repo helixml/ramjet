@@ -7,10 +7,40 @@ from engine_metrics import (
     metric_value,
     position_values,
     speculative_delta,
+    workload_delta,
+    workload_values,
 )
 
 
 class EngineMetricsTest(unittest.TestCase):
+    def test_workload_values_selects_and_sums_sglang_labeled_counters(self):
+        body = '''
+sglang:generation_tokens_total{is_streaming="false"} 10
+sglang:generation_tokens_total{is_streaming="true"} 12
+sglang:num_requests_total{is_streaming="false"} 2
+sglang:num_requests_total{is_streaming="true"} 3
+'''
+        self.assertEqual(
+            workload_values(body),
+            {"backend": "sglang", "generation_tokens": 22, "finished_requests": 5},
+        )
+
+    def test_workload_delta_reconciles_sglang_and_rejects_contamination(self):
+        before = {"backend": "sglang", "generation_tokens": 100, "finished_requests": 4}
+        after = {"backend": "sglang", "generation_tokens": 356, "finished_requests": 6}
+        result = workload_delta(before, after, 256, 2)
+        self.assertTrue(result["reconciled"])
+        self.assertEqual(result["state"], "reconciled")
+        self.assertEqual(result["backend"], "sglang")
+        self.assertFalse(workload_delta(before, after, 255, 2)["reconciled"])
+
+    def test_workload_delta_fails_closed_on_reset_or_backend_change(self):
+        before = {"backend": "vllm", "generation_tokens": 10, "finished_requests": 2}
+        reset = {"backend": "vllm", "generation_tokens": 0, "finished_requests": 0}
+        changed = {"backend": "sglang", "generation_tokens": 20, "finished_requests": 3}
+        self.assertEqual(workload_delta(before, reset, 0, 0)["state"], "counter_reset")
+        self.assertEqual(workload_delta(before, changed, 10, 1)["state"], "backend_changed")
+
     def test_metric_value_sums_labeled_series(self):
         body = """
 # HELP vllm:num_requests_waiting waiting

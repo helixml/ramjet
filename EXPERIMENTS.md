@@ -1,5 +1,83 @@
 # node06 experiment journal
 
+## 2026-09-12 — GLM-5.3-Flash SM120 TP2 runs beside Qwen A; parser fixed and c4 retained
+
+Question: can a new W4A16 NVFP4 GLM-5.3-Flash quant run on node06 engine B
+while Qwen3.8-Flash-Next A continues serving, pass the agent/tool contract, and
+produce a clean concurrency curve? Answer: **yes as an LB-isolated canary after
+one narrow SGLang parser correction.** It is not promoted into Ramjet routing.
+
+The checkpoint is
+`ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO` at immutable revision
+`ee0989a944b0e213589191d7fca63af825a0741e`. All 90 safetensor shards passed
+`hf cache verify`; Hugging Face's local `.cache/huggingface` metadata was the
+only extra state. The initial runtime was
+`ghcr.io/ormandj/sglang-glm53-flash-sm120@sha256:ec4243f940a179a27fea21895077efd47cd050501f99a1d2a5fecf7df2e7be71`
+(v0.4.3 source revision `386684975edf3cbce15c4b12df37908366e2aa8b`).
+The isolated Compose assigns host GPUs 4-5, TP2, 524,288 context/KV tokens,
+FP8 E4M3 KV, sparse-MLA DSA, adaptive EAGLE 5/1/6, four running requests, and
+loopback port 8062. Qwen B was stopped only after draining; Qwen A and the
+shared LB were never recreated or reconfigured.
+
+The base-image rollout became ready in 1,448.7 seconds, including 893.2 seconds
+for target weights, 52.8 seconds for NextN, PCIe all-reduce tuning, graph
+capture, and serving-coverage warmups. Intake stayed at 42C; candidate GPUs
+peaked at 57/55C and 221/213W during loading. Native startup selected
+`flashinfer_sparse_mla` for SM120. Each rank used 81.44GB for target weights,
+3.20GB for NextN, about 2.16GB for 28 KDA/Mamba state slots, 3.55GB for the
+524,288-token target KV pool, and 0.32GB for draft KV. SGLang defaulted missing
+FP8 KV scales to 1.0, so correctness remained a hard gate.
+
+The first deterministic five-case agent gate transported 5/5 responses but
+validated only 4/5. The required streamed nullable argument was returned as a
+string instead of JSON null. Native SGLang deltas reconciled exactly at five
+requests and 122 generated tokens. Inspection proved the cause in the `glm47`
+streaming parser: JSON Schema `type: ["string", "null"]` is inferred as
+`string`, so the formatter quotes the raw `null` token. The marker parser itself
+was correct.
+
+`Dockerfile.nullable-parser` derives from the exact base and refuses to patch
+unless the upstream parser SHA-256 is
+`4de49ef0ea1ced956e95b1ad7cfabee5823731230cb5549dc05caff49ec0bcf2`.
+It buffers only the exact nullable-string union until the XML argument closes,
+emitting JSON null for `null` and a quoted JSON string otherwise. The patched
+parser SHA-256 is
+`8ed76f9da2aa782b3e9374d00687186624fd383e98acf9ba0d6ac9759e1425d7`;
+the live node-local image is
+`sha256:024a988fd0c0e15d80e382073c05657b2d57f52611c324599508cdb62b9debb8`.
+Its B-only rollout became ready in 1,023 seconds, passed the guard in 1,026.5
+seconds, and peaked at 42C intake, 57C GPU, and 771.36W full-box power. Qwen A's
+container ID, image, start time, and restart count remained unchanged.
+
+The corrected agent gate passed 5/5 with empty protocol-error lists. SGLang
+reconciled exactly at five requests and 127 generated tokens. It took 1.78
+seconds, reached 71.4 output tok/s with 291.8ms TTFT p95, and its fresh guard
+journal passed at 42C intake. The first agent/code shapes device-loaded Triton
+kernels after built-in startup warmup; those intervals were treated as warmup,
+not performance evidence. Clean repeats then produced:
+
+| concurrency / max output | requests | aggregate output median | per-stream decode median | TTFT median / p95 | TPOT median / p95 | late loads |
+|---|---:|---:|---:|---:|---:|---:|
+| c1 / 256 | 3/3 | 153.5 tok/s | 164.8 tok/s | 105.7 / 113.0ms | 6.09 / 6.32ms | warmup only |
+| c2 / 256 | 6/6 | 246.3 tok/s | 137.1 tok/s | 177.7 / 193.4ms | 7.33 / 7.78ms | 0 |
+| c4 / 256 | 12/12 | **370.7 tok/s** | 106.3 tok/s | 263.9 / 267.1ms | 9.44 / 9.83ms | 0 |
+| c8 / 256 | 24/24 | 358.3 tok/s | 97.2 tok/s | 1,427.9 / 3,077.9ms | 10.33 / 12.16ms | 0 |
+
+Every cell used a fresh intake guard journal and exact SGLang
+request/generation reconciliation. Intake stayed 42C; the clean c8 repeat
+peaked at 62C GPU and 781.27W full-box power. c8 loses 3.3% aggregate throughput
+versus c4 while median TTFT rises 5.4x, demonstrating queueing above the four
+running-request/KDA-state ceiling.
+
+Decision: retain `--max-running-requests=4`; do not spend the remaining 0.72GB
+device margin on more per-sequence KDA state. Keep the candidate LB-isolated
+with Qwen A serving production and GPUs 6-7 free. The node-local derived image
+is valid canary evidence but is not durable promotion authority; publish it by
+immutable registry digest and repin Compose before adding it to Ramjet routing.
+Evidence is retained under
+`/home/luke/inference/glm53_flash_sm120/.experiments/20260912T085607Z-glm53-qualification`
+and the adjacent rollout/TPS experiment directories.
+
 ## 2026-09-10 — NVIDIA GLM-5.3-Flash NVFP4 rejected: stock SM120 sparse-MLA has no NoPE KV path
 
 Question: can the official `nvidia/GLM-5.3-Flash-NVFP4` revision
