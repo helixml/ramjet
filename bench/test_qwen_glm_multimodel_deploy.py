@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -18,6 +19,9 @@ def load_validator():
     return module
 
 
+@unittest.skipUnless(
+    shutil.which("docker"), "Docker Compose is validated in the deployment lane"
+)
 class QwenGlmMultimodelDeployTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
