@@ -1,5 +1,45 @@
 # node06 experiment journal
 
+## 2026-09-12 — GLM recipe/source audit: track DFlash2; no new live mutation
+
+Question: do the other deployment recipes or current upstream engine sources
+contain a safe, untested GLM-5.3-Flash speedup worth another engine-B reload?
+Answer: **not yet.** The exact [SM120 runtime](https://github.com/ormandj/sglang-glm53-flash-sm120)
+v0.4.3 tag and current main are identical. Its published launcher already
+carries the GLM-specific KDA, DSA, W4A16 long-prefill, ragged-graph, and PCIe
+IPC all-reduce work used by our canary. Our separately measured 6,144-token
+prefill chunk remains the only promoted local delta.
+
+Source tracing rejected several superficially transferable knobs. In the live
+tree, `--num-continuous-decode-steps` is declared but has no runtime consumer.
+Two-batch overlap requires data-parallel attention and is incompatible with
+the canary's adaptive speculation; the upstream GLM data-parallel attempt
+[#36802](https://github.com/sgl-project/sglang/issues/36802) hung during
+warmup. Symmetric-memory all-reduce has an open deadlock report
+[#36943](https://github.com/sgl-project/sglang/issues/36943). Torch compile is
+experimental and conflicts with parts of the current breakable
+prefill-graph configuration, with no GLM-specific end-to-end result to justify
+a 17-minute reload. Qwen's lower sequence cap and larger prefill chunks were
+already rejected by our own measurements and do not transfer as assumptions.
+
+The strongest new decode candidate is the approximately 1B-parameter
+[`incoai/GLM-5.3-Flash-DFlash2`](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2)
+drafter. Both current SGLang source and vLLM's maintained GLM recipe describe
+DFlash2 integration. It was not downloaded or deployed: the checkpoint is
+gated under CC-BY-NC-ND-4.0, its publisher says final benchmark numbers are
+still being measured, node06 has no cached copy, and commercial use needs a
+separate license. It is now an explicit watchlist candidate whose first gate is
+license/access, followed by correctness and an engine-B-only ABBA against
+adaptive EAGLE.
+
+The maintained [vLLM GLM recipe](https://github.com/vllm-project/recipes/blob/main/models/zai-org/GLM-5.3-Flash.yaml)
+is useful confirmation of the intended NVFP4 and DFlash2 configuration, not an
+SM120 qualification. The node06 vLLM path remains blocked until its NoPE/KDA
+changes are merged into a pinned release and pass a GPU-free launcher probe.
+Decision: leave Qwen A and isolated GLM B unchanged, track the exact runtime,
+checkpoint, draft, and vLLM recipe, and reopen the loop when one of those
+sources supplies the missing license or implementation evidence.
+
 ## 2026-09-09 — two load-balancer outages from steering windows (postmortem + new rule)
 
 Both incidents today came from one pattern: experiment campaigns recreated
