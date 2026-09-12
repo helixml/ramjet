@@ -1,5 +1,104 @@
 # node06 experiment journal
 
+## 2026-09-12 — GLM DFlash2 runs correctly but fails capacity, c4, and prefill gates
+
+Question: after the checkpoint access constraint was explicitly cleared, can
+`incoai/GLM-5.3-Flash-DFlash2` replace adaptive EAGLE on the isolated
+GLM-5.3-Flash engine B and improve decode without compromising capacity or
+prefill? Answer: **no on the pinned SM120 TP2 stack.** DFlash2 passed model
+verification and agent correctness and improved one-stream decode by about 4%,
+but it required reducing the shared token pool from 500,000 to 200,000, lost 5%
+at the retained c4 operating point, and reduced cold prefill by 30-33%. It is a
+measured rejection, not a deployment candidate. Qwen3.8-Flash-Next A continued
+serving throughout; its container identity, immutable image, start time,
+restart count, and health did not change, and the shared load balancer was
+never recreated.
+
+The draft checkpoint was downloaded at immutable revision
+`bf582e4eacc1810f76656d1811693ff6c6737d2a` and installed read-only at
+`/prod/models/incoai/GLM-5.3-Flash-DFlash2-bf582e4eacc1`. All five files
+passed `hf cache verify`. `config.json` is SHA-256
+`c4aeac0101196a6e26705b34c45230bcd0c7c68ee2d2d1efdb242087f3712573`;
+the 2,342,169,800-byte `model.safetensors` is SHA-256
+`b038e1d9d1e7833fa3880c2c0135ba9b673013f03da1b29fb831931584759dac`.
+The experiment retained the exact pinned target model and SGLang image from
+the admitted GLM deployment, used only GPUs 4-5 and loopback port 8062, and
+kept the 600W inference ceiling. Every request-generating interval ran under a
+fresh intake-temperature guard journal; intake was 42C and the highest
+measured candidate GPU temperature was 69C.
+
+The pinned SGLang runtime has native DFlash support, but the safe launch is not
+the apparent flag substitution. The draft must explicitly use
+`--speculative-draft-model-quantization=unquant`; otherwise it incorrectly
+inherits the target's `modelopt_mixed` quantization. FlashAttention 4 forces
+the draft KV cache to BF16, while the FlashInfer target attention backend
+allows FP8 E4M3 draft KV. The approximately 1B-parameter draft consumes 1.80GB
+per rank. Its five-layer, hidden-size-4096 cache still allocates a physical
+draft slot for every target token, so the small speculative window does not
+bound draft-cache capacity. With radix cache and overlap scheduling, the
+hybrid KDA state needs five state slots per running request; c4 therefore has
+an exact minimum of 20 rather than the retained EAGLE recipe's conservative
+28.
+
+Five engine-B-only load gates located the actual memory boundary:
+
+| run | shared token cap | relevant change | result |
+|---|---:|---|---|
+| r1 | 500,000 | FA4, BF16 draft KV | OOM before target graph capture |
+| r2 | 500,000 | FlashInfer, FP8 draft KV | OOM during target verify graph |
+| r3 | 400,000 | FP8 draft KV | draft graph disabled; KDA warmup OOM |
+| r4 | 300,000 | KDA state slots 28 to 20 | graphs captured; sparse-MLA warmup OOM from fragmentation |
+| r5 | 200,000 | same c4 settings | ready and qualified |
+
+The successful r5 rank allocation included about 81.44GB of target weights,
+1.80GB of draft weights, 1.35GB of target KV, and two 0.48GB draft-KV
+allocations. It retained 3.17GB after graph capture. Its first persisted
+FlashInfer SM120 top-k compile took 789 seconds; this startup cost was excluded
+from inference timing through the guard's runtime-start signal. The earlier
+failures occurred during server-owned load, graph, or serving warmup before
+readiness and before any benchmark request.
+
+The deterministic agent/tool gate completed all five cases with no protocol
+errors and exact native reconciliation of five requests and 120 generated
+tokens. The clean forced-length decode curve used a prior c4 warmup, a fresh
+guard per measured cell, exact SGLang request/token counter reconciliation,
+and no late-load markers:
+
+| concurrency | adaptive EAGLE aggregate | DFlash2 aggregate | change | adaptive EAGLE per stream | DFlash2 per stream | change |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 153.5 | 160.1 | +4.3% | 164.8 | 171.6 | +4.1% |
+| 2 | 246.3 | 237.9 | -3.4% | 137.1 | 137.2 | +0.1% |
+| 4 | 388.2 | 367.0 | -5.5% | 109.4 | 103.9 | -5.0% |
+| 8 | 358.3 | 342.6 | -4.4% | 97.2 | 96.4 | -0.8% |
+
+Rates are output tok/s. C4 remains the admitted concurrency point, so the c1
+gain is not sufficient to promote the drafter. The clean cold/warm frontier
+also reconciled all native prompt, cached-prompt, request, and generated-token
+counters, with no late compilation marker in a measured interval:
+
+| context | adaptive EAGLE cold prefill | DFlash2 cold prefill | change | DFlash2 cold TTFT | DFlash2 warm cached tokens / TTFT |
+|---:|---:|---:|---:|---:|---:|
+| 2K | 5,174 tok/s | 3,618 tok/s | -30.1% | 591ms | 2,048 / 106ms |
+| 8K | 5,817 tok/s | 3,920 tok/s | -32.6% | 2,147ms | 8,192 / 232ms |
+| 32K | 5,961 tok/s | 3,965 tok/s | -33.5% | 8,451ms | 33,280 / 365ms |
+| 64K | 5,951 tok/s | 3,962 tok/s | -33.4% | 16,899ms | 66,816 / 555ms |
+
+Decision: reject DFlash2 for this target/runtime and restore the byte-identical
+admitted adaptive-EAGLE recipe: TP2, c4, 6,144-token prefill chunks, a
+500,000-token pool, 28 KDA state slots, and adaptive EAGLE 5/1/6. Keep the
+verified DFlash2 checkpoint available for a future runtime that changes its
+physical draft-cache allocation or target/draft memory behavior; do not carry
+its flags into the promotable Compose recipe. The guarded restore completed in
+1,035 seconds, returned the live Compose to SHA-256
+`e0b321eab9efea38d92f511ebb259f8b6f5604fffcb40df86871c799328fb520`,
+passed readiness and a direct smoke, and left GLM B running with zero restarts
+or OOM. Intake stayed at 42C and the restored GPUs peaked at 60C. Evidence is under
+`20260912T135850Z-dflash2`, `20260912T142005Z-dflash2-r2`,
+`20260912T144200Z-dflash2-r3`, `20260912T150300Z-dflash2-r4`, and
+`20260912T153500Z-dflash2-r5` in the GLM experiment directory on node06. The
+r5 directory contains the correctness, clean c1/c2/c4/c8 decode, clean
+2K/8K/32K/64K prefill, thermal, native-counter, and rollback evidence.
+
 ## 2026-09-12 — GLM recipe/source audit: track DFlash2; no new live mutation
 
 Question: do the other deployment recipes or current upstream engine sources
