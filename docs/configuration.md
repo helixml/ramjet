@@ -698,7 +698,9 @@ families are:
   recent serving traffic.
 - `ramjet_route_decisions_total` for route distribution.
 - `ramjet_cache_requests_total` and prompt/cached token counters for observed
-  cache outcomes.
+  cache outcomes; `ramjet_model_{prompt,cached_prompt,completion}_tokens_total`
+  and `ramjet_model_requests_total` split the same successful inference usage
+  by statically configured model.
 - `ramjet_cache_ttft_seconds` for streaming time to first generated content.
 - `ramjet_session_affinity_total` for bounded prospective pair, health, load,
   and score outcomes when session shadow mode is enabled.
