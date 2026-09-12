@@ -207,11 +207,24 @@ function buildTokenBuckets(days: number): TokenBucket[] {
 }
 
 export function mockTokens(days: number): TokenHistory {
+  const buckets = buildTokenBuckets(days)
+  const split = (share: number): TokenBucket[] =>
+    buckets.map((bucket) => ({
+      t: bucket.t,
+      prompt: bucket.prompt * share,
+      completion: bucket.completion * share,
+      cached: bucket.cached * share,
+      requests: bucket.requests * share,
+    }))
   return {
     now: Date.now(),
     days,
     bucket_seconds: 3600,
-    buckets: buildTokenBuckets(days),
+    buckets,
+    models: [
+      { model: "qwen3.8-flash-next", buckets: split(0.68) },
+      { model: "glm-5.3-flash", buckets: split(0.32) },
+    ],
   }
 }
 

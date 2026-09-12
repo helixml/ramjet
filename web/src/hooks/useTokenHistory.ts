@@ -12,7 +12,7 @@ export interface TokenHistoryData {
   mock: boolean
 }
 
-/** Polls the hourly token history used by the two magnitude heatmaps. */
+/** Polls aggregate and per-model hourly token history. */
 export function useTokenHistory(days: number): TokenHistoryData {
   const [tokens, setTokens] = useState<TokenHistory | null>(null)
   const [error, setError] = useState<string | null>(null)

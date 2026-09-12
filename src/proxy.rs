@@ -946,6 +946,7 @@ impl Proxy {
             })
             .collect::<anyhow::Result<Vec<_>>>()?
             .into();
+        metrics.initialize_model_usage(config.upstream_models.iter().map(String::as_str));
         publish_initial_replica_state(
             &config,
             metrics.as_ref(),
@@ -1733,7 +1734,13 @@ impl Proxy {
                     .observe(ttft.as_secs_f64());
             }
             if status == StatusCode::OK && endpoint != Endpoint::Other {
-                self.record_usage(endpoint_label, &usage, started.elapsed(), first_token);
+                self.record_usage(
+                    endpoint_label,
+                    upstream,
+                    &usage,
+                    started.elapsed(),
+                    first_token,
+                );
                 self.inner
                     .router
                     .observe_served(upstream, &fingerprints, new_kv_tokens(&usage));
@@ -2128,13 +2135,46 @@ impl Proxy {
             .observe(elapsed.as_secs_f64());
     }
 
+    fn record_model_usage(&self, model: &str, usage: &Accumulator) {
+        self.inner
+            .metrics
+            .model_requests
+            .with_label_values(&[model])
+            .inc();
+        if let Some(value) = usage.prompt {
+            self.inner
+                .metrics
+                .model_prompt_tokens
+                .with_label_values(&[model])
+                .inc_by(value);
+        }
+        if let Some(value) = usage.cached {
+            self.inner
+                .metrics
+                .model_cached_tokens
+                .with_label_values(&[model])
+                .inc_by(value);
+        }
+        if let Some(value) = usage.completion {
+            self.inner
+                .metrics
+                .model_completion_tokens
+                .with_label_values(&[model])
+                .inc_by(value);
+        }
+    }
+
     fn record_usage(
         &self,
         endpoint: &str,
+        upstream: usize,
         usage: &Accumulator,
         elapsed: Duration,
         first_token: Option<Duration>,
     ) {
+        if let Some(model) = self.inner.config.upstream_models.get(upstream) {
+            self.record_model_usage(model, usage);
+        }
         let cache_outcome = usage.cache_outcome();
         self.inner
             .metrics
@@ -4271,7 +4311,10 @@ mod tests {
 
     #[test]
     fn response_usage_records_bounded_cache_outcome_and_ttft() {
-        let proxy = proxy_for(&[Url::parse("http://127.0.0.1:1").unwrap()]);
+        let proxy = proxy_for_models(
+            &[Url::parse("http://127.0.0.1:1").unwrap()],
+            &["glm-5.3-flash"],
+        );
         let usage = Accumulator {
             prompt: Some(100.0),
             cached: Some(64.0),
@@ -4282,6 +4325,7 @@ mod tests {
 
         proxy.record_usage(
             "chat",
+            0,
             &usage,
             Duration::from_secs(2),
             Some(Duration::from_millis(500)),
@@ -4303,6 +4347,46 @@ mod tests {
                 .get_sample_count(),
             1
         );
+        for (actual, expected) in [
+            (
+                proxy
+                    .inner
+                    .metrics
+                    .model_prompt_tokens
+                    .with_label_values(&["glm-5.3-flash"])
+                    .get(),
+                100.0,
+            ),
+            (
+                proxy
+                    .inner
+                    .metrics
+                    .model_cached_tokens
+                    .with_label_values(&["glm-5.3-flash"])
+                    .get(),
+                64.0,
+            ),
+            (
+                proxy
+                    .inner
+                    .metrics
+                    .model_completion_tokens
+                    .with_label_values(&["glm-5.3-flash"])
+                    .get(),
+                10.0,
+            ),
+            (
+                proxy
+                    .inner
+                    .metrics
+                    .model_requests
+                    .with_label_values(&["glm-5.3-flash"])
+                    .get(),
+                1.0,
+            ),
+        ] {
+            assert!((actual - expected).abs() < f64::EPSILON);
+        }
     }
 
     #[tokio::test]

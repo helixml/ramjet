@@ -137,11 +137,17 @@ export interface TokenBucket {
   requests: number
 }
 
+export interface ModelTokenHistory {
+  model: string
+  buckets: TokenBucket[]
+}
+
 export interface TokenHistory {
   now: number
   days: number
   bucket_seconds: number
   buckets: TokenBucket[]
+  models: ModelTokenHistory[]
 }
 
 export type AdaptiveMode = "off" | "manual" | "recommend" | "auto"

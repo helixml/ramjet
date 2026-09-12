@@ -20,8 +20,7 @@
 )]
 
 use std::{
-    collections::HashMap,
-    collections::VecDeque,
+    collections::{BTreeMap, HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -65,9 +64,11 @@ const STREAM_CHANNEL_CAPACITY: usize = 64;
 const MAX_STREAM_CLIENTS: usize = 8;
 const MIN_TOKEN_HISTORY_DAYS: u64 = 1;
 const MAX_TOKEN_HISTORY_DAYS: u64 = 400;
-/// Version 1 files carry samples only; version 2 adds the token history and
-/// is still readable by, and readable from, a version 1 snapshot.
-const STATE_VERSION: u32 = 2;
+const MAX_MODEL_TOKEN_HISTORIES: usize = 64;
+const MAX_MODEL_LABEL_BYTES: usize = 256;
+/// Version 1 files carry samples only, version 2 adds aggregate token history,
+/// and version 3 adds per-model token history. Older snapshots remain valid.
+const STATE_VERSION: u32 = 3;
 const MIN_STATE_VERSION: u32 = 1;
 /// Static assets must be small dashboard files; refuse to stream anything
 /// that plainly is not part of the built bundle.
@@ -850,6 +851,8 @@ pub struct TokenCounters {
     pub requests: Option<f64>,
 }
 
+type ModelTokenCounters = BTreeMap<String, TokenCounters>;
+
 /// Reads the cumulative counters the token history integrates.
 #[must_use]
 pub fn token_counters(map: &MetricMap) -> TokenCounters {
@@ -859,6 +862,38 @@ pub fn token_counters(map: &MetricMap) -> TokenCounters {
         cached: metric_sum(map, "ramjet_cached_prompt_tokens_total"),
         requests: metric_sum(map, "ramjet_requests_total"),
     }
+}
+
+/// Reads the same cumulative counters split by the bounded configured-model
+/// label published by the proxy.
+#[must_use]
+pub fn model_token_counters(map: &MetricMap) -> ModelTokenCounters {
+    let mut models = BTreeMap::new();
+    for (model, value) in metric_by_label(map, "ramjet_model_prompt_tokens_total", "model") {
+        models
+            .entry(model)
+            .or_insert_with(TokenCounters::default)
+            .prompt = Some(value);
+    }
+    for (model, value) in metric_by_label(map, "ramjet_model_completion_tokens_total", "model") {
+        models
+            .entry(model)
+            .or_insert_with(TokenCounters::default)
+            .completion = Some(value);
+    }
+    for (model, value) in metric_by_label(map, "ramjet_model_cached_prompt_tokens_total", "model") {
+        models
+            .entry(model)
+            .or_insert_with(TokenCounters::default)
+            .cached = Some(value);
+    }
+    for (model, value) in metric_by_label(map, "ramjet_model_requests_total", "model") {
+        models
+            .entry(model)
+            .or_insert_with(TokenCounters::default)
+            .requests = Some(value);
+    }
+    models
 }
 
 /// One wall-clock hour of counter deltas, keyed by its UTC hour start.
@@ -872,6 +907,13 @@ pub struct TokenBucket {
     pub completion: f64,
     pub cached: f64,
     pub requests: f64,
+}
+
+/// Hourly token history for one statically configured model.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelTokenHistory {
+    pub model: String,
+    pub buckets: Vec<TokenBucket>,
 }
 
 /// A long, cheap history of hourly token volume.
@@ -1441,13 +1483,21 @@ struct PersistedState {
     samples: Vec<Sample>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tokens: Vec<TokenBucket>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    model_tokens: Vec<ModelTokenHistory>,
 }
 
-fn persist_state(path: &Path, samples: &[Sample], tokens: &[TokenBucket]) -> std::io::Result<()> {
+fn persist_state(
+    path: &Path,
+    samples: &[Sample],
+    tokens: &[TokenBucket],
+    model_tokens: &[ModelTokenHistory],
+) -> std::io::Result<()> {
     let state = PersistedState {
         version: STATE_VERSION,
         samples: samples.to_vec(),
         tokens: tokens.to_vec(),
+        model_tokens: model_tokens.to_vec(),
     };
     let body =
         serde_json::to_vec(&state).map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -1458,11 +1508,21 @@ fn persist_state(path: &Path, samples: &[Sample], tokens: &[TokenBucket]) -> std
     std::fs::rename(&temporary, path)
 }
 
-fn load_state(path: &Path) -> Option<(Vec<Sample>, Vec<TokenBucket>)> {
+fn load_state(path: &Path) -> Option<(Vec<Sample>, Vec<TokenBucket>, Vec<ModelTokenHistory>)> {
     let body = std::fs::read(path).ok()?;
-    let state: PersistedState = serde_json::from_slice(&body).ok()?;
-    ((MIN_STATE_VERSION..=STATE_VERSION).contains(&state.version))
-        .then_some((state.samples, state.tokens))
+    let mut state: PersistedState = serde_json::from_slice(&body).ok()?;
+    if !(MIN_STATE_VERSION..=STATE_VERSION).contains(&state.version) {
+        return None;
+    }
+    state.model_tokens.retain(|history| {
+        !history.model.is_empty()
+            && history.model.len() <= MAX_MODEL_LABEL_BYTES
+            && !history.model.chars().any(char::is_control)
+    });
+    state.model_tokens.sort_by(|a, b| a.model.cmp(&b.model));
+    state.model_tokens.dedup_by(|a, b| a.model == b.model);
+    state.model_tokens.truncate(MAX_MODEL_TOKEN_HISTORIES);
+    Some((state.samples, state.tokens, state.model_tokens))
 }
 
 // --- Live stream ------------------------------------------------------------
@@ -1591,6 +1651,7 @@ struct Shared {
     settings: Settings,
     store: Store,
     tokens: Mutex<TokenHistory>,
+    model_tokens: Mutex<BTreeMap<String, TokenHistory>>,
     stream: broadcast::Sender<Arc<str>>,
     stream_clients: AtomicUsize,
     upstreams: Vec<Url>,
@@ -1604,6 +1665,16 @@ impl Shared {
         }
         if let Some(encoded) = encode_frame(frame) {
             let _ = self.stream.send(encoded);
+        }
+    }
+
+    fn observe_model_tokens(&self, now: u64, counters: ModelTokenCounters) {
+        let mut histories = self.model_tokens.lock();
+        for (model, counters) in counters {
+            histories
+                .entry(model)
+                .or_insert_with(|| TokenHistory::new(self.settings.token_history_days))
+                .observe(now, counters);
         }
     }
 }
@@ -1638,15 +1709,22 @@ impl MachineView {
         }
         let store = Store::new(settings.retention_seconds);
         let mut tokens = TokenHistory::new(settings.token_history_days);
+        let mut model_tokens = BTreeMap::new();
         if let Some(path) = &settings.state_path
-            && let Some((samples, buckets)) = load_state(path)
+            && let Some((samples, buckets, persisted_models)) = load_state(path)
         {
             let now = now_unix_ms();
             store.restore(samples, now);
             tokens.restore(buckets, now);
+            for persisted in persisted_models {
+                let mut history = TokenHistory::new(settings.token_history_days);
+                history.restore(persisted.buckets, now);
+                model_tokens.insert(persisted.model, history);
+            }
             tracing::info!(
                 samples = store.len(),
                 token_hours = tokens.len(),
+                token_models = model_tokens.len(),
                 "machineview state restored"
             );
         }
@@ -1655,6 +1733,7 @@ impl MachineView {
             settings: settings.clone(),
             store,
             tokens: Mutex::new(tokens),
+            model_tokens: Mutex::new(model_tokens),
             stream,
             stream_clients: AtomicUsize::new(0),
             upstreams: upstreams.clone(),
@@ -1707,10 +1786,11 @@ impl MachineView {
             loop {
                 let tick_started = tokio::time::Instant::now();
                 let now = now_unix_ms();
-                let (sample, counters) = sampler.sample(now).await;
+                let (sample, counters, model_counters) = sampler.sample(now).await;
                 loop_shared.publish(&StreamFrame::Sample { sample: &sample });
                 loop_shared.store.push(sample);
                 loop_shared.tokens.lock().observe(now, counters);
+                loop_shared.observe_model_tokens(now, model_counters);
                 ticks += 1;
                 if ticks.is_multiple_of(PERSIST_EVERY_TICKS) {
                     persist_snapshot(&loop_shared).await;
@@ -1806,7 +1886,18 @@ async fn persist_snapshot(shared: &Arc<Shared>) {
     };
     let samples = shared.store.snapshot();
     let tokens = shared.tokens.lock().snapshot();
-    let result = tokio::task::spawn_blocking(move || persist_state(&path, &samples, &tokens)).await;
+    let model_tokens = shared
+        .model_tokens
+        .lock()
+        .iter()
+        .map(|(model, history)| ModelTokenHistory {
+            model: model.clone(),
+            buckets: history.snapshot(),
+        })
+        .collect::<Vec<_>>();
+    let result =
+        tokio::task::spawn_blocking(move || persist_state(&path, &samples, &tokens, &model_tokens))
+            .await;
     match result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::warn!(%error, "machineview state persist failed"),
@@ -1828,9 +1919,9 @@ struct Sampler {
 impl Sampler {
     /// Produces the ring sample plus the raw cumulative counters, which the
     /// caller folds into the hourly token history.
-    async fn sample(&mut self, t_ms: u64) -> (Sample, TokenCounters) {
+    async fn sample(&mut self, t_ms: u64) -> (Sample, TokenCounters, ModelTokenCounters) {
         let self_map = gather_registry(&self.registry);
-        let counters = token_counters(&self_map);
+        let model_counters = model_token_counters(&self_map);
         let mut serving =
             build_serving_sample(&self_map, t_ms, &mut self.rates, &mut self.histograms);
 
@@ -1930,7 +2021,8 @@ impl Sampler {
                 engines,
                 energy,
             },
-            counters,
+            token_counters(&self_map),
+            model_counters,
         )
     }
 }
@@ -2008,6 +2100,7 @@ struct TokensResponse {
     days: u64,
     bucket_seconds: u64,
     buckets: Vec<TokenBucket>,
+    models: Vec<ModelTokenHistory>,
 }
 
 async fn tokens_handler(
@@ -2019,11 +2112,21 @@ async fn tokens_handler(
         .days
         .unwrap_or(shared.settings.token_history_days)
         .clamp(MIN_TOKEN_HISTORY_DAYS, shared.settings.token_history_days);
+    let models = shared
+        .model_tokens
+        .lock()
+        .iter()
+        .map(|(model, history)| ModelTokenHistory {
+            model: model.clone(),
+            buckets: history.query(now, days),
+        })
+        .collect();
     let response = TokensResponse {
         now,
         days,
         bucket_seconds: HOUR_MS / 1_000,
         buckets: shared.tokens.lock().query(now, days),
+        models,
     };
     json_response(&response)
 }
@@ -2340,10 +2443,15 @@ mod tests {
             cached: 4.0,
             requests: 1.0,
         }];
-        persist_state(&path, &samples, &buckets).expect("persist");
-        let (loaded, loaded_tokens) = load_state(&path).expect("load");
+        let model_tokens = vec![ModelTokenHistory {
+            model: "glm-5.3-flash".to_owned(),
+            buckets: buckets.clone(),
+        }];
+        persist_state(&path, &samples, &buckets, &model_tokens).expect("persist");
+        let (loaded, loaded_tokens, loaded_model_tokens) = load_state(&path).expect("load");
         assert_eq!(loaded, samples);
         assert_eq!(loaded_tokens, buckets);
+        assert_eq!(loaded_model_tokens, model_tokens);
         let store = Store::new(10);
         store.restore(loaded, 5_000);
         assert_eq!(store.len(), 2);
@@ -2362,9 +2470,10 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let path = dir.join("state.json");
         std::fs::write(&path, br#"{"version":1,"samples":[{"t":1000}]}"#).expect("write v1 state");
-        let (samples, tokens) = load_state(&path).expect("v1 state loads");
+        let (samples, tokens, model_tokens) = load_state(&path).expect("v1 state loads");
         assert_eq!(samples.len(), 1);
         assert!(tokens.is_empty());
+        assert!(model_tokens.is_empty());
         std::fs::write(&path, br#"{"version":99,"samples":[]}"#).expect("write future state");
         assert!(
             load_state(&path).is_none(),
@@ -2568,6 +2677,29 @@ mod tests {
         assert_eq!(counters.cached, Some(789.0));
         assert_eq!(counters.requests, Some(7.0), "labelled series are summed");
         assert_eq!(token_counters(&MetricMap::new()), TokenCounters::default());
+    }
+
+    #[test]
+    fn model_token_counters_group_the_bounded_proxy_registry_shapes() {
+        let map = parse_prometheus_text(concat!(
+            "ramjet_model_prompt_tokens_total{model=\"qwen\"} 1200\n",
+            "ramjet_model_prompt_tokens_total{model=\"glm\"} 300\n",
+            "ramjet_model_cached_prompt_tokens_total{model=\"qwen\"} 800\n",
+            "ramjet_model_completion_tokens_total{model=\"qwen\"} 70\n",
+            "ramjet_model_completion_tokens_total{model=\"glm\"} 20\n",
+            "ramjet_model_requests_total{model=\"qwen\"} 4\n",
+            "ramjet_model_requests_total{model=\"glm\"} 1\n",
+        ));
+        let by_model = model_token_counters(&map);
+        assert_eq!(
+            by_model.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["glm", "qwen"]
+        );
+        assert_eq!(by_model["qwen"], counters(1_200.0, 70.0, 800.0, 4.0));
+        assert_eq!(by_model["glm"].prompt, Some(300.0));
+        assert_eq!(by_model["glm"].completion, Some(20.0));
+        assert_eq!(by_model["glm"].cached, None);
+        assert_eq!(by_model["glm"].requests, Some(1.0));
     }
 
     #[test]
