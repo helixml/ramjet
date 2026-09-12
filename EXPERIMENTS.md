@@ -32,6 +32,333 @@ recovers it on its own. The rewritten `qwen38_escape_*` and
 `qwen38_steering_{capture,eval}` and `qwen38_cyber_steering_sweep`
 campaigns carry a DEPRECATED-PATTERN header and must not be revived as-is.
 
+## 2026-09-12 — GLM SM120 6K prefill admitted; 8K rejected; vLLM still blocked
+
+Question: can the isolated GLM-5.3-Flash engine B improve cold prefill,
+aggregate output, or per-stream decode without changing Qwen A? Answer:
+**yes with 6,144-token prefill chunks and a 500,000-token shared pool.** The
+trade gives up 24,288 token slots (4.6%) and is therefore recorded as an
+explicit capacity/performance choice, not free headroom. Qwen A's container
+identity, image, start time, restart count, and health remained unchanged.
+
+`bench/context_frontier.py` now reconciles backend-neutral request, prompt,
+cached-prompt, and generation counters for both vLLM and SGLang. Its reported
+prefill rate is effective uncached prompt tokens divided by TTFT, including
+scheduler and first-token overhead. `BENCH_IGNORE_EOS=1` forces every decode
+sample to 256 output tokens. SGLang does not publish cumulative speculative
+proposed/accepted counters, so speculation is reported as unavailable rather
+than inferred from a gauge. The GPU-free gate passed agentbench validation,
+723 Python tests, all Rust tests, Clippy, and the locked release build.
+
+The 4,096-token control at a 450W ceiling produced 5,174, 5,434, 5,897, and
+5,881 effective tok/s at 2K, 8K, 32K, and 64K context. A forced-length
+8K/64K ABBA at 450W/600W showed no power response: prefill stayed within
+5,413-5,431 and 5,883-5,887 tok/s while candidate GPUs drew only 223-233W.
+The inference ceiling remains 600W as requested, but it is not the limiter.
+
+An 8,192-token candidate with the full 524,288-token pool loaded target and
+NextN weights and captured every graph, then failed built-in serving warmup.
+The SM120 sparse-attention path requested a 256MiB output with only 124.94MiB
+free. Capping the pool at 500,000 freed exactly 120MiB, but the same allocation
+still had only 244.94MiB free. Both failures occurred before readiness or a
+benchmark request, had no container OOM kill, restart, Xid, or thermal event,
+and stopped only GLM B. The rollout owner was fixed to fail immediately when
+the engine exits instead of polling until its 40-minute readiness deadline.
+
+The 6,144/500,000 candidate passed the same warmup, became ready in 1,036
+seconds, and passed its direct smoke. The complete and repeat frontiers used
+fresh guard journals and exact native counter reconciliation:
+
+| context | 4K control prefill | 6K candidate prefill | change | 6K cold / warm decode |
+|---|---:|---:|---:|---:|
+| 2K | 5,174 tok/s | 5,174 tok/s | 0.0% | 161.3 / 165.7 tok/s |
+| 8K | 5,415 tok/s forced controls | 5,817 tok/s | **+7.4%** | 154.6 / 164.5 tok/s |
+| 32K | 5,897 tok/s | 5,961 tok/s | +1.1% | 151.2 / 157.4 tok/s |
+| 64K | 5,884 tok/s forced controls | 5,951 tok/s | +1.1% | 164.3 / 171.8 tok/s |
+
+Early frontier and c4 passes exposed late text-shape Triton loads and were
+retained only as warmup; the table and c4 result below come from subsequent
+intervals with no late-load marker.
+
+The clean c4 code cell completed 20/20 requests at **388.2 aggregate tok/s** and
+**109.4 per-stream tok/s**, versus the retained 4K result of 370.7 and 106.3:
++4.7% aggregate and +2.9% per stream. Native requests and all 5,120 generated
+tokens reconciled exactly. Its guard passed at 42C intake and 62C peak GLM GPU;
+the long-context repeat passed at 42C intake and 73C peak GPU. No late JIT
+marker landed in a measured interval.
+
+The current backend survey did not identify a second safe live candidate.
+[vLLM v0.29.0](https://github.com/vllm-project/vllm/releases/tag/v0.29.0)
+still lacks merged SM120 NoPE support; the required
+[#55277](https://github.com/vllm-project/vllm/pull/55277) is open/dirty.
+Its promising FlashKDA prefill
+[#55737](https://github.com/vllm-project/vllm/pull/55737) and masked-MHA NoPE
+prefill [#55738](https://github.com/vllm-project/vllm/pull/55738) changes are
+also open and blocked/dirty. SGLang's small-batch SM120 BA projection
+[#38635](https://github.com/sgl-project/sglang/pull/38635) is blocked, while
+the metadata fusion [#38213](https://github.com/sgl-project/sglang/pull/38213)
+is already enabled in the canary and claims no isolated end-to-end result.
+Compact NoPE storage [#38430](https://github.com/sgl-project/sglang/pull/38430)
+adds capacity rather than a demonstrated speedup and remains open.
+
+Decision: promote 6,144/6,144/500,000 as the deployment defaults; retain
+`--max-running-requests=4`, adaptive EAGLE 5/1/6, and every other engine knob.
+Leave GLM B loopback/LB-isolated on GPUs 4-5 at the measured settings and
+600W ceiling, with GPUs 6-7 free. Evidence is under
+`20260912T1058Z-prefill8192`, `20260912T1124Z-prefill8192-500k`,
+`20260912T1142Z-prefill6144-500k`, `20260912T1201Z-prefill6144-frontier-r2`,
+`20260912T1204Z-prefill6144-repeat`,
+`20260912T1213Z-prefill6144-frontier-final`, and
+`20260912T1216Z-prefill6144-c4-clean` in
+the GLM experiment directory on node06.
+
+## 2026-09-12 — GLM-5.3-Flash SM120 TP2 runs beside Qwen A; parser fixed and c4 retained
+
+Question: can a new W4A16 NVFP4 GLM-5.3-Flash quant run on node06 engine B
+while Qwen3.8-Flash-Next A continues serving, pass the agent/tool contract, and
+produce a clean concurrency curve? Answer: **yes as an LB-isolated canary after
+one narrow SGLang parser correction.** It is not promoted into Ramjet routing.
+
+The checkpoint is
+`ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO` at immutable revision
+`ee0989a944b0e213589191d7fca63af825a0741e`. All 90 safetensor shards passed
+`hf cache verify`; Hugging Face's local `.cache/huggingface` metadata was the
+only extra state. The initial runtime was
+`ghcr.io/ormandj/sglang-glm53-flash-sm120@sha256:ec4243f940a179a27fea21895077efd47cd050501f99a1d2a5fecf7df2e7be71`
+(v0.4.3 source revision `386684975edf3cbce15c4b12df37908366e2aa8b`).
+The isolated Compose assigns host GPUs 4-5, TP2, 524,288 context/KV tokens,
+FP8 E4M3 KV, sparse-MLA DSA, adaptive EAGLE 5/1/6, four running requests, and
+loopback port 8062. Qwen B was stopped only after draining; Qwen A and the
+shared LB were never recreated or reconfigured.
+
+The base-image rollout became ready in 1,448.7 seconds, including 893.2 seconds
+for target weights, 52.8 seconds for NextN, PCIe all-reduce tuning, graph
+capture, and serving-coverage warmups. Intake stayed at 42C; candidate GPUs
+peaked at 57/55C and 221/213W during loading. Native startup selected
+`flashinfer_sparse_mla` for SM120. Each rank used 81.44GB for target weights,
+3.20GB for NextN, about 2.16GB for 28 KDA/Mamba state slots, 3.55GB for the
+524,288-token target KV pool, and 0.32GB for draft KV. SGLang defaulted missing
+FP8 KV scales to 1.0, so correctness remained a hard gate.
+
+The first deterministic five-case agent gate transported 5/5 responses but
+validated only 4/5. The required streamed nullable argument was returned as a
+string instead of JSON null. Native SGLang deltas reconciled exactly at five
+requests and 122 generated tokens. Inspection proved the cause in the `glm47`
+streaming parser: JSON Schema `type: ["string", "null"]` is inferred as
+`string`, so the formatter quotes the raw `null` token. The marker parser itself
+was correct.
+
+`Dockerfile.nullable-parser` derives from the exact base and refuses to patch
+unless the upstream parser SHA-256 is
+`4de49ef0ea1ced956e95b1ad7cfabee5823731230cb5549dc05caff49ec0bcf2`.
+It buffers only the exact nullable-string union until the XML argument closes,
+emitting JSON null for `null` and a quoted JSON string otherwise. The patched
+parser SHA-256 is
+`8ed76f9da2aa782b3e9374d00687186624fd383e98acf9ba0d6ac9759e1425d7`;
+the live node-local image is
+`sha256:024a988fd0c0e15d80e382073c05657b2d57f52611c324599508cdb62b9debb8`.
+Its B-only rollout became ready in 1,023 seconds, passed the guard in 1,026.5
+seconds, and peaked at 42C intake, 57C GPU, and 771.36W full-box power. Qwen A's
+container ID, image, start time, and restart count remained unchanged.
+
+The corrected agent gate passed 5/5 with empty protocol-error lists. SGLang
+reconciled exactly at five requests and 127 generated tokens. It took 1.78
+seconds, reached 71.4 output tok/s with 291.8ms TTFT p95, and its fresh guard
+journal passed at 42C intake. The first agent/code shapes device-loaded Triton
+kernels after built-in startup warmup; those intervals were treated as warmup,
+not performance evidence. Clean repeats then produced:
+
+| concurrency / max output | requests | aggregate output median | per-stream decode median | TTFT median / p95 | TPOT median / p95 | late loads |
+|---|---:|---:|---:|---:|---:|---:|
+| c1 / 256 | 3/3 | 153.5 tok/s | 164.8 tok/s | 105.7 / 113.0ms | 6.09 / 6.32ms | warmup only |
+| c2 / 256 | 6/6 | 246.3 tok/s | 137.1 tok/s | 177.7 / 193.4ms | 7.33 / 7.78ms | 0 |
+| c4 / 256 | 12/12 | **370.7 tok/s** | 106.3 tok/s | 263.9 / 267.1ms | 9.44 / 9.83ms | 0 |
+| c8 / 256 | 24/24 | 358.3 tok/s | 97.2 tok/s | 1,427.9 / 3,077.9ms | 10.33 / 12.16ms | 0 |
+
+Every cell used a fresh intake guard journal and exact SGLang
+request/generation reconciliation. Intake stayed 42C; the clean c8 repeat
+peaked at 62C GPU and 781.27W full-box power. c8 loses 3.3% aggregate throughput
+versus c4 while median TTFT rises 5.4x, demonstrating queueing above the four
+running-request/KDA-state ceiling.
+
+Decision: retain `--max-running-requests=4`; do not spend the remaining 0.72GB
+device margin on more per-sequence KDA state. Keep the candidate LB-isolated
+with Qwen A serving production and GPUs 6-7 free. The node-local derived image
+is valid canary evidence but is not durable promotion authority; publish it by
+immutable registry digest and repin Compose before adding it to Ramjet routing.
+Evidence is retained under
+`/home/luke/inference/glm53_flash_sm120/.experiments/20260912T085607Z-glm53-qualification`
+and the adjacent rollout/TPS experiment directories.
+
+## 2026-09-10 — NVIDIA GLM-5.3-Flash NVFP4 rejected: stock SM120 sparse-MLA has no NoPE KV path
+
+Question: can the official `nvidia/GLM-5.3-Flash-NVFP4` revision
+`423acf37583782c51c142d145aef733d72943d93` replace only Qwen B on node06,
+pass correctness, and proceed to guarded TPS/concurrency measurements? Answer:
+**no on the pinned vLLM image.** The candidate failed the live loader gate, so
+no inference request and no performance cell ran. Qwen A served production
+throughout; each failure path recreated canonical Qwen B and the shared load
+balancer was never recreated.
+
+The exact checkpoint downloaded to
+`/prod/models/nvidia/GLM-5.3-Flash-NVFP4-423acf37583782c51c142d145aef733d72943d93`
+in 49m22.67s. `verify-model.py` admitted the pinned metadata, 33 complete
+shards, no partials, and 204,439,103,396 tensor bytes. The immutable runtime
+image was
+`vllm/vllm-openai@sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93`
+(vLLM `0.28.1rc1.dev472+gd9105ea80`). Its GPU-free full config builder passed
+the FP8 candidate in 34.59s.
+
+The guarded FP8 run is
+`/home/luke/inference/glm53_flash_nvidia/.experiments/20260910T110722Z-canary-r2`.
+All four TP ranks loaded 44.52GiB each in 138.0, 138.0, 151.6, and 169.9s.
+TileLang JIT then completed and CUDA-graph/cache profiling reached the first MLA
+cache write. The worker failed with:
+
+```text
+concat_and_cache_mla ... pe_dim must be 64 for fp8_ds_mla
+```
+
+The checkpoint is NoPE sparse MLA: `qk_nope_head_dim=256`,
+`qk_rope_head_dim=0`, `kv_lora_rank=512`, `index_topk=2048`, and
+`index_kpool=4`. The pinned SM120 backend canonicalizes the checkpoint's FP8
+request to the packed `fp8_ds_mla` format, whose writer requires a 64-element
+RoPE section. This is an attention/KV kernel incompatibility after clean weight
+loading, not a weight-fit, ModelOpt, memory, or thermal failure.
+
+A single-variable negative control pinned `--kv-cache-dtype=bfloat16`. Its
+GPU-free engine config passed in 29.03s, but the guarded live run at
+`/home/luke/inference/glm53_flash_nvidia/.experiments/20260910T113103Z-canary-bf16-kv`
+failed before loading weights: `TRITON_MLA` does not support sparse attention,
+and `FLASHINFER_MLA_SPARSE_SM120` does not support BF16 KV. The runtime's
+`nvfp4_ds_mla` cache format is documented in its own source as SM100-only, so
+there is no third supported dtype to tune on these SM120 GPUs.
+
+This exactly matches upstream vLLM issue
+[#53963](https://github.com/vllm-project/vllm/issues/53963). The NoPE SM120
+implementation PRs [#53969](https://github.com/vllm-project/vllm/pull/53969)
+and [#55277](https://github.com/vllm-project/vllm/pull/55277) were still open at
+qualification time. An unmerged source overlay was not introduced into the
+production node. The loader can be retried only after a reviewed immutable
+runtime carries that support; correctness remains the next gate, before TPS or
+concurrency.
+
+Both guarded campaigns stayed below 43C chassis intake and had no OOM, Xid,
+container restart, or Qwen A identity change. The canary owner now fails fast
+when an engine exits and retains the exact rollback and LB-isolation checks.
+
+## 2026-09-10 — NVIDIA GLM-5.3-Flash NVFP4 passed GPU-free shape checks
+
+Question: would `nvidia/GLM-5.3-Flash-NVFP4` fit and appear supported by the
+existing node06 image? Answer: yes at the metadata/config layer. Everything
+below is read-only or GPU-free. No engine, load balancer, or GPU allocation was
+touched;
+`qwen38flashnext-a` served throughout and `qwen38flashnext-b` was left on its
+running steering image.
+
+This matters because `deploy/glm53_flash` already serves this model family, but
+from `LibertAIDAI`'s checkpoint on a locally built SGLang image patched from an
+unlicensed third-party repository. That recipe passed a real 2026-08-27
+qualification and still cannot be promoted. NVIDIA's checkpoint is MIT, and the
+runtime is the `vllm/vllm-openai` digest already qualified for the Qwen NVFP4
+deployment, so the licence blocker disappears without a new artefact.
+
+### The checkpoint
+
+320B total parameters, 18B active. 45 layers: 11 full-attention (MLA,
+`kv_lora_rank` 512, `v_head_dim` 256, `qk_rope_head_dim` 0, DeepSeek-style
+sparse indexer at `index_topk` 2048) at indices 3, 7, ... 43, interleaved with
+34 KDA linear-attention layers. 288 routed experts plus one shared, top-8,
+`first_k_dense_replace` 3, Manifold-Constrained Hyper-Connections at
+`hc_mult` 4, one MTP layer, native multimodal, `max_position_embeddings`
+1,048,576, vocab 154,880.
+
+NVFP4 covers weights and activations of transformer-block linear operators at
+group size 16, with an FP8 KV cache. `lm_head`, embeddings, `self_attn`, many
+`shared_experts`/`mlp.gate` tensors, and the whole vision tower stay higher
+precision. The safetensors census at revision
+`423acf37583782c51c142d145aef733d72943d93` is 152,429,395,968 U8 elements
+(two packed FP4 values each), 16,460,604,030 BF16 and 3,635,424 F32, which is
+where the 320B total comes from.
+
+Checkpoint on disk: 33 shards, **204,439,103,396 tensor bytes (190.4GiB)**,
+44 files including metadata.
+
+### Fit
+
+node06 reports eight `NVIDIA RTX PRO 6000 Blackwell Server Edition` at
+97,887MiB each. TP4 places 204,439,103,396 / 4 = 51,109,775,849 bytes, i.e.
+**47.6GiB of weights per GPU**, leaving about 38GiB per GPU for KV, KDA state,
+activations and graphs at `--gpu-memory-utilization 0.90`. Both TP4 engines
+resident would be about 381GiB of the box's 764GiB. `/prod` has 1.7T available.
+
+The KV cache is structurally cheap here: only 11 layers cache per token and
+they cache an MLA latent at FP8, while the 34 KDA layers hold a constant
+per-sequence state that vLLM resets to float32 for its accelerated GDN backend
+(`Reset SSM cache type to float32 for accelerated GDN mamba backend
+'glm5_next_text'`). That is read off the config and the engine's own log line,
+not measured. The real allocation comes from the engine's profiling run and
+must be read from live `cache_config_info` before `RJ_ROUTE_KV_CAPACITY_TOKENS`
+can be pinned.
+
+### Runtime support
+
+The image already pinned for the Qwen NVFP4 deployment,
+`vllm/vllm-openai@sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93`,
+reports vLLM `0.28.1rc1.dev472+gd9105ea80` and transformers `5.16.1` — exactly
+the model card's stated minimum. It bundles the out-of-tree
+`vllm.models.glm5next` package (model, MTP, KDA, MLA+indexer, multimodal)
+alongside `deepseek_v4`, `kimi_k3`, `qwen4_exp` and the rest. No new image, no
+patched source, no local build.
+
+A GPU-free engine-config probe in a disposable `--network none` container,
+against only the checkpoint's metadata files, returned:
+
+```
+ARCH ['Glm5NextForConditionalGeneration']
+QUANT modelopt_fp4   KVDTYPE fp8
+MULTIMODAL True      HYBRID True
+PREFIX_CACHING True  BLOCK 128  MAMBA_BLOCK 16
+MAXLEN 262144        SPEC None
+```
+
+`deploy/glm53_flash_nvidia/args-preflight.py` then admitted the complete
+rendered Compose argv through the image's own CLI and full `create_engine_config`
+in **33.44s and 33.99s** on two warm runs. It proved, among other things, that
+`--trust-remote-code` is *not* required: the architecture resolves to the
+in-image implementation. A negative control substituting
+`--tool-call-parser=qwen3_coder` failed with `candidate engine shape changed:
+tool_parser` and exit 1.
+
+`glm47` is the registered name for both the tool and reasoning parser (aliased
+as `glm45`). Its markers are exactly `<tool_call>`, `<arg_key>`, `<arg_value>`
+and `<think>`, which is precisely what this checkpoint's `chat_template.jinja`
+emits at lines 50 and 162-163. That is a marker match, not a qualification.
+
+### What was added
+
+`deploy/glm53_flash_nvidia/`: one Compose file (no overlay), a semantic
+validator, a fail-closed checkpoint verifier pinning eight metadata digests and
+the exact 33-shard/204,439,103,396-byte shape, the GPU-free argv preflight, and
+a README. 44 GPU-free tests in `bench/test_glm53_nvidia_{compose,docs,model_verify}.py`.
+
+The checked-in defaults are a canary, not a configuration anyone measured: 262K
+context, `--max-num-seqs=4`, MTP off, images and video refused, and every ramjet
+authority that would need a GLM renderer profile or a qualified hybrid KV
+inventory switched off. The engines *do* configure the ZMQ KV-event publisher,
+so promoting the LB to `RJ_KV_EVENT_MODE=shadow` later is a load-balancer-only
+recreate rather than an engine roll.
+
+### Still open
+
+Nothing here is a performance result. Unmeasured: throughput and TTFT; host
+memory peak during a 190GiB load on a box whose RAM is tight; whether
+prefix-cache accounting is useful over the hybrid KDA/MLA allocator, which is
+what decides whether ramjet's affinity routing is worth anything for this
+model; and agent-protocol correctness, where the sibling SGLang recipe already
+caught this model family violating a nullable tool-argument contract. The
+checkpoint has not been downloaded to node06.
+
 ## 2026-09-07 — time-decayed prefix affinity calibrated to the eviction horizon (local foundation, not deployed)
 
 The approximate router credited a served fingerprint chain for as long as the

@@ -1,0 +1,172 @@
+# Canonical GLM-5.3-Flash NVFP4 deployment for node06, on the official vLLM
+# runtime. This is one complete Compose file; do not add an overlay. Start only
+# the named canary engine until its loader, SM120 kernels, host-memory peak,
+# agent protocol, and thermal state pass.
+#
+# This is the licence-clean successor candidate to deploy/glm53_flash, which
+# serves the same model family from a third-party unlicensed SGLang image and
+# therefore cannot be promoted. Both deployments bind the same LB ports; only
+# one of them may own node06 at a time.
+
+name: glm53_flash_nvidia
+
+x-glm-labels: &glm-labels
+  ai.ramjet.model.repository: nvidia/GLM-5.3-Flash-NVFP4
+  ai.ramjet.model.revision: 423acf37583782c51c142d145aef733d72943d93
+
+x-glm-engine: &glm-engine
+  # The same immutable vLLM image already qualified for the NVIDIA
+  # Qwen3.8-Flash-Next NVFP4 deployment. It bundles vllm.models.glm5next and
+  # transformers 5.16.1, which is exactly the model card's stated minimum.
+  image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93}
+  labels: *glm-labels
+  entrypoint: ["vllm", "serve"]
+  # Canary posture: a loader that dies must stay dead for inspection rather
+  # than loop on eight shared GPUs.
+  restart: ${ENGINE_RESTART_POLICY:-no}
+  ipc: host
+  init: true
+  shm_size: 32gb
+  ulimits:
+    memlock: -1
+    stack: 67108864
+    nofile: {soft: 1048576, hard: 1048576}
+  environment: &glm-environment
+    CUDA_DEVICE_ORDER: PCI_BUS_ID
+    CUDA_VISIBLE_DEVICES: "0,1,2,3"
+    # The checkpoint is mounted from /prod at a pinned revision. Never let a
+    # loader reach the Hub and silently serve a different revision.
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    # node06's root filesystem is nearly full and JIT artifacts are large.
+    # Keep every compiler cache below the engine's own /prod bind.
+    XDG_CACHE_HOME: /root/.cache
+    TRITON_CACHE_DIR: /root/.cache/triton
+    TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+    CUDA_CACHE_PATH: /root/.cache/nv/ComputeCache
+    # vLLM reads this directly. Keep bearer authority out of the process argv
+    # so identity capture and host process inspection remain privacy-safe.
+    VLLM_API_KEY: ${VLLM_API_KEY:-glm-local}
+
+x-glm-command: &glm-command
+  - /workspace/model
+  - --served-model-name=${SERVED_MODEL_NAME:-glm-5.3-flash}
+  - --revision=423acf37583782c51c142d145aef733d72943d93
+  - --tokenizer-revision=423acf37583782c51c142d145aef733d72943d93
+  - --host=0.0.0.0
+  - --port=8000
+  - --tensor-parallel-size=4
+  - --enable-expert-parallel
+  - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
+  # NVFP4 linear weights/activations with the checkpoint's FP8 KV cache.
+  # This exact setting currently reproduces the pinned runtime's SM120 NoPE
+  # kernel gap (fp8_ds_mla requires pe_dim=64 while GLM has pe_dim=0). Keep it
+  # pinned as an admission/reproduction artefact; README documents the block.
+  - --quantization=modelopt_fp4
+  - --kv-cache-dtype=fp8
+  # Canary reductions from the card's 1M context: they minimise the first GPU
+  # exposure and are not a performance comparison. Raise one at a time, each
+  # with its own journal entry.
+  - --max-model-len=${MAX_MODEL_LEN:-262144}
+  - --max-num-seqs=${MAX_NUM_SEQS:-4}
+  - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}
+  # The checkpoint is natively multimodal but ramjet's request path and local
+  # tokenizer shadow are text-only, so image-token accounting would be wrong.
+  # Admit text only until that is a deliberate, measured decision.
+  - --limit-mm-per-prompt={"image":0,"video":0}
+  - --enable-prefix-caching
+  - --enable-prompt-tokens-details
+  # SM120 autotune has cost engine starts on this box before.
+  - --no-enable-flashinfer-autotune
+  # Unlike the SGLang recipe, vLLM does publish a ZMQ KV-event feed. The
+  # publisher is configured now so that promoting the LB to shadow KV
+  # inventory is a load-balancer-only recreate rather than an engine roll.
+  # A publisher with no subscriber costs effectively nothing.
+  - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
+  # GLM-4.7's parser handles the exact <tool_call>/<arg_key>/<arg_value> and
+  # <think> markers this checkpoint's chat template emits. That is a shape
+  # match, not a qualification: agentbench decides.
+  - --enable-auto-tool-choice
+  - --tool-call-parser=glm47
+  - --reasoning-parser=glm47
+
+services:
+  ds4-loadbalancer:
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.5.0@sha256:c3fc5723a0dba51f9bb8eced77648cf0b05788039e90fc638fbd8c19adec70d8}
+    container_name: ds4-loadbalancer
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8006:8000"
+      - "127.0.0.1:8007:9090"
+      - "100.89.187.17:8007:9090"
+    volumes:
+      - /var/lib/ramjet-machineview:/machineview
+    networks:
+      - default
+      - machineview-host
+    environment:
+      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://glm53nvidia-a:8000,http://glm53nvidia-b:8000}
+      RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:-glm-local}
+      RJ_ADVERTISE_CTX_MARGIN: ${RJ_ADVERTISE_CTX_MARGIN:-8192}
+      RJ_MAX_TOKENS_STRIP: "0"
+      RJ_AFFINITY: prefix
+      RJ_ROUTE_ALPHA: ${RJ_ROUTE_ALPHA:-4}
+      RJ_ROUTE_CHUNK_BYTES: "2048"
+      RJ_ROUTE_MAX_PREFIX_BYTES: "2097152"
+      RJ_ROUTE_MAX_OVERLAP_BLOCKS: "32"
+      RJ_ROUTE_LOAD_UNIT_BYTES: "32768"
+      RJ_ROUTE_MAX_LOAD_UNITS: "8"
+      RJ_ROUTE_PHASE_AWARE_LOAD: ${RJ_ROUTE_PHASE_AWARE_LOAD:-false}
+      RJ_ROUTE_PROJECTED_LOAD: "false"
+      RJ_ROUTE_JOURNAL: "true"
+      # No GLM profile is registered in src/model, so local rendering, exact
+      # placement, and every authority derived from them stay off. Approximate
+      # prefix/load routing, health, cancellation, and metrics remain live.
+      RJ_TOKENIZER_MODE: "off"
+      RJ_EXACT_ROUTE_MODE: "off"
+      RJ_UPSTREAM_ADMISSION_MODE: http
+      # The engines publish KV events; consuming them over a hybrid KDA/MLA
+      # allocator is unqualified. Promote to shadow only with a recorded
+      # comparison, and never straight to placement authority.
+      RJ_KV_EVENT_MODE: "off"
+      RJ_KV_EVENT_LIVE_ENDPOINTS: ""
+      RJ_KV_EVENT_REPLAY_ENDPOINTS: ""
+      RJ_SNAPSHOT_ROUTE_MODE: "off"
+      RJ_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
+      RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json
+      RJ_IDLE_DRAIN_MODE: "off"
+
+  glm53nvidia-a:
+    <<: *glm-engine
+    container_name: glm53nvidia-a
+    cpuset: "0-11,24-35"
+    ports: ["127.0.0.1:8060:8000"]
+    volumes:
+      - ${MODEL_DIR:-/prod/models/nvidia/GLM-5.3-Flash-NVFP4-423acf37583782c51c142d145aef733d72943d93}:/workspace/model:ro
+      - ${VLLM_CACHE_DIR_A:-/prod/engine-cache-vllm-glm53nvidia-a}:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["0", "1", "2", "3"], capabilities: [gpu]}
+    command: *glm-command
+
+  glm53nvidia-b:
+    <<: *glm-engine
+    container_name: glm53nvidia-b
+    cpuset: "12-23,36-47"
+    ports: ["127.0.0.1:8061:8000"]
+    volumes:
+      - ${MODEL_DIR:-/prod/models/nvidia/GLM-5.3-Flash-NVFP4-423acf37583782c51c142d145aef733d72943d93}:/workspace/model:ro
+      - ${VLLM_CACHE_DIR_B:-/prod/engine-cache-vllm-glm53nvidia-b}:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["4", "5", "6", "7"], capabilities: [gpu]}
+    command: *glm-command
+
+networks:
+  machineview-host:
+    external: true
+    name: ${MACHINEVIEW_NETWORK:-qwen38_27b_default}

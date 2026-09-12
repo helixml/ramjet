@@ -39,6 +39,8 @@ DEPLOYMENTS = {
     "dspark_0731": "vllm",
     "qwen38_27b": "sglang",
     "glm53_flash": "sglang",
+    "glm53_flash_sm120": "sglang",
+    "glm53_flash_nvidia": "vllm",
 }
 
 EXPECTED_FLAG = {"vllm": VLLM_FLAG, "sglang": SGLANG_FLAG}

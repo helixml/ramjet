@@ -30,6 +30,22 @@ SPEC_COUNTERS = {
     "finished_requests": "vllm:request_success_total",
 }
 SPEC_POSITION_COUNTER = "vllm:spec_decode_num_accepted_tokens_per_pos_total"
+WORKLOAD_COUNTERS = (
+    (
+        "vllm",
+        "vllm:generation_tokens_total",
+        "vllm:request_success_total",
+        "vllm:prompt_tokens_total",
+        "vllm:prompt_tokens_cached_total",
+    ),
+    (
+        "sglang",
+        "sglang:generation_tokens_total",
+        "sglang:num_requests_total",
+        "sglang:prompt_tokens_total",
+        "sglang:cached_tokens_total",
+    ),
+)
 
 
 def metric_value(body, name, required_labels=None):
@@ -84,6 +100,69 @@ def fetch_speculative(url, timeout=10):
     result = {key: metric_value(body, name) for key, name in SPEC_COUNTERS.items()}
     result["accepted_per_position"] = position_values(body)
     return result
+
+
+def workload_values(body):
+    """Parse native workload counters shared by vLLM and SGLang cells."""
+    for (
+        backend,
+        generation_name,
+        requests_name,
+        prompt_name,
+        cached_prompt_name,
+    ) in WORKLOAD_COUNTERS:
+        generation_tokens = metric_value(body, generation_name)
+        finished_requests = metric_value(body, requests_name)
+        if generation_tokens is not None and finished_requests is not None:
+            return {
+                "backend": backend,
+                "generation_tokens": generation_tokens,
+                "finished_requests": finished_requests,
+                "prompt_tokens": metric_value(body, prompt_name),
+                "cached_prompt_tokens": metric_value(body, cached_prompt_name),
+            }
+    return {
+        "backend": None,
+        "generation_tokens": None,
+        "finished_requests": None,
+        "prompt_tokens": None,
+        "cached_prompt_tokens": None,
+    }
+
+
+def fetch_workload(url, timeout=10):
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return workload_values(response.read().decode("utf-8", "replace"))
+
+
+def workload_delta(before, after, client_completion_tokens, client_requests):
+    """Reconcile successful response usage with one engine's native counters."""
+    if before is None or after is None:
+        return {"state": "unavailable", "reconciled": False}
+    backend = before.get("backend")
+    if not backend or after.get("backend") != backend:
+        return {"state": "backend_changed", "reconciled": False}
+    deltas = {}
+    for key in ("generation_tokens", "finished_requests"):
+        left, right = before.get(key), after.get(key)
+        if left is None or right is None:
+            return {"state": "incomplete", "reconciled": False, "backend": backend}
+        if right < left:
+            return {"state": "counter_reset", "reconciled": False, "backend": backend}
+        deltas[key] = right - left
+    reconciled = (
+        deltas["generation_tokens"] == client_completion_tokens
+        and deltas["finished_requests"] == client_requests
+    )
+    return {
+        "state": "reconciled" if reconciled else "contaminated",
+        "reconciled": reconciled,
+        "backend": backend,
+        "client_completion_tokens": int(client_completion_tokens),
+        "engine_generation_tokens": int(deltas["generation_tokens"]),
+        "client_requests": int(client_requests),
+        "engine_finished_requests": int(deltas["finished_requests"]),
+    }
 
 
 def speculative_delta(

@@ -1,0 +1,9 @@
+FROM ghcr.io/ormandj/sglang-glm53-flash-sm120@sha256:ec4243f940a179a27fea21895077efd47cd050501f99a1d2a5fecf7df2e7be71
+
+COPY patch-glm47-nullable.py /tmp/patch-glm47-nullable.py
+RUN python3 /tmp/patch-glm47-nullable.py \
+    && rm -f /tmp/patch-glm47-nullable.py
+
+LABEL org.opencontainers.image.title="SGLang GLM-5.3 SM120 nullable parser fix" \
+      org.opencontainers.image.base.digest="sha256:ec4243f940a179a27fea21895077efd47cd050501f99a1d2a5fecf7df2e7be71" \
+      org.opencontainers.image.source="https://github.com/helixml/ramjet"
