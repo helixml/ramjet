@@ -47,8 +47,10 @@ identity() {
   docker inspect "$1" --format '{{.Id}} {{.Image}} {{.State.StartedAt}} {{.RestartCount}}'
 }
 record() {
-  docker inspect --format '{{.Name}} {{.Id}} {{.Image}} {{.State.StartedAt}} {{.RestartCount}} {{.State.Status}} {{.State.OOMKilled}}' \
-    "$qwen" "$glm_b" "$glm_c"
+  for container in "$qwen" "$glm_b" "$glm_c"; do
+    docker inspect --format '{{.Name}} {{.Id}} {{.Image}} {{.State.StartedAt}} {{.RestartCount}} {{.State.Status}} {{.State.OOMKilled}}' \
+      "$container" 2>/dev/null || true
+  done
   nvidia-smi --query-gpu=index,memory.used,utilization.gpu,temperature.gpu,power.draw,power.limit \
     --format=csv,noheader
   free -h
