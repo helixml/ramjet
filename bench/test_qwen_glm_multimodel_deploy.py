@@ -97,6 +97,12 @@ class QwenGlmMultimodelDeployTests(unittest.TestCase):
             "for engine in qwen38flashnext-a glm53sm120-b glm53sm120-c", text
         )
         self.assertIn('== "1 2 "', text)
+        for upstream in (
+            "http://qwen38flashnext-a:8000",
+            "http://glm53sm120-b:8000",
+            "http://glm53sm120-c:8000",
+        ):
+            self.assertIn(upstream, text)
         self.assertIn('-H @"$authorization_header"', text)
         self.assertNotIn("Authorization: Bearer $VLLM_API_KEY", text)
         self.assertNotIn("docker.sock", text)

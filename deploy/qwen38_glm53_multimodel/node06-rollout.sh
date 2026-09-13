@@ -149,8 +149,12 @@ PY
   python3 - "$scratch/metrics.txt" <<'PY'
 import re, sys
 metrics = open(sys.argv[1], encoding="utf-8").read()
-up = re.findall(r'^ramjet_upstream_up\{upstream="([0-9]+)"\}\s+1(?:\.0)?$', metrics, re.M)
-assert set(up) == {"0", "1", "2"}, up
+up = re.findall(r'^ramjet_upstream_up\{upstream="([^"]+)"\}\s+1(?:\.0)?$', metrics, re.M)
+assert set(up) == {
+    "http://qwen38flashnext-a:8000",
+    "http://glm53sm120-b:8000",
+    "http://glm53sm120-c:8000",
+}, up
 PY
 }
 
