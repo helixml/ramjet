@@ -74,7 +74,10 @@ container without touching the public LB; this is the pre-merge qualification
 mode.
 
 For promotion it stops and renames the old LB instead of deleting it, starts
-the new canonical container, and repeats the same checks. Any failure removes
+the new canonical container under a release-unique Compose project, and repeats
+the same checks. The unique project is required because Compose v5 otherwise
+rediscovers the renamed old service by label and recreates it, consuming the
+rollback artifact. Any failure removes
 the candidate/new LB, restores the old container's exact configuration and
 image under its original name, and starts it. On success the script prints the
 name of the stopped rollback container; retain that container until the new LB

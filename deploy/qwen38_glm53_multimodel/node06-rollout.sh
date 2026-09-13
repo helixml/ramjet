@@ -44,8 +44,13 @@ done
 
 candidate_project=qwen38_glm53_multimodel_canary
 candidate_name=ds4-loadbalancer-multimodel-canary
-rollback_name="ds4-loadbalancer-rollback-$(date -u +%Y%m%dT%H%M%SZ)"
-canonical_project=qwen38_glm53_multimodel
+rollout_stamp=$(date -u +%Y%m%dT%H%M%SZ)
+rollback_name="ds4-loadbalancer-rollback-$rollout_stamp"
+# Compose v5 discovers a renamed container by its immutable project/service
+# labels and will otherwise adopt and delete it during `up`. A release-unique
+# project keeps the preserved rollback container outside the candidate's
+# reconciliation scope. The canonical public container name remains stable.
+canonical_project="qwen38_glm53_multimodel_release_${rollout_stamp,,}_$$"
 promoted=0
 
 compose_run() {
