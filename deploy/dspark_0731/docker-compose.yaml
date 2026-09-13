@@ -32,9 +32,9 @@ services:
   ds4-loadbalancer:
     # Replaces the retired ghcr.io/helixml/mini-dynamo:rust-b0e0700 pin. This
     # stack is not currently deployed -- node06 serves the qwen38_27b stack --
-    # so v0.2.0 here is the current default, not a qualified rollout. Qualify
+    # so v0.6.0 here is the current default, not a qualified rollout. Qualify
     # before reviving this stack.
-    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.5.0@sha256:c3fc5723a0dba51f9bb8eced77648cf0b05788039e90fc638fbd8c19adec70d8}
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.6.0@sha256:25949fb1bb97bc5c066e4a53a703d5453a49fc1aaa773f1c39e2c465c85ba976}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:

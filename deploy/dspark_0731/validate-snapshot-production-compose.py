@@ -26,12 +26,12 @@ ATTESTATION_PROFILE = "snapshot-attestation"
 SESSION_GID = "12000"
 LB_UID = "12002"
 EXPECTED_LB_IMAGE = (
-    "ghcr.io/helixml/ramjet:v0.5.0@"
-    "sha256:c3fc5723a0dba51f9bb8eced77648cf0b05788039e90fc638fbd8c19adec70d8"
+    "ghcr.io/helixml/ramjet:v0.6.0@"
+    "sha256:25949fb1bb97bc5c066e4a53a703d5453a49fc1aaa773f1c39e2c465c85ba976"
 )
 EXPECTED_COMPANION_IMAGE = (
-    "ghcr.io/helixml/ramjet:companion-v0.5.0@"
-    "sha256:d6504e2a1cad6dc3a611084c0c2143ccb90d8025c372b59d3d91aac036e31d13"
+    "ghcr.io/helixml/ramjet:companion-v0.6.0@"
+    "sha256:7b452761667eec6f0f59f60394cda8962b43d0c70798370f2ee849819821e55a"
 )
 
 DOMAINS: dict[str, dict[str, str]] = {

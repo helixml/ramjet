@@ -94,14 +94,12 @@ services:
     # the metric prefix moved to ramjet_ separately, which is what the
     # dashboards actually query.
     # Override only with another immutable tag+digest pair. This pin is the
-    # v0.5.0 release qualified on node06 on 2026-09-02; its OCI revision is
-    # cd85aa3. Rollback target is the v0.3.0 pin
-    # sha256:2489110adbed61b7a2a415784d817d48803c234c97509fd2e0eb180c5e7453b3;
-    # rolling back predates the stream_tps serving fields, so the machine-view
-    # Stream tok/s tile goes empty until rolled forward again.
+    # v0.6.0 release qualified on node06 on 2026-09-13; its OCI revision is
+    # 8206b29. Rollback target is the v0.5.0 pin
+    # sha256:c3fc5723a0dba51f9bb8eced77648cf0b05788039e90fc638fbd8c19adec70d8.
     # It must stay a post-rename image: the RJ_ settings below are ignored by
     # anything older, which would come up healthy and differently tuned.
-    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.5.0@sha256:c3fc5723a0dba51f9bb8eced77648cf0b05788039e90fc638fbd8c19adec70d8}
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.6.0@sha256:25949fb1bb97bc5c066e4a53a703d5453a49fc1aaa773f1c39e2c465c85ba976}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:
