@@ -14,6 +14,11 @@ Qwen engine; requests selecting `glm-5.3-flash` can reach only the GLM engine.
 Unknown, absent, or malformed model selection is rejected before any upstream
 is dialed.
 
+Machine view also publishes this static ownership map on its Topology tab:
+Qwen is Engine A (`TP4`, GPUs 0-3) and GLM is Engine B (`TP2`, GPUs 4-5).
+That serving view is independent of the optional adaptive controller and stays
+visible while adaptive topology changes are disabled.
+
 ## Deliberate feature boundary
 
 The deployment disables local tokenization, exact routing, direct/snapshot KV

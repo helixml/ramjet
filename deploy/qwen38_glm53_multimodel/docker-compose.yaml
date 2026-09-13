@@ -57,6 +57,9 @@ services:
       RJ_IDLE_DRAIN_MODE: "off"
       RJ_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
       RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json
+      # Dense GPU ownership map matching RJ_UPSTREAM. Machine view derives
+      # each engine's displayed TP size from the number of listed devices.
+      RJ_MACHINEVIEW_UPSTREAM_GPUS: 0,1,2,3;4,5
 
 networks:
   qwen-engine:

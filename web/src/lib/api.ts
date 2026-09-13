@@ -113,12 +113,21 @@ export interface Sample {
   energy?: EnergySample
 }
 
+export interface ServingTopologyEngine {
+  upstream: number
+  endpoint: string
+  model: string | null
+  gpus: number[]
+  tensor_parallel_size: number | null
+}
+
 export interface Summary {
   now: number
   hostname: string | null
   interval_ms: number
   retention_seconds: number
   upstreams: string[]
+  topology: ServingTopologyEngine[]
   latest: Sample | null
 }
 

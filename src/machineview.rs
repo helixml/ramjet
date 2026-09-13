@@ -90,6 +90,7 @@ pub struct Settings {
     pub agent_url: Option<Url>,
     pub state_path: Option<PathBuf>,
     pub ui_dir: Option<PathBuf>,
+    pub upstream_gpus: Vec<Vec<u32>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -198,6 +199,9 @@ impl Settings {
             Some(_) => None,
             None => Some(PathBuf::from("/ui")).filter(|path| path.is_dir()),
         };
+        let upstream_gpus = parse_upstream_gpus(
+            get("RJ_MACHINEVIEW_UPSTREAM_GPUS").filter(|value| !value.is_empty()),
+        )?;
         Ok(Self {
             mode,
             interval_ms,
@@ -207,8 +211,71 @@ impl Settings {
             agent_url,
             state_path,
             ui_dir,
+            upstream_gpus,
         })
     }
+
+    /// Ensures an explicitly declared GPU topology has one dense entry per
+    /// configured upstream. An unset map remains valid and simply leaves TP
+    /// size unknown in the observation UI.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SettingsError`] when the topology cardinality is ambiguous.
+    pub fn validate_upstream_count(&self, upstream_count: usize) -> Result<(), SettingsError> {
+        if self.upstream_gpus.is_empty() || self.upstream_gpus.len() == upstream_count {
+            return Ok(());
+        }
+        Err(invalid(
+            "RJ_MACHINEVIEW_UPSTREAM_GPUS",
+            format!(
+                "{} GPU sets for {upstream_count} upstreams",
+                self.upstream_gpus.len()
+            ),
+            "one semicolon-separated GPU set per RJ_UPSTREAM entry",
+        ))
+    }
+}
+
+fn parse_upstream_gpus(raw: Option<String>) -> Result<Vec<Vec<u32>>, SettingsError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let mut claimed = BTreeMap::new();
+    let mut sets = Vec::new();
+    for (engine, group) in raw.split(';').enumerate() {
+        if group.is_empty() {
+            return Err(invalid(
+                "RJ_MACHINEVIEW_UPSTREAM_GPUS",
+                raw,
+                "non-empty semicolon-separated sets of comma-separated GPU indices",
+            ));
+        }
+        let mut gpus = Vec::new();
+        for value in group.split(',') {
+            let gpu = value
+                .parse::<u32>()
+                .ok()
+                .filter(|gpu| *gpu <= 255)
+                .ok_or_else(|| {
+                    invalid(
+                        "RJ_MACHINEVIEW_UPSTREAM_GPUS",
+                        raw.clone(),
+                        "GPU indices from 0 through 255, grouped with semicolons",
+                    )
+                })?;
+            if claimed.insert(gpu, engine).is_some() {
+                return Err(invalid(
+                    "RJ_MACHINEVIEW_UPSTREAM_GPUS",
+                    raw,
+                    "each GPU index claimed by exactly one upstream",
+                ));
+            }
+            gpus.push(gpu);
+        }
+        sets.push(gpus);
+    }
+    Ok(sets)
 }
 
 fn bounded(
@@ -1655,7 +1722,38 @@ struct Shared {
     stream: broadcast::Sender<Arc<str>>,
     stream_clients: AtomicUsize,
     upstreams: Vec<Url>,
+    topology: Vec<ServingTopologyEngine>,
     hostname: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct ServingTopologyEngine {
+    upstream: usize,
+    endpoint: String,
+    model: Option<String>,
+    gpus: Vec<u32>,
+    tensor_parallel_size: Option<usize>,
+}
+
+fn build_serving_topology(
+    upstreams: &[Url],
+    upstream_models: &[String],
+    upstream_gpus: &[Vec<u32>],
+) -> Vec<ServingTopologyEngine> {
+    upstreams
+        .iter()
+        .enumerate()
+        .map(|(index, endpoint)| {
+            let gpus = upstream_gpus.get(index).cloned().unwrap_or_default();
+            ServingTopologyEngine {
+                upstream: index,
+                endpoint: endpoint.as_str().trim_end_matches('/').to_owned(),
+                model: upstream_models.get(index).cloned(),
+                tensor_parallel_size: (!gpus.is_empty()).then_some(gpus.len()),
+                gpus,
+            }
+        })
+        .collect()
 }
 
 impl Shared {
@@ -1702,6 +1800,7 @@ impl MachineView {
         registry: Arc<Registry>,
         client: reqwest::Client,
         upstreams: Vec<Url>,
+        upstream_models: &[String],
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> Option<Self> {
         if settings.mode == Mode::Off {
@@ -1729,6 +1828,7 @@ impl MachineView {
             );
         }
         let (stream, _) = broadcast::channel(STREAM_CHANNEL_CAPACITY);
+        let topology = build_serving_topology(&upstreams, upstream_models, &settings.upstream_gpus);
         let shared = Arc::new(Shared {
             settings: settings.clone(),
             store,
@@ -1737,6 +1837,7 @@ impl MachineView {
             stream,
             stream_clients: AtomicUsize::new(0),
             upstreams: upstreams.clone(),
+            topology,
             hostname: read_hostname(),
         });
         // The fast publisher reads only the in-process registry, so it costs
@@ -2036,6 +2137,7 @@ struct SummaryResponse {
     interval_ms: u64,
     retention_seconds: u64,
     upstreams: Vec<String>,
+    topology: Vec<ServingTopologyEngine>,
     latest: Option<Sample>,
 }
 
@@ -2050,6 +2152,7 @@ async fn summary_handler(State(shared): State<Arc<Shared>>) -> Response<Body> {
             .iter()
             .map(|url| url.as_str().trim_end_matches('/').to_owned())
             .collect(),
+        topology: shared.topology.clone(),
         latest: shared.store.latest(),
     };
     json_response(&response)
@@ -2282,6 +2385,43 @@ mod tests {
             (key == "RJ_MACHINEVIEW_UI_DIR").then(|| "/definitely/not/a/real/dir".to_owned())
         });
         assert!(ui.is_err());
+    }
+
+    #[test]
+    fn serving_topology_gpu_sets_are_dense_and_exclusive() {
+        let settings = Settings::from_lookup(|key| {
+            (key == "RJ_MACHINEVIEW_UPSTREAM_GPUS").then(|| "0,1,2,3;4,5".to_owned())
+        })
+        .expect("valid GPU ownership map");
+        assert_eq!(settings.upstream_gpus, vec![vec![0, 1, 2, 3], vec![4, 5]]);
+        assert!(settings.validate_upstream_count(2).is_ok());
+        assert!(settings.validate_upstream_count(3).is_err());
+
+        for rejected in ["0,1;1,2", "0,1;", "0,a;2,3", "256;1"] {
+            assert!(
+                Settings::from_lookup(|key| {
+                    (key == "RJ_MACHINEVIEW_UPSTREAM_GPUS").then(|| rejected.to_owned())
+                })
+                .is_err(),
+                "{rejected} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn serving_topology_combines_model_and_gpu_authority() {
+        let upstreams = [
+            Url::parse("http://qwen:8000/").expect("url"),
+            Url::parse("http://glm:8000/").expect("url"),
+        ];
+        let models = ["qwen3.8-flash-next".to_owned(), "glm-5.3-flash".to_owned()];
+        let topology = build_serving_topology(&upstreams, &models, &[vec![0, 1, 2, 3], vec![4, 5]]);
+        assert_eq!(topology[0].model.as_deref(), Some("qwen3.8-flash-next"));
+        assert_eq!(topology[0].tensor_parallel_size, Some(4));
+        assert_eq!(topology[0].gpus, vec![0, 1, 2, 3]);
+        assert_eq!(topology[1].model.as_deref(), Some("glm-5.3-flash"));
+        assert_eq!(topology[1].tensor_parallel_size, Some(2));
+        assert_eq!(topology[1].gpus, vec![4, 5]);
     }
 
     #[test]

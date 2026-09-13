@@ -9,6 +9,7 @@ import { HeatmapCard, buildScale } from "@/components/Heatmap"
 import { dayGrid, hourGrid, totals } from "@/lib/tokens"
 import { GpuGrid } from "@/components/GpuGrid"
 import { AdaptiveTopology } from "@/components/AdaptiveTopology"
+import { ServingTopology } from "@/components/ServingTopology"
 import { LoginScreen } from "@/components/LoginScreen"
 import { Meter } from "@/components/Meter"
 import { TabBar, useTabs, type TabDef } from "@/components/Tabs"
@@ -831,9 +832,14 @@ function Dashboard({ onLogout }: { onLogout?: () => void }) {
       {tab === "serving" ? <ChartGrid cards={servingCards} loading={loading} /> : null}
 
       {tab === "topology" ? (
-        <AdaptiveTopology
-          gpus={displayGpus}
-        />
+        <div className="flex flex-col gap-3">
+          <ServingTopology
+            topology={summary?.topology ?? []}
+            latest={latest}
+            gpus={displayGpus}
+          />
+          <AdaptiveTopology gpus={displayGpus} />
+        </div>
       ) : null}
 
       {tab === "gpus" ? (

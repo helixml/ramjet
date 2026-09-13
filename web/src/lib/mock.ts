@@ -164,6 +164,22 @@ export function mockSummary(): Summary {
     interval_ms: 5000,
     retention_seconds: 86400,
     upstreams: UPSTREAMS,
+    topology: [
+      {
+        upstream: 0,
+        endpoint: UPSTREAMS[0],
+        model: "qwen3.8-flash-next",
+        gpus: [0, 1, 2, 3],
+        tensor_parallel_size: 4,
+      },
+      {
+        upstream: 1,
+        endpoint: UPSTREAMS[1],
+        model: "glm-5.3-flash",
+        gpus: [4, 5],
+        tensor_parallel_size: 2,
+      },
+    ],
     latest: all[all.length - 1] ?? null,
   }
 }
