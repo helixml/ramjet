@@ -35,7 +35,7 @@ flock -n 9 || {
 for network in qwen38_flash_next_default glm53_flash_sm120_default qwen38_27b_default; do
   docker network inspect "$network" >/dev/null
 done
-for engine in qwen38flashnext-a glm53sm120-b; do
+for engine in qwen38flashnext-a glm53sm120-b glm53sm120-c; do
   [[ $(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$engine") == "true 0" ]] || {
     echo "engine preflight failed: $engine" >&2
     exit 1
@@ -88,8 +88,8 @@ validate_endpoint() {
 import json, sys
 health = json.load(open(sys.argv[1], encoding="utf-8"))
 models = json.load(open(sys.argv[2], encoding="utf-8"))
-assert health["healthy_replicas"] == 2, health
-assert health["total_replicas"] == 2, health
+assert health["healthy_replicas"] == 3, health
+assert health["total_replicas"] == 3, health
 assert {item["id"] for item in models["data"]} == {
     "qwen3.8-flash-next", "glm-5.3-flash"
 }, models
@@ -104,19 +104,54 @@ PY
     echo "multi-model LB did not become ready on port $port" >&2
     return 1
   }
-  for model in qwen3.8-flash-next glm-5.3-flash; do
-    curl -fsS --max-time 60 \
-      -H @"$authorization_header" \
-      -H 'content-type: application/json' \
-      --data "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with one word.\"}],\"max_tokens\":8,\"temperature\":0}" \
-      "http://127.0.0.1:${port}/v1/chat/completions" >"$scratch/${model}.json"
-    python3 - "$scratch/${model}.json" <<'PY'
+  curl -fsS --max-time 60 \
+    -D "$scratch/qwen.headers" \
+    -H @"$authorization_header" \
+    -H 'content-type: application/json' \
+    --data '{"model":"qwen3.8-flash-next","messages":[{"role":"user","content":"Reply with one word."}],"max_tokens":8,"temperature":0}' \
+    "http://127.0.0.1:${port}/v1/chat/completions" >"$scratch/qwen.json"
+  python3 - "$scratch/qwen.json" "$scratch/qwen.headers" <<'PY'
 import json, sys
 response = json.load(open(sys.argv[1], encoding="utf-8"))
 assert response.get("choices"), "missing choices"
 assert "error" not in response, "engine returned an error"
+headers = open(sys.argv[2], encoding="utf-8").read().lower()
+assert "x-ramjet-upstream: 0\n" in headers.replace("\r\n", "\n"), headers
+PY
+
+  : >"$scratch/glm-upstreams.txt"
+  for attempt in 1 2 3 4; do
+    curl -fsS --max-time 60 \
+      -D "$scratch/glm-${attempt}.headers" \
+      -H @"$authorization_header" \
+      -H 'content-type: application/json' \
+      --data "{\"model\":\"glm-5.3-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with one word. Probe ${attempt}.\"}],\"max_tokens\":8,\"temperature\":0}" \
+      "http://127.0.0.1:${port}/v1/chat/completions" >"$scratch/glm-${attempt}.json"
+    python3 - "$scratch/glm-${attempt}.json" "$scratch/glm-${attempt}.headers" \
+      >>"$scratch/glm-upstreams.txt" <<'PY'
+import json, re, sys
+response = json.load(open(sys.argv[1], encoding="utf-8"))
+assert response.get("choices"), "missing choices"
+assert "error" not in response, "engine returned an error"
+headers = open(sys.argv[2], encoding="utf-8").read()
+match = re.search(r"^x-ramjet-upstream:\s*([0-9]+)\s*$", headers, re.I | re.M)
+assert match, "missing upstream header"
+assert match.group(1) in {"1", "2"}, "GLM crossed its ownership boundary"
+print(match.group(1))
 PY
   done
+  [[ $(sort -u "$scratch/glm-upstreams.txt" | tr '\n' ' ') == "1 2 " ]] || {
+    echo "GLM probes did not reach both replicas" >&2
+    return 1
+  }
+
+  curl -fsS --max-time 5 "http://127.0.0.1:$((port + 1))/metrics" >"$scratch/metrics.txt"
+  python3 - "$scratch/metrics.txt" <<'PY'
+import re, sys
+metrics = open(sys.argv[1], encoding="utf-8").read()
+up = re.findall(r'^ramjet_upstream_up\{upstream="([0-9]+)"\}\s+1(?:\.0)?$', metrics, re.M)
+assert set(up) == {"0", "1", "2"}, up
+PY
 }
 
 scratch=$(mktemp -d)

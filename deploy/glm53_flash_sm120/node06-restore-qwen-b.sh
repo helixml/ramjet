@@ -10,6 +10,11 @@ readonly lock_file=/run/lock/ramjet-node06-deployment.lock
 exec 9>"$lock_file"
 flock -n 9 || { echo "another node06 deployment operation owns the lock" >&2; exit 2; }
 
+if [[ $(docker inspect --format '{{.State.Status}}' glm53sm120-c 2>/dev/null || true) == running ]]; then
+  echo "refusing Qwen B restore while the production GLM C replica owns GPUs 6-7" >&2
+  exit 2
+fi
+
 if [[ $(docker inspect --format '{{.State.Status}}' qwen38flashnext-b 2>/dev/null || true) == running ]] &&
   curl -fsS --max-time 5 http://127.0.0.1:8006/health |
     jq -e '.healthy_replicas >= 2 and .replicas[0].healthy == true and .replicas[1].healthy == true' >/dev/null; then

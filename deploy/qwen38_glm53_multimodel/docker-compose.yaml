@@ -1,5 +1,5 @@
 # Ramjet-only node06 deployment joining the independently owned Qwen TP4 and
-# GLM TP2 engine networks. Engine lifecycles remain with their source Compose
+# two GLM TP2 replicas. Engine lifecycles remain with their source Compose
 # projects; this file may recreate only the stateless load balancer.
 name: qwen38_glm53_multimodel
 
@@ -19,8 +19,8 @@ services:
       - glm-engine
       - machineview-host
     environment:
-      RJ_UPSTREAM: http://qwen38flashnext-a:8000,http://glm53sm120-b:8000
-      RJ_UPSTREAM_MODELS: qwen3.8-flash-next,glm-5.3-flash
+      RJ_UPSTREAM: http://qwen38flashnext-a:8000,http://glm53sm120-b:8000,http://glm53sm120-c:8000
+      RJ_UPSTREAM_MODELS: qwen3.8-flash-next,glm-5.3-flash,glm-5.3-flash
       # SGLang accepts the unused bearer header; Qwen requires it. The shared
       # value therefore remains the narrowest credential contract supported by
       # the current Ramjet upstream client.
@@ -59,7 +59,7 @@ services:
       RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json
       # Dense GPU ownership map matching RJ_UPSTREAM. Machine view derives
       # each engine's displayed TP size from the number of listed devices.
-      RJ_MACHINEVIEW_UPSTREAM_GPUS: 0,1,2,3;4,5
+      RJ_MACHINEVIEW_UPSTREAM_GPUS: 0,1,2,3;4,5;6,7
 
 networks:
   qwen-engine:

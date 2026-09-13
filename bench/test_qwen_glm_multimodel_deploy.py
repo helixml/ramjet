@@ -55,6 +55,17 @@ class QwenGlmMultimodelDeployTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.validator.validate(changed)
 
+    def test_duplicate_glm_owners_and_three_gpu_groups_are_explicit(self):
+        environment = self.document["services"]["ds4-loadbalancer"]["environment"]
+        self.assertEqual(
+            environment["RJ_UPSTREAM_MODELS"],
+            "qwen3.8-flash-next,glm-5.3-flash,glm-5.3-flash",
+        )
+        self.assertEqual(
+            environment["RJ_MACHINEVIEW_UPSTREAM_GPUS"], "0,1,2,3;4,5;6,7"
+        )
+        self.assertEqual(len(environment["RJ_UPSTREAM"].split(",")), 3)
+
     def test_heterogeneous_authorities_stay_disabled(self):
         environment = self.document["services"]["ds4-loadbalancer"]["environment"]
         for key in (
@@ -82,6 +93,10 @@ class QwenGlmMultimodelDeployTests(unittest.TestCase):
         self.assertIn('[[ "$canary_only" == 0 || "$canary_only" == 1 ]]', text)
         self.assertIn('if [[ "$canary_only" == 1 ]]', text)
         self.assertIn("for _attempt in $(seq 1 60)", text)
+        self.assertIn(
+            "for engine in qwen38flashnext-a glm53sm120-b glm53sm120-c", text
+        )
+        self.assertIn('== "1 2 "', text)
         self.assertIn('-H @"$authorization_header"', text)
         self.assertNotIn("Authorization: Bearer $VLLM_API_KEY", text)
         self.assertNotIn("docker.sock", text)
@@ -91,6 +106,7 @@ class QwenGlmMultimodelDeployTests(unittest.TestCase):
         self.assertIn("qwen3.8-flash-next", text)
         self.assertIn("glm-5.3-flash", text)
         self.assertIn("combined", text)
+        self.assertIn("GPUs 6-7", text)
 
 
 if __name__ == "__main__":
