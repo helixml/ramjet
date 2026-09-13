@@ -73,6 +73,12 @@ class QwenGlmMultimodelDeployTests(unittest.TestCase):
         text = script.read_text(encoding="utf-8")
         self.assertIn("docker rename ds4-loadbalancer \"$rollback_name\"", text)
         self.assertIn("docker rename \"$rollback_name\" ds4-loadbalancer", text)
+        self.assertIn('rollout_stamp=$(date -u +%Y%m%dT%H%M%SZ)', text)
+        self.assertIn(
+            'canonical_project="qwen38_glm53_multimodel_release_${rollout_stamp,,}_$$"',
+            text,
+        )
+        self.assertNotIn("canonical_project=qwen38_glm53_multimodel\n", text)
         self.assertIn('[[ "$canary_only" == 0 || "$canary_only" == 1 ]]', text)
         self.assertIn('if [[ "$canary_only" == 1 ]]', text)
         self.assertIn("for _attempt in $(seq 1 60)", text)
