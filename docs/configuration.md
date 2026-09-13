@@ -55,6 +55,7 @@ resolving across the rename.
 | --- | --- | --- |
 | `RJ_UPSTREAM` | `http://ds4-flash:8000` | Comma-separated OpenAI-compatible engine URLs. |
 | `RJ_UPSTREAM_MODELS` | unset | Optional dense model ownership map: exactly one model ID per `RJ_UPSTREAM` entry. Enables model-aware routing and combined `/v1/models`; duplicate IDs represent replicas of one model. |
+| `RJ_MACHINEVIEW_UPSTREAM_GPUS` | unset | Optional observation-only dense GPU ownership map, with semicolon-separated sets matching `RJ_UPSTREAM` (for example `0,1,2,3;4,5`). Machine view derives displayed TP size from each set. GPU indices must be unique. |
 | `RJ_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
 | `RJ_UPSTREAM_WARMUP_MODE` | `off` | `off`, observation-only `shadow`, or `enforce` passive admission for a replica recovering from observed health loss. HTTP admission only. |
 | `RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES` | `3` | Successful existing readiness probes required after recovery before passive warmup admits the replica. |

@@ -36,6 +36,9 @@ class QwenGlmMultimodelDeployTests(unittest.TestCase):
             lambda document: document["services"]["ds4-loadbalancer"]["environment"].pop(
                 "RJ_UPSTREAM_MODELS"
             ),
+            lambda document: document["services"]["ds4-loadbalancer"]["environment"].pop(
+                "RJ_MACHINEVIEW_UPSTREAM_GPUS"
+            ),
             lambda document: document["networks"]["glm-engine"].update(
                 name="wrong-network"
             ),

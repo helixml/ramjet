@@ -94,11 +94,15 @@ async fn main() -> anyhow::Result<()> {
     }
     let machineview_settings =
         machineview::Settings::from_env().context("invalid machineview configuration")?;
+    machineview_settings
+        .validate_upstream_count(config.upstreams.len())
+        .context("invalid machineview topology")?;
     let machineview = machineview::MachineView::start(
         machineview_settings,
         registry.clone(),
         client,
         config.upstreams.clone(),
+        &config.upstream_models,
         shutdown_tx.subscribe(),
     );
 

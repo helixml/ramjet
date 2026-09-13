@@ -247,7 +247,7 @@ export function AdaptiveTopology({
     return <Card><CardContent className="py-20 text-center text-sm text-muted-foreground">reading engine topology…</CardContent></Card>
   }
   if (status === null) {
-    return <Card><CardHeader><CardTitle>Adaptive topology is not configured</CardTitle><CardDescription>Mount a reviewed profile file and set RJ_ADAPTIVE_CONFIG_PATH to enable the embedded controller.</CardDescription></CardHeader></Card>
+    return <Card><CardHeader><CardTitle>Adaptive control is not configured</CardTitle><CardDescription>The live serving topology above remains authoritative. Mount a reviewed profile file and set RJ_ADAPTIVE_CONFIG_PATH only to enable engine-shape transitions.</CardDescription></CardHeader></Card>
   }
 
   return (
