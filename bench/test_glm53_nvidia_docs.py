@@ -17,7 +17,7 @@ SIBLING_README = ROOT / "deploy" / "glm53_flash" / "README.md"
 
 MODEL_REVISION = "423acf37583782c51c142d145aef733d72943d93"
 ENGINE_DIGEST = "5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93"
-LB_DIGEST = "c3fc5723a0dba51f9bb8eced77648cf0b05788039e90fc638fbd8c19adec70d8"
+LB_DIGEST = "25949fb1bb97bc5c066e4a53a703d5453a49fc1aaa773f1c39e2c465c85ba976"
 
 
 class Glm53NvidiaDocumentationTests(unittest.TestCase):

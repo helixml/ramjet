@@ -1,5 +1,42 @@
 # node06 experiment journal
 
+## 2026-09-13 — Ramjet v0.6.0 release qualification on the mixed-model topology
+
+Release commit `8206b295ad7542678a9d8690ecf896b1a6fc3c5d` passed Drone push
+build 672 and published load-balancer revision image
+`ghcr.io/helixml/ramjet:rust-8206b29@sha256:25949fb1bb97bc5c066e4a53a703d5453a49fc1aaa773f1c39e2c465c85ba976`
+plus companion revision image
+`ghcr.io/helixml/ramjet:companion-rust-8206b29@sha256:7b452761667eec6f0f59f60394cda8962b43d0c70798370f2ee849819821e55a`.
+Both images reported OCI version `0.6.0` and the exact full release revision.
+The rendered production candidate differed from the running deployment only
+in the load-balancer image reference.
+
+Guarded node06 run `38c554f959bbd1d3ed774115780cd4af` first exercised the exact
+candidate on alternate loopback ports, then replaced only the stateless load
+balancer. Qwen3.8-Flash-Next remained TP4 on GPUs 0-3; the established
+GLM-5.3-Flash TP2 on GPUs 4-5 and the second TP2 on GPUs 6-7 retained their
+container identities, start times, zero restart counts, and `OOMKilled=false`.
+The candidate and promoted checks each required three healthy replicas, the
+combined deduplicated model list (`qwen3.8-flash-next`, `glm-5.3-flash`), Qwen
+routing only to ordinal 0, and four salted GLM requests that collectively
+reached both ordinals 1 and 2. No prompts, completions, or credentials were
+retained in the journal.
+
+Post-promotion health was `ok` with 3/3 active, healthy, warmup-ready replicas
+and zero in flight. Every fixed `ramjet_upstream_up` series was 1. Bounded
+recent logs contained no panic, fatal, segmentation, or out-of-memory marker.
+The guard passed with maximum intake 43C, maximum GPU temperature 64C, and
+maximum observed eight-GPU power 624.06W. Evidence is retained on node06 under
+`/home/luke/inference/qwen38_glm53_multimodel/.experiments/20260913T140900Z-v060-revision-qualify`.
+
+The exact previous load balancer remains stopped for rollback as
+`ds4-loadbalancer-rollback-20260913T140903Z`, using
+`ghcr.io/helixml/ramjet:rust-9b4372d@sha256:28057c7269b61e483e57bc4333e7de80c5eb84072eb80b11879971e2b8b7e155`.
+After acceptance, annotated tag `v0.6.0` was created on the qualified commit;
+Drone tag build 673 promoted the identical manifests to
+`ghcr.io/helixml/ramjet:v0.6.0` and
+`ghcr.io/helixml/ramjet:companion-v0.6.0`.
+
 ## 2026-09-12 — GLM DFlash2 runs correctly but fails capacity, c4, and prefill gates
 
 Question: after the checkpoint access constraint was explicitly cleared, can
