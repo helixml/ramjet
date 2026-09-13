@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-09-13
+
+### Heterogeneous multi-model serving
+
+- Ramjet can assign an explicit served-model owner to every upstream. Requests
+  are routed only within that model's replica set, unknown models fail before
+  an upstream is dialed, and `GET /v1/models` returns one combined,
+  deduplicated model list.
+- Machine view reports prompt, cached-prompt, and completion-token usage per
+  model. Its Topology tab renders the authoritative model, tensor-parallel
+  size, and GPU group for every live engine, including multiple replicas of
+  one model.
+- Added the qualified node06 topology with Qwen3.8-Flash-Next TP4 on GPUs 0-3
+  and two GLM-5.3-Flash TP2 replicas on GPUs 4-5 and 6-7. The guarded rollout
+  preserves Qwen and the established GLM replica while adding the second GLM
+  engine, then proves both GLM owners receive traffic before an LB-only
+  promotion.
+
+### GLM-5.3-Flash qualification
+
+- Added immutable NVIDIA vLLM and SM120 SGLang NVFP4 deployment recipes,
+  model verification, argument preflight, parser-contract validation, guarded
+  canaries, rollback paths, and backend-neutral prefill/decode metrics.
+- Qualified the SGLang W4A16 TP2 recipe with a patched nullable `glm47` tool
+  parser and 6,144-token chunked prefill. The DFlash2 candidate remains
+  explicitly rejected because it did not pass the model's correctness and
+  serving gates.
+- Added the optional Qwen NVFP4 steering plugin and its escape-vector recipe
+  as a separate experimental surface.
+
+### Routing and operations
+
 - Added default-off time-decayed prefix affinity
   (`RJ_ROUTE_AFFINITY_HORIZON_MODE=observe|enforce`). Served fingerprint
   blocks older than a replica's estimated eviction horizon earn no routing
@@ -10,6 +42,12 @@
   records per-candidate block ages and `bench/route_replay.py --horizons`
   sweeps horizons offline. New metrics: `ramjet_route_affinity_horizon_total`,
   `ramjet_route_affinity_horizon_seconds`, `ramjet_route_stale_overlap_blocks`.
+- Fixed adaptive exact-route attestation scope and recorded the guarded node06
+  placement qualification.
+- Added privacy-bounded route-journal rotation, compression, retention, and
+  offline archive analysis with hardened systemd installation units.
+- LB rollouts preserve the exact previous container under Docker Compose v5,
+  keeping rollback outside candidate reconciliation.
 
 ## 0.5.0 — 2026-09-02
 
