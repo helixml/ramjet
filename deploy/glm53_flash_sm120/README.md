@@ -105,7 +105,7 @@ under the thermal guard:
 ```bash
 sudo python3 /home/luke/inference/glm53_flash_sm120/node06_gpu_guard.py \
   --label glm53-sm120-second-tp2 \
-  --expected-gpus 6,7 \
+  --expected-gpus 8 \
   --output /protected/evidence/thermal.jsonl \
   --runtime-start-signal \
   --runtime-start-timeout-seconds 2400 \
