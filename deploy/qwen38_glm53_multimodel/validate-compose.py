@@ -18,9 +18,9 @@ CANDIDATE_IMAGE = (
     + "a" * 64
 )
 EXPECTED_ENV = {
-    "RJ_UPSTREAM": "http://qwen38flashnext-a:8000,http://glm53sm120-b:8000",
-    "RJ_UPSTREAM_MODELS": "qwen3.8-flash-next,glm-5.3-flash",
-    "RJ_MACHINEVIEW_UPSTREAM_GPUS": "0,1,2,3;4,5",
+    "RJ_UPSTREAM": "http://qwen38flashnext-a:8000,http://glm53sm120-b:8000,http://glm53sm120-c:8000",
+    "RJ_UPSTREAM_MODELS": "qwen3.8-flash-next,glm-5.3-flash,glm-5.3-flash",
+    "RJ_MACHINEVIEW_UPSTREAM_GPUS": "0,1,2,3;4,5;6,7",
     "RJ_TOKENIZER_MODE": "off",
     "RJ_EXACT_ROUTE_MODE": "off",
     "RJ_KV_EVENT_MODE": "off",

@@ -32,7 +32,9 @@ class Glm53Sm120DeployTests(unittest.TestCase):
         readme = (DEPLOY / "README.md").read_text()
         for required in (
             "127.0.0.1:8062",
+            "127.0.0.1:8063",
             "Qwen A",
+            "GPUs 6-7",
             "Dockerfile.nullable-parser",
             "[\"string\", \"null\"]",
             "1,500-second",
@@ -63,6 +65,24 @@ class Glm53Sm120DeployTests(unittest.TestCase):
         self.assertLess(
             rollout.index("start_inference_budget\n"),
             rollout.index('glm_probe || fail'),
+        )
+
+    def test_second_replica_rollout_is_additive_and_defers_inference_budget(self):
+        compose = (DEPLOY / "docker-compose.yaml").read_text()
+        rollout = (DEPLOY / "node06-second-replica-rollout.sh").read_text()
+        self.assertIn("glm53sm120-b:", compose)
+        self.assertIn("glm53sm120-c:", compose)
+        self.assertIn('device_ids: ["6", "7"]', compose)
+        self.assertIn('"127.0.0.1:8063:8000"', compose)
+        self.assertIn('compose_run up -d --no-deps "$glm_c"', rollout)
+        self.assertNotIn('force-recreate "$glm_b"', rollout)
+        self.assertNotIn('force-recreate "$qwen"', rollout)
+        self.assertNotIn("docker.sock", rollout)
+        restore = (DEPLOY / "node06-restore-qwen-b.sh").read_text()
+        self.assertIn("refusing Qwen B restore", restore)
+        self.assertLess(
+            rollout.index("start_inference_budget\n"),
+            rollout.index('glm_c_probe || fail'),
         )
 
 

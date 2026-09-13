@@ -4491,6 +4491,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multi_model_mode_routes_between_duplicate_owners_and_deduplicates_discovery() {
+        let qwen = AxumRouter::new().fallback(any(|request: Request<Body>| async move {
+            assert!(is_models_request(request.method(), request.uri()));
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"object":"list","data":[{"id":"qwen3.8-flash-next","object":"model"}]}"#,
+                ))
+                .unwrap()
+        }));
+
+        let first_replica_requests = Arc::new(AtomicUsize::new(0));
+        let first_replica_counter = Arc::clone(&first_replica_requests);
+        let first_replica = AxumRouter::new().fallback(any(move |request: Request<Body>| {
+            let counter = Arc::clone(&first_replica_counter);
+            async move {
+                if is_models_request(request.method(), request.uri()) {
+                    return Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"object":"list","data":[{"id":"glm-5.3-flash","object":"model","context_length":524288}]}"#,
+                        ))
+                        .unwrap();
+                }
+                counter.fetch_add(1, Ordering::Relaxed);
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"engine":"glm-b"}"#))
+                    .unwrap()
+            }
+        }));
+
+        let second_replica_requests = Arc::new(AtomicUsize::new(0));
+        let second_replica_counter = Arc::clone(&second_replica_requests);
+        let second_replica = AxumRouter::new().fallback(any(move |request: Request<Body>| {
+            let counter = Arc::clone(&second_replica_counter);
+            async move {
+                if is_models_request(request.method(), request.uri()) {
+                    return Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"object":"list","data":[{"id":"glm-5.3-flash","object":"model","context_length":524288}]}"#,
+                        ))
+                        .unwrap();
+                }
+                counter.fetch_add(1, Ordering::Relaxed);
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"engine":"glm-c"}"#))
+                    .unwrap()
+            }
+        }));
+
+        let (qwen_url, qwen_task) = start_upstream(qwen).await;
+        let (first_replica_url, first_replica_task) = start_upstream(first_replica).await;
+        let (second_replica_url, second_replica_task) = start_upstream(second_replica).await;
+        let proxy = proxy_for_models(
+            &[qwen_url, first_replica_url, second_replica_url],
+            &["qwen3.8-flash-next", "glm-5.3-flash", "glm-5.3-flash"],
+        );
+
+        let response = proxy
+            .serve(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let models: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(models["data"].as_array().unwrap().len(), 2);
+
+        let mut selected = std::collections::BTreeSet::new();
+        for salt in 0..4 {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .body(Body::from(format!(
+                    r#"{{"model":"glm-5.3-flash","messages":[{{"role":"user","content":"unique request {salt}"}}]}}"#
+                )))
+                .unwrap();
+            let response = proxy.serve(request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            selected.insert(
+                response.headers()["x-ramjet-upstream"]
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+            let _ = to_bytes(response.into_body(), 1024).await.unwrap();
+        }
+        assert_eq!(selected, ["1".to_owned(), "2".to_owned()].into());
+        assert_eq!(
+            first_replica_requests.load(Ordering::Relaxed)
+                + second_replica_requests.load(Ordering::Relaxed),
+            4
+        );
+        assert!(first_replica_requests.load(Ordering::Relaxed) > 0);
+        assert!(second_replica_requests.load(Ordering::Relaxed) > 0);
+
+        qwen_task.abort();
+        first_replica_task.abort();
+        second_replica_task.abort();
+    }
+
+    #[tokio::test]
     async fn multi_model_mode_rejects_missing_invalid_and_unknown_models_without_dispatch() {
         let requests = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&requests);

@@ -12,7 +12,7 @@ readonly qwen_a=qwen38flashnext-a
 readonly qwen_dir=/home/luke/inference/qwen38_flash_next
 readonly base_image=sha256:ec4243f940a179a27fea21895077efd47cd050501f99a1d2a5fecf7df2e7be71
 readonly fixed_image=sha256:024a988fd0c0e15d80e382073c05657b2d57f52611c324599508cdb62b9debb8
-readonly compose_sha=81ac5a53b83b7ace78882510fd06921467ecb899908e5ed6fd7c7d292f8eb314
+readonly compose_sha=765452df91208722d8deb166ce96bf834262093201983e252b1b99a8a8037483
 
 fail() { echo "GLM nullable-parser rollout: $*" >&2; exit 2; }
 

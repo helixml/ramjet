@@ -11,6 +11,7 @@ readonly lock_file=/run/lock/ramjet-node06-deployment.lock
 readonly qwen_a=qwen38flashnext-a
 readonly qwen_b=qwen38flashnext-b
 readonly glm_b=glm53sm120-b
+readonly glm_c=glm53sm120-c
 readonly qwen_image=sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93
 readonly glm_ref=sha256:024a988fd0c0e15d80e382073c05657b2d57f52611c324599508cdb62b9debb8
 readonly model_dir=/prod/models/ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO-ee0989a944b0
@@ -28,7 +29,7 @@ runner=$(realpath -e -- "$0")
 [[ $(stat -c '%u:%a' "$experiment_dir") == 0:700 ]] || fail "experiment directory must be root-owned mode 0700"
 [[ $runner == "$experiment_dir/node06-canary.sh" ]] || fail "execute the staged campaign authority"
 [[ $(sha256sum "$qwen_compose" | awk '{print $1}') == "$EXPECTED_QWEN_COMPOSE_SHA256" ]] || fail "Qwen Compose bytes drifted"
-[[ $(sha256sum "$glm_compose" | awk '{print $1}') == 81ac5a53b83b7ace78882510fd06921467ecb899908e5ed6fd7c7d292f8eb314 ]] || fail "GLM Compose bytes drifted"
+[[ $(sha256sum "$glm_compose" | awk '{print $1}') == 765452df91208722d8deb166ce96bf834262093201983e252b1b99a8a8037483 ]] || fail "GLM Compose bytes drifted"
 [[ $(sha256sum "$glm_dir/glm53-adaptive.json" | awk '{print $1}') == 23faa5c717d20bc1638148751ebdf1a474985ebf91fbc3ee4eacd7b6b1240722 ]] || fail "adaptive config bytes drifted"
 [[ $(<"$glm_dir/model-verified.flag") == 'ee0989a944b0e213589191d7fca63af825a0741e verified' ]] || fail "model verification receipt missing"
 [[ -f "$model_dir/config.json" ]] || fail "model config is missing"
@@ -45,6 +46,8 @@ export VLLM_API_KEY
 
 exec 9>"$lock_file"
 flock -n 9 || fail "another node06 deployment operation owns the lock"
+[[ $(docker inspect "$glm_c" --format '{{.State.Status}}' 2>/dev/null || true) != running ]] ||
+  fail "legacy Qwen-B crossover is forbidden while GLM C is serving"
 
 qwen_compose_cmd() { docker compose -f "$qwen_compose" --project-directory "$qwen_dir" "$@"; }
 glm_compose_cmd() { docker compose -f "$glm_compose" --project-directory "$glm_dir" "$@"; }

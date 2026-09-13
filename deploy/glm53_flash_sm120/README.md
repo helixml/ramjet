@@ -1,10 +1,10 @@
-# GLM-5.3-Flash SM120 TP2 canary
+# GLM-5.3-Flash SM120 TP2 replicas
 
-This is the isolated node06 deployment contract for the community-qualified
-SGLang v0.4.3 stack. It deliberately contains no Ramjet service. During the
-canary, canonical Qwen B is stopped under the common deployment lock, Qwen A
-continues serving through the unchanged load balancer, and GLM is reachable
-only at `127.0.0.1:8062`.
+This is the independently managed node06 deployment contract for two
+community-qualified SGLang v0.4.3 TP2 replicas. It deliberately contains no
+Ramjet service. Qwen A continues serving on GPUs 0-3, GLM B owns GPUs 4-5 at
+`127.0.0.1:8062`, and GLM C owns GPUs 6-7 at `127.0.0.1:8063`. Start or recreate
+only the explicitly named service being managed.
 
 Immutable inputs:
 
@@ -18,9 +18,9 @@ Immutable inputs:
   Its patched GLM47 parser is
   `8ed76f9da2aa782b3e9374d00687186624fd383e98acf9ba0d6ac9759e1425d7`.
 
-The initial profile matches the release's qualified TP2/C4 settings, with
-HiCache disabled. TP4 is not admitted: the upstream launcher and measurements
-cover only TP2. Run `validate-compose.py`, verify the downloaded checkpoint
+Both replicas use the release's qualified TP2/C4 settings, with HiCache
+disabled and distinct writable compilation caches. TP4 is not admitted: the
+upstream launcher and measurements cover only TP2. Run `validate-compose.py`, verify the downloaded checkpoint
 with `hf cache verify --fail-on-missing-files`. The downloader's own
 `.cache/huggingface` metadata is expected local-only state, so the generic
 `--fail-on-extra-files` switch is intentionally not used. Run the rollout only
@@ -50,9 +50,10 @@ docker image inspect ramjet/glm53-sm120:nullable-parser-r1 \
 python3 validate-compose.py
 ```
 
-The current pin is a node06-local canary image, not a published registry
-artifact. Do not promote it to a durable deployment until the same derived
-image is published by immutable registry digest and the Compose pin is updated.
+The current pin is a node06-local derived image rather than a published
+registry artifact. Both replicas must use that exact image ID until the same
+derived image is published by immutable registry digest and the Compose pin is
+updated.
 
 For a first canary, stage the complete directory plus the current benchmark
 guard under `/home/luke/inference/glm53_flash_sm120`, create a root-owned
@@ -60,8 +61,10 @@ mode-0700 experiment directory, copy `node06-canary.sh` into it, and run
 `node06-guarded-rollout.sh`. For an already-running exact base candidate,
 `node06-parser-rollout.sh` rolls only the isolated GLM service and stops that
 candidate on failure; a thermal abort never initiates another model load.
-`node06-restore-qwen-b.sh` stops GLM and recreates the canonical Qwen B service;
-it requires the exact Qwen Compose SHA-256 in
+`node06-restore-qwen-b.sh` stops GLM B and recreates the canonical Qwen B
+service only while GLM C is absent. Once the second GLM replica owns GPUs 6-7,
+the legacy Qwen-B restore fails closed instead of creating an overlapping GPU
+assignment. It requires the exact Qwen Compose SHA-256 in
 `EXPECTED_QWEN_COMPOSE_SHA256`.
 
 The accepted node06 concurrency curve uses `bench/codebench.py` with
@@ -91,3 +94,29 @@ by 7.4%, c4 aggregate output by 4.7%, and c4 per-stream decode by 2.9%; 32K and
 64K cold prefill improved only about 1%. The 24,288-token (4.6%) pool reduction
 is therefore part of the accepted performance/capacity contract, not free
 headroom.
+
+## Add the second replica
+
+Stage this directory on node06 without changing the existing Compose project,
+create a fresh root-owned mode-0700 evidence directory below `.experiments`,
+copy `node06-second-replica-rollout.sh` into it, and run only that staged script
+under the thermal guard:
+
+```bash
+sudo python3 /home/luke/inference/glm53_flash_sm120/node06_gpu_guard.py \
+  --label glm53-sm120-second-tp2 \
+  --expected-gpus 8 \
+  --output /protected/evidence/thermal.jsonl \
+  --runtime-start-signal \
+  --runtime-start-timeout-seconds 2400 \
+  --max-runtime-seconds 300 \
+  -- /protected/evidence/node06-second-replica-rollout.sh /protected/evidence
+```
+
+The 2,400-second bound covers model loading, JIT, and graph capture. The
+five-minute inference budget begins only after readiness and covers one direct
+acceptance request; it is not a 25-minute load window. The script requires
+GPUs 6-7 to be empty at the 600W inference ceiling, leaves Qwen A, GLM B, and
+Ramjet byte-identical, and removes only the new candidate container on failure.
+After direct qualification succeeds, add GLM C to Ramjet with the reviewed
+`deploy/qwen38_glm53_multimodel` recipe.

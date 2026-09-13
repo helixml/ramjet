@@ -11,7 +11,7 @@ readonly glm=glm53sm120-b
 readonly qwen_a=qwen38flashnext-a
 readonly qwen_dir=/home/luke/inference/qwen38_flash_next
 readonly fixed_image=sha256:024a988fd0c0e15d80e382073c05657b2d57f52611c324599508cdb62b9debb8
-readonly compose_sha=e0b321eab9efea38d92f511ebb259f8b6f5604fffcb40df86871c799328fb520
+readonly compose_sha=765452df91208722d8deb166ce96bf834262093201983e252b1b99a8a8037483
 
 fail() { echo "GLM 6K-prefill rollout: $*" >&2; exit 2; }
 
