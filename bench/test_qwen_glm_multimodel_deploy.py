@@ -91,6 +91,8 @@ class QwenGlmMultimodelDeployTests(unittest.TestCase):
         self.assertIn("qwen3.8-flash-next", text)
         self.assertIn("glm-5.3-flash", text)
         self.assertIn("combined", text)
+        self.assertIn('com.docker.compose.project"}}', text)
+        self.assertIn('-p "$project"', text)
 
 
 if __name__ == "__main__":

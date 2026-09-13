@@ -83,6 +83,17 @@ image under its original name, and starts it. On success the script prints the
 name of the stopped rollback container; retain that container until the new LB
 has passed the observation window.
 
+The promoted container deliberately carries a release-unique Compose project
+label. For later inspection or an exact Compose operation, read that authority
+from the running container instead of assuming the file's default project:
+
+```bash
+project=$(docker inspect ds4-loadbalancer \
+  --format '{{index .Config.Labels "com.docker.compose.project"}}')
+docker compose --env-file /path/to/protected.env -p "$project" \
+  -f docker-compose.yaml ps
+```
+
 ## Verify and roll back
 
 Verify health, the combined IDs, both owner-routed requests, and the two fixed
