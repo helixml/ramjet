@@ -1,10 +1,11 @@
 # Qwen3.8-Flash-Next + GLM-5.3-Flash behind one Ramjet
 
-This is the node06 Ramjet-only deployment for the two independently managed
-engines that are currently resident together:
+This is the node06 Ramjet-only deployment for three independently managed
+engines that are resident together:
 
 - `qwen38flashnext-a`: Qwen3.8-Flash-Next, TP4 on GPUs 0-3.
 - `glm53sm120-b`: GLM-5.3-Flash, TP2 on GPUs 4-5.
+- `glm53sm120-c`: GLM-5.3-Flash, TP2 on GPUs 6-7.
 
 The engine Compose projects retain their own lifecycle and immutable model and
 runtime pins. This deployment owns only `ds4-loadbalancer`, joins both external
@@ -15,9 +16,11 @@ Unknown, absent, or malformed model selection is rejected before any upstream
 is dialed.
 
 Machine view also publishes this static ownership map on its Topology tab:
-Qwen is Engine A (`TP4`, GPUs 0-3) and GLM is Engine B (`TP2`, GPUs 4-5).
-That serving view is independent of the optional adaptive controller and stays
-visible while adaptive topology changes are disabled.
+Qwen is Engine A (`TP4`, GPUs 0-3), while GLM replicas B and C are separate TP2
+engines on GPUs 4-5 and 6-7. The combined model list still exposes one
+`glm-5.3-flash` entry. That serving view is independent of the optional
+adaptive controller and stays visible while adaptive topology changes are
+disabled.
 
 ## Deliberate feature boundary
 
@@ -26,8 +29,9 @@ events, adaptive topology, speculative-profile placement, prefix single-flight,
 affinity-horizon estimation, and idle parking. Those features currently own one
 fleet-wide tokenizer, compatibility manifest, event geometry, or interchangeable
 replica set. Applying the Qwen authority to GLM would make their telemetry or
-placement incorrect. Ordinary prefix/load accounting remains active but has one
-eligible TP engine per model, so it cannot cross the ownership boundary.
+placement incorrect. Ordinary prefix/load accounting remains active. Qwen has
+one eligible engine; GLM requests are scored only across the two GLM replicas,
+so neither ordinary routing nor fail-open can cross the ownership boundary.
 
 The LB has no Docker socket and cannot start, stop, or recreate either engine.
 Direct engine ports remain loopback-only. Public access continues through the
@@ -65,10 +69,11 @@ sudo python3 /home/luke/inference/glm53_flash_sm120/node06_gpu_guard.py \
     ./node06-rollout.sh
 ```
 
-The script holds `/run/lock/ramjet-node06-deployment.lock`, verifies both
+The script holds `/run/lock/ramjet-node06-deployment.lock`, verifies all three
 engine containers and all three external networks, and first starts the exact
 candidate on alternate loopback ports. It requires a combined two-model list
-and one successful request to each owner before the public LB is touched.
+plus successful Qwen routing and observed GLM routing to both replicas before
+the public LB is touched.
 Set `RAMJET_CANARY_ONLY=1` to stop after that proof and remove the alternate-port
 container without touching the public LB; this is the pre-merge qualification
 mode.
@@ -85,12 +90,12 @@ has passed the observation window.
 
 ## Verify and roll back
 
-Verify health, the combined IDs, both owner-routed requests, and the two fixed
-upstream metric series. Do not print prompts, completions, credentials, or raw
-request bodies into the deployment journal.
+Verify health, the combined IDs, all three owner-routed upstreams, and the three
+fixed upstream metric series. Do not print prompts, completions, credentials,
+or raw request bodies into the deployment journal.
 
 To roll back after a successful script run, stop and remove only the new
 `ds4-loadbalancer`, rename the printed stopped rollback container back to
 `ds4-loadbalancer`, and start it. This restores the byte-identical old container
-without rendering its historical Compose inputs. Qwen A and GLM B stay running
-through either LB operation.
+without rendering its historical Compose inputs. Qwen A and both GLM replicas
+stay running through either LB operation.
