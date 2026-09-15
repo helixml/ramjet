@@ -1,5 +1,41 @@
 # node06 experiment journal
 
+## 2026-09-15 — Ramjet v0.6.1 cache-statistics release qualification
+
+Release commit `e90ccc37cb2ac3a0fb099ca9f1c91d7764f3ddb7` passed Drone push
+build 678 and published load-balancer revision image
+`ghcr.io/helixml/ramjet:rust-e90ccc3@sha256:bdd58ba1d2d98240df76f85b595a4d52420feedf809dda6462b36f97ce14f0a1`
+plus companion revision image
+`ghcr.io/helixml/ramjet:companion-rust-e90ccc3@sha256:250c9dd79331fa357e5d85f5a93d886b8efd6b93e45ed9fc1bc416633f5acc7d`.
+Both images reported OCI version `0.6.1` and the exact full release revision.
+
+The first guarded rollout passed the alternate-port candidate checks but its
+post-promotion set of four GLM probes reached only one healthy GLM owner while
+production traffic was active. The fail-closed rollout restored the exact
+v0.6.0 container automatically. With request counters stable, guarded retry
+`4fb855e91fed4b95b9cb8276fed0f696` passed both candidate and promoted checks:
+three healthy replicas, the combined Qwen/GLM model list, Qwen owner isolation,
+and observed traffic on both GLM owners. Qwen A and GLM B/C retained their
+start times, zero restart counts, and `OOMKilled=false` throughout.
+
+Post-promotion health was `ok` with 3/3 replicas and every fixed
+`ramjet_upstream_up` series at 1. Bounded logs contained no warning, error,
+panic, or fatal marker. Replaying the dashboard's real one-hour, 400-point
+series through the released rolling-cache implementation produced 331 finite
+points and 69 absent points, with range 0–99.943% and no out-of-range value.
+The guard passed in 10.347s with maximum intake 45C, maximum GPU temperature
+59C, and maximum observed eight-GPU power 630.65W. Evidence is retained on
+node06 under
+`/home/luke/inference/qwen38_glm53_multimodel/.experiments/20260915T185400Z-v061-release-deploy-retry`.
+
+The exact previous load balancer remains stopped for rollback as
+`ds4-loadbalancer-rollback-20260915T185341Z`, using
+`ghcr.io/helixml/ramjet:rust-8206b29@sha256:25949fb1bb97bc5c066e4a53a703d5453a49fc1aaa773f1c39e2c465c85ba976`.
+After acceptance, annotated tag `v0.6.1` was created on the qualified commit;
+Drone tag build 679 promoted the identical manifests to
+`ghcr.io/helixml/ramjet:v0.6.1` and
+`ghcr.io/helixml/ramjet:companion-v0.6.1`.
+
 ## 2026-09-13 — Ramjet v0.6.0 release qualification on the mixed-model topology
 
 Release commit `8206b295ad7542678a9d8690ecf896b1a6fc3c5d` passed Drone push
