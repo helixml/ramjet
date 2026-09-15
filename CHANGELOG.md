@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.6.1 — 2026-09-15
+
+- Fixed machine view's rolling cache-hit chart producing impossible negative
+  percentages after a busy interval aged into an idle window. Empty windows
+  now clear floating-point accumulator residue and correctly render as absent.
+- Added a focused frontend regression test and made the pull-request and
+  release quality pipelines build and test the machine-view UI.
+
 ## 0.6.0 — 2026-09-13
 
 ### Heterogeneous multi-model serving

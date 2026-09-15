@@ -72,6 +72,11 @@ export function rollingAverage(rows: Timed[], spec: RollingSpec): Timed[] {
   let weight = 0
   let spanned = 0
   let span = 0
+  // Counts, unlike floating-point sums, return to exactly zero. Use them to
+  // distinguish an empty window from cancellation residue left after a busy
+  // window has been subtracted out.
+  let active = 0
+  let weightedActive = 0
   for (let index = 0; index < count; index += 1) {
     const value = values[index]
     if (value != null) {
@@ -79,6 +84,8 @@ export function rollingAverage(rows: Timed[], spec: RollingSpec): Timed[] {
       weight += weights[index]
       spanned += spans[index] * value
       span += spans[index]
+      active += 1
+      if (weights[index] > 0) weightedActive += 1
     }
     const from = rows[index].t - windowMs
     while (start < index && rows[start].t < from) {
@@ -88,13 +95,33 @@ export function rollingAverage(rows: Timed[], spec: RollingSpec): Timed[] {
         weight -= weights[start]
         spanned -= spans[start] * dropped
         span -= spans[start]
+        active -= 1
+        if (weights[start] > 0) weightedActive -= 1
       }
       start += 1
     }
     // The weighted mean is the real answer; the unweighted one covers a window
     // whose traffic series is absent or all zero, where the ratios are still
     // the only thing known about it.
-    const average = weight > 1e-9 ? weighted / weight : span > 1e-9 ? spanned / span : null
+    // The traffic-weighted subset can become empty while zero-weight ratio
+    // observations remain. Rebase it independently so the next traffic burst
+    // also starts from exact zero.
+    if (weightedActive === 0) {
+      weighted = 0
+      weight = 0
+    }
+    let average: number | null
+    if (active === 0) {
+      // Clear all cancellation residue so a later burst starts from an exact
+      // baseline instead of inheriting an impossible negative hit rate.
+      spanned = 0
+      span = 0
+      average = null
+    } else if (weightedActive > 0) {
+      average = weighted / weight
+    } else {
+      average = spanned / span
+    }
     out[index] = { ...rows[index], [outKey]: average }
   }
   return out

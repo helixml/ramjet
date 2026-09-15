@@ -59,6 +59,15 @@ steps:
       - python3 bench/agentbench.py validate
       - python3 -m unittest discover -s bench -p 'test_*.py'
 
+  - name: machineview-ui
+    image: node:24-alpine
+    pull: if-not-exists
+    commands:
+      - cd web
+      - npm ci --no-audit --no-fund
+      - npm test
+      - npm run build
+
   - name: deployment-compose
     image: docker:29-cli
     pull: if-not-exists
@@ -91,6 +100,7 @@ steps:
       - rust-lint
       - rust-test
       - agent-protocol
+      - machineview-ui
       - deployment-compose
 
   # Drone 2.12 silently discards `when.paths`, so every publisher has a
@@ -114,7 +124,7 @@ steps:
         mkdir -p /kaniko/.docker
         printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" >/kaniko/.docker/config.json
         exec /kaniko/executor --context . --dockerfile Dockerfile.deps \
-          --destination ghcr.io/helixml/ramjet:rust-deps-sha256-464c49a85cc62e5d929cb2676dd051f80e16046fc0381c3aa5841dc222ff93f5 \
+          --destination ghcr.io/helixml/ramjet:rust-deps-sha256-545a0470ab87b23a10e1bb3e37afd2f72d4c0c7102baa3eaea487c856bf64eee \
           --cache=true --cache-repo=ghcr.io/helixml/ramjet-build-cache \
           --cache-ttl=336h --snapshot-mode=redo --reproducible
     when:
@@ -284,6 +294,15 @@ steps:
       - python3 bench/agentbench.py validate
       - python3 -m unittest discover -s bench -p 'test_*.py'
 
+  - name: release-machineview-ui
+    image: node:24-alpine
+    pull: if-not-exists
+    commands:
+      - cd web
+      - npm ci --no-audit --no-fund
+      - npm test
+      - npm run build
+
   - name: release-deployment-compose
     image: docker:29-cli
     pull: if-not-exists
@@ -313,6 +332,7 @@ steps:
       - release-rust-lint
       - release-rust-test
       - release-agent-protocol
+      - release-machineview-ui
       - release-deployment-compose
 
   - name: release-image
