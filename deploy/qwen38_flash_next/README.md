@@ -10,8 +10,8 @@ The checkpoint and image are immutable inputs:
 - model revision: `bcd9f01ddc9cff2316eb84281bebcd5b058bddce`
 - model payload: 185,502,232,570 bytes across 131 safetensors shards
 - linux/amd64 vLLM image: `sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
-- released ramjet Compose default: `v0.6.0@sha256:25949fb1bb97bc5c066e4a53a703d5453a49fc1aaa773f1c39e2c465c85ba976`
-- node06-qualified live ramjet image: `rust-8206b29@sha256:25949fb1bb97bc5c066e4a53a703d5453a49fc1aaa773f1c39e2c465c85ba976` (v0.6.0 release qualification on the mixed Qwen/GLM topology; previous `rust-9b4372d@sha256:28057c7269b61e483e57bc4333e7de80c5eb84072eb80b11879971e2b8b7e155`)
+- released ramjet Compose default: `v0.6.1@sha256:bdd58ba1d2d98240df76f85b595a4d52420feedf809dda6462b36f97ce14f0a1`
+- node06-qualified live ramjet image: `rust-e90ccc3@sha256:bdd58ba1d2d98240df76f85b595a4d52420feedf809dda6462b36f97ce14f0a1` (v0.6.1 cache-statistics fix qualified on the mixed Qwen/GLM topology; previous `rust-8206b29@sha256:25949fb1bb97bc5c066e4a53a703d5453a49fc1aaa773f1c39e2c465c85ba976`)
 - exact-route manifest: `compat/qwen38-flash-next-r134.json`, SHA-256 `a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67`
 
 The day-zero vLLM image config labels its source/build revision as `unknown`.
@@ -280,12 +280,12 @@ prefix hits while regressing returning-probe TTFT by 15%, blocker TTFT p95 by
 qualified value.
 
 The checked-in Compose default follows the repository-wide released-image
-policy and is the exact v0.6.0 image qualified on node06. Emergency candidate
+policy and is the exact v0.6.1 image qualified on node06. Emergency candidate
 or rollback renders must carry an explicit immutable `LB_IMAGE` override on
 every `docker compose` invocation, including cleanup traps; ordinary
 production renders use the released default. The admitted node06 Compose
 SHA-256 is
-`51333dc97adc66ecb11242946983518f4c8f903a1204c42b0ee9d9b683b7ec1a`;
+`3961d563e47851a47eac226b7112a47ee8b3ebc1ef8d1d4bec85b2a5307bc065`;
 the adaptive policy SHA-256 is
 `39bbd0f4ca311ae431f7cbf6e9230510c0ce1beaea0e9fe9ee58dd57bd6c6b8a`.
 

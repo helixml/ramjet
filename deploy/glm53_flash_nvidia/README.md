@@ -41,7 +41,7 @@ node06 at a time. Neither supersedes the other until this one is qualified.
 - Engine image: `vllm/vllm-openai@sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93`.
   It bundles `vllm.models.glm5next` (model, MTP, KDA, MLA+indexer, multimodal)
   and transformers 5.16.1, which is exactly the model card's stated minimum.
-- Load balancer: `ghcr.io/helixml/ramjet:v0.6.0@sha256:25949fb1bb97bc5c066e4a53a703d5453a49fc1aaa773f1c39e2c465c85ba976`.
+- Load balancer: `ghcr.io/helixml/ramjet:v0.6.1@sha256:bdd58ba1d2d98240df76f85b595a4d52420feedf809dda6462b36f97ce14f0a1`.
 
 ## What the checkpoint is, and why it fits
 
