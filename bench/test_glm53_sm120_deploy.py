@@ -41,6 +41,16 @@ class Glm53Sm120DeployTests(unittest.TestCase):
         ):
             self.assertIn(required, readme)
 
+    def test_recipe_documents_multimodal_client_contract(self):
+        readme = (DEPLOY / "README.md").read_text()
+        for required in (
+            "--enable-multimodal",
+            "Multimodal client contract",
+            '"input": ["text", "image"]',
+            "this model does not support image input",
+        ):
+            self.assertIn(required, readme)
+
     def test_loader_defers_only_the_inference_runtime_budget(self):
         wrapper = (DEPLOY / "node06-guarded-rollout.sh").read_text()
         canary = (DEPLOY / "node06-canary.sh").read_text()
