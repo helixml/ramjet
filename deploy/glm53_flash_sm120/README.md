@@ -95,6 +95,35 @@ by 7.4%, c4 aggregate output by 4.7%, and c4 per-stream decode by 2.9%; 32K and
 is therefore part of the accepted performance/capacity contract, not free
 headroom.
 
+## Multimodal client contract
+
+Image input is part of this deployment: both replicas launch with
+`--enable-multimodal` and the torchvision image processor, and the shared load
+balancer passes image content parts through unchanged. Verified 2026-09-16
+under a thermal guard (run `98cc4610d771ff28454ab61e3231f262`): a 32x32 PNG
+`image_url` data-URI chat completion returned 200 with correct image content
+and identical prompt-token counts on the direct engine `127.0.0.1:8062`, the
+load balancer's `glm-5.3-flash` alias, and the public Caddy TLS ingress.
+
+Agent harnesses that pre-check model capabilities before sending a request
+(opencode/T3 Code) gate attachments on each model's declared modalities. A
+client recipe for this deployment must declare the GLM entry multimodal, for
+example in `~/.config/opencode/opencode.jsonc`:
+
+```json
+"glm-5.3-flash": {
+  "modalities": {
+    "input": ["text", "image"],
+    "output": ["text"]
+  }
+}
+```
+
+A client that still declares `input: ["text"]` refuses image attachments
+locally ("this model does not support image input") before any request reaches
+node06; that error is a stale client recipe, not an engine capability. Keep
+client-side modality declarations in sync with this section.
+
 ## Add the second replica
 
 Stage this directory on node06 without changing the existing Compose project,

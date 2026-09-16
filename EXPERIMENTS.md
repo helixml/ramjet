@@ -1,5 +1,40 @@
 # node06 experiment journal
 
+## 2026-09-16 — GLM-5.3-Flash image-input smoke and the client-side modality gate
+
+An agent harness (opencode/T3 Code) reported "this model does not support image
+input" for `ramjet-node06/glm-5.3-flash`. The defect was entirely client-side:
+the dev box's `~/.config/opencode/opencode.jsonc` declared
+`modalities.input: ["text"]` for `glm-5.3-flash` (Qwen was already declared
+`["text", "image"]`). The harness checks that declaration when a file part
+reaches the model and rewrites the attachment to an error text before any
+request leaves the client, so node06 never saw the image. The same recipe fix —
+`input: ["text", "image"]` for the GLM model entry — was applied on the dev box.
+
+The serving stack needed no change. A guarded smoke
+(run `98cc4610d771ff28454ab61e3231f262`, journal
+`glm53-image-smoke-20260916T1.jsonl`) sent one 32x32 checkerboard PNG as a
+chat-completion `image_url` data URI with a color question, capped at 64 output
+tokens. All four paths returned 200 with the correct answer
+("red and blue") and identical `prompt_tokens=46`:
+direct engine `127.0.0.1:8062`, the shared load balancer `127.0.0.1:8006` with
+the `glm-5.3-flash` alias, and the public Caddy TLS ingress
+(`https://node06.lukemarsden.net/v1`) that the agent client itself uses. A
+text-only control through the LB also returned 200. Engine-side multimodality
+was already part of the `deploy/glm53_flash_sm120` contract
+(`--enable-multimodal`, torchvision image processor); the load balancer passes
+image content parts through unchanged.
+
+Node06's operational mirror was also refreshed from the reviewed repository
+state: `bench/node06_gpu_guard.py`, `node06_operational_moratorium.py`,
+`shadow_soak.py`, `cachebench.py`, `engine_metrics.py`, and
+`snapshot_recovery_gate.py` were copied into
+`/home/luke/inference/dspark_0731/bench/`. The on-box moratorium copy still
+carried the armed 2026-08-14 flag; the repository's reviewed state
+(`MORATORIUM_ACTIVE = False`, retired 2026-08-25 after the operator confirmed
+the AC repair) is now what runs on node06. The multimodal client contract is
+documented in `deploy/glm53_flash_sm120/README.md`.
+
 ## 2026-09-15 — Ramjet v0.6.1 cache-statistics release qualification
 
 Release commit `e90ccc37cb2ac3a0fb099ca9f1c91d7764f3ddb7` passed Drone push
