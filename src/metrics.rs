@@ -26,6 +26,7 @@ pub struct Metrics {
     pub completion_tokens: CounterVec,
     pub model_completion_tokens: CounterVec,
     pub model_requests: CounterVec,
+    pub model_request_outcomes: CounterVec,
     pub context_size: HistogramVec,
     pub output_size: HistogramVec,
     pub decode_tps: HistogramVec,
@@ -222,6 +223,11 @@ impl Metrics {
                 "ramjet_model_requests_total",
                 "Successful inference responses with usage accounting by configured model",
                 &["model"],
+            )?,
+            model_request_outcomes: counter(
+                "ramjet_model_request_outcomes_total",
+                "Terminal inference request outcomes by configured model",
+                &["model", "outcome"],
             )?,
             context_size: histogram(
                 "ramjet_context_tokens",
@@ -1014,6 +1020,10 @@ impl Metrics {
             self.model_cached_tokens.with_label_values(&[model]);
             self.model_completion_tokens.with_label_values(&[model]);
             self.model_requests.with_label_values(&[model]);
+            for outcome in ["complete", "upstream_error", "client_disconnect"] {
+                self.model_request_outcomes
+                    .with_label_values(&[model, outcome]);
+            }
         }
     }
 
@@ -1033,6 +1043,7 @@ impl Metrics {
             Box::new(self.completion_tokens.clone()),
             Box::new(self.model_completion_tokens.clone()),
             Box::new(self.model_requests.clone()),
+            Box::new(self.model_request_outcomes.clone()),
             Box::new(self.context_size.clone()),
             Box::new(self.output_size.clone()),
             Box::new(self.decode_tps.clone()),
@@ -1347,6 +1358,7 @@ mod tests {
             "ramjet_completion_tokens_total",
             "ramjet_model_completion_tokens_total",
             "ramjet_model_requests_total",
+            "ramjet_model_request_outcomes_total",
             "ramjet_tokenizer_shadow_total",
             "ramjet_exact_route_preroute_total",
             "ramjet_exact_route_placement_total",
@@ -1379,6 +1391,7 @@ mod tests {
             r#"ramjet_model_prompt_tokens_total{model="glm-5.3-flash"} 0"#,
             r#"ramjet_model_completion_tokens_total{model="qwen3.8-flash-next"} 0"#,
             r#"ramjet_model_requests_total{model="glm-5.3-flash"} 0"#,
+            r#"ramjet_model_request_outcomes_total{model="glm-5.3-flash",outcome="upstream_error"} 0"#,
         ] {
             assert!(text.contains(expected), "missing zero series: {expected}");
         }
