@@ -1315,7 +1315,9 @@ impl Proxy {
         };
         let (mut approximate_decision, speculation_profile, affinity_horizon) =
             prepared.route_profiled(&self.inner.router, endpoint, decode_load_units);
-        if !self.inner.config.upstream_models.is_empty() {
+        let configured_model = if self.inner.config.upstream_models.is_empty() {
+            None
+        } else {
             let model = match &prepared.requested_model {
                 RequestedModel::Named(model) => model,
                 RequestedModel::Missing | RequestedModel::Invalid => {
@@ -1347,7 +1349,13 @@ impl Proxy {
                 );
                 return json_error(StatusCode::NOT_FOUND, "model not found");
             }
-        }
+            self.inner
+                .config
+                .upstream_models
+                .iter()
+                .find(|configured| *configured == model)
+                .map(String::as_str)
+        };
         self.inner
             .metrics
             .route_speculation_profile
@@ -1523,6 +1531,7 @@ impl Proxy {
                 "no_healthy_upstream" => StatusCode::SERVICE_UNAVAILABLE,
                 _ => StatusCode::BAD_GATEWAY,
             };
+            self.record_model_request_outcome(configured_model, "upstream_error");
             self.record_error(endpoint_label, reason, status, started.elapsed());
             self.inner.journal.finish(
                 journal_sequence,
@@ -1763,6 +1772,20 @@ impl Proxy {
             }
         }
         self.record_upstream_request(upstream, status);
+        let outcome = match result {
+            "client_disconnect" => "client_disconnect",
+            "upstream_read_error" => "upstream_error",
+            _ if status.is_server_error() => "upstream_error",
+            _ => "complete",
+        };
+        self.record_model_request_outcome(
+            self.inner
+                .config
+                .upstream_models
+                .get(upstream)
+                .map(String::as_str),
+            outcome,
+        );
         self.inner.journal.finish(
             journal_sequence,
             started.elapsed(),
@@ -2161,6 +2184,16 @@ impl Proxy {
                 .model_completion_tokens
                 .with_label_values(&[model])
                 .inc_by(value);
+        }
+    }
+
+    fn record_model_request_outcome(&self, model: Option<&str>, outcome: &str) {
+        if let Some(model) = model {
+            self.inner
+                .metrics
+                .model_request_outcomes
+                .with_label_values(&[model, outcome])
+                .inc();
         }
     }
 
@@ -3440,6 +3473,16 @@ mod tests {
         proxy_for_config(config, Arc::from([]))
     }
 
+    fn assert_model_outcome(proxy: &Proxy, model: &str, outcome: &str) {
+        let value = proxy
+            .inner
+            .metrics
+            .model_request_outcomes
+            .with_label_values(&[model, outcome])
+            .get();
+        assert!((value - 1.0).abs() < f64::EPSILON);
+    }
+
     fn proxy_for_config(config: Config, inventories: Arc<[SharedFencedInventory]>) -> Proxy {
         let registry = Registry::new();
         let metrics = Arc::new(Metrics::new(&registry).unwrap());
@@ -4486,8 +4529,31 @@ mod tests {
         }
         assert_eq!(qwen_requests.load(Ordering::Relaxed), 1);
         assert_eq!(glm_requests.load(Ordering::Relaxed), 1);
+        for model in ["qwen3.8-flash-next", "glm-5.3-flash"] {
+            assert_model_outcome(&proxy, model, "complete");
+        }
         qwen_task.abort();
         glm_task.abort();
+    }
+
+    #[tokio::test]
+    async fn configured_model_transport_failure_records_upstream_error() {
+        let proxy = proxy_for_models(
+            &[Url::parse("http://127.0.0.1:1").unwrap()],
+            &["glm-5.3-flash"],
+        );
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                r#"{"model":"glm-5.3-flash","messages":[{"role":"user","content":"hi"}]}"#,
+            ))
+            .unwrap();
+
+        let response = proxy.serve(request).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_model_outcome(&proxy, "glm-5.3-flash", "upstream_error");
     }
 
     #[tokio::test]
@@ -6422,12 +6488,12 @@ mod tests {
             }
         }));
         let (url, task) = start_upstream(upstream).await;
-        let proxy = proxy_for(&[url]);
+        let proxy = proxy_for_models(&[url], &["glm-5.3-flash"]);
         let request = Request::builder()
             .method(Method::POST)
             .uri("/v1/chat/completions")
             .body(Body::from(
-                r#"{"messages":[{"role":"user","content":"cancel me"}]}"#,
+                r#"{"model":"glm-5.3-flash","messages":[{"role":"user","content":"cancel me"}]}"#,
             ))
             .unwrap();
 
@@ -6461,6 +6527,7 @@ mod tests {
                 .abs()
                 < f64::EPSILON
         );
+        assert_model_outcome(&proxy, "glm-5.3-flash", "client_disconnect");
         assert_eq!(proxy.router().state(0).unwrap().1, 0);
         task.abort();
     }
