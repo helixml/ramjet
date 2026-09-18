@@ -3473,6 +3473,16 @@ mod tests {
         proxy_for_config(config, Arc::from([]))
     }
 
+    fn assert_model_outcome(proxy: &Proxy, model: &str, outcome: &str) {
+        let value = proxy
+            .inner
+            .metrics
+            .model_request_outcomes
+            .with_label_values(&[model, outcome])
+            .get();
+        assert!((value - 1.0).abs() < f64::EPSILON);
+    }
+
     fn proxy_for_config(config: Config, inventories: Arc<[SharedFencedInventory]>) -> Proxy {
         let registry = Registry::new();
         let metrics = Arc::new(Metrics::new(&registry).unwrap());
@@ -4520,15 +4530,7 @@ mod tests {
         assert_eq!(qwen_requests.load(Ordering::Relaxed), 1);
         assert_eq!(glm_requests.load(Ordering::Relaxed), 1);
         for model in ["qwen3.8-flash-next", "glm-5.3-flash"] {
-            assert_eq!(
-                proxy
-                    .inner
-                    .metrics
-                    .model_request_outcomes
-                    .with_label_values(&[model, "complete"])
-                    .get(),
-                1.0
-            );
+            assert_model_outcome(&proxy, model, "complete");
         }
         qwen_task.abort();
         glm_task.abort();
@@ -4551,15 +4553,7 @@ mod tests {
         let response = proxy.serve(request).await;
 
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(
-            proxy
-                .inner
-                .metrics
-                .model_request_outcomes
-                .with_label_values(&["glm-5.3-flash", "upstream_error"])
-                .get(),
-            1.0
-        );
+        assert_model_outcome(&proxy, "glm-5.3-flash", "upstream_error");
     }
 
     #[tokio::test]
@@ -6533,15 +6527,7 @@ mod tests {
                 .abs()
                 < f64::EPSILON
         );
-        assert_eq!(
-            proxy
-                .inner
-                .metrics
-                .model_request_outcomes
-                .with_label_values(&["glm-5.3-flash", "client_disconnect"])
-                .get(),
-            1.0
-        );
+        assert_model_outcome(&proxy, "glm-5.3-flash", "client_disconnect");
         assert_eq!(proxy.router().state(0).unwrap().1, 0);
         task.abort();
     }
