@@ -29,6 +29,7 @@ DEPLOY = ROOT / "deploy"
 
 VLLM_FLAG = "--enable-prompt-tokens-details"
 SGLANG_FLAG = "--enable-cache-report"
+KEV_CACHE_SETTING = "KEV_PREFIX_CACHE"
 
 # Deployments that serve a model, and the engine whose flag spelling applies.
 # Adding a GPU deployment without registering it here fails
@@ -41,9 +42,20 @@ DEPLOYMENTS = {
     "glm53_flash": "sglang",
     "glm53_flash_sm120": "sglang",
     "glm53_flash_nvidia": "vllm",
+    "qwen38_glm53_kev": "kev",
 }
 
-EXPECTED_FLAG = {"vllm": VLLM_FLAG, "sglang": SGLANG_FLAG}
+EXPECTED_MARKER = {
+    "vllm": VLLM_FLAG,
+    "sglang": SGLANG_FLAG,
+    # Kev publishes its native prefix-cache hit/miss counters from /v1/models.
+    "kev": KEV_CACHE_SETTING,
+}
+WRONG_MARKERS = {
+    "vllm": (SGLANG_FLAG,),
+    "sglang": (VLLM_FLAG,),
+    "kev": (VLLM_FLAG, SGLANG_FLAG),
+}
 
 # Suffixes that can carry serving arguments. ``.json`` covers pinned runtime
 # manifests, whose recorded argv is authoritative for an image-baked launcher.
@@ -118,8 +130,8 @@ class CacheStatsFlagTests(unittest.TestCase):
                 # assertTrue, not assertIn: the haystack is every serving
                 # file in the deployment and unittest would print all of it.
                 self.assertTrue(
-                    EXPECTED_FLAG[engine] in _argv_text(directory),
-                    f"{name} ({engine}) never passes {EXPECTED_FLAG[engine]}, so "
+                    EXPECTED_MARKER[engine] in _argv_text(directory),
+                    f"{name} ({engine}) never configures {EXPECTED_MARKER[engine]}, so "
                     "its API returns no prefix-cache statistics",
                 )
 
@@ -131,18 +143,18 @@ class CacheStatsFlagTests(unittest.TestCase):
         """
         for name, engine in sorted(DEPLOYMENTS.items()):
             with self.subTest(deployment=name, engine=engine):
-                wrong = SGLANG_FLAG if engine == "vllm" else VLLM_FLAG
-                self.assertFalse(
-                    wrong in _argv_text(DEPLOY / name),
-                    f"{name} is {engine} but carries {wrong}",
-                )
+                for wrong in WRONG_MARKERS[engine]:
+                    self.assertFalse(
+                        wrong in _argv_text(DEPLOY / name),
+                        f"{name} is {engine} but carries {wrong}",
+                    )
 
     def test_every_gpu_deployment_is_registered(self):
         self.assertEqual(
             _gpu_deployments(),
             set(DEPLOYMENTS),
             "a GPU deployment is not registered above; decide which cache-stats "
-            "flag its engine needs and add it to DEPLOYMENTS",
+            "cache-statistics marker its engine needs and add it to DEPLOYMENTS",
         )
 
 

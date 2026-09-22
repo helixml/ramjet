@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-source_dir=${KEV_SOURCE_DIR:-/home/karolis/go/src/github.com/jaredpalmer/kev}
+source_dir=${KEV_SOURCE_DIR:?set KEV_SOURCE_DIR to a clean Kev Git checkout}
 source_revision=5e94a28818cfd3d0ec9b8bca046dc8db0d79a704
 model_revision=54f4f8777356cd5bbbb6c6919c657f26e6f2f6d8
 image=${KEV_IMAGE_TAG:-ghcr.io/helixml/ramjet-kev:0.8b-${source_revision:0:7}-r2}

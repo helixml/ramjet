@@ -26,7 +26,7 @@ pinned Hugging Face cache has been populated.
 ```bash
 python3 deploy/qwen38_glm53_kev/validate-compose.py
 bash -n deploy/qwen38_glm53_kev/node06-rollout.sh
-deploy/qwen38_glm53_kev/build-kev-image.sh
+KEV_SOURCE_DIR=/path/to/kev deploy/qwen38_glm53_kev/build-kev-image.sh
 ```
 
 The Kev builder requires a clean checkout at the exact source revision. Push
