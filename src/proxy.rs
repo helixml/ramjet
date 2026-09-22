@@ -1268,12 +1268,7 @@ impl Proxy {
         if capture_shadow_soak && !self.inner.tokenizer.shadow_soak_status().enabled {
             return text_error(StatusCode::NOT_FOUND, "not found");
         }
-        let request_id = match helix_request_id(&parts.headers) {
-            Ok(request_id) => request_id,
-            Err(()) => {
-                return json_error(StatusCode::BAD_REQUEST, "invalid x-helix-request-id");
-            }
-        };
+        let request_id = journal_request_id(&parts.headers);
         let opaque_session = opaque_session_id(&parts.headers);
         let endpoint = shims::endpoint(parts.uri.path());
         let endpoint_label = endpoint.label();
@@ -3209,35 +3204,30 @@ fn upstream_url(base: &Url, uri: &Uri) -> Url {
 fn filtered_headers(source: &HeaderMap) -> HeaderMap {
     let mut destination = HeaderMap::with_capacity(source.len());
     for (name, value) in source {
-        if !hop_header(name)
-            && !matches!(
-                name.as_str(),
-                "x-session-id" | "x-helix-request-id" | "x-ramjet-shadow-soak"
-            )
-        {
+        if !hop_header(name) && !matches!(name.as_str(), "x-session-id" | "x-ramjet-shadow-soak") {
             destination.append(name, value.clone());
         }
     }
     destination
 }
 
-fn helix_request_id(headers: &HeaderMap) -> Result<Option<String>, ()> {
-    let mut values = headers.get_all("x-helix-request-id").iter();
+fn journal_request_id(headers: &HeaderMap) -> Option<String> {
+    let mut values = headers.get_all("x-request-id").iter();
     let Some(value) = values.next() else {
-        return Ok(None);
+        return None;
     };
     if values.next().is_some() {
-        return Err(());
+        return None;
     }
-    let value = value.to_str().map_err(|_| ())?;
+    let value = value.to_str().ok()?;
     if !(1..=128).contains(&value.len())
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
     {
-        return Err(());
+        return None;
     }
-    Ok(Some(value.to_owned()))
+    Some(value.to_owned())
 }
 
 fn opaque_session_id(headers: &HeaderMap) -> OpaqueSession<'_> {
@@ -4283,14 +4273,14 @@ mod tests {
         source.insert("connection", "close".parse().unwrap());
         source.insert("x-ramjet-upstream", "secret".parse().unwrap());
         source.insert("x-session-id", "private-session".parse().unwrap());
-        source.insert("x-helix-request-id", "req_private".parse().unwrap());
+        source.insert("x-request-id", "req_private".parse().unwrap());
         source.insert("x-ramjet-shadow-soak", "capture".parse().unwrap());
         let result = filtered_headers(&source);
         assert!(result.contains_key("authorization"));
         assert!(!result.contains_key("connection"));
         assert!(!result.contains_key("x-ramjet-upstream"));
         assert!(!result.contains_key("x-session-id"));
-        assert!(!result.contains_key("x-helix-request-id"));
+        assert_eq!(result["x-request-id"], "req_private");
         assert!(!result.contains_key("x-ramjet-shadow-soak"));
     }
 
@@ -4430,22 +4420,76 @@ mod tests {
     }
 
     #[test]
-    fn helix_request_id_requires_one_bounded_opaque_header() {
+    fn journal_request_id_omits_untrusted_values() {
         let mut headers = HeaderMap::new();
-        assert_eq!(helix_request_id(&headers), Ok(None));
-        headers.insert("x-helix-request-id", "req_01m2.test:1".parse().unwrap());
+        assert_eq!(journal_request_id(&headers), None);
+        headers.insert("x-request-id", "req_01m2.test:1".parse().unwrap());
         assert_eq!(
-            helix_request_id(&headers),
-            Ok(Some("req_01m2.test:1".to_owned()))
+            journal_request_id(&headers),
+            Some("req_01m2.test:1".to_owned())
         );
-        headers.append("x-helix-request-id", "req_second".parse().unwrap());
-        assert_eq!(helix_request_id(&headers), Err(()));
+        headers.append("x-request-id", "req_second".parse().unwrap());
+        assert_eq!(journal_request_id(&headers), None);
 
         let mut headers = HeaderMap::new();
-        headers.insert("x-helix-request-id", "contains space".parse().unwrap());
-        assert_eq!(helix_request_id(&headers), Err(()));
-        headers.insert("x-helix-request-id", "x".repeat(129).parse().unwrap());
-        assert_eq!(helix_request_id(&headers), Err(()));
+        headers.insert("x-request-id", "contains space".parse().unwrap());
+        assert_eq!(journal_request_id(&headers), None);
+        headers.insert("x-request-id", "x".repeat(129).parse().unwrap());
+        assert_eq!(journal_request_id(&headers), None);
+        headers.insert(
+            "x-request-id",
+            axum::http::HeaderValue::from_bytes(&[0x80]).unwrap(),
+        );
+        assert_eq!(journal_request_id(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn untrusted_request_ids_do_not_change_request_handling() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&requests);
+        let upstream = AxumRouter::new().fallback(any(move || {
+            let observed = Arc::clone(&observed);
+            async move {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"choices":[]}"#))
+                    .unwrap()
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let proxy = proxy_for(&[url]);
+
+        let mut duplicated = HeaderMap::new();
+        duplicated.append("x-request-id", "first".parse().unwrap());
+        duplicated.append("x-request-id", "second".parse().unwrap());
+        let mut malformed = HeaderMap::new();
+        malformed.insert("x-request-id", "contains space".parse().unwrap());
+        let mut oversized = HeaderMap::new();
+        oversized.insert("x-request-id", "x".repeat(129).parse().unwrap());
+        let mut non_ascii = HeaderMap::new();
+        non_ascii.insert(
+            "x-request-id",
+            axum::http::HeaderValue::from_bytes(&[0x80]).unwrap(),
+        );
+
+        for headers in [
+            HeaderMap::new(),
+            duplicated,
+            malformed,
+            oversized,
+            non_ascii,
+        ] {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .body(Body::from(r#"{"model":"test","messages":[]}"#))
+                .unwrap();
+            *request.headers_mut() = headers;
+            assert_eq!(proxy.serve(request).await.status(), StatusCode::OK);
+        }
+        assert_eq!(requests.load(Ordering::Relaxed), 5);
+        task.abort();
     }
 
     #[test]
