@@ -37,7 +37,7 @@ MAX_RECORDS_PER_COLLECTION = 1_000_000
 CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 START_FIELDS = {
-    "v", "event", "seq", "unix_ms", "endpoint", "request_bytes", "total_blocks",
+    "v", "event", "seq", "unix_ms", "request_id", "endpoint", "request_bytes", "total_blocks",
     "chosen", "served_chosen", "outcome", "rotation", "alpha", "max_affinity_blocks",
     "chunk_bytes", "load_unit_bytes", "max_load_units", "phase_aware_load",
     "decode_load_unit_tokens", "decode_max_load_units", "decode_load_units",
@@ -45,7 +45,7 @@ START_FIELDS = {
     "output_limit", "prefix_single_flight", "affinity_horizon", "candidates",
 }
 FINISH_FIELDS = {
-    "v", "event", "seq", "unix_ms", "result", "upstream", "request_load_units",
+    "v", "event", "seq", "unix_ms", "request_id", "result", "upstream", "request_load_units",
     "status", "duration_ms", "first_byte_ms", "ttft_ms", "response_bytes",
     "prompt_tokens", "cached_tokens", "completion_tokens",
 }
@@ -207,7 +207,7 @@ def decode_record(payload: str) -> dict:
     seq = record.get("seq")
     event = record.get("event")
     unix_ms = record.get("unix_ms")
-    if not isinstance(version, int) or isinstance(version, bool) or not 1 <= version <= 11:
+    if not isinstance(version, int) or isinstance(version, bool) or not 1 <= version <= 12:
         raise ArchiveError("route-journal version is unsupported")
     if not isinstance(seq, int) or isinstance(seq, bool) or seq <= 0:
         raise ArchiveError("route-journal sequence is invalid")

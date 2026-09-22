@@ -1268,6 +1268,7 @@ impl Proxy {
         if capture_shadow_soak && !self.inner.tokenizer.shadow_soak_status().enabled {
             return text_error(StatusCode::NOT_FOUND, "not found");
         }
+        let request_id = journal_request_id(&parts.headers);
         let opaque_session = opaque_session_id(&parts.headers);
         let endpoint = shims::endpoint(parts.uri.path());
         let endpoint_label = endpoint.label();
@@ -1446,6 +1447,7 @@ impl Proxy {
 
         self.record_decision(&decision);
         let journal_sequence = self.inner.journal.start(
+            request_id.as_deref(),
             endpoint_label,
             body.len(),
             &approximate_decision,
@@ -1547,6 +1549,7 @@ impl Proxy {
             self.record_error(endpoint_label, reason, status, started.elapsed());
             self.inner.journal.finish(
                 journal_sequence,
+                request_id.as_deref(),
                 started.elapsed(),
                 None,
                 None,
@@ -1586,6 +1589,7 @@ impl Proxy {
                     inflight_guard,
                     prefix_single_flight_guard,
                     journal_sequence,
+                    request_id,
                     started,
                 )
                 .await;
@@ -1630,6 +1634,7 @@ impl Proxy {
                     inflight_guard,
                     prefix_single_flight_guard,
                     journal_sequence,
+                    request_id,
                     started,
                 )
                 .await;
@@ -1661,6 +1666,7 @@ impl Proxy {
         _inflight_guard: InflightGuard,
         _prefix_single_flight_guard: Option<PrefixSingleFlightGuard>,
         journal_sequence: Option<u64>,
+        request_id: Option<String>,
         started: Instant,
     ) {
         let endpoint_label = endpoint.label();
@@ -1800,6 +1806,7 @@ impl Proxy {
         );
         self.inner.journal.finish(
             journal_sequence,
+            request_id.as_deref(),
             started.elapsed(),
             first_byte,
             first_token,
@@ -1944,6 +1951,7 @@ impl Proxy {
         _inflight_guard: InflightGuard,
         _prefix_single_flight_guard: Option<PrefixSingleFlightGuard>,
         journal_sequence: Option<u64>,
+        request_id: Option<String>,
         started: Instant,
     ) -> Response<Body> {
         match response.bytes().await {
@@ -1956,6 +1964,7 @@ impl Proxy {
                 self.record_upstream_request(upstream, StatusCode::OK);
                 self.inner.journal.finish(
                     journal_sequence,
+                    request_id.as_deref(),
                     started.elapsed(),
                     Some(started.elapsed()),
                     None,
@@ -3202,6 +3211,23 @@ fn filtered_headers(source: &HeaderMap) -> HeaderMap {
     destination
 }
 
+fn journal_request_id(headers: &HeaderMap) -> Option<String> {
+    let mut values = headers.get_all("x-request-id").iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let value = value.to_str().ok()?;
+    if !(1..=128).contains(&value.len())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
 fn opaque_session_id(headers: &HeaderMap) -> OpaqueSession<'_> {
     let mut values = headers.get_all("x-session-id").iter();
     let Some(session_id) = values.next().map(axum::http::HeaderValue::as_bytes) else {
@@ -4245,12 +4271,14 @@ mod tests {
         source.insert("connection", "close".parse().unwrap());
         source.insert("x-ramjet-upstream", "secret".parse().unwrap());
         source.insert("x-session-id", "private-session".parse().unwrap());
+        source.insert("x-request-id", "req_private".parse().unwrap());
         source.insert("x-ramjet-shadow-soak", "capture".parse().unwrap());
         let result = filtered_headers(&source);
         assert!(result.contains_key("authorization"));
         assert!(!result.contains_key("connection"));
         assert!(!result.contains_key("x-ramjet-upstream"));
         assert!(!result.contains_key("x-session-id"));
+        assert_eq!(result["x-request-id"], "req_private");
         assert!(!result.contains_key("x-ramjet-shadow-soak"));
     }
 
@@ -4387,6 +4415,79 @@ mod tests {
         assert_eq!(opaque_session_id(&headers), OpaqueSession::Invalid);
         headers.insert("x-session-id", "x".repeat(257).parse().unwrap());
         assert_eq!(opaque_session_id(&headers), OpaqueSession::Invalid);
+    }
+
+    #[test]
+    fn journal_request_id_omits_untrusted_values() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(journal_request_id(&headers), None);
+        headers.insert("x-request-id", "req_01m2.test:1".parse().unwrap());
+        assert_eq!(
+            journal_request_id(&headers),
+            Some("req_01m2.test:1".to_owned())
+        );
+        headers.append("x-request-id", "req_second".parse().unwrap());
+        assert_eq!(journal_request_id(&headers), None);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", "contains space".parse().unwrap());
+        assert_eq!(journal_request_id(&headers), None);
+        headers.insert("x-request-id", "x".repeat(129).parse().unwrap());
+        assert_eq!(journal_request_id(&headers), None);
+        headers.insert(
+            "x-request-id",
+            axum::http::HeaderValue::from_bytes(&[0x80]).unwrap(),
+        );
+        assert_eq!(journal_request_id(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn untrusted_request_ids_do_not_change_request_handling() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&requests);
+        let upstream = AxumRouter::new().fallback(any(move || {
+            let observed = Arc::clone(&observed);
+            async move {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"choices":[]}"#))
+                    .unwrap()
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let proxy = proxy_for(&[url]);
+
+        let mut duplicated = HeaderMap::new();
+        duplicated.append("x-request-id", "first".parse().unwrap());
+        duplicated.append("x-request-id", "second".parse().unwrap());
+        let mut malformed = HeaderMap::new();
+        malformed.insert("x-request-id", "contains space".parse().unwrap());
+        let mut oversized = HeaderMap::new();
+        oversized.insert("x-request-id", "x".repeat(129).parse().unwrap());
+        let mut non_ascii = HeaderMap::new();
+        non_ascii.insert(
+            "x-request-id",
+            axum::http::HeaderValue::from_bytes(&[0x80]).unwrap(),
+        );
+
+        for headers in [
+            HeaderMap::new(),
+            duplicated,
+            malformed,
+            oversized,
+            non_ascii,
+        ] {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .body(Body::from(r#"{"model":"test","messages":[]}"#))
+                .unwrap();
+            *request.headers_mut() = headers;
+            assert_eq!(proxy.serve(request).await.status(), StatusCode::OK);
+        }
+        assert_eq!(requests.load(Ordering::Relaxed), 5);
+        task.abort();
     }
 
     #[test]
