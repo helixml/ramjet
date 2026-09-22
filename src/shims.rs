@@ -8,6 +8,7 @@ pub enum Endpoint {
     Messages,
     Responses,
     Completions,
+    SystemOne,
     Other,
 }
 
@@ -19,6 +20,7 @@ impl Endpoint {
             Self::Messages => "messages",
             Self::Responses => "responses",
             Self::Completions => "completions",
+            Self::SystemOne => "systemone",
             Self::Other => "other",
         }
     }
@@ -34,6 +36,8 @@ pub fn endpoint(path: &str) -> Endpoint {
         Endpoint::Responses
     } else if path.starts_with("/v1/completions") {
         Endpoint::Completions
+    } else if path == "/v1/systemone" || path.starts_with("/v1/systemone/") {
+        Endpoint::SystemOne
     } else {
         Endpoint::Other
     }
@@ -175,6 +179,13 @@ fn shrink_map(value: &mut Value, margin: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_only_the_systemone_route_family() {
+        assert_eq!(endpoint("/v1/systemone"), Endpoint::SystemOne);
+        assert_eq!(endpoint("/v1/systemone/permute"), Endpoint::SystemOne);
+        assert_eq!(endpoint("/v1/systemoneish"), Endpoint::Other);
+    }
 
     #[test]
     fn sanitizes_go_compatibility_fields() {

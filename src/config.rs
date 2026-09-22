@@ -51,6 +51,10 @@ pub struct Config {
     /// homogeneous-fleet contract in which every upstream may serve every
     /// request and `/v1/models` is proxied from one selected replica.
     pub upstream_models: Vec<String>,
+    /// API family served by each upstream. This map is always dense so a
+    /// request can never fail open from one protocol into another. An unset
+    /// `RJ_UPSTREAM_APIS` preserves the historical all-OpenAI deployment.
+    pub upstream_api_profiles: Vec<UpstreamApiProfile>,
     pub upstream_token: Option<String>,
     pub upstream_admission_mode: UpstreamAdmissionMode,
     pub upstream_admission_timeout_ms: usize,
@@ -200,6 +204,22 @@ impl PrefixSingleFlightMode {
 pub enum UpstreamAdmissionMode {
     Http,
     Compatibility,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UpstreamApiProfile {
+    OpenAi,
+    SystemOne,
+}
+
+impl UpstreamApiProfile {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::SystemOne => "systemone",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -495,6 +515,32 @@ impl Config {
                 models.into_iter().map(str::to_owned).collect()
             }
         };
+        let upstream_api_profiles = match get("RJ_UPSTREAM_APIS") {
+            None => vec![UpstreamApiProfile::OpenAi; upstreams.len()],
+            Some(raw) => {
+                let profiles = raw
+                    .split(',')
+                    .map(str::trim)
+                    .map(|profile| match profile {
+                        "openai" => Ok(UpstreamApiProfile::OpenAi),
+                        "systemone" => Ok(UpstreamApiProfile::SystemOne),
+                        _ => Err(invalid(
+                            "RJ_UPSTREAM_APIS",
+                            raw.clone(),
+                            "exactly one openai or systemone profile per RJ_UPSTREAM entry",
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if profiles.len() != upstreams.len() {
+                    return Err(invalid(
+                        "RJ_UPSTREAM_APIS",
+                        raw,
+                        "exactly one openai or systemone profile per RJ_UPSTREAM entry",
+                    ));
+                }
+                profiles
+            }
+        };
         let upstream_token = get("RJ_UPSTREAM_TOKEN").filter(|value| !value.is_empty());
 
         let route_alpha = parse(
@@ -768,6 +814,7 @@ impl Config {
         Ok(Self {
             upstreams,
             upstream_models,
+            upstream_api_profiles,
             upstream_token,
             upstream_admission_mode,
             upstream_warmup_mode,
@@ -2319,6 +2366,36 @@ mod tests {
     fn upstream_model_ownership_allows_replicas_of_the_same_model() {
         let config = two_upstreams(&[("RJ_UPSTREAM_MODELS", "model-a,model-a")]).unwrap();
         assert_eq!(config.upstream_models, ["model-a", "model-a"]);
+    }
+
+    #[test]
+    fn upstream_api_profiles_are_dense_typed_and_default_to_openai() {
+        let legacy = two_upstreams(&[]).unwrap();
+        assert_eq!(
+            legacy.upstream_api_profiles,
+            [UpstreamApiProfile::OpenAi, UpstreamApiProfile::OpenAi]
+        );
+
+        let mixed = two_upstreams(&[("RJ_UPSTREAM_APIS", "openai, systemone")]).unwrap();
+        assert_eq!(
+            mixed.upstream_api_profiles,
+            [UpstreamApiProfile::OpenAi, UpstreamApiProfile::SystemOne]
+        );
+
+        for invalid_profiles in ["openai", "openai,", "openai,jev", "openai,systemone,openai"] {
+            let error = two_upstreams(&[("RJ_UPSTREAM_APIS", invalid_profiles)])
+                .expect_err("an ambiguous API ownership map must fail startup");
+            assert!(
+                matches!(
+                    error,
+                    ConfigError::InvalidValue {
+                        key: "RJ_UPSTREAM_APIS",
+                        ..
+                    }
+                ),
+                "{invalid_profiles:?}: {error}"
+            );
+        }
     }
 
     /// The seconds-suffixed names are the deployment contract. A half-finished

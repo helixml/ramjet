@@ -53,8 +53,9 @@ resolving across the rename.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `RJ_UPSTREAM` | `http://ds4-flash:8000` | Comma-separated OpenAI-compatible engine URLs. |
+| `RJ_UPSTREAM` | `http://ds4-flash:8000` | Comma-separated engine URLs. |
 | `RJ_UPSTREAM_MODELS` | unset | Optional dense model ownership map: exactly one model ID per `RJ_UPSTREAM` entry. Enables model-aware routing and combined `/v1/models`; duplicate IDs represent replicas of one model. |
+| `RJ_UPSTREAM_APIS` | `openai` per upstream | Dense API ownership map: exactly one `openai` or `systemone` profile per `RJ_UPSTREAM` entry. `/v1/systemone` can reach only System One upstreams; all other routes can reach only OpenAI upstreams. |
 | `RJ_MACHINEVIEW_UPSTREAM_GPUS` | unset | Optional observation-only dense GPU ownership map, with semicolon-separated sets matching `RJ_UPSTREAM` (for example `0,1,2,3;4,5`). Machine view derives displayed TP size from each set. GPU indices must be unique. |
 | `RJ_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
 | `RJ_UPSTREAM_WARMUP_MODE` | `off` | `off`, observation-only `shadow`, or `enforce` passive admission for a replica recovering from observed health loss. HTTP admission only. |
@@ -104,6 +105,15 @@ configured ID before that upstream becomes healthy. Heterogeneous deployments
 must keep tokenizer/exact-KV features scoped to compatible models; the node06
 Qwen/GLM recipe disables them because one shared tokenizer or KV-event geometry
 cannot describe both engines.
+
+`RJ_UPSTREAM_APIS` is an independent, fail-closed protocol boundary. Its
+default is a dense all-`openai` map, preserving existing deployments. A
+`systemone` entry accepts the TypeSafe-compatible `/v1/systemone` route and is
+probed through its `{ "models": [...] }` discovery schema. Ramjet's public
+`GET /v1/models` response remains OpenAI-compatible and includes only
+`openai`-profile upstreams. Model and API ownership are intersected before
+dispatch, so retries and fail-open cannot send an OpenAI request to a System
+One server or vice versa.
 
 Decode load uses only the already journaled, low-cardinality effective output
 bucket. A bounded bucket reserves its upper edge; `4097+`, unset, and invalid

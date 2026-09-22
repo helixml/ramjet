@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### TypeSafe System One upstreams
+
+- Adds a dense `RJ_UPSTREAM_APIS` ownership map and first-class
+  `/v1/systemone` routing. API and model ownership are intersected before
+  dispatch, including retries and fail-open.
+- Adds System One model-schema readiness probes while preserving the public
+  OpenAI-compatible `/v1/models` response.
+- Adds the pinned node06 Kev-0.8B runtime and Qwen/GLM/Kev deployment recipe.
+
 ## 0.6.1 — 2026-09-15
 
 - Fixed machine view's rolling cache-hit chart producing impossible negative

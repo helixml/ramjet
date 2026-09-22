@@ -78,6 +78,8 @@ steps:
       - bash -n deploy/dspark_0731/validate-snapshot-production-host.sh
       - bash -n deploy/dspark_0731/validate-persistent-jit-cache-host.sh
       - sh -n deploy/qwen38_flash_next/install-route-journal-archive.sh
+      - bash -n deploy/qwen38_glm53_kev/build-kev-image.sh
+      - bash -n deploy/qwen38_glm53_kev/node06-rollout.sh
       - docker compose -f deploy/dspark_0731/docker-compose.yaml config --quiet
       - python3 deploy/dspark_0731/validate-persistent-jit-cache-compose.py
       - python3 deploy/dspark_0731/validate-snapshot-companion-compose.py
@@ -89,7 +91,8 @@ steps:
       - python3 deploy/qwen38_flash_next/validate-compose.py
       - python3 deploy/glm53_flash_sm120/validate-compose.py
       - python3 deploy/qwen38_glm53_multimodel/validate-compose.py
-      - python3 -m unittest bench.test_persistent_jit_cache_compose bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose bench.test_qwen_flash_next_compose bench.test_glm53_sm120_deploy bench.test_qwen_glm_multimodel_deploy
+      - python3 deploy/qwen38_glm53_kev/validate-compose.py
+      - python3 -m unittest bench.test_persistent_jit_cache_compose bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose bench.test_qwen_flash_next_compose bench.test_glm53_sm120_deploy bench.test_qwen_glm_multimodel_deploy bench.test_qwen_glm_kev_deploy
 
   - name: quality-complete
     image: alpine:3.23
@@ -311,6 +314,8 @@ steps:
       - bash -n deploy/dspark_0731/sync-compose.sh
       - bash -n deploy/dspark_0731/validate-snapshot-companion-host.sh
       - bash -n deploy/dspark_0731/validate-snapshot-production-host.sh
+      - bash -n deploy/qwen38_glm53_kev/build-kev-image.sh
+      - bash -n deploy/qwen38_glm53_kev/node06-rollout.sh
       - docker compose -f deploy/dspark_0731/docker-compose.yaml config --quiet
       - python3 deploy/dspark_0731/validate-snapshot-companion-compose.py
       - python3 deploy/dspark_0731/validate-snapshot-production-compose.py
@@ -321,7 +326,8 @@ steps:
       - python3 deploy/qwen38_flash_next/validate-compose.py
       - python3 deploy/glm53_flash_sm120/validate-compose.py
       - python3 deploy/qwen38_glm53_multimodel/validate-compose.py
-      - python3 -m unittest bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose bench.test_qwen_flash_next_compose bench.test_glm53_sm120_deploy bench.test_qwen_glm_multimodel_deploy
+      - python3 deploy/qwen38_glm53_kev/validate-compose.py
+      - python3 -m unittest bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose bench.test_qwen_flash_next_compose bench.test_glm53_sm120_deploy bench.test_qwen_glm_multimodel_deploy bench.test_qwen_glm_kev_deploy
 
   - name: release-quality-complete
     image: alpine:3.23

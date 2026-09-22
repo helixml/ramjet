@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1.7
+# Build with the pinned Kev checkout as the context; build-kev-image.sh verifies
+# the checkout revision before Docker sees it.
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:5d275ca5f0da33c3368ac8fbb85fafabad023b3b8a7cff39a94ac0baecfd9a50
+
+ARG KEV_SOURCE_REVISION
+ARG KEV_MODEL_REVISION
+LABEL org.opencontainers.image.source="https://github.com/jaredpalmer/kev" \
+      org.opencontainers.image.revision="${KEV_SOURCE_REVISION}" \
+      ai.helix.kev.model="jaredpalmer/kev-0.8b@${KEV_MODEL_REVISION}" \
+      ai.helix.kev.patch="configurable-private-bind-v1"
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/kev-venv \
+    PATH=/opt/kev-venv/bin:$PATH \
+    PYTHONUNBUFFERED=1
+WORKDIR /opt/kev
+
+COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY kev ./kev
+
+# Kev's lock pins torch 2.8/CUDA 12.8 and transformers 5.17. Qwen3.5's
+# Gated DeltaNet path additionally needs FLA; pin it and the Triton version
+# explicitly because neither is part of Kev's lock file.
+RUN uv sync --frozen --extra serve --no-dev \
+    && uv pip install --python /opt/kev-venv/bin/python \
+       'flash-linear-attention==0.5.2' 'triton==3.7.1' \
+    && python -c 'import fla, torch, transformers; print(torch.__version__, transformers.__version__)'
+
+# Upstream intentionally binds loopback. This derivative preserves that
+# default while allowing the private, internal-only Docker network to bind.
+RUN sed -i 's/uvicorn.run(app, host="127.0.0.1", port=a.port)/uvicorn.run(app, host=os.environ.get("KEV_HOST", "127.0.0.1"), port=a.port)/' kev/serve.py \
+    && grep -F 'host=os.environ.get("KEV_HOST", "127.0.0.1")' kev/serve.py
+
+USER 1000:1000
+ENTRYPOINT ["python", "-m", "kev.serve"]

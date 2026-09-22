@@ -27,7 +27,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 
 use crate::{
-    config::{Config, DsparkGuardMode, UpstreamAdmissionMode, WarmupAdmissionMode},
+    config::{
+        Config, DsparkGuardMode, UpstreamAdmissionMode, UpstreamApiProfile, WarmupAdmissionMode,
+    },
     dspark_guard::{
         AttestedEngineCoreIncarnation, DsparkCounters, DsparkGuard, IncarnationOutcome,
         MAX_PROMETHEUS_BYTES, Observation, ParseFailure, WindowOutcome, parse_prometheus,
@@ -1315,6 +1317,18 @@ impl Proxy {
         };
         let (mut approximate_decision, speculation_profile, affinity_horizon) =
             prepared.route_profiled(&self.inner.router, endpoint, decode_load_units);
+        let requested_profile = if endpoint == Endpoint::SystemOne {
+            UpstreamApiProfile::SystemOne
+        } else {
+            UpstreamApiProfile::OpenAi
+        };
+        let mut eligible = self
+            .inner
+            .config
+            .upstream_api_profiles
+            .iter()
+            .map(|profile| *profile == requested_profile)
+            .collect::<Vec<_>>();
         let configured_model = if self.inner.config.upstream_models.is_empty() {
             None
         } else {
@@ -1333,21 +1347,10 @@ impl Proxy {
                     );
                 }
             };
-            let eligible = self
-                .inner
-                .config
-                .upstream_models
-                .iter()
-                .map(|configured| configured == model)
-                .collect::<Vec<_>>();
-            if !approximate_decision.restrict_to(&eligible) {
-                self.record_error(
-                    endpoint_label,
-                    "model_not_found",
-                    StatusCode::NOT_FOUND,
-                    started.elapsed(),
-                );
-                return json_error(StatusCode::NOT_FOUND, "model not found");
+            for (eligible, configured) in
+                eligible.iter_mut().zip(&self.inner.config.upstream_models)
+            {
+                *eligible &= configured == model;
             }
             self.inner
                 .config
@@ -1356,6 +1359,15 @@ impl Proxy {
                 .find(|configured| *configured == model)
                 .map(String::as_str)
         };
+        if !approximate_decision.restrict_to(&eligible) {
+            self.record_error(
+                endpoint_label,
+                "model_not_found",
+                StatusCode::NOT_FOUND,
+                started.elapsed(),
+            );
+            return json_error(StatusCode::NOT_FOUND, "model not found for API profile");
+        }
         self.inner
             .metrics
             .route_speculation_profile
@@ -1820,7 +1832,17 @@ impl Proxy {
     /// ID; unexpected aliases are not exposed and cannot become routing
     /// authority. Replica duplicates collapse to one stable model entry.
     async fn serve_models_aggregated(&self, endpoint: &str, started: Instant) -> Response<Body> {
-        let results = futures_util::stream::iter(0..self.inner.config.upstreams.len())
+        let openai_upstreams = self
+            .inner
+            .config
+            .upstream_api_profiles
+            .iter()
+            .enumerate()
+            .filter_map(|(upstream, profile)| {
+                (*profile == UpstreamApiProfile::OpenAi).then_some(upstream)
+            })
+            .collect::<Vec<_>>();
+        let results = futures_util::stream::iter(openai_upstreams)
             .map(|upstream| async move {
                 let result = self.fetch_configured_model(upstream).await;
                 (upstream, result)
@@ -2877,11 +2899,17 @@ impl Proxy {
             Err(error) => (false, upstream_error_reason(&error), None),
         };
         if let Some(models_body) = models_body {
-            if let Some(expected) = self.inner.config.upstream_models.get(upstream)
-                && advertised_model(&models_body, expected).is_none()
-            {
-                healthy = false;
-                reason = "model_mismatch";
+            if let Some(expected) = self.inner.config.upstream_models.get(upstream) {
+                let advertised = match self.inner.config.upstream_api_profiles[upstream] {
+                    UpstreamApiProfile::OpenAi => advertised_model(&models_body, expected),
+                    UpstreamApiProfile::SystemOne => {
+                        advertised_systemone_model(&models_body, expected)
+                    }
+                };
+                if advertised.is_none() {
+                    healthy = false;
+                    reason = "model_mismatch";
+                }
             }
             if self.inner.config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility {
                 let compatibility = self
@@ -3233,6 +3261,15 @@ fn advertised_model(body: &[u8], expected: &str) -> Option<Value> {
         .cloned()
 }
 
+fn advertised_systemone_model(body: &[u8], expected: &str) -> Option<Value> {
+    let root = serde_json::from_slice::<Value>(body).ok()?;
+    root.get("models")?
+        .as_array()?
+        .iter()
+        .find(|model| model.get("id").and_then(Value::as_str) == Some(expected))
+        .cloned()
+}
+
 fn json_error(status: StatusCode, message: &str) -> Response<Body> {
     let body = serde_json::json!({"error": {"message": message, "type": status.as_str()}});
     Response::builder()
@@ -3458,15 +3495,25 @@ mod tests {
     }
 
     fn proxy_for_models(upstreams: &[Url], models: &[&str]) -> Proxy {
+        proxy_for_models_and_profiles(upstreams, models, None)
+    }
+
+    fn proxy_for_models_and_profiles(
+        upstreams: &[Url],
+        models: &[&str],
+        profiles: Option<&[&str]>,
+    ) -> Proxy {
         let joined = upstreams
             .iter()
             .map(Url::as_str)
             .collect::<Vec<_>>()
             .join(",");
         let models = models.join(",");
+        let profiles = profiles.map(|profiles| profiles.join(","));
         let config = Config::from_lookup(|key| match key {
             "RJ_UPSTREAM" => Some(joined.clone()),
             "RJ_UPSTREAM_MODELS" => Some(models.clone()),
+            "RJ_UPSTREAM_APIS" => profiles.clone(),
             _ => None,
         })
         .unwrap();
@@ -4554,6 +4601,75 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert_model_outcome(&proxy, "glm-5.3-flash", "upstream_error");
+    }
+
+    #[tokio::test]
+    async fn api_profiles_route_systemone_and_openai_without_crossing() {
+        let openai_requests = Arc::new(AtomicUsize::new(0));
+        let openai_counter = Arc::clone(&openai_requests);
+        let openai = AxumRouter::new().fallback(any(move |request: Request<Body>| {
+            let counter = Arc::clone(&openai_counter);
+            async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                assert_eq!(request.uri().path(), "/v1/chat/completions");
+                (StatusCode::OK, r#"{"engine":"openai"}"#)
+            }
+        }));
+        let systemone_requests = Arc::new(AtomicUsize::new(0));
+        let systemone_counter = Arc::clone(&systemone_requests);
+        let systemone = AxumRouter::new().fallback(any(move |request: Request<Body>| {
+            let counter = Arc::clone(&systemone_counter);
+            async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                assert_eq!(request.uri().path(), "/v1/systemone");
+                (StatusCode::OK, r#"{"engine":"systemone"}"#)
+            }
+        }));
+        let (openai_url, openai_task) = start_upstream(openai).await;
+        let (systemone_url, systemone_task) = start_upstream(systemone).await;
+        let proxy = proxy_for_models_and_profiles(
+            &[openai_url, systemone_url],
+            &["qwen", "kev-latest"],
+            Some(&["openai", "systemone"]),
+        );
+
+        for (path, model, expected_upstream) in [
+            ("/v1/chat/completions", "qwen", "0"),
+            ("/v1/systemone", "kev-latest", "1"),
+        ] {
+            let response = proxy
+                .serve(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(path)
+                        .body(Body::from(format!(r#"{{"model":"{model}"}}"#)))
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-ramjet-upstream"], expected_upstream);
+            let _ = to_bytes(response.into_body(), 1024).await.unwrap();
+        }
+
+        for (path, model) in [
+            ("/v1/chat/completions", "kev-latest"),
+            ("/v1/systemone", "qwen"),
+        ] {
+            let response = proxy
+                .serve(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(path)
+                        .body(Body::from(format!(r#"{{"model":"{model}"}}"#)))
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        assert_eq!(openai_requests.load(Ordering::Relaxed), 1);
+        assert_eq!(systemone_requests.load(Ordering::Relaxed), 1);
+        openai_task.abort();
+        systemone_task.abort();
     }
 
     #[tokio::test]
@@ -6099,6 +6215,22 @@ mod tests {
                 .abs()
                 < f64::EPSILON
         );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn systemone_probe_accepts_the_typesafe_model_schema() {
+        let upstream = AxumRouter::new().fallback(any(|| async {
+            (
+                StatusCode::OK,
+                [("content-type", "application/json")],
+                r#"{"models":[{"id":"kev-latest"}]}"#,
+            )
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let proxy = proxy_for_models_and_profiles(&[url], &["kev-latest"], Some(&["systemone"]));
+        proxy.probe(0).await;
+        assert!(proxy.router().state(0).unwrap().3);
         task.abort();
     }
 
