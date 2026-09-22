@@ -1,5 +1,64 @@
 # node06 experiment journal
 
+## 2026-09-21 — Kev-0.8B System One latency through the live heterogeneous Ramjet
+
+Question: after adding the TypeSafe System One API profile to the production
+Ramjet, what latency and bounded throughput does the co-located Kev-0.8B
+deployment deliver on one RTX PRO 6000 Blackwell Server Edition GPU? Answer:
+the 85-request synthetic gate completed without failure. A short request with
+three typed questions took 77.0ms end to end at the median at concurrency one;
+four-way submission reached 20.33 requests/s and 60.99 questions/s. Reusing an
+exact 5,524-token state cut median sequential latency from one 291.0ms cold
+sample to 87.7ms across 12 cached requests.
+
+The live identities were:
+
+- Ramjet
+  `ghcr.io/helixml/ramjet:systemone-6b025f7-8fa31d5cec1d@sha256:bcd132f97171f6203715e04f0fc5ab3784a8b8e8cb656e7bf74c1c39b9884f93`;
+- Kev runtime
+  `ghcr.io/helixml/ramjet-kev:0.8b-5e94a28-r2@sha256:839c50bf1599322b667938cc35fca4d287eff8370febd403d76ccb8c1186f543`;
+- Kev source commit `5e94a28818cfd3d0ec9b8bca046dc8db0d79a704` and
+  adapter revision `54f4f8777356cd5bbbb6c6919c657f26e6f2f6d8`,
+  backed by Qwen3.5-0.8B-Base in bf16;
+- live Compose SHA-256
+  `b28894c36748b5f2d14645008df35706d1d617d5d19cf343175f9166f7897d63`.
+
+Kev was confined to physical GPU 3, sharing the device with Qwen TP rank 3.
+It used 4,284MiB of device memory and 2.868GiB of host memory; Qwen used
+81,216MiB on the same device. The server retained about 11.4GiB free there.
+`KEV_PREFIX_CACHE=4` and `KEV_PREFIX_MIN_TOKENS=384` were unchanged. Ramjet
+mapped `qwen3.8-flash-next,glm-5.3-flash,glm-5.3-flash,kev-latest` to
+`openai,openai,openai,systemone`; every measured response carried upstream
+ordinal 3 and all three expected answer types (`choice`, `noul`, `score`).
+
+The privacy-safe workload used generated support-ticket text. Short cells used
+a fresh state namespace on every request. The long cells used a fresh
+5,524-token state once cold, then repeated the exact state. No state, answer,
+credential, or response body was retained. Results were:
+
+| cell | requests / questions | concurrency | input tokens | model p50 / p95 | end-to-end p50 / p95 | aggregate rate |
+|---|---:|---:|---:|---:|---:|---:|
+| short | 24 / 72 | 1 | 151 median | 71.8 / 81.2ms | 77.0 / 86.1ms | 12.66 req/s; 37.99 questions/s |
+| short | 24 / 72 | 4 | 153 median | 46.8 / 61.2ms | 190.5 / 230.4ms | 20.33 req/s; 60.99 questions/s |
+| long cold | 1 / 3 | 1 | 5,524 | 273.9ms | 291.0ms | one sample |
+| long cached | 12 / 36 | 1 | 5,524 | 75.2 / 79.3ms | 87.7 / 93.2ms | 11.57 req/s; 34.72 questions/s |
+| long cached | 24 / 72 | 4 | 5,524 | 73.2 / 86.0ms | 252.4 / 317.3ms | 14.51 req/s; 43.53 questions/s |
+
+The post-run Kev model endpoint reported exactly one cache miss, 36 hits, and
+one resident cached state. Ramjet's upstream counter reconciled all 85 Kev
+requests. Two unrelated Qwen requests also completed during the eight-second
+interval, and GPUs 0-3 reached 99-100% observed utilization, so this is a live
+co-location observation rather than an isolated peak-throughput result.
+
+Guard run `310abb4a44001b2c902b9488b65bb4cd` passed. Intake air peaked at
+41C, maximum observed GPU temperature was 62C, and maximum observed eight-GPU
+power was 700.03W. The production Ramjet, Kev, Qwen, and both GLM containers
+retained zero restarts; all four `ramjet_upstream_up` series remained 1 and
+bounded logs contained no error, panic, fatal, or traceback marker. Evidence
+is owner-only under
+`/home/luke/inference/dspark_0731/.experiments/20260921t210341z-kev-blog-*`.
+The benchmark harness is `bench/systemone_bench.py`.
+
 ## 2026-09-16 — GLM-5.3-Flash image-input smoke and the client-side modality gate
 
 An agent harness (opencode/T3 Code) reported "this model does not support image
