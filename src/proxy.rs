@@ -1268,6 +1268,12 @@ impl Proxy {
         if capture_shadow_soak && !self.inner.tokenizer.shadow_soak_status().enabled {
             return text_error(StatusCode::NOT_FOUND, "not found");
         }
+        let request_id = match helix_request_id(&parts.headers) {
+            Ok(request_id) => request_id,
+            Err(()) => {
+                return json_error(StatusCode::BAD_REQUEST, "invalid x-helix-request-id");
+            }
+        };
         let opaque_session = opaque_session_id(&parts.headers);
         let endpoint = shims::endpoint(parts.uri.path());
         let endpoint_label = endpoint.label();
@@ -1446,6 +1452,7 @@ impl Proxy {
 
         self.record_decision(&decision);
         let journal_sequence = self.inner.journal.start(
+            request_id.as_deref(),
             endpoint_label,
             body.len(),
             &approximate_decision,
@@ -1547,6 +1554,7 @@ impl Proxy {
             self.record_error(endpoint_label, reason, status, started.elapsed());
             self.inner.journal.finish(
                 journal_sequence,
+                request_id.as_deref(),
                 started.elapsed(),
                 None,
                 None,
@@ -1586,6 +1594,7 @@ impl Proxy {
                     inflight_guard,
                     prefix_single_flight_guard,
                     journal_sequence,
+                    request_id,
                     started,
                 )
                 .await;
@@ -1630,6 +1639,7 @@ impl Proxy {
                     inflight_guard,
                     prefix_single_flight_guard,
                     journal_sequence,
+                    request_id,
                     started,
                 )
                 .await;
@@ -1661,6 +1671,7 @@ impl Proxy {
         _inflight_guard: InflightGuard,
         _prefix_single_flight_guard: Option<PrefixSingleFlightGuard>,
         journal_sequence: Option<u64>,
+        request_id: Option<String>,
         started: Instant,
     ) {
         let endpoint_label = endpoint.label();
@@ -1800,6 +1811,7 @@ impl Proxy {
         );
         self.inner.journal.finish(
             journal_sequence,
+            request_id.as_deref(),
             started.elapsed(),
             first_byte,
             first_token,
@@ -1944,6 +1956,7 @@ impl Proxy {
         _inflight_guard: InflightGuard,
         _prefix_single_flight_guard: Option<PrefixSingleFlightGuard>,
         journal_sequence: Option<u64>,
+        request_id: Option<String>,
         started: Instant,
     ) -> Response<Body> {
         match response.bytes().await {
@@ -1956,6 +1969,7 @@ impl Proxy {
                 self.record_upstream_request(upstream, StatusCode::OK);
                 self.inner.journal.finish(
                     journal_sequence,
+                    request_id.as_deref(),
                     started.elapsed(),
                     Some(started.elapsed()),
                     None,
@@ -3195,11 +3209,35 @@ fn upstream_url(base: &Url, uri: &Uri) -> Url {
 fn filtered_headers(source: &HeaderMap) -> HeaderMap {
     let mut destination = HeaderMap::with_capacity(source.len());
     for (name, value) in source {
-        if !hop_header(name) && !matches!(name.as_str(), "x-session-id" | "x-ramjet-shadow-soak") {
+        if !hop_header(name)
+            && !matches!(
+                name.as_str(),
+                "x-session-id" | "x-helix-request-id" | "x-ramjet-shadow-soak"
+            )
+        {
             destination.append(name, value.clone());
         }
     }
     destination
+}
+
+fn helix_request_id(headers: &HeaderMap) -> Result<Option<String>, ()> {
+    let mut values = headers.get_all("x-helix-request-id").iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(());
+    }
+    let value = value.to_str().map_err(|_| ())?;
+    if !(1..=128).contains(&value.len())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(());
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn opaque_session_id(headers: &HeaderMap) -> OpaqueSession<'_> {
@@ -4245,12 +4283,14 @@ mod tests {
         source.insert("connection", "close".parse().unwrap());
         source.insert("x-ramjet-upstream", "secret".parse().unwrap());
         source.insert("x-session-id", "private-session".parse().unwrap());
+        source.insert("x-helix-request-id", "req_private".parse().unwrap());
         source.insert("x-ramjet-shadow-soak", "capture".parse().unwrap());
         let result = filtered_headers(&source);
         assert!(result.contains_key("authorization"));
         assert!(!result.contains_key("connection"));
         assert!(!result.contains_key("x-ramjet-upstream"));
         assert!(!result.contains_key("x-session-id"));
+        assert!(!result.contains_key("x-helix-request-id"));
         assert!(!result.contains_key("x-ramjet-shadow-soak"));
     }
 
@@ -4387,6 +4427,25 @@ mod tests {
         assert_eq!(opaque_session_id(&headers), OpaqueSession::Invalid);
         headers.insert("x-session-id", "x".repeat(257).parse().unwrap());
         assert_eq!(opaque_session_id(&headers), OpaqueSession::Invalid);
+    }
+
+    #[test]
+    fn helix_request_id_requires_one_bounded_opaque_header() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(helix_request_id(&headers), Ok(None));
+        headers.insert("x-helix-request-id", "req_01m2.test:1".parse().unwrap());
+        assert_eq!(
+            helix_request_id(&headers),
+            Ok(Some("req_01m2.test:1".to_owned()))
+        );
+        headers.append("x-helix-request-id", "req_second".parse().unwrap());
+        assert_eq!(helix_request_id(&headers), Err(()));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-helix-request-id", "contains space".parse().unwrap());
+        assert_eq!(helix_request_id(&headers), Err(()));
+        headers.insert("x-helix-request-id", "x".repeat(129).parse().unwrap());
+        assert_eq!(helix_request_id(&headers), Err(()));
     }
 
     #[test]

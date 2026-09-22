@@ -16,7 +16,7 @@ use crate::{
     usage::Accumulator,
 };
 
-const VERSION: u8 = 11;
+const VERSION: u8 = 12;
 
 pub struct RouteJournal {
     enabled: bool,
@@ -40,6 +40,8 @@ pub struct StartRecord<'a> {
     event: &'static str,
     seq: u64,
     unix_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<&'a str>,
     endpoint: &'a str,
     request_bytes: usize,
     total_blocks: usize,
@@ -74,6 +76,8 @@ pub struct FinishRecord<'a> {
     event: &'static str,
     seq: u64,
     unix_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<&'a str>,
     result: &'a str,
     upstream: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,6 +108,7 @@ impl RouteJournal {
 
     pub(crate) fn start(
         &self,
+        request_id: Option<&str>,
         endpoint: &str,
         request_bytes: usize,
         decision: &Decision,
@@ -116,6 +121,7 @@ impl RouteJournal {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let record = Self::start_record(
             sequence,
+            request_id,
             endpoint,
             request_bytes,
             decision,
@@ -129,6 +135,7 @@ impl RouteJournal {
     #[must_use]
     pub(crate) fn start_record<'a>(
         sequence: u64,
+        request_id: Option<&'a str>,
         endpoint: &'a str,
         request_bytes: usize,
         decision: &'a Decision,
@@ -140,6 +147,7 @@ impl RouteJournal {
             event: "start",
             seq: sequence,
             unix_ms: unix_millis(),
+            request_id,
             endpoint,
             request_bytes,
             total_blocks: decision.total_blocks,
@@ -172,6 +180,7 @@ impl RouteJournal {
     pub fn finish(
         &self,
         sequence: Option<u64>,
+        request_id: Option<&str>,
         elapsed: Duration,
         first_byte: Option<Duration>,
         first_token: Option<Duration>,
@@ -190,6 +199,7 @@ impl RouteJournal {
             event: "finish",
             seq: sequence,
             unix_ms: unix_millis(),
+            request_id,
             result,
             upstream,
             request_load_units,
@@ -292,6 +302,7 @@ mod tests {
         );
         let encoded = serde_json::to_string(&RouteJournal::start_record(
             42,
+            Some("req_01m2test"),
             "chat",
             1_555_943,
             &decision,
@@ -333,7 +344,8 @@ mod tests {
         }
         assert!(encoded.contains("\"chosen\":1"));
         assert!(encoded.contains("\"served_chosen\":1"));
-        assert!(encoded.contains("\"v\":11"));
+        assert!(encoded.contains("\"v\":12"));
+        assert!(encoded.contains("\"request_id\":\"req_01m2test\""));
         assert!(
             encoded.contains("\"prefix_single_flight\":{\"mode\":\"off\",\"outcome\":\"off\"}")
         );
@@ -364,6 +376,7 @@ mod tests {
             event: "finish",
             seq: 42,
             unix_ms: 1,
+            request_id: Some("req_01m2test"),
             result: "complete",
             upstream: Some(1),
             request_load_units: Some(4),
@@ -378,7 +391,8 @@ mod tests {
         };
 
         let encoded = serde_json::to_string(&record).unwrap();
-        assert!(encoded.contains("\"v\":11"));
+        assert!(encoded.contains("\"v\":12"));
+        assert!(encoded.contains("\"request_id\":\"req_01m2test\""));
         assert!(encoded.contains("\"upstream\":1"));
         assert!(encoded.contains("\"request_load_units\":4"));
         for forbidden in ["prompt_text", "token_ids", "fingerprint"] {

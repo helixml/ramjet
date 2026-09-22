@@ -147,7 +147,7 @@ class RouteReplayTest(unittest.TestCase):
 
     def test_boolean_and_future_journal_versions_are_not_accepted(self):
         boolean = {**start(), "v": True}
-        future = {**start(), "v": 12}
+        future = {**start(), "v": 13}
         self.assertEqual(
             list(records([__import__("json").dumps(boolean), __import__("json").dumps(future)])),
             [],
