@@ -3213,9 +3213,7 @@ fn filtered_headers(source: &HeaderMap) -> HeaderMap {
 
 fn journal_request_id(headers: &HeaderMap) -> Option<String> {
     let mut values = headers.get_all("x-request-id").iter();
-    let Some(value) = values.next() else {
-        return None;
-    };
+    let value = values.next()?;
     if values.next().is_some() {
         return None;
     }
