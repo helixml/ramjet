@@ -83,6 +83,8 @@ resolving across the rename.
 | `RJ_ROUTE_AFFINITY_HORIZON_SOURCE` | `static` | `static` applies one fixed age; `fill` derives each replica's horizon from the KV tokens ramjet has served against its capacity. |
 | `RJ_ROUTE_AFFINITY_HORIZON_SECONDS` | unset | Fixed horizon age; required by the `static` source, rejected with `fill`. At most one week. |
 | `RJ_ROUTE_KV_CAPACITY_TOKENS` | unset | Engine KV capacity in tokens, one value or one per upstream (vLLM logs `GPU KV cache size: N tokens` per incarnation; re-read it after an engine restart). `-` marks a replica whose capacity has not been observed, which is modelled as never evicting. Required by the `fill` source, rejected with `static`. |
+| `RJ_ROUTE_LONG_PROMPT_BYTES` | unset (off) | Request-body bytes at or above which a request is confined to its model's long-prompt lane. `0` is off; roughly 4 bytes per prompt token. Requires `RJ_ROUTE_LONG_PROMPT_UPSTREAMS`. |
+| `RJ_ROUTE_LONG_PROMPT_UPSTREAMS` | unset (off) | Dense lane map: exactly one `lane` or `-` per `RJ_UPSTREAM` entry, with at least one `lane`, all on `openai`-profile upstreams (for example `-,-,lane,-`). Requires `RJ_ROUTE_LONG_PROMPT_BYTES`. |
 | `RJ_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
 | `RJ_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary; `0` disables the legacy strip. |
 | `RJ_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
@@ -151,6 +153,36 @@ block ages, so a default-mode capture can be swept offline with
 `bench/route_replay.py --horizons` before either mode is enabled.
 `RJ_ROUTE_AFFINITY_HORIZON_MODE=off` is the instant rollback and leaves both
 source inputs inert.
+
+The long-prompt lane keeps very long prefills off protected replicas. One
+~310k-token prefill on a GLM replica runs for about a minute, evicts every
+other session's cached prefix there, and stalls its other requests; confining
+such prompts to a designated replica protects the rest of that model's
+replicas. The size signal is the request body length in bytes (after the
+`RJ_MAX_TOKENS_STRIP` shim), the same total that sizes load reservations. It
+is not limited by `RJ_ROUTE_MAX_PREFIX_BYTES`, which bounds only the
+fingerprinted prefix, and it needs no tokenizer. It includes JSON framing and
+tool schemas, so it slightly over-reads the prompt; English/JSON text
+averages about 4 body bytes per token (a synthetic 529KiB prompt measured
+145,631 tokens, about 3.7 bytes per token), so 600,000 bytes is roughly 150k
+tokens.
+
+At or above the threshold, after model and API ownership have narrowed the
+candidates, the request may go only to that model's lane members that are
+currently serving: healthy, not quarantined or fenced, and not parked by idle
+drain. Session affinity, exact placement, and prefix single-flight then choose
+only among those members. If the model has lane members but none is serving,
+the request routes exactly as it would without a lane, because availability
+beats isolation. Once lane members have been chosen, dispatch retries stay
+among them rather than spilling onto a protected replica; a transport failure
+marks that member down, so later long prompts fall back until its readiness
+probe recovers. Requests below the threshold, and
+models with no lane member, are unaffected; they may still use a lane
+replica. `ramjet_route_long_prompt_total{upstream,outcome}` counts each long
+request against its selected upstream as `lane` or `fallback`.
+`RJ_ROUTE_LONG_PROMPT_BYTES=0` is the rollback: it disables the lane while the
+member list is still validated but ignored. Setting either variable without
+the other fails startup.
 
 `GET /health` returns opaque replica ordinals, serving health, DSpark
 reliability state, inflight work, load units, and index size. It returns `200 ok` when every replica is healthy,
@@ -708,6 +740,8 @@ families are:
   `ramjet_upstream_probe_suppressed_total` for probe failures outvoted by
   recent serving traffic.
 - `ramjet_route_decisions_total` for route distribution.
+- `ramjet_route_long_prompt_total` for long-prompt lane decisions by selected
+  upstream and `lane` or `fallback` outcome.
 - `ramjet_cache_requests_total` and prompt/cached token counters for observed
   cache outcomes; `ramjet_model_{prompt,cached_prompt,completion}_tokens_total`
   and `ramjet_model_requests_total` split the same successful inference usage
@@ -788,6 +822,11 @@ audit therefore prefers the finish value and falls back to the pre-route
 candidate estimate only for v1-v7 traces, where that fallback systematically
 over-reports warm requests under placement. It is a bounded integer and carries
 no prefix identity.
+Journal v12 adds `long_request_lane`, an object with one fixed `outcome`
+label: `off`, `below`, `no_lane`, `lane`, or `fallback`. It records neither
+the threshold, the request size, nor any upstream address; lane-restricted
+records show the excluded replicas as non-serving candidates, so replay
+reproduces the restriction.
 Journal v9 adds the bounded `projected_load` policy bit to the start record so
 offline replay can reproduce whether candidate-specific request cost affected
 the approximate score.

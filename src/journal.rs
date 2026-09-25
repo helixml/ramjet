@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::{
     affinity_horizon::AffinityHorizonObservation,
     config::Config,
+    long_prompt_lane::LongPromptLaneObservation,
     prefix_single_flight::PrefixSingleFlightObservation,
     prepare::OutputLimitObservation,
     router::{CandidateState, Decision},
@@ -16,7 +17,7 @@ use crate::{
     usage::Accumulator,
 };
 
-const VERSION: u8 = 11;
+const VERSION: u8 = 12;
 
 pub struct RouteJournal {
     enabled: bool,
@@ -32,6 +33,7 @@ pub(crate) struct RouteAnnotations {
     pub(crate) decode_load_units: usize,
     pub(crate) prefix_single_flight: PrefixSingleFlightObservation,
     pub(crate) affinity_horizon: AffinityHorizonObservation,
+    pub(crate) long_prompt_lane: LongPromptLaneObservation,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,6 +67,9 @@ pub struct StartRecord<'a> {
     output_limit: OutputLimitObservation,
     prefix_single_flight: PrefixSingleFlightObservation,
     affinity_horizon: AffinityHorizonObservation,
+    /// Named for its request-size signal: the privacy test forbids the
+    /// substring "prompt" anywhere in a journal record.
+    long_request_lane: LongPromptLaneObservation,
     candidates: &'a [CandidateState],
 }
 
@@ -164,6 +169,7 @@ impl RouteJournal {
             output_limit: annotations.output_limit,
             prefix_single_flight: annotations.prefix_single_flight,
             affinity_horizon: annotations.affinity_horizon,
+            long_request_lane: annotations.long_prompt_lane,
             candidates: &decision.candidate_state,
         }
     }
@@ -316,6 +322,7 @@ mod tests {
                     source: "fill",
                     outcome: "would_move",
                 },
+                long_prompt_lane: crate::long_prompt_lane::LongPromptLaneOutcome::Lane.into(),
             },
         ))
         .unwrap();
@@ -333,7 +340,8 @@ mod tests {
         }
         assert!(encoded.contains("\"chosen\":1"));
         assert!(encoded.contains("\"served_chosen\":1"));
-        assert!(encoded.contains("\"v\":11"));
+        assert!(encoded.contains("\"v\":12"));
+        assert!(encoded.contains("\"long_request_lane\":{\"outcome\":\"lane\"}"));
         assert!(
             encoded.contains("\"prefix_single_flight\":{\"mode\":\"off\",\"outcome\":\"off\"}")
         );
@@ -378,7 +386,7 @@ mod tests {
         };
 
         let encoded = serde_json::to_string(&record).unwrap();
-        assert!(encoded.contains("\"v\":11"));
+        assert!(encoded.contains("\"v\":12"));
         assert!(encoded.contains("\"upstream\":1"));
         assert!(encoded.contains("\"request_load_units\":4"));
         for forbidden in ["prompt_text", "token_ids", "fingerprint"] {

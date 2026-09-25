@@ -21,6 +21,17 @@ inside `ramjet_kev_systemone`, a fixed internal-only Docker network. No Kev
 port is published. The runtime is non-root, read-only, and offline after the
 pinned Hugging Face cache has been populated.
 
+Request bodies of at least `RJ_ROUTE_LONG_PROMPT_BYTES` (default 600,000
+bytes, roughly 150k tokens) route only to `glm53sm120-c`, the long-prompt
+lane, while it is serving. A single ~310k-token GLM prefill takes about 57s
+and evicts every other cached prefix on its replica, so confining it keeps
+`glm53sm120-b`'s cache and latency intact. If the lane is unavailable the
+request falls back to ordinary routing. Shorter requests still use both GLM
+replicas, and Qwen is unaffected. Set `RJ_ROUTE_LONG_PROMPT_BYTES=0` to turn
+the lane off without editing the file; `ramjet_route_long_prompt_total`
+counts `lane` versus `fallback` decisions per upstream. The lane needs an LB
+image that includes it; older images ignore both variables.
+
 ## Validate and build
 
 ```bash

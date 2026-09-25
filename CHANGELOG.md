@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Long-prompt lane
+
+- Adds an opt-in long-prompt lane. `RJ_ROUTE_LONG_PROMPT_BYTES` sets a
+  request-body threshold and `RJ_ROUTE_LONG_PROMPT_UPSTREAMS` (`lane` or `-`
+  per upstream) names the replicas that may serve prompts at or above it.
+  A long request is restricted to its model's serving lane members after
+  model/API ownership is applied; if none is serving it routes normally.
+  Shorter requests and models without a lane member are unchanged. Unset,
+  or a threshold of `0`, is off.
+- Adds `ramjet_route_long_prompt_total{upstream,outcome}` (`lane` or
+  `fallback`) and route-journal v12's fixed-label `long_request_lane`
+  outcome; `route_replay.py` and `route_journal_archive.py` admit v12.
+- The Qwen/GLM/Kev deployment defaults the lane to `glm53sm120-c` at
+  600,000 bytes (about 150k tokens), protecting `glm53sm120-b`'s prefix cache
+  from ~310k-token prefills.
+
 ### TypeSafe System One upstreams
 
 - Adds a dense `RJ_UPSTREAM_APIS` ownership map and first-class

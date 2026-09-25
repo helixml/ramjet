@@ -42,6 +42,22 @@ def render() -> dict:
     return json.loads(completed.stdout)
 
 
+def validate_long_prompt_lane(environment: dict) -> None:
+    """Mirror Ramjet's boot-time lane rules so a bad render fails here first."""
+    raw_bytes = environment.get("RJ_ROUTE_LONG_PROMPT_BYTES")
+    if raw_bytes is None or not re.fullmatch(r"[0-9]+", raw_bytes):
+        fail("RJ_ROUTE_LONG_PROMPT_BYTES must be a non-negative integer (0 disables)")
+    upstreams = environment.get("RJ_UPSTREAM", "").split(",")
+    profiles = environment.get("RJ_UPSTREAM_APIS", "").split(",")
+    lanes = [value.strip() for value in environment.get("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "").split(",")]
+    if len(lanes) != len(upstreams) or any(value not in {"lane", "-"} for value in lanes):
+        fail("RJ_ROUTE_LONG_PROMPT_UPSTREAMS needs exactly one lane or - per upstream")
+    if "lane" not in lanes:
+        fail("RJ_ROUTE_LONG_PROMPT_UPSTREAMS must name at least one lane member")
+    if any(lane == "lane" and profile != "openai" for lane, profile in zip(lanes, profiles)):
+        fail("long-prompt lane members must be OpenAI-profile upstreams")
+
+
 def validate(document: dict) -> None:
     if document.get("name") != "qwen38_glm53_kev":
         fail("unexpected Compose project name")
@@ -92,6 +108,7 @@ def validate(document: dict) -> None:
     for key, value in expected.items():
         if environment.get(key) != value:
             fail(f"{key} must be {value!r}")
+    validate_long_prompt_lane(environment)
     if "RJ_MACHINEVIEW_UPSTREAM_GPUS" in environment:
         fail("exclusive machine-view GPU ownership cannot describe co-located Kev")
     for key in (

@@ -84,6 +84,13 @@ services:
       RJ_ROUTE_SPECULATION_MODE: "off"
       RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE: "off"
       RJ_ROUTE_AFFINITY_HORIZON_MODE: "off"
+      # Long-prompt lane: request bodies of at least this many bytes (~150k
+      # tokens at ~4 bytes/token) route only to glm53sm120-c while it is
+      # serving, so one ~57s GLM prefill cannot evict glm53sm120-b's prefix
+      # cache or stall its other requests. An unavailable lane falls back to
+      # ordinary routing. RJ_ROUTE_LONG_PROMPT_BYTES=0 is the rollback flip.
+      RJ_ROUTE_LONG_PROMPT_BYTES: "${RJ_ROUTE_LONG_PROMPT_BYTES:-600000}"
+      RJ_ROUTE_LONG_PROMPT_UPSTREAMS: "${RJ_ROUTE_LONG_PROMPT_UPSTREAMS:--,-,lane,-}"
       RJ_ROUTE_JOURNAL: "true"
       RJ_TOKENIZER_MODE: "off"
       RJ_EXACT_ROUTE_MODE: "off"
