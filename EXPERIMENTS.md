@@ -1,5 +1,45 @@
 # node06 experiment journal
 
+## 2026-09-25 — v0.6.2 released: GLM cache settings on both replicas, long-prompt lane live
+
+**GLM rollout.** From the merged canonical file (SHA-256 `8c2e04eb…`), C then
+B were recreated with `node06-engine-rollout.sh` under the thermal guard and
+deployment lock while the peer served. Recreate to ready took 1,003-1,012s per
+engine; both have zero restarts and run image `sha256:899fe8eb…`. Host
+MemAvailable is 38.8GB with HiCache pinned on both engines (53.7GB before).
+
+**LB.** Drone #699 published `rust-962b7b2@sha256:53047a81…` (0.6.2 labels,
+release revision) in 473s, including a cold dependency-image rebuild (236s).
+`deploy/qwen38_glm53_kev/node06-rollout.sh` qualified a canary on the
+alternate ports and replaced only the LB. Rendered baseline vs candidate
+differed only in the image and the two `RJ_ROUTE_LONG_PROMPT_*` variables.
+`/health` reported 4/4, and there were no LB errors or 5xx. A 654KB (233,551-token) request went
+through the lane to `glm53sm120-c` (`ramjet_route_long_prompt_total{outcome="lane"}`),
+and a short request went to B. Two real long prompts followed it into the lane
+within minutes. Main build #697 (the GLM merge) failed only on the known
+`kv_transport::stalled_replay_has_a_bounded_drain_window` runner-starvation
+race; it passed 5/5 locally and on #699. Tag pipeline #700 promoted
+`v0.6.2`/`companion-v0.6.2` with identical digests. Rollback container:
+`ds4-loadbalancer-rollback-20260925T151249Z` (systemone-6b025f7).
+
+**Helix end-to-end (Dubai broker intake suite, 11 cases).** Per-session
+LLM-call records via `/api/v1/agents/<app>/llm-calls?session=`:
+
+| run | engines | hit (all) | first large call | TTFT p50 / p90 | pass |
+|---|---|---|---|---|---|
+| before | B only, old config, cache warm 8 days | 91.7% | 90.5% | 1.18 / 2.35s | 10/11 |
+| after, just restarted | B+C, new config | 84.8% | 76.5% | 1.20 / 3.57s | 8/11 |
+| after, warm | B+C, new config | 93.1% | 98.9% | 1.10 / 2.17s | 9/11 |
+
+The just-restarted run is cold by construction: each engine's first session got
+0%. The suite runs its sessions seconds apart, so it never saw the long-prompt
+evictions this change fixes; the isolated probes above measure those. Pass-rate
+changes are not attributable to the engine: another operator re-applied the
+broker prompt at 15:06 UTC between the before and after runs, adding
+final-step declaration content. `submission-gate` now fails 3/4 on the
+jargon rule (the reply says "session") while the judge accepts the behaviour.
+`owner-needs-second-role` fails in every run, including before.
+
 ## 2026-09-25 — GLM-5.3 prefix cache was bounded by linear-attention state slots, not KV
 
 **Symptom.** Helix bot sessions on `glm-5.3-flash` saw 0-cached first and mid
