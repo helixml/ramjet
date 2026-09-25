@@ -36,6 +36,39 @@ class QwenGlmKevDeployTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.validator.validate(changed)
 
+    def test_long_prompt_lane_defaults_to_the_second_glm_replica(self):
+        environment = self.document["services"]["ds4-loadbalancer"]["environment"]
+        self.assertEqual(environment["RJ_ROUTE_LONG_PROMPT_BYTES"], "600000")
+        lanes = environment["RJ_ROUTE_LONG_PROMPT_UPSTREAMS"].split(",")
+        upstreams = environment["RJ_UPSTREAM"].split(",")
+        self.assertEqual(
+            [upstream for upstream, lane in zip(upstreams, lanes) if lane == "lane"],
+            ["http://glm53sm120-c:8000"],
+        )
+
+    def test_long_prompt_lane_render_is_fail_closed(self):
+        for key, value in (
+            ("RJ_ROUTE_LONG_PROMPT_BYTES", None),
+            ("RJ_ROUTE_LONG_PROMPT_BYTES", "600k"),
+            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", None),
+            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,lane"),
+            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,-,-"),
+            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,-,lane"),
+        ):
+            changed = copy.deepcopy(self.document)
+            environment = changed["services"]["ds4-loadbalancer"]["environment"]
+            if value is None:
+                environment.pop(key)
+            else:
+                environment[key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                self.validator.validate(changed)
+        rolled_back = copy.deepcopy(self.document)
+        rolled_back["services"]["ds4-loadbalancer"]["environment"][
+            "RJ_ROUTE_LONG_PROMPT_BYTES"
+        ] = "0"
+        self.validator.validate(rolled_back)
+
     def test_kev_is_private_pinned_and_gpu_confined(self):
         kev = self.document["services"]["kev-small"]
         self.assertEqual(set(kev["networks"]), {"kev-engine"})

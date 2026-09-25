@@ -91,6 +91,12 @@ pub struct Config {
     pub route_prefix_single_flight_min_blocks: usize,
     pub route_prefix_single_flight_capacity: usize,
     pub route_prefix_single_flight_max_load_delta: usize,
+    /// Request-body byte threshold at or above which a prompt is confined to
+    /// its model's long-prompt lane. Zero disables the lane.
+    pub route_long_prompt_bytes: usize,
+    /// Lane membership per upstream, aligned with `upstreams`. Empty when the
+    /// lane is not configured.
+    pub route_long_prompt_upstreams: Vec<bool>,
     pub affinity: Affinity,
     pub route_affinity_horizon: AffinityHorizonConfig,
     pub session_affinity_mode: SessionAffinityMode,
@@ -643,6 +649,8 @@ impl Config {
                 "no greater than RJ_ROUTE_MAX_LOAD_UNITS",
             ));
         }
+        let (route_long_prompt_bytes, route_long_prompt_upstreams) =
+            long_prompt_lane_settings(&mut get, &upstream_api_profiles)?;
         let session_affinity = session_affinity_settings(
             &mut get,
             upstreams.len(),
@@ -866,6 +874,8 @@ impl Config {
             route_prefix_single_flight_min_blocks,
             route_prefix_single_flight_capacity,
             route_prefix_single_flight_max_load_delta,
+            route_long_prompt_bytes,
+            route_long_prompt_upstreams,
             affinity,
             route_affinity_horizon,
             session_affinity_mode: session_affinity.mode,
@@ -1701,6 +1711,86 @@ fn speculation_route_settings(
     Ok((mode, profiles))
 }
 
+/// Parses the long-prompt lane.
+///
+/// Both settings are required together. The threshold is the rollback flip:
+/// an explicit `0` disables the lane while leaving a still-validated member
+/// list inert, so an operator can switch it off without editing the list.
+/// Lane members must be OpenAI-profile upstreams because the size signal is
+/// an OpenAI-family request body.
+fn long_prompt_lane_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    profiles: &[UpstreamApiProfile],
+) -> Result<(usize, Vec<bool>), ConfigError> {
+    const BYTES: &str = "RJ_ROUTE_LONG_PROMPT_BYTES";
+    const UPSTREAMS: &str = "RJ_ROUTE_LONG_PROMPT_UPSTREAMS";
+    let raw_bytes = get(BYTES).filter(|value| !value.is_empty());
+    let threshold = match &raw_bytes {
+        None => None,
+        Some(raw) => Some(
+            raw.parse::<usize>()
+                .map_err(|_| invalid(BYTES, raw.clone(), "a non-negative integer"))?,
+        ),
+    };
+    let raw_members = value_list(get, UPSTREAMS)?;
+    let members = if raw_members.is_empty() {
+        Vec::new()
+    } else {
+        if raw_members.len() != profiles.len() {
+            return Err(invalid(
+                UPSTREAMS,
+                raw_members.join(","),
+                "exactly one lane or - per RJ_UPSTREAM entry",
+            ));
+        }
+        let members = raw_members
+            .iter()
+            .map(|value| match value.as_str() {
+                "lane" => Ok(true),
+                "-" => Ok(false),
+                _ => Err(invalid(
+                    UPSTREAMS,
+                    raw_members.join(","),
+                    "a comma-separated list of lane or -",
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !members.contains(&true) {
+            return Err(invalid(
+                UPSTREAMS,
+                raw_members.join(","),
+                "at least one lane member",
+            ));
+        }
+        if members
+            .iter()
+            .zip(profiles)
+            .any(|(member, profile)| *member && *profile != UpstreamApiProfile::OpenAi)
+        {
+            return Err(invalid(
+                UPSTREAMS,
+                raw_members.join(","),
+                "lane members on openai RJ_UPSTREAM_APIS upstreams only",
+            ));
+        }
+        members
+    };
+    match (threshold, members.is_empty()) {
+        (None, true) | (Some(0), _) => Ok((0, Vec::new())),
+        (None, false) => Err(invalid(
+            BYTES,
+            String::new(),
+            "set whenever RJ_ROUTE_LONG_PROMPT_UPSTREAMS is set",
+        )),
+        (Some(_), true) => Err(invalid(
+            UPSTREAMS,
+            String::new(),
+            "set whenever RJ_ROUTE_LONG_PROMPT_BYTES is positive",
+        )),
+        (Some(threshold), false) => Ok((threshold, members)),
+    }
+}
+
 /// Parses the time-decayed affinity policy.
 ///
 /// The mode is the single rollback flip: `off` leaves both horizon inputs
@@ -2366,6 +2456,149 @@ mod tests {
     fn upstream_model_ownership_allows_replicas_of_the_same_model() {
         let config = two_upstreams(&[("RJ_UPSTREAM_MODELS", "model-a,model-a")]).unwrap();
         assert_eq!(config.upstream_models, ["model-a", "model-a"]);
+    }
+
+    fn live_shape(extra: &[(&'static str, &'static str)]) -> Result<Config, ConfigError> {
+        let overrides: HashMap<&str, &str> = extra.iter().copied().collect();
+        Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(
+                "http://qwen38flashnext-a:8000,http://glm53sm120-b:8000,\
+                 http://glm53sm120-c:8000,http://kev-small:8009"
+                    .to_owned(),
+            ),
+            "RJ_UPSTREAM_MODELS" => {
+                Some("qwen3.8-flash-next,glm-5.3-flash,glm-5.3-flash,kev-latest".to_owned())
+            }
+            "RJ_UPSTREAM_APIS" => Some("openai,openai,openai,systemone".to_owned()),
+            other => overrides.get(other).map(|value| (*value).to_owned()),
+        })
+    }
+
+    fn assert_invalid(result: Result<Config, ConfigError>, expected: &str, case: &str) {
+        match result {
+            Err(ConfigError::InvalidValue { key, .. }) => assert_eq!(key, expected, "{case}"),
+            other => panic!("{case}: expected {expected} rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn long_prompt_lane_is_off_by_default_and_parses_the_live_shape() {
+        let off = live_shape(&[]).unwrap();
+        assert_eq!(off.route_long_prompt_bytes, 0);
+        assert!(off.route_long_prompt_upstreams.is_empty());
+
+        let lane = live_shape(&[
+            ("RJ_ROUTE_LONG_PROMPT_BYTES", "600000"),
+            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-, -, lane, -"),
+        ])
+        .unwrap();
+        assert_eq!(lane.route_long_prompt_bytes, 600_000);
+        assert_eq!(
+            lane.route_long_prompt_upstreams,
+            [false, false, true, false]
+        );
+
+        // An explicit zero is the rollback flip: the list stays validated but
+        // the lane is inert.
+        let rolled_back = live_shape(&[
+            ("RJ_ROUTE_LONG_PROMPT_BYTES", "0"),
+            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,lane,-"),
+        ])
+        .unwrap();
+        assert_eq!(rolled_back.route_long_prompt_bytes, 0);
+        assert!(rolled_back.route_long_prompt_upstreams.is_empty());
+        assert_invalid(
+            live_shape(&[
+                ("RJ_ROUTE_LONG_PROMPT_BYTES", "0"),
+                ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,lane"),
+            ]),
+            "RJ_ROUTE_LONG_PROMPT_UPSTREAMS",
+            "zero still validates the list",
+        );
+
+        // Empty values are unset, matching every other setting.
+        let empty = live_shape(&[
+            ("RJ_ROUTE_LONG_PROMPT_BYTES", ""),
+            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", ""),
+        ])
+        .unwrap();
+        assert_eq!(empty.route_long_prompt_bytes, 0);
+        assert!(empty.route_long_prompt_upstreams.is_empty());
+    }
+
+    #[test]
+    fn long_prompt_lane_rejects_partial_or_ambiguous_configuration() {
+        for (bytes, upstreams, key, case) in [
+            (
+                Some("600000"),
+                None,
+                "RJ_ROUTE_LONG_PROMPT_UPSTREAMS",
+                "threshold without lanes",
+            ),
+            (
+                None,
+                Some("-,-,lane,-"),
+                "RJ_ROUTE_LONG_PROMPT_BYTES",
+                "lanes without threshold",
+            ),
+            (
+                Some("600000"),
+                Some("-,lane,-"),
+                "RJ_ROUTE_LONG_PROMPT_UPSTREAMS",
+                "too few entries",
+            ),
+            (
+                Some("600000"),
+                Some("-,-,lane,-,-"),
+                "RJ_ROUTE_LONG_PROMPT_UPSTREAMS",
+                "too many entries",
+            ),
+            (
+                Some("600000"),
+                Some("-,,lane,-"),
+                "RJ_ROUTE_LONG_PROMPT_UPSTREAMS",
+                "sparse entry",
+            ),
+            (
+                Some("600000"),
+                Some("-,-,true,-"),
+                "RJ_ROUTE_LONG_PROMPT_UPSTREAMS",
+                "unknown token",
+            ),
+            (
+                Some("600000"),
+                Some("-,-,-,-"),
+                "RJ_ROUTE_LONG_PROMPT_UPSTREAMS",
+                "no lane member",
+            ),
+            (
+                Some("600000"),
+                Some("-,-,-,lane"),
+                "RJ_ROUTE_LONG_PROMPT_UPSTREAMS",
+                "lane on a systemone upstream",
+            ),
+            (
+                Some("-1"),
+                Some("-,-,lane,-"),
+                "RJ_ROUTE_LONG_PROMPT_BYTES",
+                "negative threshold",
+            ),
+            (
+                Some("600k"),
+                Some("-,-,lane,-"),
+                "RJ_ROUTE_LONG_PROMPT_BYTES",
+                "non-numeric threshold",
+            ),
+        ] {
+            let mut extra = Vec::new();
+            if let Some(bytes) = bytes {
+                extra.push(("RJ_ROUTE_LONG_PROMPT_BYTES", bytes));
+            }
+            if let Some(upstreams) = upstreams {
+                extra.push(("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", upstreams));
+            }
+            assert_invalid(live_shape(&extra), key, case);
+        }
     }
 
     #[test]

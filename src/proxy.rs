@@ -43,6 +43,7 @@ use crate::{
     },
     journal::{RouteAnnotations, RouteJournal},
     kv_consumer::SharedFencedInventory,
+    long_prompt_lane::{self, LongPromptLaneOutcome},
     metrics::Metrics,
     prefix_single_flight::{PrefixSingleFlight, PrefixSingleFlightConfig, PrefixSingleFlightGuard},
     prepare::{PreparedRequest, RequestedModel},
@@ -1368,6 +1369,15 @@ impl Proxy {
             );
             return json_error(StatusCode::NOT_FOUND, "model not found for API profile");
         }
+        // Confine a very long prompt to its model's lane before any later
+        // stage (session affinity, exact placement, single-flight) reads the
+        // decision, so none of them can move it back onto a protected replica.
+        let long_prompt_lane = long_prompt_lane::confine(
+            &mut approximate_decision,
+            prepared.body.len(),
+            self.inner.config.route_long_prompt_bytes,
+            &self.inner.config.route_long_prompt_upstreams,
+        );
         self.inner
             .metrics
             .route_speculation_profile
@@ -1445,6 +1455,7 @@ impl Proxy {
         self.observe_idle_drain_activity();
 
         self.record_decision(&decision);
+        self.record_long_prompt_lane(long_prompt_lane, &decision);
         let journal_sequence = self.inner.journal.start(
             endpoint_label,
             body.len(),
@@ -1458,6 +1469,7 @@ impl Proxy {
                 decode_load_units,
                 prefix_single_flight,
                 affinity_horizon,
+                long_prompt_lane: long_prompt_lane.into(),
             },
         );
 
@@ -2314,6 +2326,23 @@ impl Proxy {
         if !status.is_server_error() {
             self.note_upstream_serving_success(upstream);
         }
+    }
+
+    /// Counts requests governed by a long-prompt lane against the upstream
+    /// the router selected for them. Below-threshold and lane-less requests
+    /// are not recorded, so the series stays proportional to long prompts.
+    fn record_long_prompt_lane(&self, outcome: LongPromptLaneOutcome, decision: &Decision) {
+        if !outcome.counted() {
+            return;
+        }
+        let Some(&upstream) = decision.candidates.first() else {
+            return;
+        };
+        self.inner
+            .metrics
+            .route_long_prompt
+            .with_label_values(&[&self.upstream_label(upstream), outcome.label()])
+            .inc();
     }
 
     fn upstream_label(&self, upstream: usize) -> String {
@@ -3383,7 +3412,7 @@ fn unix_seconds() -> f64 {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         fmt::Write as _,
         fs,
         os::unix::fs::{MetadataExt, PermissionsExt},
@@ -4581,6 +4610,140 @@ mod tests {
         }
         qwen_task.abort();
         glm_task.abort();
+    }
+
+    /// The live node06 shape with the long-prompt lane on the second GLM
+    /// replica, a 4 KiB threshold, and one counting echo upstream per slot.
+    async fn long_prompt_lane_fleet() -> (Proxy, Vec<Url>, Vec<tokio::task::JoinHandle<()>>) {
+        let mut urls = Vec::new();
+        let mut tasks = Vec::new();
+        for index in 0..4 {
+            let app = AxumRouter::new().fallback(any(move || async move {
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"engine":{index}}}"#)))
+                    .unwrap()
+            }));
+            let (url, task) = start_upstream(app).await;
+            urls.push(url);
+            tasks.push(task);
+        }
+        let joined = urls.iter().map(Url::as_str).collect::<Vec<_>>().join(",");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_MODELS" => {
+                Some("qwen3.8-flash-next,glm-5.3-flash,glm-5.3-flash,kev-latest".to_owned())
+            }
+            "RJ_UPSTREAM_APIS" => Some("openai,openai,openai,systemone".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_BYTES" => Some("4096".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_UPSTREAMS" => Some("-,-,lane,-".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        (proxy_for_config(config, Arc::from([])), urls, tasks)
+    }
+
+    async fn served_upstream(proxy: &Proxy, model: &str, salt: usize, bytes: usize) -> String {
+        // A distinct leading salt keeps every prompt cold, so prefix affinity
+        // cannot explain where it lands.
+        let content = format!("{salt:08} {}", "x".repeat(bytes));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                serde_json::json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": content}],
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let response = proxy.serve(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.headers()["x-ramjet-upstream"]
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn long_prompt_count(proxy: &Proxy, upstream: &Url, outcome: &str) -> f64 {
+        proxy
+            .inner
+            .metrics
+            .route_long_prompt
+            .with_label_values(&[upstream.as_str().trim_end_matches('/'), outcome])
+            .get()
+    }
+
+    #[tokio::test]
+    async fn long_prompts_are_confined_to_the_lane_and_short_prompts_are_not() {
+        let (proxy, urls, tasks) = long_prompt_lane_fleet().await;
+
+        let mut short = HashSet::new();
+        for salt in 0..8 {
+            short.insert(served_upstream(&proxy, "glm-5.3-flash", salt, 256).await);
+        }
+        assert_eq!(
+            short,
+            ["1".to_owned(), "2".to_owned()].into(),
+            "short prompts still use both GLM replicas, lane included"
+        );
+
+        for salt in 100..108 {
+            assert_eq!(
+                served_upstream(&proxy, "glm-5.3-flash", salt, 8_192).await,
+                "2"
+            );
+        }
+        // A model without a lane member is unaffected by the threshold.
+        assert_eq!(
+            served_upstream(&proxy, "qwen3.8-flash-next", 200, 8_192).await,
+            "0"
+        );
+
+        assert!((long_prompt_count(&proxy, &urls[2], "lane") - 8.0).abs() < f64::EPSILON);
+        for url in &urls {
+            assert!(long_prompt_count(&proxy, url, "fallback").abs() < f64::EPSILON);
+        }
+        assert!(long_prompt_count(&proxy, &urls[0], "lane").abs() < f64::EPSILON);
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fenced_lane_falls_back_to_the_protected_replica() {
+        let (proxy, urls, tasks) = long_prompt_lane_fleet().await;
+        for (fence, restore) in [
+            (
+                (|proxy: &Proxy| proxy.inner.router.set_healthy(2, false)) as fn(&Proxy),
+                (|proxy: &Proxy| proxy.inner.router.set_healthy(2, true)) as fn(&Proxy),
+            ),
+            (
+                |proxy: &Proxy| proxy.inner.router.set_drained(2, true),
+                |proxy: &Proxy| proxy.inner.router.set_drained(2, false),
+            ),
+        ] {
+            fence(&proxy);
+            for salt in 0..4 {
+                assert_eq!(
+                    served_upstream(&proxy, "glm-5.3-flash", salt, 8_192).await,
+                    "1",
+                    "availability beats isolation"
+                );
+            }
+            restore(&proxy);
+        }
+        assert!((long_prompt_count(&proxy, &urls[1], "fallback") - 8.0).abs() < f64::EPSILON);
+        assert_eq!(
+            served_upstream(&proxy, "glm-5.3-flash", 100, 8_192).await,
+            "2",
+            "the lane resumes as soon as it is serving again"
+        );
+        assert!((long_prompt_count(&proxy, &urls[2], "lane") - 1.0).abs() < f64::EPSILON);
+        for task in tasks {
+            task.abort();
+        }
     }
 
     #[tokio::test]
