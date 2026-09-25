@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.2 — 2026-09-25
 
 ### GLM-5.3 prefix-cache capacity and SwiGLU clamp (node06)
 
