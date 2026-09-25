@@ -13,13 +13,15 @@ Immutable inputs:
 - Model: `ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO` at revision
   `ee0989a944b0e213589191d7fca63af825a0741e`.
 - Runtime source revision: `386684975edf3cbce15c4b12df37908366e2aa8b`.
-- Nullable-parser canary image on node06:
+- Nullable-parser image on node06:
   `sha256:024a988fd0c0e15d80e382073c05657b2d57f52611c324599508cdb62b9debb8`.
   Its patched GLM47 parser is
   `8ed76f9da2aa782b3e9374d00687186624fd383e98acf9ba0d6ac9759e1425d7`.
+- Serving image on node06 (`Dockerfile.swiglu-clamp` over the nullable-parser
+  image): `sha256:899fe8eb0f563b6654125f7b1c3ac7ad497e5c2e02256b30dc8fd7059e957a64`.
 
-Both replicas use the release's qualified TP2/C4 settings, with HiCache
-disabled and distinct writable compilation caches. TP4 is not admitted: the
+Both replicas use the release's qualified TP2/C4 settings plus the prefix-cache
+settings below, with distinct writable compilation caches. TP4 is not admitted: the
 upstream launcher and measurements cover only TP2. Run `validate-compose.py`, verify the downloaded checkpoint
 with `hf cache verify --fail-on-missing-files`. The downloader's own
 `.cache/huggingface` metadata is expected local-only state, so the generic
@@ -94,6 +96,66 @@ by 7.4%, c4 aggregate output by 4.7%, and c4 per-stream decode by 2.9%; 32K and
 64K cold prefill improved only about 1%. The 24,288-token (4.6%) pool reduction
 is therefore part of the accepted performance/capacity contract, not free
 headroom.
+
+## Routed-expert SwiGLU clamp
+
+GLM-5.3 declares `swiglu_limit = 10.0`. Shared experts and dense MLPs apply it in
+`glm5_next.swiglu_clamped`, but on the SM120 W4A16 routed-expert path the limit
+was dropped twice: SGLang's `_run_flashinfer_b12x_w4a16` never passed it to
+`launch_sm120_moe`, and FlashInfer 0.7.0's `_launch_sm120_w4a16_moe` never
+forwarded it to `run_w4a16_moe`. The kernel already implements GLM's clamp
+(gate <= L, -L <= up <= L) behind `has_swiglu_limit`, so `patch-swiglu-clamp.py`
+restores only the plumbing. It fails closed unless both files have their
+reviewed SHA-256. Build it where the nullable-parser tag resolves to its pinned ID:
+
+```bash
+docker build --network=none -f Dockerfile.swiglu-clamp \
+  -t ramjet/glm53-sm120:swiglu-clamp-r1 .
+```
+
+Full GSM8K (1,319, temperature 0, `reasoning_effort=low`, `bench/gsm8k_check.py`):
+96.29% before, 96.44% after, 10 fixed and 8 broken questions, same wall time.
+732 of 1,319 completions changed length, so the clamp is live. The agent
+protocol corpus passes 5/5.
+
+## Prefix-cache capacity
+
+GLM-5.3 is hybrid: resuming a cached prefix needs a saved linear-attention
+state as well as its KV. SGLang's `UnifiedRadixCache` stores one state per
+6,144-token prefill chunk in a 28-slot pool (`--max-mamba-cache-size`, about
+38MB per slot per GPU) and evicts LRU. Running requests hold about four slots
+each. Before this change one ~310k-token prompt (about 51 chunks) evicted every
+other session's prefix while the 500k-token KV pool was far from full.
+
+- `--mamba-max-states-per-path=2` keeps each path's tail and the state before
+  it, plus every fork (for example a shared system prompt). Agent loops resume
+  from the tail, so this costs them nothing and doubles session capacity.
+- `--enable-hierarchical-cache --hicache-size=4` adds a write-through host tier
+  per TP rank: 308,288 KV tokens (1.95GB) and 1.57GB of states. It pins about
+  8GB of host memory per engine.
+- `--enable-int8-mamba-checkpoint` is rejected: this build wires it only into
+  the older `MambaRadixCache`, it is incompatible with HiCache, and its pool is
+  carved from headroom that does not exist here.
+- The KV token pool stays at 500,000: running requests alone reached 0.99 of it.
+
+Measured on an isolated C (`bench/prefix_eviction_probe.py`, 20k-token sessions):
+
+| probe | before | cap 4 | cap 2 + HiCache |
+|---|---|---|---|
+| 6 sessions, then one 308k-token prompt | 0/6 cached, 3.35s each | 6/6 (99.6%), 0.15-0.30s | - |
+| 12 sessions, cyclic re-query | - | 0/12 | 12/12 (99.2%), 0.15-0.30s |
+| 14 sessions, cyclic recall | - | - | 11/14 from host, 0.43s; 14/14 recalled exactly |
+
+c4 decode throughput was unchanged (300 GSM8K questions: 87.2s cap 4, 88.5s
+with HiCache). The shared load balancer additionally confines prompts above
+600,000 request bytes to C (`RJ_ROUTE_LONG_PROMPT_*`), so B's cache never sees
+them.
+
+Roll one replica at a time with `node06-engine-rollout.sh` beneath the thermal
+guard while the peer serves. For a candidate, pass a full experiment copy of
+this file whose only difference is `networks.default.name`, so the shared load
+balancer cannot reach it until it is qualified; then recreate it from this
+canonical file.
 
 ## Multimodal client contract
 
