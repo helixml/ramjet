@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fail-closed semantic validation for the node06 GLM TP2 replicas."""
 
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -9,9 +10,10 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent
 COMPOSE = ROOT / "docker-compose.yaml"
-EXPECTED_IMAGE = "sha256:024a988fd0c0e15d80e382073c05657b2d57f52611c324599508cdb62b9debb8"
+EXPECTED_IMAGE = "sha256:899fe8eb0f563b6654125f7b1c3ac7ad497e5c2e02256b30dc8fd7059e957a64"
 EXPECTED_BASE = "sha256:ec4243f940a179a27fea21895077efd47cd050501f99a1d2a5fecf7df2e7be71"
 EXPECTED_PARSER = "8ed76f9da2aa782b3e9374d00687186624fd383e98acf9ba0d6ac9759e1425d7"
+SWIGLU_PATCH = ROOT / "patch-swiglu-clamp.py"
 
 
 def fail(message: str) -> None:
@@ -54,6 +56,9 @@ required = {
     "--dsa-decode-backend=flashinfer_sparse_mla",
     "--tool-call-parser=glm47",
     "--reasoning-parser=glm45",
+    "--mamba-max-states-per-path=2",
+    "--enable-hierarchical-cache",
+    "--hicache-size=4",
 }
 seen_devices = set()
 seen_caches = set()
@@ -66,6 +71,10 @@ for name, expected in EXPECTED_ENGINES.items():
         fail(f"{name} does not identify the reviewed base image")
     if labels.get("ai.ramjet.runtime.glm47-parser-sha256") != EXPECTED_PARSER:
         fail(f"{name} does not identify the reviewed GLM47 parser")
+    if labels.get("ai.ramjet.runtime.swiglu-clamp-patch-sha256") != hashlib.sha256(
+        SWIGLU_PATCH.read_bytes()
+    ).hexdigest():
+        fail(f"{name} does not identify the committed SwiGLU clamp patch")
     if service.get("restart") not in ("no", None):
         fail(f"{name} restart policy must remain disabled")
     if service.get("cpuset") != "12-23,36-47":
@@ -110,8 +119,8 @@ for name, expected in EXPECTED_ENGINES.items():
     missing = sorted(required - set(command))
     if missing:
         fail(f"{name} missing required arguments: {', '.join(missing)}")
-    if any("hierarchical-cache" in arg for arg in command):
-        fail(f"{name} must keep HiCache disabled")
+    if any(arg.startswith("--enable-int8-mamba-checkpoint") for arg in command):
+        fail(f"{name}: int8 mamba checkpoints are incompatible with HiCache")
 
 if seen_devices != {"4", "5", "6", "7"}:
     fail("the GLM replica set must own exactly host GPUs 4-7")

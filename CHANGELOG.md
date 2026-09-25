@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### GLM-5.3 prefix-cache capacity and SwiGLU clamp (node06)
+
+- The GLM TP2 replicas cap cached linear-attention states per radix path
+  (`--mamba-max-states-per-path=2`) and add a 4GB-per-rank HiCache host tier.
+  One ~310k-token prompt used to evict every other session's prefix through
+  the 28-slot state pool; six 20k-token sessions now stay 99.6% cached across
+  it, and twelve fit on the device instead of none.
+- A derived image (`Dockerfile.swiglu-clamp`) routes GLM-5.3's
+  `swiglu_limit = 10.0` into the SM120 W4A16 routed-expert kernel, which the
+  pinned SGLang and FlashInfer dropped. GSM8K 96.29% -> 96.44%.
+- Adds `bench/gsm8k_check.py`, `bench/prefix_eviction_probe.py`, and the
+  one-replica `node06-engine-rollout.sh` owner.
+
 ### Long-prompt lane
 
 - Adds an opt-in long-prompt lane. `RJ_ROUTE_LONG_PROMPT_BYTES` sets a

@@ -1,5 +1,64 @@
 # node06 experiment journal
 
+## 2026-09-25 — GLM-5.3 prefix cache was bounded by linear-attention state slots, not KV
+
+**Symptom.** Helix bot sessions on `glm-5.3-flash` saw 0-cached first and mid
+calls (8-10s recomputes at 40-50k tokens, one 68s stall). Each coincided with a
+~310k-token prompt from another bot.
+
+**Cause.** GLM-5.3 is hybrid; SGLang's `UnifiedRadixCache` can resume a prefix
+only at a node holding a saved linear-attention state. Every 6,144-token
+prefill chunk stores one (`cache_unfinished_req` -> `_alloc_mamba_slot`) in a
+28-slot pool (`--max-mamba-cache-size=28`, ~38MB/slot/GPU) evicted LRU, and
+running requests hold ~4 slots each (max `mamba num` 16 at 4 running over nine
+days of logs). A 310k prompt (~51 chunks) therefore swept every other state
+while the 500k-token fp8 KV pool had room: engine B cached a 49,152-token
+prefix at 12:31:59, the 313k prompt arrived at 12:33, and the prefix was cold
+at 12:35:04. More KV space, or a smaller checkpoint, cannot help; NVIDIA's
+official GLM-5.3-Flash NVFP4 is 9GB larger than the running W4A16 checkpoint.
+
+**Change.** On C only, isolated from the shared LB by a private Compose network
+while B served, under the thermal guard and the deployment lock:
+
+1. `--mamba-max-states-per-path` (keeps tail, forks, and the deepest states).
+2. Derived image `sha256:899fe8eb…` (`Dockerfile.swiglu-clamp`, 7.75s build):
+   the pinned SGLang runner and FlashInfer 0.7.0 dispatch dropped GLM-5.3's
+   `swiglu_limit = 10.0` before the SM120 W4A16 routed-expert kernel, which
+   already implements the clamp.
+3. HiCache (`--hicache-size=4`, write-through): per rank 308,288 KV tokens
+   (1.95GB) plus 1.57GB of states; host MemAvailable fell 53.7 -> 45.6GB.
+
+`bench/prefix_eviction_probe.py` (salted synthetic 20k-token sessions, max_tokens=1):
+
+| probe | baseline C | cap 4 + clamp | cap 2 + clamp + HiCache |
+|---|---|---|---|
+| 6 sessions, one 308k prompt, re-query | 0/6, 3.35s each | 6/6 at 99.6%, 0.15-0.30s | - |
+| 12 sessions, cyclic re-query | - | 0/12 (LRU thrash) | 12/12 at 99.2%, 0.15-0.30s |
+| 14 sessions, recall a code (`bench/prefix_recall_probe.py`) | - | - | 11/14 restored from host at 0.43s; 14/14 exact |
+| 16 sessions (exceeds host KV) | - | - | 5/16 hit (one partial); 16/16 exact |
+
+Cap 4 leaves ~24 free slots / 4 = ~6 sessions; cap 2 doubles that, and the
+host tier adds 2-3 sessions plus 0.43s restores. HiCache backed up KV and state
+pools (`hicache_backup_tokens_total`) and dropped 274,944 KV tokens as
+write-through-unbacked evictions under the cyclic stress (lost cache, not
+correctness).
+
+**Correctness and speed.** Full GSM8K test split (1,319, temperature 0,
+`reasoning_effort=low`, `bench/gsm8k_check.py`) at c2: baseline 1,270
+(96.29%, 492s) vs clamp 1,272 (96.44%, 492s); 10 fixed, 8 broken, 732
+completion lengths changed, so the clamp is active and accuracy is neutral to
+slightly positive. Five-case agent corpus 5/5 on both candidates. 300 GSM8K
+questions at c4: 87.2s (cap 4) vs 88.5s (HiCache), within noise.
+
+**Rejected.** `--enable-int8-mamba-checkpoint`: this build wires it only into
+`MambaRadixCache` (not the unified cache in use), rejects it with HiCache, and
+allocates from headroom that is ~53MiB here. Shrinking `--max-total-tokens` to
+fund slots: running requests alone reached 0.99 of the pool. TP4: not
+qualified upstream and removes a replica.
+
+Loads: 1,003s and 1,012s from recreate to ready. Evidence (owner-only):
+`/home/luke/inference/glm53_flash_sm120/.experiments/20260925-cache-capacity/`.
+
 ## 2026-09-21 — Kev-0.8B System One latency through the live heterogeneous Ramjet
 
 Question: after adding the TypeSafe System One API profile to the production

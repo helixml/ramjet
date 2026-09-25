@@ -4,16 +4,17 @@
 name: glm53_flash_sm120
 
 x-glm-engine: &glm-engine
-  image: ${SGLANG_IMAGE:-sha256:024a988fd0c0e15d80e382073c05657b2d57f52611c324599508cdb62b9debb8}
+  image: ${SGLANG_IMAGE:-sha256:899fe8eb0f563b6654125f7b1c3ac7ad497e5c2e02256b30dc8fd7059e957a64}
   pull_policy: never
   labels:
-    ai.ramjet.model.repository: ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO
-    ai.ramjet.model.revision: ee0989a944b0e213589191d7fca63af825a0741e
+    ai.ramjet.model.repository: ${GLM53_MODEL_REPOSITORY:-ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO}
+    ai.ramjet.model.revision: ${GLM53_MODEL_REVISION:-ee0989a944b0e213589191d7fca63af825a0741e}
     ai.ramjet.runtime.repository: ormandj/sglang-glm53-flash-sm120
     ai.ramjet.runtime.revision: 386684975edf3cbce15c4b12df37908366e2aa8b
     ai.ramjet.runtime.release: v0.4.3
     ai.ramjet.runtime.base-digest: sha256:ec4243f940a179a27fea21895077efd47cd050501f99a1d2a5fecf7df2e7be71
     ai.ramjet.runtime.glm47-parser-sha256: 8ed76f9da2aa782b3e9374d00687186624fd383e98acf9ba0d6ac9759e1425d7
+    ai.ramjet.runtime.swiglu-clamp-patch-sha256: b6bf7c99f3094c927100c0c933daa63a80ef9cffab44092f3199e2134dbfc0b9
   entrypoint: ["sglang"]
   restart: "no"
   init: true
@@ -55,7 +56,7 @@ x-glm-engine: &glm-engine
     - --warmups=serving_coverage
     - --image-processor-backend=torchvision
     - --mm-preprocessing-device=cpu
-    - --quantization=modelopt_mixed
+    - --quantization=${GLM53_QUANTIZATION:-modelopt_mixed}
     - --moe-runner-backend=flashinfer_cutlass
     - --disable-shared-experts-fusion
     - --disable-custom-all-reduce
@@ -70,6 +71,13 @@ x-glm-engine: &glm-engine
     - --max-running-requests=4
     - --max-mamba-cache-size=28
     - --mamba-ssm-dtype=bfloat16
+    # Each prefill chunk checkpoints a linear-attention state into the radix
+    # cache, and the 28-slot pool evicts LRU. Without a per-path cap one
+    # 310k-token prompt (~51 chunks) evicted every other session's prefix.
+    - --mamba-max-states-per-path=${GLM53_MAMBA_MAX_STATES_PER_PATH:-2}
+    # Host tier for evicted prefixes (KV and linear-attention states), per TP rank.
+    - --enable-hierarchical-cache
+    - --hicache-size=${GLM53_HICACHE_SIZE_GB:-4}
     - --cuda-graph-backend-prefill=breakable
     - --cuda-graph-bs-prefill
     - "64"
