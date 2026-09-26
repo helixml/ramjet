@@ -55,7 +55,8 @@ days of logs). A 310k prompt (~51 chunks) therefore swept every other state
 while the 500k-token fp8 KV pool had room: engine B cached a 49,152-token
 prefix at 12:31:59, the 313k prompt arrived at 12:33, and the prefix was cold
 at 12:35:04. More KV space, or a smaller checkpoint, cannot help; NVIDIA's
-official GLM-5.3-Flash NVFP4 is 9GB larger than the running W4A16 checkpoint.
+official GLM-5.3-Flash NVFP4 (190.4GiB of safetensors) is about 25GiB larger than the
+running W4A16 checkpoint (165.8GiB).
 
 **Change.** On C only, isolated from the shared LB by a private Compose network
 while B served, under the thermal guard and the deployment lock:
