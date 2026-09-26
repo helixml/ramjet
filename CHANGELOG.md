@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- The Qwen/GLM/Kev deployment now defaults the long-prompt lane off
+  (`RJ_ROUTE_LONG_PROMPT_BYTES=0`). Two concurrent ~290k-token GLM
+  conversations do not fit one replica's KV pool, so confining both to one
+  replica cost 23-30s per turn instead of ~4s. See EXPERIMENTS.md.
+
 ## 0.6.2 — 2026-09-25
 
 ### GLM-5.3 prefix-cache capacity and SwiGLU clamp (node06)
