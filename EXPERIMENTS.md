@@ -1,5 +1,36 @@
 # node06 experiment journal
 
+## 2026-09-26 — long-prompt lane turned off: two long conversations do not fit one replica
+
+**Replay.** Through the live LB (lane on), two synthetic conversations started
+at ~279k tokens and grew by 4k tokens a turn, alternating with six 20k-token
+agent sessions that grew by 1.5k a turn, six rounds, `max_tokens=1`, under
+the thermal guard. The lane sent both long conversations to `glm53sm120-c`.
+
+| turns 3-6 | cached | time per turn |
+|---|---|---|
+| long1 / long2 (287k-299k tokens) on C | 135k-166k | 23.4-30.2s |
+| agents placed on C by affinity (agent1, agent4) | 0 every turn | 3.8-4.6s |
+| agents on B (agent2, 3, 5, 6) | 99.3-99.4% | 0.42-0.45s |
+
+Two ~290k-token conversations need ~580k tokens of KV and C holds 499,968, so
+the token pool (not the snapshot pool) became the limit and the lane made the
+long conversations and everything else on C evict each other. Ordinary routing
+would place the two conversations on different replicas.
+
+**Production (all LB traffic, route journal).** Requests with prompts of at
+least 150k tokens: 946 in the 89 h before the 2026-09-25 rollout had 7.4% cold
+(<50% cached), 67 waits over 30s and p99 TTFT 79.8s; 379 in the 14.5 h after
+had 1.1% cold, 3 over 30s and p99 27.4s. 8k-150k-token requests: 5.3% cold and
+70 waits over 10s in 12,747 before; 3.1% cold and 1 over 10s in 514 after. The
+after window is short and quiet and did not appear to contain two concurrent
+long conversations; in the 21-25 Sep Helix records two sessions of at least
+150k tokens were active together in 82 of 522 active minutes.
+
+**Decision.** `RJ_ROUTE_LONG_PROMPT_BYTES` now defaults to 0 in
+`deploy/qwen38_glm53_kev`. The GLM per-path snapshot cap already prevents one
+long prompt from evicting other sessions. The lane code stays as an opt-in.
+
 ## 2026-09-25 — v0.6.2 released: GLM cache settings on both replicas, long-prompt lane live
 
 **GLM rollout.** From the merged canonical file (SHA-256 `8c2e04eb…`), C then

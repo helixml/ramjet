@@ -36,9 +36,9 @@ class QwenGlmKevDeployTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.validator.validate(changed)
 
-    def test_long_prompt_lane_defaults_to_the_second_glm_replica(self):
+    def test_long_prompt_lane_is_off_but_names_the_second_glm_replica(self):
         environment = self.document["services"]["ds4-loadbalancer"]["environment"]
-        self.assertEqual(environment["RJ_ROUTE_LONG_PROMPT_BYTES"], "600000")
+        self.assertEqual(environment["RJ_ROUTE_LONG_PROMPT_BYTES"], "0")
         lanes = environment["RJ_ROUTE_LONG_PROMPT_UPSTREAMS"].split(",")
         upstreams = environment["RJ_UPSTREAM"].split(",")
         self.assertEqual(

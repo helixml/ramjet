@@ -21,15 +21,17 @@ inside `ramjet_kev_systemone`, a fixed internal-only Docker network. No Kev
 port is published. The runtime is non-root, read-only, and offline after the
 pinned Hugging Face cache has been populated.
 
-Request bodies of at least `RJ_ROUTE_LONG_PROMPT_BYTES` (default 600,000
-bytes, roughly 150k tokens) route only to `glm53sm120-c`, the long-prompt
-lane, while it is serving. A single ~310k-token GLM prefill takes about 57s
-and evicts every other cached prefix on its replica, so confining it keeps
-`glm53sm120-b`'s cache and latency intact. If the lane is unavailable the
-request falls back to ordinary routing. Shorter requests still use both GLM
-replicas, and Qwen is unaffected. Set `RJ_ROUTE_LONG_PROMPT_BYTES=0` to turn
-the lane off without editing the file; `ramjet_route_long_prompt_total`
-counts `lane` versus `fallback` decisions per upstream. The lane needs an LB
+The long-prompt lane is off by default (`RJ_ROUTE_LONG_PROMPT_BYTES=0`).
+Setting a positive threshold, for example 600,000 bytes (roughly 150k tokens),
+routes larger request bodies only to `glm53sm120-c` while it is serving, and
+`ramjet_route_long_prompt_total` counts `lane` versus `fallback` decisions.
+It was on from 2026-09-25 to 2026-09-26 and was turned off after a replay:
+two concurrent ~290k-token conversations do not fit `glm53sm120-c`'s
+500k-token KV pool together, so both re-read about half their prompt on every
+turn (23-30s instead of about 4s) and every other session on `c` lost its
+cache. With the per-path snapshot cap on the GLM replicas, one long prompt no
+longer evicts other sessions, so ordinary routing, which spreads concurrent
+long conversations across both replicas, is better. The lane needs an LB
 image that includes it; older images ignore both variables.
 
 ## Validate and build
