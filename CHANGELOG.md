@@ -6,6 +6,13 @@
   (`RJ_ROUTE_LONG_PROMPT_BYTES=0`). Two concurrent ~290k-token GLM
   conversations do not fit one replica's KV pool, so confining both to one
   replica cost 23-30s per turn instead of ~4s. See EXPERIMENTS.md.
+- `bench/snapshot_roi.py` replays archived route journals against
+  hypothetical cache-retention horizons and sizes the snapshot tier they would
+  need. On 13.6 days of GLM traffic infinite retention would have avoided only
+  0.44% of prompt tokens, so no CPU/NVMe snapshot tier is planned
+  (`docs/glm_snapshot_roi.md`).
+- `serving_cost_audit.py` accepts journal v11/v12 output-limit telemetry, and
+  a test now fails when any journal consumer rejects the version the LB emits.
 
 ## 0.6.2 — 2026-09-25
 
