@@ -6,6 +6,7 @@ Usage:
   python3 route_replay.py trace.log --alphas 1,2,4,8 --caps 8,16,32,64
   python3 route_replay.py trace.log --projected-loads off,on
   python3 route_replay.py trace.log --horizons inf,60,300,900
+  python3 route_replay.py trace.log --affinity-bases absolute,marginal
 
 The journal deliberately excludes prompts and fingerprints. Replay therefore
 holds each observed cache-overlap/load snapshot fixed and asks which upstream
@@ -16,6 +17,13 @@ Journal v11 records the age of every served leading block per candidate, so
 `--horizons` re-scores each decision as if blocks older than the given horizon
 (seconds, or `inf`) had already been evicted. It replays the LB's own step
 model; it cannot see the engine's real free queue.
+
+Journal v14 records the affinity basis. `--affinity-bases` re-scores under
+`absolute` (overlap, capped) or `marginal` (overlap above the least-warm
+healthy candidate, capped). Healthy candidates in a record are exactly the
+model's serving replicas, so this reproduces the router's peer-group floor,
+except that a long-prompt lane also marks its protected replicas unhealthy;
+those records replay with the lane members' floor.
 """
 
 import argparse
@@ -66,6 +74,37 @@ def parse_horizons(raw):
 
 def horizon_label(horizon_ms):
     return "inf" if horizon_ms is None else f"{horizon_ms / 1000:g}"
+
+
+AFFINITY_BASES = ("absolute", "marginal")
+
+
+def parse_affinity_bases(raw):
+    values = []
+    for item in raw.split(","):
+        label = item.strip().lower()
+        if not label:
+            continue
+        if label not in AFFINITY_BASES:
+            raise argparse.ArgumentTypeError(
+                "affinity bases must be a comma-separated subset of absolute,marginal"
+            )
+        if label not in values:
+            values.append(label)
+    if not values:
+        raise argparse.ArgumentTypeError("affinity bases must include absolute or marginal")
+    return values
+
+
+def recorded_affinity_basis(record):
+    """Basis the router scored with; journals before v14 were always absolute."""
+    return record.get("affinity_basis", "absolute")
+
+
+def marginal_floor(candidates, overlaps):
+    """Overlap of the least-warm healthy candidate, or zero if none is healthy."""
+    healthy = [overlaps[candidate["upstream"]] for candidate in candidates if candidate["healthy"]]
+    return min(healthy, default=0)
 
 
 def affinity_horizon_outcome(record):
@@ -139,8 +178,15 @@ def affinity_horizon_record_mismatch(record):
     if type(cap) is not int or cap < 0:
         return True
     enforce = observation.get("mode") == "enforce"
+    basis = recorded_affinity_basis(record)
+    if basis not in AFFINITY_BASES:
+        return True
+    lane = record.get("long_request_lane")
+    lane_restricted = isinstance(lane, dict) and lane.get("outcome") == "lane"
     try:
-        for candidate in record.get("candidates", []):
+        candidates = record.get("candidates", [])
+        expected_overlaps = {}
+        for candidate in candidates:
             if enforce:
                 horizon_ms = candidate.get("horizon_ms")
                 if horizon_ms is not None and (type(horizon_ms) is not int or horizon_ms < 0):
@@ -150,7 +196,14 @@ def affinity_horizon_record_mismatch(record):
                 expected = raw_overlap(record, candidate)
             if candidate["overlap_blocks"] != expected:
                 return True
-            if candidate["affinity_blocks"] != min(expected, cap):
+            expected_overlaps[candidate["upstream"]] = expected
+        if basis == "marginal" and lane_restricted:
+            # The router's floor included replicas the lane later fenced.
+            return False
+        floor = marginal_floor(candidates, expected_overlaps) if basis == "marginal" else 0
+        for candidate in candidates:
+            expected = expected_overlaps[candidate["upstream"]]
+            if candidate["affinity_blocks"] != min(max(expected - floor, 0), cap):
                 return True
     except (KeyError, TypeError, ValueError):
         return True
@@ -192,7 +245,7 @@ def records(lines):
         version = record.get("v")
         if (
             type(version) is int
-            and version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
+            and version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
             and record.get("event") in ("start", "finish")
         ):
             yield record
@@ -324,7 +377,15 @@ def session_affinity_choice(record, alpha=None, bonus_blocks=None, max_load_delt
     return _session_affinity_decision(record, alpha, bonus_blocks, max_load_delta)[0]
 
 
-def choose(record, alpha, cap, tie_break=None, projected_load=False, horizon_ms=None):
+def choose(
+    record,
+    alpha,
+    cap,
+    tie_break=None,
+    projected_load=False,
+    horizon_ms=None,
+    affinity_basis=None,
+):
     candidates = record["candidates"]
     rotation = record.get("rotation", 0)
     count = len(candidates)
@@ -336,6 +397,8 @@ def choose(record, alpha, cap, tie_break=None, projected_load=False, horizon_ms=
         candidate["upstream"]: credited_overlap(record, candidate, horizon_ms)
         for candidate in candidates
     }
+    basis = affinity_basis or recorded_affinity_basis(record)
+    floor = marginal_floor(candidates, overlaps) if basis == "marginal" else 0
     for candidate in candidates:
         load = candidate["load_units"]
         if projected_load:
@@ -358,8 +421,8 @@ def choose(record, alpha, cap, tie_break=None, projected_load=False, horizon_ms=
         right_load = scored_loads[right["upstream"]]
         left_overlap = overlaps[left["upstream"]]
         right_overlap = overlaps[right["upstream"]]
-        left_score = min(left_overlap, cap) - alpha * left_load
-        right_score = min(right_overlap, cap) - alpha * right_load
+        left_score = min(max(left_overlap - floor, 0), cap) - alpha * left_load
+        right_score = min(max(right_overlap - floor, 0), cap) - alpha * right_load
         if left_score != right_score:
             return -1 if left_score > right_score else 1
         if left_overlap != right_overlap and (tie_break == "overlap" or left_load == right_load):
@@ -383,6 +446,7 @@ def replay(
     session_max_load_delta=None,
     projected_loads=None,
     horizons=None,
+    affinity_bases=None,
 ):
     paired_records = [
         (record, finishes[record["seq"]])
@@ -432,13 +496,15 @@ def replay(
     rows = []
     policies = [None] if projected_loads is None else projected_loads
     horizon_policies = [None] if horizons is None else horizons
+    basis_policies = [None] if affinity_bases is None else affinity_bases
     horizon_mismatches = sum(affinity_horizon_record_mismatch(record) for record in starts)
     for alpha in alphas:
         for cap in caps:
-            for projected_load, horizon_ms in (
-                (projected_load, horizon_ms)
+            for projected_load, horizon_ms, affinity_basis in (
+                (projected_load, horizon_ms, affinity_basis)
                 for projected_load in policies
                 for horizon_ms in horizon_policies
+                for affinity_basis in basis_policies
             ):
                 choices = []
                 agreements = 0
@@ -452,6 +518,7 @@ def replay(
                         tie_break,
                         projected_load=bool(projected_load),
                         horizon_ms=horizon_ms,
+                        affinity_basis=affinity_basis,
                     )
                     if selected is None:
                         continue
@@ -547,6 +614,8 @@ def replay(
                     row["projected_load"] = projected_load
                 if horizons is not None:
                     row["horizon_s"] = horizon_label(horizon_ms)
+                if affinity_bases is not None:
+                    row["affinity_basis"] = affinity_basis
                 rows.append(row)
     return rows
 
@@ -617,6 +686,14 @@ def main(argv=None):
             "leading blocks no older than the horizon, from journal v11 block ages"
         ),
     )
+    parser.add_argument(
+        "--affinity-bases",
+        type=parse_affinity_bases,
+        help=(
+            "sweep absolute,marginal affinity scoring; marginal credits only overlap "
+            "above the least-warm healthy candidate before the cap"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit one JSON object per policy")
     args = parser.parse_args(argv)
     if args.session_bonus_blocks is not None and args.session_bonus_blocks < 0:
@@ -664,6 +741,7 @@ def main(argv=None):
             args.session_max_load_delta,
             args.projected_loads,
             args.horizons,
+            args.affinity_bases,
         )
     except ValueError as error:
         parser.error(str(error))
@@ -673,8 +751,9 @@ def main(argv=None):
     else:
         projected_header = " projected" if args.projected_loads is not None else ""
         horizon_header = " horizon_s" if args.horizons is not None else ""
+        basis_header = "    basis" if args.affinity_bases is not None else ""
         print(
-            f"alpha cap{projected_header}{horizon_header} requests agree% moves routes mean_overlap "
+            f"alpha cap{projected_header}{horizon_header}{basis_header} requests agree% moves routes mean_overlap "
             "mean_load paired first_byte ttft_ms cache% warm/cold warm_ttft cold_ttft"
         )
         for row in rows:
@@ -687,8 +766,11 @@ def main(argv=None):
             horizon_value = (
                 f" {row['horizon_s']:>9}" if args.horizons is not None else ""
             )
+            basis_value = (
+                f" {row['affinity_basis']:>8}" if args.affinity_bases is not None else ""
+            )
             print(
-                f"{row['alpha']:>5g} {row['cap']:>3}{projected_value}{horizon_value} {row['requests']:>8} "
+                f"{row['alpha']:>5g} {row['cap']:>3}{projected_value}{horizon_value}{basis_value} {row['requests']:>8} "
                 f"{row['agreement_pct']:>6.1f} {row['counterfactual_migrations']:>5} {routes:>12} "
                 f"{row['mean_overlap_blocks']:>12.2f} {row['mean_observed_load_units']:>9.2f} "
                 f"{row['paired_finishes']:>6} "

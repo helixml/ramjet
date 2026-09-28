@@ -88,5 +88,7 @@ fn router() -> Router {
         speculation_profiles: vec![SpeculationProfile::Standard],
         affinity: Affinity::Prefix,
         affinity_horizon: ramjet::affinity_horizon::AffinityHorizonConfig::off(),
+        affinity_basis: ramjet::config::AffinityBasis::Absolute,
+        affinity_groups: Vec::new(),
     })
 }

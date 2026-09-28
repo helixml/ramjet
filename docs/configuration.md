@@ -66,6 +66,7 @@ resolving across the rename.
 | `RJ_ROUTE_CHUNK_BYTES` | `2048` | Bytes per approximate prefix fingerprint block. |
 | `RJ_ROUTE_MAX_PREFIX_BYTES` | `2097152` | Maximum request prefix bytes fingerprinted. |
 | `RJ_ROUTE_MAX_OVERLAP_BLOCKS` | `32` | Cap on affinity credit in fingerprint blocks. |
+| `RJ_ROUTE_AFFINITY_BASIS` | `absolute` | `absolute` credits a replica's leading served blocks up to the cap; `marginal` credits only the blocks beyond the least-warm serving replica of the same model and API profile. `marginal` requires `RJ_AFFINITY=prefix`. |
 | `RJ_ROUTE_INDEX_CAPACITY` | `100000` | Maximum entries in the approximate locality index. |
 | `RJ_ROUTE_LOAD_UNIT_BYTES` | `32768` | Request bytes represented by one reserved load unit. |
 | `RJ_ROUTE_MAX_LOAD_UNITS` | `8` | Maximum size-weighted load reservation per request. |
@@ -153,6 +154,24 @@ block ages, so a default-mode capture can be swept offline with
 `bench/route_replay.py --horizons` before either mode is enabled.
 `RJ_ROUTE_AFFINITY_HORIZON_MODE=off` is the instant rollback and leaves both
 source inputs inert.
+
+The affinity basis decides what the overlap cap is applied to. Under
+`absolute`, a prefix every replica already caches counts toward the cap on
+all of them. Once a shared system prompt alone is longer than the cap (32
+blocks of 2KiB, 64KiB by default), every replica scores the same full
+affinity. The session history that only one replica holds then matters just
+as a tie-break after the load penalty, so a single load unit of imbalance
+moves an agent session off its warm replica and it re-prefills its whole
+history. `marginal` subtracts a floor first: the overlap of the least-warm
+serving replica that could take the same request. Peer groups follow
+`RJ_UPSTREAM_MODELS` and `RJ_UPSTREAM_APIS`, so in a multi-model deployment
+another model's cold replicas never pull the floor to zero. The cap still
+bounds what affinity can buy, now measured in blocks the peers would have to
+recompute. Where some serving peer holds none of the prefix, the floor is zero
+and routing is identical to `absolute`. Journal v14 records the basis, and
+`bench/route_replay.py --affinity-bases absolute,marginal` replays an existing
+capture under both before the basis is changed. `RJ_ROUTE_AFFINITY_BASIS=absolute`
+is the instant rollback.
 
 The long-prompt lane keeps very long prefills off protected replicas. One
 ~310k-token prefill on a GLM replica runs for about a minute, evicts every
@@ -822,6 +841,9 @@ audit therefore prefers the finish value and falls back to the pre-route
 candidate estimate only for v1-v7 traces, where that fallback systematically
 over-reports warm requests under placement. It is a bounded integer and carries
 no prefix identity.
+Journal v14 adds `affinity_basis`, `absolute` or `marginal`. Candidate
+`affinity_blocks` are scored under that basis; replay recomputes the marginal
+floor from the record's healthy candidates.
 Journal v12 adds `long_request_lane`, an object with one fixed `outcome`
 label: `off`, `below`, `no_lane`, `lane`, or `fallback`. It records neither
 the threshold, the request size, nor any upstream address; lane-restricted
