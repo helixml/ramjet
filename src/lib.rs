@@ -53,6 +53,7 @@ pub mod snapshot_tail;
 pub mod snapshot_tail_wire;
 pub mod snapshot_transport;
 pub mod tokenizer;
+pub mod topology;
 pub mod ui_auth;
 pub mod usage;
 pub mod warmup_admission;

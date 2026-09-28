@@ -329,31 +329,78 @@ struct Score {
     ages: Vec<[u64; 2]>,
 }
 
-/// For each candidate, the overlap of the least-warm serving replica in its
-/// peer group. Scoring overlap above that floor credits only the prefix a
-/// replica holds that its peers would have to recompute, so a prefix every
-/// peer already caches (a shared system prompt) no longer saturates the
-/// affinity cap and hides the session history beyond it. A group with no
-/// serving member has a floor of zero; its candidates cannot win anyway.
-fn marginal_baselines(
+/// Least and greatest overlap among the serving replicas of one peer group.
+/// A group with no serving member reports zero for both; its candidates
+/// cannot win anyway.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PeerOverlap {
+    floor: usize,
+    lead: usize,
+}
+
+/// One pass over the fleet, so scoring stays linear in the upstream count.
+fn peer_overlaps(
     states: &[UpstreamState],
-    localities: &[Locality],
+    overlaps: &[usize],
     groups: &[usize],
-    overlap_of: impl Fn(&Locality) -> usize,
-) -> Vec<usize> {
+) -> Vec<PeerOverlap> {
     let group = |index: usize| groups.get(index).copied().unwrap_or(0);
+    let mut per_group: Vec<Option<PeerOverlap>> = Vec::new();
+    for (index, (state, &overlap)) in states.iter().zip(overlaps).enumerate() {
+        if !state.serving() {
+            continue;
+        }
+        let key = group(index);
+        if per_group.len() <= key {
+            per_group.resize(key + 1, None);
+        }
+        per_group[key] = Some(per_group[key].map_or(
+            PeerOverlap {
+                floor: overlap,
+                lead: overlap,
+            },
+            |known| PeerOverlap {
+                floor: known.floor.min(overlap),
+                lead: known.lead.max(overlap),
+            },
+        ));
+    }
     (0..states.len())
         .map(|index| {
-            states
-                .iter()
-                .zip(localities)
-                .enumerate()
-                .filter(|(peer, (state, _))| state.serving() && group(*peer) == group(index))
-                .map(|(_, (_, locality))| overlap_of(locality))
-                .min()
-                .unwrap_or(0)
+            per_group
+                .get(group(index))
+                .copied()
+                .flatten()
+                .unwrap_or_default()
         })
         .collect()
+}
+
+/// Affinity credited to one candidate, bounded by `cap`.
+///
+/// `Marginal` credits overlap above the least-warm serving peer, so a prefix
+/// every peer already caches (a shared system prompt) no longer saturates the
+/// cap and hides the session history beyond it. That floor is only useful
+/// while every peer holds the shared prefix: one cold replica in a larger
+/// fleet makes it zero. `Relative` measures from the warmest serving peer
+/// instead, which no cold replica can move: a candidate is credited the
+/// leader's capped overlap minus how far it trails the leader, so the
+/// difference between any two candidates is what the lesser would recompute,
+/// capped.
+fn credited_affinity(
+    basis: AffinityBasis,
+    overlap: usize,
+    peers: PeerOverlap,
+    cap: usize,
+) -> usize {
+    match basis {
+        AffinityBasis::Absolute => overlap.min(cap),
+        AffinityBasis::Marginal => overlap.saturating_sub(peers.floor).min(cap),
+        AffinityBasis::Relative => peers
+            .lead
+            .min(cap)
+            .saturating_sub(peers.lead.saturating_sub(overlap).min(cap)),
+    }
 }
 
 fn compare_scores(
@@ -716,14 +763,12 @@ impl Router {
                     locality.raw_overlap
                 }
             };
-            let baselines = match self.config.affinity_basis {
-                AffinityBasis::Absolute => None,
-                AffinityBasis::Marginal => Some(marginal_baselines(
-                    &inner.states,
-                    &localities,
-                    &self.config.affinity_groups,
-                    overlap_of,
-                )),
+            let overlaps = localities.iter().map(overlap_of).collect::<Vec<_>>();
+            let peers = match self.config.affinity_basis {
+                AffinityBasis::Absolute => Vec::new(),
+                AffinityBasis::Marginal | AffinityBasis::Relative => {
+                    peer_overlaps(&inner.states, &overlaps, &self.config.affinity_groups)
+                }
             };
             inner
                 .states
@@ -731,9 +776,13 @@ impl Router {
                 .zip(&localities)
                 .enumerate()
                 .map(|(index, (state, locality))| {
-                    let overlap = overlap_of(locality);
-                    let baseline = baselines.as_ref().map_or(0, |baselines| baselines[index]);
-                    let affinity = overlap.saturating_sub(baseline).min(cap);
+                    let overlap = overlaps[index];
+                    let affinity = credited_affinity(
+                        self.config.affinity_basis,
+                        overlap,
+                        peers.get(index).copied().unwrap_or_default(),
+                        cap,
+                    );
                     let request_load = self
                         .load_estimator
                         .estimate_blocks(body_bytes, overlap)
@@ -1604,6 +1653,154 @@ mod tests {
         assert_eq!(router.route(&follow_up).candidates[0], 2);
         router.set_healthy(0, true);
         assert_eq!(router.route(&follow_up).candidates[0], 1);
+    }
+
+    fn fleet(size: usize, basis: AffinityBasis) -> RouterConfig {
+        let mut config = config();
+        config.upstreams = (0..size)
+            .map(|index| Url::parse(&format!("http://replica-{index}:8000")).unwrap())
+            .collect();
+        config.speculation_profiles = vec![SpeculationProfile::Standard; size];
+        config.affinity_basis = basis;
+        config
+    }
+
+    #[test]
+    fn one_cold_replica_collapses_the_marginal_floor_but_not_relative() {
+        // Replica 2 holds the session, 1 only the shared prompt, 0 is cold and
+        // serving: the normal state of any fleet larger than two.
+        for (basis, expected) in [(AffinityBasis::Marginal, 1), (AffinityBasis::Relative, 2)] {
+            let router = Arc::new(Router::new(fleet(3, basis)));
+            let follow_up = warm_session(&router, 2, &[1]);
+            let _load = router.acquire(2, 1);
+            let decision = router.route(&follow_up);
+            assert_eq!(decision.candidates[0], expected, "{}", basis.label());
+        }
+    }
+
+    #[test]
+    fn relative_keeps_a_session_home_in_a_forty_replica_fleet() {
+        let router = Arc::new(Router::new(fleet(40, AffinityBasis::Relative)));
+        // Ten replicas hold the shared prompt, one the session, the rest are cold.
+        let follow_up = warm_session(&router, 17, &(20..30).collect::<Vec<_>>());
+        let _home_load = router.acquire(17, 3);
+        let decision = router.route(&follow_up);
+        assert_eq!(decision.candidates[0], 17);
+        assert_eq!(decision.outcome, Outcome::Overlap);
+        let affinity = |index| {
+            decision
+                .candidate_state
+                .iter()
+                .find(|candidate| candidate.index == index)
+                .unwrap()
+                .affinity_blocks
+        };
+        assert_eq!(affinity(17), 32);
+        assert!(affinity(25) < 32, "trailing the leader costs affinity");
+        assert_eq!(affinity(3), 0, "a cold replica trails by the whole cap");
+
+        // The cap still bounds what the session can buy against load.
+        let _more = (0..8).map(|_| router.acquire(17, 1)).collect::<Vec<_>>();
+        assert_ne!(router.route(&follow_up).candidates[0], 17);
+    }
+
+    #[test]
+    fn relative_makes_the_same_decisions_as_marginal_for_two_replicas() {
+        type Setup = fn(&Router) -> Vec<u8>;
+        let setups: [Setup; 4] = [
+            |router| warm_session(router, 0, &[1]),
+            |router| warm_session(router, 1, &[0]),
+            |router| warm_session(router, 0, &[]),
+            |router| {
+                let body = chat(&"short prompt ".repeat(20), "task");
+                router.observe(1, &router.fingerprints(&body));
+                body
+            },
+        ];
+        for setup in setups {
+            for (home_load, peer_load) in [(0, 0), (1, 0), (0, 1), (5, 0), (9, 0), (9, 9)] {
+                let decide = |basis| {
+                    let router = Arc::new(Router::new(fleet(2, basis)));
+                    let body = setup(&router);
+                    let _home = (0..home_load)
+                        .map(|_| router.acquire(0, 1))
+                        .collect::<Vec<_>>();
+                    let _peer = (0..peer_load)
+                        .map(|_| router.acquire(1, 1))
+                        .collect::<Vec<_>>();
+                    router.route(&body)
+                };
+                let marginal = decide(AffinityBasis::Marginal);
+                let relative = decide(AffinityBasis::Relative);
+                assert_eq!(marginal.candidates, relative.candidates);
+                assert_eq!(marginal.outcome, relative.outcome);
+            }
+        }
+    }
+
+    #[test]
+    fn relative_scores_exactly_like_absolute_below_the_cap() {
+        let decide = |basis| {
+            let router = Arc::new(Router::new(fleet(4, basis)));
+            let body = chat(&"prompt ".repeat(120), "task");
+            let partial = chat(&"prompt ".repeat(60), "other");
+            router.observe(1, &router.fingerprints(&body));
+            router.observe(2, &router.fingerprints(&partial));
+            let _load = router.acquire(1, 2);
+            router.route(&body)
+        };
+        let absolute = decide(AffinityBasis::Absolute);
+        let relative = decide(AffinityBasis::Relative);
+        assert!(
+            absolute
+                .candidate_state
+                .iter()
+                .all(|c| c.overlap_blocks < 32)
+        );
+        let credited = |decision: &Decision| {
+            decision
+                .candidate_state
+                .iter()
+                .map(|candidate| (candidate.index, candidate.affinity_blocks))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(absolute.candidates, relative.candidates);
+        assert_eq!(credited(&absolute), credited(&relative));
+    }
+
+    #[test]
+    fn relative_leader_comes_from_serving_peers_of_the_same_group() {
+        let mut config = fleet(3, AffinityBasis::Relative);
+        config.affinity_groups = vec![0, 1, 1];
+        let router = Arc::new(Router::new(config));
+        // Upstream 0 serves another model but somehow holds more of the prefix;
+        // it must not set the leader for the model's own replicas.
+        let follow_up = warm_session(&router, 0, &[1, 2]);
+        router.observe(
+            2,
+            &router.fingerprints(&agent_turn(
+                &"shared agent manual ".repeat(200),
+                &["session specific task and tool output ".repeat(80).as_str()],
+            )),
+        );
+        let decision = router.route(&follow_up);
+        let state = |index| {
+            decision
+                .candidate_state
+                .iter()
+                .find(|candidate| candidate.index == index)
+                .unwrap()
+                .affinity_blocks
+        };
+        assert_eq!(state(2), 32, "the group's own leader");
+        router.set_healthy(2, false);
+        let decision = router.route(&follow_up);
+        let peer = decision
+            .candidate_state
+            .iter()
+            .find(|candidate| candidate.index == 1)
+            .unwrap();
+        assert_eq!(peer.affinity_blocks, 32, "a non-serving leader is ignored");
     }
 
     #[test]

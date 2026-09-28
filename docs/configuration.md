@@ -54,10 +54,13 @@ resolving across the rename.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `RJ_UPSTREAM` | `http://ds4-flash:8000` | Comma-separated engine URLs. |
+| `RJ_TOPOLOGY_FILE` | unset | JSON file describing the fleet as nodes and their replicas; it supplies `RJ_UPSTREAM`, `RJ_UPSTREAM_MODELS`, `RJ_UPSTREAM_APIS`, `RJ_ROUTE_SPECULATION_PROFILES`, and `RJ_ROUTE_KV_CAPACITY_TOKENS`, which must then be unset. See [multi-node.md](multi-node.md). |
 | `RJ_UPSTREAM_MODELS` | unset | Optional dense model ownership map: exactly one model ID per `RJ_UPSTREAM` entry. Enables model-aware routing and combined `/v1/models`; duplicate IDs represent replicas of one model. |
 | `RJ_UPSTREAM_APIS` | `openai` per upstream | Dense API ownership map: exactly one `openai` or `systemone` profile per `RJ_UPSTREAM` entry. `/v1/systemone` can reach only System One upstreams; all other routes can reach only OpenAI upstreams. |
 | `RJ_MACHINEVIEW_UPSTREAM_GPUS` | unset | Optional observation-only dense GPU ownership map, with semicolon-separated sets matching `RJ_UPSTREAM` (for example `0,1,2,3;4,5`). Machine view derives displayed TP size from each set. GPU indices must be unique. |
 | `RJ_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
+| `RJ_UPSTREAM_CONNECT_TIMEOUT_MS` | `30000` | TCP connect budget per upstream attempt (1 to 300000). Lower it for replicas on other nodes so an unreachable machine fails over quickly. |
+| `RJ_ROUTE_MAX_ATTEMPTS` | unset (every serving replica) | Most candidates one request tries before returning the last failure (1 to 64). Unset keeps trying every serving replica, which grows with the fleet. |
 | `RJ_UPSTREAM_POOL_IDLE_TIMEOUT_MS` | `4000` | How long an idle pooled upstream connection may be reused (1 to 300000). Keep it below the engines' HTTP keep-alive: vLLM and SGLang both close idle connections after 5 seconds, and a request written onto a socket the server is closing fails as `protocol`, fails over, and marks a healthy replica down until its next probe. |
 | `RJ_UPSTREAM_WARMUP_MODE` | `off` | `off`, observation-only `shadow`, or `enforce` passive admission for a replica recovering from observed health loss. HTTP admission only. |
 | `RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES` | `3` | Successful existing readiness probes required after recovery before passive warmup admits the replica. |
@@ -67,7 +70,7 @@ resolving across the rename.
 | `RJ_ROUTE_CHUNK_BYTES` | `2048` | Bytes per approximate prefix fingerprint block. |
 | `RJ_ROUTE_MAX_PREFIX_BYTES` | `2097152` | Maximum request prefix bytes fingerprinted. |
 | `RJ_ROUTE_MAX_OVERLAP_BLOCKS` | `32` | Cap on affinity credit in fingerprint blocks. |
-| `RJ_ROUTE_AFFINITY_BASIS` | `absolute` | `absolute` credits a replica's leading served blocks up to the cap; `marginal` credits only the blocks beyond the least-warm serving replica of the same model and API profile. `marginal` requires `RJ_AFFINITY=prefix`. |
+| `RJ_ROUTE_AFFINITY_BASIS` | `absolute` | `absolute` credits a replica's leading served blocks up to the cap; `marginal` credits only the blocks beyond the least-warm serving replica of the same model and API profile; `relative` credits the warmest such replica's capped overlap less how far this replica trails it. `marginal` and `relative` require `RJ_AFFINITY=prefix`. Use `relative` beyond two replicas per model. |
 | `RJ_ROUTE_INDEX_CAPACITY` | `100000` | Maximum entries in the approximate locality index. |
 | `RJ_ROUTE_LOAD_UNIT_BYTES` | `32768` | Request bytes represented by one reserved load unit. |
 | `RJ_ROUTE_MAX_LOAD_UNITS` | `8` | Maximum size-weighted load reservation per request. |
@@ -173,6 +176,19 @@ and routing is identical to `absolute`. Journal v14 records the basis, and
 `bench/route_replay.py --affinity-bases absolute,marginal` replays an existing
 capture under both before the basis is changed. `RJ_ROUTE_AFFINITY_BASIS=absolute`
 is the instant rollback.
+
+`marginal`'s floor only helps while every serving peer holds the shared
+prefix, which a two-replica box reaches quickly and a larger fleet rarely
+does: one cold replica makes the floor zero. `relative` measures from the
+other end. The warmest serving peer of the same model and API profile sets
+the reference; each candidate is credited that peer's overlap, capped, less
+how far it trails the peer, capped. Until the leader passes the cap it scores
+exactly like `absolute`; for two replicas it makes the same decisions as
+`marginal`; at any size the difference between two candidates is the prefix
+the lesser would recompute, bounded by the cap. In the fleet simulation
+(`tests/fleet_routing_simulation.rs`) at 40 replicas it kept 90% of agent turns
+on the replica holding their session against 51% for `absolute` and
+`marginal`, and halved the re-prefilled share of prompt blocks.
 
 The long-prompt lane keeps very long prefills off protected replicas. One
 ~310k-token prefill on a GLM replica runs for about a minute, evicts every
@@ -755,6 +771,9 @@ single engine's metrics without exposing its address. The most useful router
 families are:
 
 - `ramjet_upstream_up`, inflight, and load gauges for availability.
+- `ramjet_upstream_info{upstream,node}`, a constant 1 naming the node each
+  upstream runs on (the topology file's node name, else the URL host), for
+  aggregating any `upstream`-labelled series by machine.
 - `ramjet_route_fail_open` and `ramjet_route_fail_open_dispatches_total`
   for intervals served while no replica passed its admission probe, and
   `ramjet_upstream_probe_suppressed_total` for probe failures outvoted by

@@ -12,6 +12,7 @@ use crate::{
     affinity_horizon::{AffinityHorizonConfig, AffinityHorizonMode, AffinityHorizonSource},
     engine_park::{EngineParkConfig, ParkActuator, SleepLevel},
     idle_drain::{IdleDrainConfig, IdleDrainMode, IdleDrainRelease},
+    topology::{self, Topology},
 };
 
 const MAX_SNAPSHOT_ROUTE_SOCKET_PATH_BYTES: usize = 64;
@@ -25,6 +26,8 @@ const MAX_SHADOW_SOAK_TOKEN_BYTES: usize = 256 << 20;
 const MAX_SHADOW_SOAK_TIMEOUT_MS: usize = 15 * 60 * 1_000;
 const MAX_UPSTREAM_ADMISSION_TIMEOUT_MS: usize = 30_000;
 const MAX_UPSTREAM_POOL_IDLE_TIMEOUT_MS: usize = 300_000;
+const MAX_UPSTREAM_CONNECT_TIMEOUT_MS: usize = 300_000;
+const MAX_ROUTE_ATTEMPTS: usize = 64;
 const MAX_DSPARK_GUARD_INTERVAL_MS: usize = 60_000;
 /// A day of quiet is far beyond any useful setting and keeps the internal
 /// millisecond arithmetic well clear of overflow.
@@ -57,12 +60,22 @@ pub struct Config {
     /// `RJ_UPSTREAM_APIS` preserves the historical all-OpenAI deployment.
     pub upstream_api_profiles: Vec<UpstreamApiProfile>,
     pub upstream_token: Option<String>,
+    /// Node name of each upstream, in upstream order, when `RJ_TOPOLOGY_FILE`
+    /// declares them. Operator-chosen names, unlike hosts, are safe to publish
+    /// on `/health`.
+    pub upstream_nodes: Option<Vec<String>>,
     pub upstream_admission_mode: UpstreamAdmissionMode,
     pub upstream_admission_timeout_ms: usize,
     /// How long an idle pooled upstream connection may be reused. It must stay
     /// below the engines' HTTP keep-alive (5s in both `vLLM` and `SGLang`), or a
     /// request can be written onto a socket the server is closing.
     pub upstream_pool_idle_timeout_ms: usize,
+    /// TCP connect budget per upstream attempt. A replica on another node that
+    /// has lost its network should fail over in well under the default.
+    pub upstream_connect_timeout_ms: usize,
+    /// Most candidates one request may try before returning the last failure;
+    /// `None` tries every serving replica, which is unbounded in fleet size.
+    pub route_max_attempts: Option<usize>,
     pub upstream_warmup_mode: WarmupAdmissionMode,
     pub upstream_warmup_consecutive_successes: usize,
     pub upstream_warmup_stable_seconds: usize,
@@ -169,7 +182,15 @@ pub enum AffinityBasis {
     Absolute,
     /// Leading blocks beyond the least-warm serving peer that could take the
     /// same request, capped: only the prefix peers would have to recompute.
+    /// Exact for two replicas; with more, one cold peer drops the floor to
+    /// zero and it scores like `Absolute`.
     Marginal,
+    /// Scored against the warmest serving peer: equal to `Absolute` until that
+    /// peer's overlap passes the cap, after which a candidate loses one block
+    /// of affinity per block it trails the leader. Makes the same decisions as
+    /// `Marginal` for two replicas and keeps session history visible past a
+    /// shared prompt at any fleet size.
+    Relative,
 }
 
 impl AffinityBasis {
@@ -178,6 +199,7 @@ impl AffinityBasis {
         match self {
             Self::Absolute => "absolute",
             Self::Marginal => "marginal",
+            Self::Relative => "relative",
         }
     }
 }
@@ -448,6 +470,8 @@ pub enum ConfigError {
         value: String,
         reason: &'static str,
     },
+    #[error(transparent)]
+    Topology(#[from] crate::topology::TopologyError),
     #[error(
         "legacy {}-prefixed settings are no longer read; rename them to RJ_: {}",
         legacy_prefix_list(),
@@ -489,6 +513,18 @@ pub fn reject_legacy_env(keys: impl Iterator<Item = String>) -> Result<(), Confi
 }
 
 impl Config {
+    /// Node each upstream runs on: the topology file's name, else the URL host.
+    #[must_use]
+    pub fn upstream_node(&self, index: usize) -> &str {
+        self.upstream_nodes
+            .as_ref()
+            .and_then(|nodes| nodes.get(index))
+            .map_or_else(
+                || self.upstreams[index].host_str().unwrap_or_default(),
+                String::as_str,
+            )
+    }
+
     /// Peer group per upstream for marginal affinity: replicas share a group
     /// exactly when they serve the same API profile and model, which is the
     /// set model/API ownership narrows a request to after scoring.
@@ -530,7 +566,27 @@ impl Config {
     ///
     /// Returns [`ConfigError`] when an upstream URL or typed setting is invalid.
     #[allow(clippy::too_many_lines)]
-    pub fn from_lookup(mut get: impl FnMut(&str) -> Option<String>) -> Result<Self, ConfigError> {
+    pub fn from_lookup(mut env: impl FnMut(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let topology = match env("RJ_TOPOLOGY_FILE") {
+            None => None,
+            Some(path) => {
+                let topology = Topology::load(&path)?;
+                for key in topology::OWNED_KEYS {
+                    if let Some(value) = env(key) {
+                        return Err(invalid(
+                            key,
+                            value,
+                            "unset when RJ_TOPOLOGY_FILE describes the fleet",
+                        ));
+                    }
+                }
+                Some(topology)
+            }
+        };
+        let mut get = |key: &str| match &topology {
+            Some(topology) if topology::OWNED_KEYS.contains(&key) => topology.lookup(key),
+            _ => env(key),
+        };
         let raw_upstreams =
             get("RJ_UPSTREAM").unwrap_or_else(|| "http://ds4-flash:8000".to_owned());
         let upstreams = raw_upstreams
@@ -549,6 +605,7 @@ impl Config {
         if upstreams.is_empty() {
             return Err(ConfigError::NoUpstreams);
         }
+        let upstream_nodes = topology.as_ref().map(Topology::upstream_nodes);
         let upstream_models = match get("RJ_UPSTREAM_MODELS") {
             None => Vec::new(),
             Some(raw) => {
@@ -652,11 +709,12 @@ impl Config {
         {
             "absolute" => AffinityBasis::Absolute,
             "marginal" => AffinityBasis::Marginal,
+            "relative" => AffinityBasis::Relative,
             value => {
                 return Err(invalid(
                     "RJ_ROUTE_AFFINITY_BASIS",
                     value.to_owned(),
-                    "absolute or marginal",
+                    "absolute, marginal, or relative",
                 ));
             }
         };
@@ -898,6 +956,7 @@ impl Config {
             upstream_models,
             upstream_api_profiles,
             upstream_token,
+            upstream_nodes,
             upstream_admission_mode,
             upstream_warmup_mode,
             upstream_warmup_consecutive_successes,
@@ -914,6 +973,21 @@ impl Config {
                 4_000,
                 MAX_UPSTREAM_POOL_IDLE_TIMEOUT_MS,
             )?,
+            upstream_connect_timeout_ms: bounded_positive(
+                &mut get,
+                "RJ_UPSTREAM_CONNECT_TIMEOUT_MS",
+                30_000,
+                MAX_UPSTREAM_CONNECT_TIMEOUT_MS,
+            )?,
+            route_max_attempts: match get("RJ_ROUTE_MAX_ATTEMPTS") {
+                None => None,
+                Some(_) => Some(bounded_positive(
+                    &mut get,
+                    "RJ_ROUTE_MAX_ATTEMPTS",
+                    1,
+                    MAX_ROUTE_ATTEMPTS,
+                )?),
+            },
             dspark_guard_mode,
             dspark_guard_interval_ms,
             dspark_guard_consecutive_windows,
@@ -2402,7 +2476,7 @@ fn idle_drain_settings(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, fs};
 
     use super::*;
 
@@ -2501,7 +2575,7 @@ mod tests {
     }
 
     #[test]
-    fn affinity_basis_defaults_to_absolute_and_marginal_needs_prefix_routing() {
+    fn affinity_basis_defaults_to_absolute_and_others_need_prefix_routing() {
         assert_eq!(
             two_upstreams(&[]).unwrap().route_affinity_basis,
             AffinityBasis::Absolute
@@ -2512,15 +2586,20 @@ mod tests {
                 .route_affinity_basis,
             AffinityBasis::Marginal
         );
-        assert!(two_upstreams(&[("RJ_ROUTE_AFFINITY_BASIS", "relative")]).is_err());
-        assert!(
-            two_upstreams(&[
-                ("RJ_ROUTE_AFFINITY_BASIS", "marginal"),
-                ("RJ_AFFINITY", "load"),
-            ])
-            .is_err(),
-            "load routing scores no prefix, so a basis has nothing to change"
+        assert_eq!(
+            two_upstreams(&[("RJ_ROUTE_AFFINITY_BASIS", "relative")])
+                .unwrap()
+                .route_affinity_basis,
+            AffinityBasis::Relative
         );
+        assert!(two_upstreams(&[("RJ_ROUTE_AFFINITY_BASIS", "leader")]).is_err());
+        for basis in ["marginal", "relative"] {
+            assert!(
+                two_upstreams(&[("RJ_ROUTE_AFFINITY_BASIS", basis), ("RJ_AFFINITY", "load")])
+                    .is_err(),
+                "load routing scores no prefix, so a basis has nothing to change"
+            );
+        }
         assert!(
             two_upstreams(&[
                 ("RJ_ROUTE_AFFINITY_BASIS", "absolute"),
@@ -3001,6 +3080,105 @@ mod tests {
                 }
             ));
         }
+    }
+
+    fn topology_file(name: &str, contents: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ramjet-topology-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn topology_file_describes_the_fleet_by_node() {
+        let path = topology_file(
+            "fleet.json",
+            r#"{"nodes": [
+                {"name": "h200-01", "replicas": [
+                    {"url": "http://10.0.0.11:8070", "model": "glm-5.3"},
+                    {"url": "http://10.0.0.11:8071", "model": "glm-5.3"}]},
+                {"name": "h200-02", "replicas": [
+                    {"url": "http://10.0.0.12:8070", "model": "glm-5.3"}]}]}"#,
+        );
+        let path = path.to_str().unwrap().to_owned();
+        let values = HashMap::from([
+            ("RJ_TOPOLOGY_FILE", path.clone()),
+            ("RJ_ROUTE_AFFINITY_BASIS", "relative".to_owned()),
+        ]);
+        let config = Config::from_lookup(|key| values.get(key).cloned()).unwrap();
+        assert_eq!(config.upstreams.len(), 3);
+        assert_eq!(config.upstreams[2].as_str(), "http://10.0.0.12:8070/");
+        assert_eq!(config.upstream_models, ["glm-5.3", "glm-5.3", "glm-5.3"]);
+        assert_eq!(
+            config.upstream_nodes.as_deref(),
+            Some(
+                &[
+                    "h200-01".to_owned(),
+                    "h200-01".to_owned(),
+                    "h200-02".to_owned()
+                ][..]
+            )
+        );
+        assert_eq!(config.upstream_node(2), "h200-02");
+        assert_eq!(config.route_affinity_groups(), [0, 0, 0]);
+
+        // A second source for a list the file owns is refused, not merged.
+        let values = HashMap::from([
+            ("RJ_TOPOLOGY_FILE", path),
+            ("RJ_UPSTREAM", "http://other:8000".to_owned()),
+        ]);
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).cloned()),
+            Err(ConfigError::InvalidValue {
+                key: "RJ_UPSTREAM",
+                ..
+            })
+        ));
+        let values = HashMap::from([("RJ_TOPOLOGY_FILE", "/nonexistent/fleet.json".to_owned())]);
+        assert!(matches!(
+            Config::from_lookup(|key| values.get(key).cloned()),
+            Err(ConfigError::Topology(_))
+        ));
+    }
+
+    #[test]
+    fn without_a_topology_each_upstream_is_named_by_its_host() {
+        let config = two_upstreams(&[]).unwrap();
+        assert_eq!(config.upstream_nodes, None);
+        for (index, url) in config.upstreams.iter().enumerate() {
+            assert_eq!(config.upstream_node(index), url.host_str().unwrap());
+        }
+    }
+
+    #[test]
+    fn cross_node_dispatch_bounds_are_validated() {
+        for (key, invalid) in [
+            ("RJ_UPSTREAM_CONNECT_TIMEOUT_MS", "0"),
+            ("RJ_UPSTREAM_CONNECT_TIMEOUT_MS", "300001"),
+            ("RJ_ROUTE_MAX_ATTEMPTS", "0"),
+            ("RJ_ROUTE_MAX_ATTEMPTS", "65"),
+            ("RJ_ROUTE_MAX_ATTEMPTS", "all"),
+        ] {
+            let values = HashMap::from([(key, invalid)]);
+            assert!(
+                matches!(
+                    Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+                    Err(ConfigError::InvalidValue { key: found, .. }) if found == key
+                ),
+                "{key}={invalid}"
+            );
+        }
+        let defaults = Config::from_lookup(|_| None).unwrap();
+        assert_eq!(defaults.upstream_connect_timeout_ms, 30_000);
+        assert_eq!(defaults.route_max_attempts, None);
+        let values = HashMap::from([
+            ("RJ_UPSTREAM_CONNECT_TIMEOUT_MS", "2000"),
+            ("RJ_ROUTE_MAX_ATTEMPTS", "3"),
+        ]);
+        let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(config.upstream_connect_timeout_ms, 2_000);
+        assert_eq!(config.route_max_attempts, Some(3));
     }
 
     #[test]

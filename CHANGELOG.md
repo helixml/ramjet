@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Multi-node routing: one ramjet can front a fleet of nodes
+  (`docs/multi-node.md`).
+  - `RJ_ROUTE_AFFINITY_BASIS=relative` scores each replica against the
+    warmest serving peer of its model. `marginal`'s floor is the least-warm
+    peer, and beyond two replicas that peer is usually cold, so it fell back to
+    `absolute`. In `tests/fleet_routing_simulation.rs` at 40 replicas,
+    `relative` kept 90% of agent turns on the replica holding their session,
+    against 51% for `absolute` and `marginal`. At two replicas it makes the
+    same decisions as `marginal`. `route_replay.py --affinity-bases` replays
+    it.
+  - `RJ_TOPOLOGY_FILE` describes the fleet as named nodes and their replicas
+    instead of index-aligned comma lists. `ramjet_upstream_info{upstream,node}`
+    and the `/health` replica entries carry the node name.
+  - Healthy replicas are probed concurrently under `http` admission, so a
+    40-replica probe round no longer serializes 5s timeouts.
+  - `RJ_ROUTE_MAX_ATTEMPTS` bounds failover, and
+    `RJ_UPSTREAM_CONNECT_TIMEOUT_MS` (default 30000, unchanged) sets the
+    connect budget for replicas on other machines.
+  - `examples/route_scale_bench.rs` measures scoring cost: 0.3ms median at 40
+    replicas in the fully warm worst case, against 2.7ms to fingerprint the
+    same prompt outside the lock.
 - Upstream connections now expire after 4s idle
   (`RJ_UPSTREAM_POOL_IDLE_TIMEOUT_MS`), below the 5s keep-alive of vLLM and
   SGLang. reqwest's 90s default reused sockets the engine was closing: under a
