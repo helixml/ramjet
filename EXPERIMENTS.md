@@ -1,5 +1,64 @@
 # node06 experiment journal
 
+## 2026-09-28 — GLM-5.3-Flash FP8 on 8x H200: routing, engine and host qualification
+
+**Question.** How should GLM-5.3-Flash be served on an 8x H200 host behind
+ramjet for coding-agent traffic, and what limits it? Direct engine cells,
+then an open-loop coding-agent fleet (`bench/agent_swarm_bench.py`, #295),
+on `zai-org/GLM-5.3-Flash` FP8 `eb9eb208` with SGLang v0.5.20. No node06
+work; the deployment is `deploy/glm53_flash_h200`.
+
+**Topology.** Two TP4/EP4 replicas behind ramjet against one TP8/EP8 engine on
+the same GPUs. Random prompts without reuse are within ±10% either way. With
+prefix reuse the split fleet wins: 1,420 vs 1,171 output tok/s (+21%) when the
+cache fits and 356 vs 232 (+54%) past it, and 194-249 vs 194 turns/min on the
+64-developer swarm, because two schedulers prefill in parallel.
+
+**Routing.** v0.6.2 prefix routing was barely better than load-only (63% vs
+53% session stickiness): every harness prompt exceeded the 64KiB affinity cap.
+`RJ_ROUTE_AFFINITY_BASIS=marginal` (#294), replicated in reverse order:
+243/249 vs 197/194 turns/min, TTFT p90 3.2-3.3s vs 5.3-5.5s, p99 6-7s vs
+11.3s. Offline replay reproduced the live router exactly and found little
+cap/alpha headroom left. Ramjet also reused pooled connections the engines'
+5s uvicorn keep-alive had closed (#296): 10 `protocol` failures became 0.
+
+**Engine.** EAGLE MTP 3/1/4: +56/31/15% output at c1/c16/c64, +9% swarm
+turns/min and -20% turn e2e p90/p99, 2x TTFT. `--enable-mixed-chunk`
+OOM-crashed a replica (rejected); adaptive MTP failed graph capture with the
+default table and measured no gain with {0,1,3} (rejected).
+
+**Capacity.** At 96 developers the working set outgrew the device pools:
+150 vs 269 turns/min at 64. A 48GB-per-rank HiCache tier restored 223 and
+passed the agent protocol corpus. The larger limit was host-side: one SGLang
+tokenizer process saturates at ~0.2s per 100k-token prompt. Per replica at 48
+developers, 1 tokenizer worker gave 108 turns/min and TTFT p90 15.3s; 4
+workers with a 60s uvicorn worker health check gave 212 and 3.2s with no
+failures (the 10s default killed busy workers and dropped requests; 8 workers
+matched 4). `/health` generation was disabled because it queued behind load
+and failed ramjet's probes. The final-config fleet run at 96 developers is
+inconclusive: 6.6 minutes in, GPU 0 raised Xid 94 (contained uncorrectable SM
+ECC error), NCCL reported an invalid peer access, and replica A hung until
+SGLang's 300s scheduler watchdog. The two per-replica runs at 48 developers
+each (212 and 208 turns/min) put the fleet at roughly twice its earlier
+96-developer throughput; that is an estimate, not a fleet measurement.
+
+**Liveness gap.** With `/health` no longer generating, the hung replica still
+answered 200, and prefix affinity kept its sessions pinned there: 60 requests
+hung until the client's 900s timeout with no ramjet failover. Ramjet needs a
+stall signal of its own (for example, no first byte from one replica while its
+peers stream) before a non-generating health check is safe in production.
+
+**Host.** No GPU throttling (1980MHz, 490-590W of 700W, PCIe Gen5 x16, clean
+NVLink). The VM exposes two sockets as eight NUMA nodes (GPU i on node i);
+without `CAP_SYS_NICE` SGLang skipped its NUMA bind and each replica's pinned
+host tier sat on the opposite socket. Fixed with `SYS_NICE` and `--numa-node`;
+no throughput change was measurable past the capacity cliff.
+
+**Decision.** `deploy/glm53_flash_h200` carries all of the above as defaults
+with a fail-closed validator. For node06: set `RJ_ROUTE_AFFINITY_BASIS=marginal`
+after a journal replay, and check its SGLang GLM replicas for single-tokenizer
+saturation and generating `/health`.
+
 ## 2026-09-26 — GLM snapshot ROI: retention beyond the GPU would recover 0.44% of prompt tokens
 
 **Question.** Would CPU/NVMe-backed KDA snapshots that outlive GPU residency pay

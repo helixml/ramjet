@@ -1,0 +1,186 @@
+# GLM-5.3-Flash FP8 on one 8x H200 (Hopper SM90) host.
+#
+# Default topology: two TP4/EP4 SGLang replicas (GPUs 0-3, 4-7) behind one
+# ramjet. The `tp8` profile is the single-engine control on all eight GPUs; it
+# owns the same devices, so never start it beside glm53-a/glm53-b.
+#
+#   docker compose up -d                        # 2x TP4 + ramjet
+#   docker compose --profile tp8 up -d glm53-tp8 # TP8 control (engines A/B stopped)
+#
+# Every tunable is a ${VAR:-default}; do not add overlay files.
+name: glm53_flash_h200
+
+x-glm-engine: &glm-engine
+  image: ${SGLANG_IMAGE:-lmsysorg/sglang@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f}
+  pull_policy: never
+  labels:
+    ai.ramjet.model.repository: zai-org/GLM-5.3-Flash
+    ai.ramjet.model.revision: eb9eb208eb0d988989d07a6a12d0fdeb5f52574a
+    ai.ramjet.runtime.release: sglang-v0.5.20
+  # One launcher for every topology; per-service knobs arrive as container
+  # environment so a YAML list never has to be spliced.
+  entrypoint: ["bash", "-c"]
+  command:
+    - >-
+      exec python3 -m sglang.launch_server
+      --model-path=/models/glm53
+      --served-model-name=glm-5.3-flash
+      --tp-size=$$GLM_TP --ep-size=$$GLM_EP
+      --kv-cache-dtype=$$GLM_KV_DTYPE
+      --dsa-prefill-backend=$$GLM_DSA_PREFILL
+      --dsa-decode-backend=$$GLM_DSA_DECODE
+      --moe-runner-backend=$$GLM_MOE_BACKEND
+      --context-length=$$GLM_CONTEXT_LENGTH
+      --mem-fraction-static=$$GLM_MEM_FRACTION
+      --chunked-prefill-size=$$GLM_CHUNKED_PREFILL
+      --max-running-requests=$$GLM_MAX_RUNNING
+      --reasoning-parser=glm45
+      --tool-call-parser=glm47
+      --enable-metrics
+      --enable-cache-report
+      --numa-node $$GLM_NUMA_NODES
+      --tokenizer-worker-num $$GLM_TOKENIZER_WORKERS
+      --host=0.0.0.0 --port=8000
+      $$GLM_SPEC_ARGS
+      $$GLM_HICACHE_ARGS
+      $$GLM_EXTRA_ARGS
+  restart: "no"
+  init: true
+  ipc: host
+  # SGLang binds each TP rank's CPUs and preferred memory to its GPU's NUMA
+  # node, but only with CAP_SYS_NICE; without it the bind is skipped and
+  # pinned host buffers (HiCache) landed on the opposite socket.
+  cap_add: [SYS_NICE]
+  shm_size: 64gb
+  stop_grace_period: 120s
+  ulimits:
+    memlock: -1
+    stack: 67108864
+    nofile: {soft: 1048576, hard: 1048576}
+  environment: &glm-env
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    # /health otherwise generates a token through the scheduler; under load it
+    # queues behind real work, times out ramjet's 5s probe, and a healthy
+    # replica is marked down (both at once under a 96-developer swarm).
+    SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION: "0"
+    # Tokenizing a 100k-token agent prompt costs ~0.2s of event-loop CPU, so
+    # one tokenizer process saturates under agent load. With several workers,
+    # uvicorn kills one that misses a 10s health ping, dropping its requests.
+    SGLANG_UVICORN_WORKER_HEALTHCHECK_TIMEOUT: ${SGLANG_UVICORN_WORKER_HEALTHCHECK_TIMEOUT:-60}
+    TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+    TILELANG_CACHE_DIR: /root/.cache/tilelang
+    TRITON_CACHE_DIR: /root/.cache/triton
+    CUDA_CACHE_PATH: /root/.cache/nv/ComputeCache
+    SGLANG_DG_CACHE_DIR: /root/.cache/deep_gemm
+    GLM_TP: "4"
+    GLM_EP: "4"
+    # Host NUMA node per TP rank. Container GPU ordinals restart at 0, so the
+    # mapping is explicit rather than auto-detected.
+    GLM_NUMA_NODES: "0 1 2 3"
+    # Hopper: FP8 KV is not a valid SM90 combination for this NoPE sparse MLA;
+    # TileLang DSA with BF16 KV is the verified H200 cell.
+    GLM_TOKENIZER_WORKERS: ${GLM_TOKENIZER_WORKERS:-4}
+    GLM_KV_DTYPE: ${GLM_KV_DTYPE:-bfloat16}
+    GLM_DSA_PREFILL: ${GLM_DSA_PREFILL:-tilelang}
+    GLM_DSA_DECODE: ${GLM_DSA_DECODE:-tilelang}
+    GLM_MOE_BACKEND: ${GLM_MOE_BACKEND:-deep_gemm}
+    GLM_CONTEXT_LENGTH: ${GLM_CONTEXT_LENGTH:-262144}
+    GLM_MEM_FRACTION: ${GLM_MEM_FRACTION:-0.88}
+    GLM_CHUNKED_PREFILL: ${GLM_CHUNKED_PREFILL:-8192}
+    GLM_MAX_RUNNING: ${GLM_MAX_RUNNING:-64}
+    # EAGLE MTP 3/1/4: +9% turns/min and -19% turn e2e p90 on the 64-developer
+    # agent swarm, at the cost of ~2x TTFT and 12% KV. GLM_SPEC_ARGS=" " disables.
+    GLM_SPEC_ARGS: ${GLM_SPEC_ARGS:---speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4}
+    # Host-memory KV tier: past the device-pool cliff (96 developers) it
+    # restored 223 vs 150 turns/min. GLM_HICACHE_ARGS=" " disables.
+    GLM_HICACHE_ARGS: ${GLM_HICACHE_ARGS:---enable-hierarchical-cache --hicache-size 48}
+    GLM_EXTRA_ARGS: ${GLM_EXTRA_ARGS:-}
+
+services:
+  glm53-a:
+    <<: *glm-engine
+    container_name: glm53-a
+    ports: ["127.0.0.1:8070:8000"]
+    volumes:
+      - ${MODEL_DIR:-${HOME}/models/zai-org/GLM-5.3-Flash-eb9eb208}:/models/glm53:ro
+      - ${CACHE_ROOT:-${HOME}/engine-cache}/sglang-a:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["0", "1", "2", "3"], capabilities: [gpu]}
+
+  glm53-b:
+    <<: *glm-engine
+    container_name: glm53-b
+    ports: ["127.0.0.1:8071:8000"]
+    environment:
+      <<: *glm-env
+      GLM_NUMA_NODES: "4 5 6 7"
+    volumes:
+      - ${MODEL_DIR:-${HOME}/models/zai-org/GLM-5.3-Flash-eb9eb208}:/models/glm53:ro
+      - ${CACHE_ROOT:-${HOME}/engine-cache}/sglang-b:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["4", "5", "6", "7"], capabilities: [gpu]}
+
+  glm53-tp8:
+    <<: *glm-engine
+    profiles: ["tp8"]
+    container_name: glm53-tp8
+    ports: ["127.0.0.1:8072:8000"]
+    environment:
+      <<: *glm-env
+      GLM_TP: "8"
+      GLM_EP: "8"
+      GLM_NUMA_NODES: "0 1 2 3 4 5 6 7"
+    volumes:
+      - ${MODEL_DIR:-${HOME}/models/zai-org/GLM-5.3-Flash-eb9eb208}:/models/glm53:ro
+      - ${CACHE_ROOT:-${HOME}/engine-cache}/sglang-tp8:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["0", "1", "2", "3", "4", "5", "6", "7"], capabilities: [gpu]}
+
+  ramjet:
+    # Main after #294 (marginal affinity basis) and #296 (upstream pool idle). The v0.6.2 control is
+    # ghcr.io/helixml/ramjet:v0.6.2@sha256:53047a816c8ae1dbade7e27b86d2e3eda40cfeaa48826ae06bf2ac1d35a27cc6.
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:rust-a524263@sha256:7f874182ee28dca1764454107647fcba67696292481d8c068b5ca9ab8ce3092c}
+    container_name: ramjet
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8006:8000"
+      - "127.0.0.1:8007:9090"
+    environment:
+      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://glm53-a:8000,http://glm53-b:8000}
+      RJ_UPSTREAM_TOKEN: ${RJ_UPSTREAM_TOKEN:-glm-local}
+      RJ_ADVERTISE_CTX_MARGIN: "8192"
+      RJ_MAX_TOKENS_STRIP: "0"
+      RJ_AFFINITY: ${RJ_AFFINITY:-prefix}
+      RJ_ROUTE_ALPHA: ${RJ_ROUTE_ALPHA:-4}
+      RJ_ROUTE_CHUNK_BYTES: ${RJ_ROUTE_CHUNK_BYTES:-2048}
+      RJ_ROUTE_MAX_PREFIX_BYTES: ${RJ_ROUTE_MAX_PREFIX_BYTES:-2097152}
+      RJ_ROUTE_MAX_OVERLAP_BLOCKS: ${RJ_ROUTE_MAX_OVERLAP_BLOCKS:-32}
+      RJ_ROUTE_AFFINITY_BASIS: ${RJ_ROUTE_AFFINITY_BASIS:-marginal}
+      RJ_ROUTE_LOAD_UNIT_BYTES: ${RJ_ROUTE_LOAD_UNIT_BYTES:-32768}
+      RJ_ROUTE_MAX_LOAD_UNITS: ${RJ_ROUTE_MAX_LOAD_UNITS:-8}
+      RJ_ROUTE_PHASE_AWARE_LOAD: ${RJ_ROUTE_PHASE_AWARE_LOAD:-true}
+      RJ_ROUTE_DECODE_LOAD_UNIT_TOKENS: "256"
+      RJ_ROUTE_DECODE_MAX_LOAD_UNITS: "4"
+      RJ_ROUTE_PROJECTED_LOAD: "false"
+      RJ_ROUTE_SPECULATION_MODE: "off"
+      RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE:-off}
+      RJ_ROUTE_AFFINITY_HORIZON_MODE: "off"
+      RJ_ROUTE_JOURNAL: ${RJ_ROUTE_JOURNAL:-true}
+      # SGLang publishes no vLLM KV-event feed and no GLM renderer profile exists.
+      RJ_TOKENIZER_MODE: "off"
+      RJ_EXACT_ROUTE_MODE: "off"
+      RJ_KV_EVENT_MODE: "off"
+      RJ_SNAPSHOT_ROUTE_MODE: "off"
+      RJ_UPSTREAM_ADMISSION_MODE: http
+      RJ_IDLE_DRAIN_MODE: "off"
