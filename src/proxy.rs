@@ -786,30 +786,37 @@ fn publish_initial_replica_state(
             guard.status().state,
             config.dspark_guard_expected_positions,
         );
-        let upstream_label = config.upstreams[index].as_str().trim_end_matches('/');
+        let upstream_label = config.upstream_label(index);
         metrics
             .upstream_info
-            .with_label_values(&[upstream_label, config.upstream_node(index)])
+            .with_label_values(&[&upstream_label, config.upstream_node(index)])
             .set(1.0);
-        guard.publish_probe_health(router, metrics, index, upstream_label, initial_probe_health);
+        guard.publish_probe_health(
+            router,
+            metrics,
+            index,
+            &upstream_label,
+            initial_probe_health,
+        );
     }
     if config.upstream_admission_mode != UpstreamAdmissionMode::Compatibility {
         return;
     }
-    for (index, upstream) in config.upstreams.iter().enumerate() {
+    for index in 0..config.upstreams.len() {
         router.set_healthy(index, false);
-        let label = upstream.as_str().trim_end_matches('/');
-        metrics.upstream_up.with_label_values(&[label]).set(0.0);
+        let label = config.upstream_label(index);
+        metrics.upstream_up.with_label_values(&[&label]).set(0.0);
         metrics
             .upstream_compatibility_admitted
-            .with_label_values(&[label])
+            .with_label_values(&[&label])
             .set(0.0);
     }
 }
 
 fn initialize_warmup_admission(config: &Config, metrics: &Metrics) -> Option<WarmupAdmission> {
-    for upstream in &config.upstreams {
-        let label = upstream.as_str().trim_end_matches('/');
+    for index in 0..config.upstreams.len() {
+        let label = config.upstream_label(index);
+        let label = label.as_str();
         metrics
             .upstream_warmup_ready
             .with_label_values(&[label])
@@ -1523,11 +1530,14 @@ impl Proxy {
         let mut selected = None;
         for (attempt, &(candidate, units)) in serving_candidates.iter().enumerate() {
             let url = upstream_url(&self.inner.config.upstreams[candidate], &parts.uri);
-            let mut outbound = self
-                .inner
-                .client
-                .request(parts.method.clone(), url)
-                .body(body.clone());
+            let mut outbound =
+                self.inner
+                    .client
+                    .request(parts.method.clone(), url)
+                    .body(pin_dp_rank(
+                        &body,
+                        self.inner.config.upstream_dp_rank(candidate),
+                    ));
             outbound = outbound.headers(filtered_headers(&parts.headers));
             let Some(load) = self.acquire_for_dispatch(candidate, units, failing_open) else {
                 failover_reason = Some("not_admitted");
@@ -2389,10 +2399,7 @@ impl Proxy {
     }
 
     fn upstream_label(&self, upstream: usize) -> String {
-        self.inner.config.upstreams[upstream]
-            .as_str()
-            .trim_end_matches('/')
-            .to_owned()
+        self.inner.config.upstream_label(upstream)
     }
 
     pub async fn probe_loop(self) {
@@ -3267,6 +3274,30 @@ const fn upstream_admission_label(mode: UpstreamAdmissionMode) -> &'static str {
         UpstreamAdmissionMode::Http => "http",
         UpstreamAdmissionMode::Compatibility => "compatibility",
     }
+}
+
+/// Pins a JSON-object request body to an `SGLang` data-parallel attention
+/// rank by appending `"routed_dp_rank"`. Appending rather than parsing keeps a
+/// multi-megabyte prompt to one copy, and because the engine keeps the last
+/// duplicate key, a caller cannot override the rank the router chose. A body
+/// that is not a JSON object is sent unchanged.
+fn pin_dp_rank(body: &Bytes, rank: Option<u32>) -> Bytes {
+    let Some(rank) = rank else {
+        return body.clone();
+    };
+    let content = body.trim_ascii();
+    let (Some(b'{'), Some(b'}')) = (content.first(), content.last()) else {
+        return body.clone();
+    };
+    let inner = content[1..content.len() - 1].trim_ascii();
+    let field = format!("\"routed_dp_rank\":{rank}}}");
+    let mut pinned = Vec::with_capacity(content.len() + field.len() + 1);
+    pinned.extend_from_slice(&content[..content.len() - 1]);
+    if !inner.is_empty() {
+        pinned.push(b',');
+    }
+    pinned.extend_from_slice(field.as_bytes());
+    Bytes::from(pinned)
 }
 
 fn upstream_url(base: &Url, uri: &Uri) -> Url {
@@ -5654,6 +5685,75 @@ mod tests {
         assert!((counter_sum(failovers, "to", &healthy_label) - 1.0).abs() < f64::EPSILON);
         healthy_task.abort();
         failing_task.abort();
+    }
+
+    #[test]
+    fn pinning_appends_the_rank_so_it_wins_over_a_caller_value() {
+        let pin = |body: &str, rank| {
+            String::from_utf8(pin_dp_rank(&Bytes::from(body.to_owned()), rank).to_vec()).unwrap()
+        };
+        assert_eq!(pin(r#"{"a":1}"#, None), r#"{"a":1}"#);
+        assert_eq!(pin(r#"{"a":1}"#, Some(3)), r#"{"a":1,"routed_dp_rank":3}"#);
+        let empty: serde_json::Value = serde_json::from_str(&pin(" { } \n", Some(0))).unwrap();
+        assert_eq!(empty, serde_json::json!({"routed_dp_rank": 0}));
+        assert_eq!(pin("[1,2]", Some(2)), "[1,2]");
+        let pinned = pin(r#"{"routed_dp_rank":7,"messages":[]}"#, Some(1));
+        let parsed: serde_json::Value = serde_json::from_str(&pinned).unwrap();
+        assert_eq!(parsed["routed_dp_rank"], 1, "the last duplicate key wins");
+    }
+
+    #[tokio::test]
+    async fn each_dp_rank_upstream_pins_its_requests_and_has_its_own_label() {
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        let (url, task) = start_upstream(AxumRouter::new().fallback(any(move |body: Bytes| {
+            let recorder = Arc::clone(&recorder);
+            async move {
+                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                recorder.lock().push(value["routed_dp_rank"].as_u64());
+                (StatusCode::OK, [("content-type", "application/json")], "{}")
+            }
+        })))
+        .await;
+        let joined = format!("{url},{url}");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_DP_RANKS" => Some("0,1".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        // The rank each request carries must be the upstream the router chose.
+        let mut chosen = Vec::new();
+        for _ in 0..2 {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .body(Body::from(
+                    r#"{"messages":[{"role":"user","content":"x"}]}"#,
+                ))
+                .unwrap();
+            let response = proxy.serve(request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let upstream: usize = response.headers()["x-ramjet-upstream"]
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            chosen.push(Some(u64::try_from(upstream).unwrap()));
+            proxy.publish_upstream_health(upstream, false);
+        }
+        assert_eq!(*seen.lock(), chosen);
+        let mut ranks = chosen.clone();
+        ranks.sort_unstable();
+        assert_eq!(ranks, [Some(0), Some(1)]);
+        let base = url.as_str().trim_end_matches('/');
+        assert_eq!(
+            upstream_labels(&proxy.inner.metrics.upstream_up),
+            [format!("{base}#dp0"), format!("{base}#dp1")]
+        );
+        task.abort();
     }
 
     #[tokio::test]
