@@ -398,6 +398,13 @@ sudo /usr/bin/python3 \
   maintain --day today --retention-days 30
 ```
 
+The installed collector validates the journal schema version, so it must be
+re-installed whenever an LB release bumps `src/journal.rs`'s `VERSION`. Until
+it is, every collection fails with `route-journal version is unsupported` and
+the history is lost at the next LB recreate: the v12 rollout on 2026-09-25 ran
+19 hours uncollected. A stopped container's log can still be recovered by ID
+with `collect --container <id>`.
+
 Inspect only bounded status and summary fields during routine operations:
 
 ```bash

@@ -1,5 +1,36 @@
 # node06 experiment journal
 
+## 2026-09-26 — GLM snapshot ROI: retention beyond the GPU would recover 0.44% of prompt tokens
+
+**Question.** Would CPU/NVMe-backed KDA snapshots that outlive GPU residency pay
+for themselves? Answered offline from the route-journal archive; no GPU work.
+
+**Method.** `bench/snapshot_roi.py` links each GLM turn to its predecessor via
+the served-block ages in journal v11+ (97% match a predecessor finish within
+±1ms) and credits the predecessor's engine-reported prompt as the prefix a
+snapshot would have supplied, per retention horizon. 30,557 requests on
+`glm53sm120-b`/`-c`, 2026-09-12 to 2026-09-26, excluding the 07:00-07:13
+synthetic lane replay.
+
+**Result.** Engines served 98.58% of 3.44B prompt tokens from cache. Infinite
+retention on either replica would add 0.44% (15.3M tokens, 380 GPU-s/day); 75%
+of that needed <5 min and 94.5% <30 min, i.e. device-pool thrash, not idle
+expiry. After the 2026-09-25 cap-2 + HiCache rollout: 0.025% same-replica,
+0.125% any-replica. Of 28,848 linked turns 131 came back after >1h and 115 of
+those still hit. Snapshots that would actually be reused peak at 16 GB; a blind
+24h-7d TTL tier would need 0.5-1.3 TB. Verified geometry: 81.3 MB of KDA state
+per replica plus 15.85 KB/token of KV+draft KV, so KV dominates past ~5k tokens.
+Restore would be ~9x faster than prefill; volume, not unit economics, is what
+is missing.
+
+**Decision.** A (little benefit): no snapshot tier. Full report:
+`docs/glm_snapshot_roi.md`. Re-run weekly against the archive.
+
+**Also found.** node06's installed journal collector rejected v12 from the
+v0.6.2 LB rollout onward (19 hours uncollected). Reinstalled from `main`
+(old copy `route_journal_archive.py.v11-backup-20260926`) and recovered the
+stopped container `bb2d425b7967` by ID (2,843 records).
+
 ## 2026-09-26 — long-prompt lane turned off: two long conversations do not fit one replica
 
 **Replay.** Through the live LB (lane on), two synthetic conversations started
