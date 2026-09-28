@@ -165,7 +165,7 @@ def bounded_output_limit(start):
     }.get(endpoint, set())
     valid = (
         type(version) is int
-        and version in range(7, 14)
+        and version in range(7, 15)
         and isinstance(raw, dict)
         and set(raw) == OUTPUT_LIMIT_FIELDS
         and type(raw.get("policy_version")) is int

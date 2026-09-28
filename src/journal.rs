@@ -17,7 +17,7 @@ use crate::{
     usage::Accumulator,
 };
 
-const VERSION: u8 = 13;
+const VERSION: u8 = 14;
 
 pub struct RouteJournal {
     enabled: bool,
@@ -53,6 +53,7 @@ pub struct StartRecord<'a> {
     rotation: usize,
     alpha: f64,
     max_affinity_blocks: usize,
+    affinity_basis: &'static str,
     chunk_bytes: usize,
     load_unit_bytes: usize,
     max_load_units: usize,
@@ -162,6 +163,7 @@ impl RouteJournal {
             rotation: decision.rotation,
             alpha: config.route_alpha,
             max_affinity_blocks: config.route_max_overlap_blocks,
+            affinity_basis: config.route_affinity_basis.label(),
             chunk_bytes: config.route_chunk_bytes,
             load_unit_bytes: config.route_load_unit_bytes,
             max_load_units: config.route_max_load_units,
@@ -299,6 +301,8 @@ mod tests {
             speculation_profiles: vec![crate::config::SpeculationProfile::Standard],
             affinity: Affinity::Prefix,
             affinity_horizon: crate::affinity_horizon::AffinityHorizonConfig::off(),
+            affinity_basis: crate::config::AffinityBasis::Absolute,
+            affinity_groups: Vec::new(),
         });
         let prepared = PreparedRequest::new(
             Endpoint::Chat,
@@ -351,9 +355,10 @@ mod tests {
         }
         assert!(encoded.contains("\"chosen\":1"));
         assert!(encoded.contains("\"served_chosen\":1"));
-        assert!(encoded.contains("\"v\":13"));
+        assert!(encoded.contains("\"v\":14"));
         assert!(encoded.contains("\"request_id\":\"req_01m2test\""));
         assert!(encoded.contains("\"long_request_lane\":{\"outcome\":\"lane\"}"));
+        assert!(encoded.contains("\"affinity_basis\":\"absolute\""));
         assert!(
             encoded.contains("\"prefix_single_flight\":{\"mode\":\"off\",\"outcome\":\"off\"}")
         );
@@ -399,7 +404,7 @@ mod tests {
         };
 
         let encoded = serde_json::to_string(&record).unwrap();
-        assert!(encoded.contains("\"v\":13"));
+        assert!(encoded.contains("\"v\":14"));
         assert!(encoded.contains("\"request_id\":\"req_01m2test\""));
         assert!(encoded.contains("\"upstream\":1"));
         assert!(encoded.contains("\"request_load_units\":4"));

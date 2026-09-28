@@ -16,7 +16,7 @@ use crate::{
         AffinityHorizonConfig, AffinityHorizonMode, AffinityHorizonObservation,
         AffinityHorizonOutcome, HorizonEstimator, Locality,
     },
-    config::{Affinity, SpeculationProfile, SpeculationRouteMode},
+    config::{Affinity, AffinityBasis, SpeculationProfile, SpeculationRouteMode},
 };
 
 #[derive(Clone, Debug)]
@@ -34,6 +34,12 @@ pub struct RouterConfig {
     pub speculation_profiles: Vec<SpeculationProfile>,
     pub affinity: Affinity,
     pub affinity_horizon: AffinityHorizonConfig,
+    /// What a candidate's cached prefix is scored against; see `AffinityBasis`.
+    pub affinity_basis: AffinityBasis,
+    /// Peer group per upstream for the marginal basis: replicas that can serve
+    /// the same requests (same API profile and served model). Empty means one
+    /// group, which is exact for single-model deployments.
+    pub affinity_groups: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -323,6 +329,33 @@ struct Score {
     ages: Vec<[u64; 2]>,
 }
 
+/// For each candidate, the overlap of the least-warm serving replica in its
+/// peer group. Scoring overlap above that floor credits only the prefix a
+/// replica holds that its peers would have to recompute, so a prefix every
+/// peer already caches (a shared system prompt) no longer saturates the
+/// affinity cap and hides the session history beyond it. A group with no
+/// serving member has a floor of zero; its candidates cannot win anyway.
+fn marginal_baselines(
+    states: &[UpstreamState],
+    localities: &[Locality],
+    groups: &[usize],
+    overlap_of: impl Fn(&Locality) -> usize,
+) -> Vec<usize> {
+    let group = |index: usize| groups.get(index).copied().unwrap_or(0);
+    (0..states.len())
+        .map(|index| {
+            states
+                .iter()
+                .zip(localities)
+                .enumerate()
+                .filter(|(peer, (state, _))| state.serving() && group(*peer) == group(index))
+                .map(|(_, (_, locality))| overlap_of(locality))
+                .min()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
 fn compare_scores(
     left: &Score,
     right: &Score,
@@ -459,6 +492,11 @@ impl Router {
             config.speculation_profiles.len(),
             config.upstreams.len(),
             "router needs one speculation profile per upstream"
+        );
+        assert!(
+            config.affinity_groups.is_empty()
+                || config.affinity_groups.len() == config.upstreams.len(),
+            "router needs no affinity groups or one per upstream"
         );
         let capacity = NonZeroUsize::new(config.index_capacity).expect("positive index capacity");
         let load_estimator = RequestLoadEstimator::from_router_config(&config);
@@ -671,18 +709,31 @@ impl Router {
             .collect::<Vec<_>>();
         let cap = self.config.max_overlap_blocks;
         let score = |use_fresh: bool| {
+            let overlap_of = |locality: &Locality| {
+                if use_fresh {
+                    locality.fresh_overlap
+                } else {
+                    locality.raw_overlap
+                }
+            };
+            let baselines = match self.config.affinity_basis {
+                AffinityBasis::Absolute => None,
+                AffinityBasis::Marginal => Some(marginal_baselines(
+                    &inner.states,
+                    &localities,
+                    &self.config.affinity_groups,
+                    overlap_of,
+                )),
+            };
             inner
                 .states
                 .iter()
                 .zip(&localities)
                 .enumerate()
                 .map(|(index, (state, locality))| {
-                    let overlap = if use_fresh {
-                        locality.fresh_overlap
-                    } else {
-                        locality.raw_overlap
-                    };
-                    let affinity = overlap.min(cap);
+                    let overlap = overlap_of(locality);
+                    let baseline = baselines.as_ref().map_or(0, |baselines| baselines[index]);
+                    let affinity = overlap.saturating_sub(baseline).min(cap);
                     let request_load = self
                         .load_estimator
                         .estimate_blocks(body_bytes, overlap)
@@ -1168,6 +1219,8 @@ mod tests {
             speculation_profiles: vec![SpeculationProfile::Standard; 2],
             affinity: Affinity::Prefix,
             affinity_horizon: AffinityHorizonConfig::off(),
+            affinity_basis: crate::config::AffinityBasis::Absolute,
+            affinity_groups: Vec::new(),
         }
     }
 
@@ -1410,6 +1463,147 @@ mod tests {
         let cold_units = cold.request_load_units;
         let _failover_load = router.acquire(1, cold_units);
         assert_eq!(router.state(1).map(|state| state.1), Some(cold_units));
+    }
+
+    fn agent_turn(system: &str, history: &[&str]) -> Vec<u8> {
+        let mut messages = vec![json!({"role": "system", "content": system})];
+        for (turn, content) in history.iter().enumerate() {
+            let role = if turn % 2 == 0 { "user" } else { "assistant" };
+            messages.push(json!({"role": role, "content": content}));
+        }
+        serde_json::to_vec(&json!({"model": "m", "messages": messages})).unwrap()
+    }
+
+    /// Replica `home` has served a session's history and `peers` only the
+    /// shared system prompt, which alone spans more blocks than the cap.
+    fn warm_session(router: &Router, home: usize, peers: &[usize]) -> Vec<u8> {
+        let system = "shared agent manual ".repeat(200);
+        let task = "session specific task and tool output ".repeat(80);
+        router.observe(home, &router.fingerprints(&agent_turn(&system, &[&task])));
+        for &peer in peers {
+            router.observe(
+                peer,
+                &router.fingerprints(&agent_turn(&system, &["another session"])),
+            );
+        }
+        agent_turn(&system, &[&task, "reply", "next tool result"])
+    }
+
+    #[test]
+    fn absolute_basis_lets_a_shared_prompt_hide_session_history() {
+        let router = Arc::new(Router::new(config()));
+        let follow_up = warm_session(&router, 0, &[1]);
+        let _load = router.acquire(0, 1);
+        let decision = router.route(&follow_up);
+        let state = |index| {
+            decision
+                .candidate_state
+                .iter()
+                .find(|candidate| candidate.index == index)
+                .unwrap()
+        };
+        assert!(state(0).overlap_blocks > state(1).overlap_blocks);
+        assert!(state(1).overlap_blocks > 32);
+        assert_eq!(state(0).affinity_blocks, 32);
+        assert_eq!(state(1).affinity_blocks, 32);
+        assert_eq!(decision.candidates[0], 1, "one load unit moves the session");
+    }
+
+    #[test]
+    fn marginal_basis_keeps_session_history_past_a_shared_prompt() {
+        let mut config = config();
+        config.affinity_basis = AffinityBasis::Marginal;
+        let router = Arc::new(Router::new(config));
+        let follow_up = warm_session(&router, 0, &[1]);
+        let _load = router.acquire(0, 1);
+        let decision = router.route(&follow_up);
+        assert_eq!(decision.candidates[0], 0);
+        assert_eq!(decision.outcome, Outcome::Overlap);
+        assert_eq!(decision.affinity_blocks, 32);
+        let peer = &decision.candidate_state[1];
+        assert_eq!(peer.index, 1);
+        assert_eq!(
+            peer.affinity_blocks, 0,
+            "the peer's shared prompt is the floor"
+        );
+        assert!(peer.overlap_blocks > 32, "raw overlap is still reported");
+
+        // The cap still bounds what affinity can buy against load.
+        let _more = (0..8).map(|_| router.acquire(0, 1)).collect::<Vec<_>>();
+        assert_eq!(router.route(&follow_up).candidates[0], 1);
+    }
+
+    #[test]
+    fn marginal_basis_equals_absolute_when_a_peer_is_cold() {
+        for (warm, load) in [(0, 0), (0, 3), (0, 9), (1, 2)] {
+            let decide = |basis| {
+                let mut config = config();
+                config.affinity_basis = basis;
+                let router = Arc::new(Router::new(config));
+                let body = chat(&"warm prompt ".repeat(300), "task");
+                router.observe(warm, &router.fingerprints(&body));
+                let _load = (0..load)
+                    .map(|_| router.acquire(warm, 1))
+                    .collect::<Vec<_>>();
+                router.route(&body)
+            };
+            // Block ages are wall-clock and differ between the two routers.
+            let scored = |decision: &Decision| {
+                decision
+                    .candidate_state
+                    .iter()
+                    .map(|candidate| {
+                        (
+                            candidate.index,
+                            candidate.overlap_blocks,
+                            candidate.affinity_blocks,
+                            candidate.load_units,
+                            candidate.request_load_units,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let absolute = decide(AffinityBasis::Absolute);
+            let marginal = decide(AffinityBasis::Marginal);
+            assert_eq!(absolute.candidates, marginal.candidates);
+            assert_eq!(scored(&absolute), scored(&marginal));
+            assert_eq!(absolute.outcome, marginal.outcome);
+        }
+    }
+
+    fn three_upstreams(groups: Vec<usize>) -> RouterConfig {
+        let mut config = config();
+        config.upstreams.push(Url::parse("http://c:8000").unwrap());
+        config.speculation_profiles = vec![SpeculationProfile::Standard; 3];
+        config.affinity_basis = AffinityBasis::Marginal;
+        config.affinity_groups = groups;
+        config
+    }
+
+    #[test]
+    fn marginal_baseline_comes_from_the_model_peer_group() {
+        // Upstream 0 serves another model and never sees this prefix. As one
+        // flat group its zero overlap would make the floor zero and the shared
+        // prompt would saturate the cap again.
+        for (groups, expected) in [(vec![0, 1, 1], 2), (Vec::new(), 1)] {
+            let router = Arc::new(Router::new(three_upstreams(groups)));
+            let follow_up = warm_session(&router, 2, &[1]);
+            let _load = router.acquire(2, 1);
+            let mut decision = router.route(&follow_up);
+            assert!(decision.restrict_to(&[false, true, true]));
+            assert_eq!(decision.candidates[0], expected);
+        }
+    }
+
+    #[test]
+    fn a_non_serving_peer_does_not_lower_the_marginal_floor() {
+        let router = Arc::new(Router::new(three_upstreams(Vec::new())));
+        let follow_up = warm_session(&router, 2, &[1]);
+        router.set_healthy(0, false);
+        let _load = router.acquire(2, 1);
+        assert_eq!(router.route(&follow_up).candidates[0], 2);
+        router.set_healthy(0, true);
+        assert_eq!(router.route(&follow_up).candidates[0], 1);
     }
 
     #[test]

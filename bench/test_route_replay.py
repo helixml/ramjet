@@ -6,6 +6,7 @@ from route_replay import (
     affinity_horizon_record_mismatch,
     choose,
     credited_overlap,
+    parse_affinity_bases,
     parse_horizons,
     parse_projected_loads,
     records,
@@ -52,6 +53,42 @@ class RouteReplayTest(unittest.TestCase):
         record = start(left=(100, 9), right=(0, 0))
         self.assertEqual(choose(record, alpha=4, cap=32), 1)
         self.assertEqual(choose(record, alpha=4, cap=64), 0)
+
+    def test_marginal_basis_scores_overlap_above_the_healthy_floor(self):
+        # Both replicas hold a 60-block shared prompt; upstream 0 also holds
+        # 40 blocks of session history and one unit of load.
+        record = start(left=(100, 1), right=(60, 0))
+        self.assertEqual(choose(record, alpha=4, cap=32), 1)
+        self.assertEqual(choose(record, alpha=4, cap=32, affinity_basis="absolute"), 1)
+        self.assertEqual(choose(record, alpha=4, cap=32, affinity_basis="marginal"), 0)
+        # An unhealthy peer does not set the floor.
+        record["candidates"].append(
+            {"upstream": 2, "rank": 2, "overlap_blocks": 0, "affinity_blocks": 0, "load_units": 0, "request_load_units": 1, "healthy": False}
+        )
+        self.assertEqual(choose(record, alpha=4, cap=32, affinity_basis="marginal"), 0)
+
+    def test_v14_recorded_basis_is_replayed_and_checked(self):
+        record = aged_start()
+        record["v"] = 14
+        record["affinity_basis"] = "marginal"
+        record["candidates"][1]["overlap_blocks"] = 10
+        record["candidates"][0]["affinity_blocks"] = 30
+        record["candidates"][1]["affinity_blocks"] = 0
+        self.assertFalse(affinity_horizon_record_mismatch(record))
+        self.assertEqual(choose(record, alpha=4, cap=32), 0)
+        record["candidates"][0]["affinity_blocks"] = 32
+        self.assertTrue(affinity_horizon_record_mismatch(record))
+        record["affinity_basis"] = "relative"
+        self.assertTrue(affinity_horizon_record_mismatch(record))
+
+    def test_affinity_basis_sweep_labels_rows(self):
+        record = start(left=(100, 1), right=(60, 0))
+        rows = replay([record], {}, [4], [32], affinity_bases=["absolute", "marginal"])
+        self.assertEqual([row["affinity_basis"] for row in rows], ["absolute", "marginal"])
+        self.assertEqual([row["route_counts"] for row in rows], [{"1": 1}, {"0": 1}])
+        self.assertEqual(parse_affinity_bases("marginal, absolute,marginal"), ["marginal", "absolute"])
+        with self.assertRaises(argparse.ArgumentTypeError):
+            parse_affinity_bases("relative")
 
     def test_deeper_overlap_breaks_equal_load_capped_tie(self):
         record = start(left=(100, 0), right=(40, 0), rotation=1)
@@ -147,7 +184,7 @@ class RouteReplayTest(unittest.TestCase):
 
     def test_boolean_and_future_journal_versions_are_not_accepted(self):
         boolean = {**start(), "v": True}
-        future = {**start(), "v": 14}
+        future = {**start(), "v": 15}
         self.assertEqual(
             list(records([__import__("json").dumps(boolean), __import__("json").dumps(future)])),
             [],

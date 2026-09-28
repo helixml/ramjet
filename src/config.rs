@@ -98,6 +98,7 @@ pub struct Config {
     /// lane is not configured.
     pub route_long_prompt_upstreams: Vec<bool>,
     pub affinity: Affinity,
+    pub route_affinity_basis: AffinityBasis,
     pub route_affinity_horizon: AffinityHorizonConfig,
     pub session_affinity_mode: SessionAffinityMode,
     pub session_affinity_key: Option<SecretString>,
@@ -152,6 +153,28 @@ pub struct Config {
 pub enum Affinity {
     Prefix,
     Load,
+}
+
+/// What a candidate's cached prefix is measured against before the
+/// `RJ_ROUTE_MAX_OVERLAP_BLOCKS` cap applies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AffinityBasis {
+    /// Leading blocks the candidate has served, capped. A prefix every peer
+    /// already holds can fill the cap on all of them.
+    Absolute,
+    /// Leading blocks beyond the least-warm serving peer that could take the
+    /// same request, capped: only the prefix peers would have to recompute.
+    Marginal,
+}
+
+impl AffinityBasis {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Absolute => "absolute",
+            Self::Marginal => "marginal",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -461,6 +484,31 @@ pub fn reject_legacy_env(keys: impl Iterator<Item = String>) -> Result<(), Confi
 }
 
 impl Config {
+    /// Peer group per upstream for marginal affinity: replicas share a group
+    /// exactly when they serve the same API profile and model, which is the
+    /// set model/API ownership narrows a request to after scoring.
+    #[must_use]
+    pub fn route_affinity_groups(&self) -> Vec<usize> {
+        let mut keys: Vec<(UpstreamApiProfile, Option<&str>)> = Vec::new();
+        (0..self.upstreams.len())
+            .map(|index| {
+                let key = (
+                    self.upstream_api_profiles
+                        .get(index)
+                        .copied()
+                        .unwrap_or(UpstreamApiProfile::OpenAi),
+                    self.upstream_models.get(index).map(String::as_str),
+                );
+                keys.iter()
+                    .position(|known| *known == key)
+                    .unwrap_or_else(|| {
+                        keys.push(key);
+                        keys.len() - 1
+                    })
+            })
+            .collect()
+    }
+
     /// Loads and validates the public environment-variable contract.
     ///
     /// # Errors
@@ -593,6 +641,27 @@ impl Config {
             "load" => Affinity::Load,
             value => return Err(invalid("RJ_AFFINITY", value.to_owned(), "prefix or load")),
         };
+        let route_affinity_basis = match get("RJ_ROUTE_AFFINITY_BASIS")
+            .as_deref()
+            .unwrap_or("absolute")
+        {
+            "absolute" => AffinityBasis::Absolute,
+            "marginal" => AffinityBasis::Marginal,
+            value => {
+                return Err(invalid(
+                    "RJ_ROUTE_AFFINITY_BASIS",
+                    value.to_owned(),
+                    "absolute or marginal",
+                ));
+            }
+        };
+        if route_affinity_basis != AffinityBasis::Absolute && affinity != Affinity::Prefix {
+            return Err(invalid(
+                "RJ_ROUTE_AFFINITY_BASIS",
+                route_affinity_basis.label().to_owned(),
+                "absolute unless RJ_AFFINITY=prefix",
+            ));
+        }
         let route_affinity_horizon =
             affinity_horizon_settings(&mut get, upstreams.len(), affinity)?;
         let route_prefix_single_flight_mode = match get("RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE")
@@ -877,6 +946,7 @@ impl Config {
             route_long_prompt_bytes,
             route_long_prompt_upstreams,
             affinity,
+            route_affinity_basis,
             route_affinity_horizon,
             session_affinity_mode: session_affinity.mode,
             session_affinity_key: session_affinity.key,
@@ -2417,6 +2487,51 @@ mod tests {
             "RJ_UPSTREAM" => Some("http://a:8000,http://b:8000".to_owned()),
             other => overrides.get(other).map(|value| (*value).to_owned()),
         })
+    }
+
+    #[test]
+    fn affinity_basis_defaults_to_absolute_and_marginal_needs_prefix_routing() {
+        assert_eq!(
+            two_upstreams(&[]).unwrap().route_affinity_basis,
+            AffinityBasis::Absolute
+        );
+        assert_eq!(
+            two_upstreams(&[("RJ_ROUTE_AFFINITY_BASIS", "marginal")])
+                .unwrap()
+                .route_affinity_basis,
+            AffinityBasis::Marginal
+        );
+        assert!(two_upstreams(&[("RJ_ROUTE_AFFINITY_BASIS", "relative")]).is_err());
+        assert!(
+            two_upstreams(&[
+                ("RJ_ROUTE_AFFINITY_BASIS", "marginal"),
+                ("RJ_AFFINITY", "load"),
+            ])
+            .is_err(),
+            "load routing scores no prefix, so a basis has nothing to change"
+        );
+        assert!(
+            two_upstreams(&[
+                ("RJ_ROUTE_AFFINITY_BASIS", "absolute"),
+                ("RJ_AFFINITY", "load"),
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn affinity_groups_follow_model_and_api_ownership() {
+        assert_eq!(two_upstreams(&[]).unwrap().route_affinity_groups(), [0, 0]);
+        let values = HashMap::from([
+            (
+                "RJ_UPSTREAM",
+                "http://q:8000,http://g1:8000,http://g2:8000,http://s:8000",
+            ),
+            ("RJ_UPSTREAM_MODELS", "qwen,glm,glm,glm"),
+            ("RJ_UPSTREAM_APIS", "openai,openai,openai,systemone"),
+        ]);
+        let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(config.route_affinity_groups(), [0, 1, 1, 2]);
     }
 
     #[test]

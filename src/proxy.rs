@@ -3602,6 +3602,8 @@ mod tests {
             speculation_profiles: config.route_speculation_profiles.clone(),
             affinity: config.affinity,
             affinity_horizon: config.route_affinity_horizon.clone(),
+            affinity_basis: crate::config::AffinityBasis::Absolute,
+            affinity_groups: Vec::new(),
         }));
         Proxy::new(config, reqwest::Client::new(), metrics, router, inventories).unwrap()
     }
@@ -4168,6 +4170,8 @@ mod tests {
             speculation_profiles: config.route_speculation_profiles.clone(),
             affinity: config.affinity,
             affinity_horizon: config.route_affinity_horizon.clone(),
+            affinity_basis: crate::config::AffinityBasis::Absolute,
+            affinity_groups: Vec::new(),
         }));
         let client = reqwest::Client::new();
         let tokenizer = TokenizerObserver::with_test_attestation(
@@ -5345,6 +5349,8 @@ mod tests {
             speculation_profiles: config.route_speculation_profiles.clone(),
             affinity: config.affinity,
             affinity_horizon: config.route_affinity_horizon.clone(),
+            affinity_basis: crate::config::AffinityBasis::Absolute,
+            affinity_groups: Vec::new(),
         }));
         let proxy = Proxy::new(
             config,

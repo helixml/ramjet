@@ -185,6 +185,8 @@ mod tests {
             speculation_profiles: vec![SpeculationProfile::Standard; upstreams],
             affinity: Affinity::Prefix,
             affinity_horizon: AffinityHorizonConfig::off(),
+            affinity_basis: crate::config::AffinityBasis::Absolute,
+            affinity_groups: Vec::new(),
         }))
     }
 

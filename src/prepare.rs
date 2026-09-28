@@ -391,6 +391,8 @@ mod tests {
             speculation_profiles: vec![crate::config::SpeculationProfile::Standard],
             affinity: Affinity::Prefix,
             affinity_horizon: crate::affinity_horizon::AffinityHorizonConfig::off(),
+            affinity_basis: crate::config::AffinityBasis::Absolute,
+            affinity_groups: Vec::new(),
         })
     }
 

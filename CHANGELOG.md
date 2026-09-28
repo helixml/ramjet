@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Adds `RJ_ROUTE_AFFINITY_BASIS=marginal` (default `absolute`, unchanged).
+  With a shared system prompt longer than the 64KiB affinity cap, every
+  replica scored full affinity and one load unit moved an agent session off
+  the replica holding its history. `marginal` credits only the prefix beyond
+  the least-warm serving peer of the same model and API profile, so session
+  history outweighs small load differences while the cap still bounds the
+  trade. Route journal v14 records the basis; `route_replay.py
+  --affinity-bases` and the journal archive admit it.
 - The Qwen/GLM/Kev deployment now defaults the long-prompt lane off
   (`RJ_ROUTE_LONG_PROMPT_BYTES=0`). Two concurrent ~290k-token GLM
   conversations do not fit one replica's KV pool, so confining both to one
