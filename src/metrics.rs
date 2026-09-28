@@ -63,6 +63,7 @@ pub struct Metrics {
     pub dspark_guard_effective_tokens_per_step: GaugeVec,
     pub dspark_guard_position_acceptance: GaugeVec,
     pub upstream_errors: CounterVec,
+    pub upstream_failovers: CounterVec,
     pub client_disconnects: CounterVec,
     pub last_upstream_success: GaugeVec,
     pub upstream_requests: CounterVec,
@@ -432,6 +433,11 @@ impl Metrics {
                 "ramjet_upstream_errors_total",
                 "Proxied requests that failed before receiving a complete upstream response",
                 &["endpoint", "reason"],
+            )?,
+            upstream_failovers: counter(
+                "ramjet_upstream_failovers_total",
+                "Requests served by a later candidate after the first attempt failed, by that failure",
+                &["from", "to", "reason"],
             )?,
             client_disconnects: counter(
                 "ramjet_client_disconnects_total",
@@ -1086,6 +1092,7 @@ impl Metrics {
             Box::new(self.dspark_guard_effective_tokens_per_step.clone()),
             Box::new(self.dspark_guard_position_acceptance.clone()),
             Box::new(self.upstream_errors.clone()),
+            Box::new(self.upstream_failovers.clone()),
             Box::new(self.client_disconnects.clone()),
             Box::new(self.last_upstream_success.clone()),
             Box::new(self.upstream_requests.clone()),

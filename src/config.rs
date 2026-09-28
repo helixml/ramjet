@@ -24,6 +24,7 @@ const MAX_SHADOW_SOAK_ATTEMPTS: usize = 2_000_000;
 const MAX_SHADOW_SOAK_TOKEN_BYTES: usize = 256 << 20;
 const MAX_SHADOW_SOAK_TIMEOUT_MS: usize = 15 * 60 * 1_000;
 const MAX_UPSTREAM_ADMISSION_TIMEOUT_MS: usize = 30_000;
+const MAX_UPSTREAM_POOL_IDLE_TIMEOUT_MS: usize = 300_000;
 const MAX_DSPARK_GUARD_INTERVAL_MS: usize = 60_000;
 /// A day of quiet is far beyond any useful setting and keeps the internal
 /// millisecond arithmetic well clear of overflow.
@@ -58,6 +59,10 @@ pub struct Config {
     pub upstream_token: Option<String>,
     pub upstream_admission_mode: UpstreamAdmissionMode,
     pub upstream_admission_timeout_ms: usize,
+    /// How long an idle pooled upstream connection may be reused. It must stay
+    /// below the engines' HTTP keep-alive (5s in both `vLLM` and `SGLang`), or a
+    /// request can be written onto a socket the server is closing.
+    pub upstream_pool_idle_timeout_ms: usize,
     pub upstream_warmup_mode: WarmupAdmissionMode,
     pub upstream_warmup_consecutive_successes: usize,
     pub upstream_warmup_stable_seconds: usize,
@@ -902,6 +907,12 @@ impl Config {
                 "RJ_UPSTREAM_ADMISSION_TIMEOUT_MS",
                 5_000,
                 MAX_UPSTREAM_ADMISSION_TIMEOUT_MS,
+            )?,
+            upstream_pool_idle_timeout_ms: bounded_positive(
+                &mut get,
+                "RJ_UPSTREAM_POOL_IDLE_TIMEOUT_MS",
+                4_000,
+                MAX_UPSTREAM_POOL_IDLE_TIMEOUT_MS,
             )?,
             dspark_guard_mode,
             dspark_guard_interval_ms,
@@ -2993,11 +3004,29 @@ mod tests {
     }
 
     #[test]
+    fn upstream_pool_idle_timeout_is_bounded() {
+        for invalid in ["0", "300001"] {
+            let values = HashMap::from([("RJ_UPSTREAM_POOL_IDLE_TIMEOUT_MS", invalid)]);
+            assert!(matches!(
+                Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+                Err(ConfigError::InvalidValue {
+                    key: "RJ_UPSTREAM_POOL_IDLE_TIMEOUT_MS",
+                    ..
+                })
+            ));
+        }
+        let values = HashMap::from([("RJ_UPSTREAM_POOL_IDLE_TIMEOUT_MS", "2500")]);
+        let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(config.upstream_pool_idle_timeout_ms, 2_500);
+    }
+
+    #[test]
     fn defaults_match_go_contract() {
         let config = Config::from_lookup(|_| None).unwrap();
         assert_eq!(config.upstreams[0].as_str(), "http://ds4-flash:8000/");
         assert_eq!(config.upstream_admission_mode, UpstreamAdmissionMode::Http);
         assert_eq!(config.upstream_admission_timeout_ms, 5_000);
+        assert_eq!(config.upstream_pool_idle_timeout_ms, 4_000);
         assert_eq!(config.upstream_warmup_mode, WarmupAdmissionMode::Off);
         assert_eq!(config.upstream_warmup_consecutive_successes, 3);
         assert_eq!(config.upstream_warmup_stable_seconds, 30);
