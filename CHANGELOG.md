@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+- The Qwen/GLM/Kev deployment now defaults the long-prompt lane off
+  (`RJ_ROUTE_LONG_PROMPT_BYTES=0`). Two concurrent ~290k-token GLM
+  conversations do not fit one replica's KV pool, so confining both to one
+  replica cost 23-30s per turn instead of ~4s. See EXPERIMENTS.md.
+- `bench/snapshot_roi.py` replays archived route journals against
+  hypothetical cache-retention horizons and sizes the snapshot tier they would
+  need. On 13.6 days of GLM traffic infinite retention would have avoided only
+  0.44% of prompt tokens, so no CPU/NVMe snapshot tier is planned
+  (`docs/glm_snapshot_roi.md`).
+- `serving_cost_audit.py` accepts journal v11/v12 output-limit telemetry, and
+  a test now fails when any journal consumer rejects the version the LB emits.
+
+## 0.6.2 — 2026-09-25
+
+### GLM-5.3 prefix-cache capacity and SwiGLU clamp (node06)
+
+- The GLM TP2 replicas cap cached linear-attention states per radix path
+  (`--mamba-max-states-per-path=2`) and add a 4GB-per-rank HiCache host tier.
+  One ~310k-token prompt used to evict every other session's prefix through
+  the 28-slot state pool; six 20k-token sessions now stay 99.6% cached across
+  it, and twelve fit on the device instead of none.
+- A derived image (`Dockerfile.swiglu-clamp`) routes GLM-5.3's
+  `swiglu_limit = 10.0` into the SM120 W4A16 routed-expert kernel, which the
+  pinned SGLang and FlashInfer dropped. GSM8K 96.29% -> 96.44%.
+- Adds `bench/gsm8k_check.py`, `bench/prefix_eviction_probe.py`, and the
+  one-replica `node06-engine-rollout.sh` owner.
+
+### Long-prompt lane
+
+- Adds an opt-in long-prompt lane. `RJ_ROUTE_LONG_PROMPT_BYTES` sets a
+  request-body threshold and `RJ_ROUTE_LONG_PROMPT_UPSTREAMS` (`lane` or `-`
+  per upstream) names the replicas that may serve prompts at or above it.
+  A long request is restricted to its model's serving lane members after
+  model/API ownership is applied; if none is serving it routes normally.
+  Shorter requests and models without a lane member are unchanged. Unset,
+  or a threshold of `0`, is off.
+- Adds `ramjet_route_long_prompt_total{upstream,outcome}` (`lane` or
+  `fallback`) and route-journal v12's fixed-label `long_request_lane`
+  outcome; `route_replay.py` and `route_journal_archive.py` admit v12.
+- The Qwen/GLM/Kev deployment defaults the lane to `glm53sm120-c` at
+  600,000 bytes (about 150k tokens), protecting `glm53sm120-b`'s prefix cache
+  from ~310k-token prefills.
+
 ### TypeSafe System One upstreams
 
 - Adds a dense `RJ_UPSTREAM_APIS` ownership map and first-class

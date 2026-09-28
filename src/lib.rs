@@ -26,6 +26,7 @@ pub mod kv_fence;
 pub mod kv_snapshot;
 pub mod kv_transport;
 pub mod kv_wire;
+pub mod long_prompt_lane;
 pub mod machineview;
 pub mod metrics;
 pub mod model;

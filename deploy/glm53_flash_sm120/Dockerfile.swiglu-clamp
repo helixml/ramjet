@@ -1,0 +1,12 @@
+# Derived from the qualified nullable-parser image (image ID
+# sha256:024a988fd0c0e15d80e382073c05657b2d57f52611c324599508cdb62b9debb8).
+# Build only on a host where that tag resolves to that exact ID.
+FROM ramjet/glm53-sm120:nullable-parser-r1
+
+COPY patch-swiglu-clamp.py /tmp/patch-swiglu-clamp.py
+RUN python3 /tmp/patch-swiglu-clamp.py \
+    && rm -f /tmp/patch-swiglu-clamp.py
+
+LABEL org.opencontainers.image.title="SGLang GLM-5.3 SM120 nullable parser + routed-expert SwiGLU clamp" \
+      org.opencontainers.image.base.name="ramjet/glm53-sm120:nullable-parser-r1" \
+      org.opencontainers.image.source="https://github.com/helixml/ramjet"

@@ -72,20 +72,34 @@ class RouteJournalArchiveTest(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_v12_request_id_is_approved_and_v13_is_not(self):
+    def test_v13_request_id_is_approved_and_v14_is_not(self):
+        record = start(1, 1_000)
+        record["v"] = 13
+        record["request_id"] = "req_01m2test"
+        record["long_request_lane"] = {"outcome": "lane"}
+        self.assertEqual(archive.decode_record(json.dumps(record)), record)
+        record["v"] = 14
+        with self.assertRaises(archive.ArchiveError):
+            archive.decode_record(json.dumps(record))
+
+    def test_v12_long_request_lane_is_approved(self):
         record = start(1, 1_000)
         record["v"] = 12
-        record["request_id"] = "req_01m2test"
+        record["long_request_lane"] = {"outcome": "lane"}
+        self.assertEqual(archive.decode_record(json.dumps(record)), record)
+        record["long_request_lane"]["upstream_url"] = "leak"
+        with self.assertRaises(archive.ArchiveError):
+            archive.decode_record(json.dumps(record))
+
+    def test_v11_affinity_horizon_fields_are_approved(self):
+        record = start(1, 1_000)
+        record["v"] = 11
         record["affinity_horizon"] = {"mode": "observe", "source": "fill", "outcome": "fresh"}
         record["candidates"][0].update(
             {"stale_blocks": 0, "horizon_ms": 300_000, "overlap_ages_ms": [[8, 1_000]]}
         )
         self.assertEqual(archive.decode_record(json.dumps(record)), record)
         record["affinity_horizon"]["prompt"] = "leak"
-        with self.assertRaises(archive.ArchiveError):
-            archive.decode_record(json.dumps(record))
-        del record["affinity_horizon"]["prompt"]
-        record["v"] = 13
         with self.assertRaises(archive.ArchiveError):
             archive.decode_record(json.dumps(record))
 

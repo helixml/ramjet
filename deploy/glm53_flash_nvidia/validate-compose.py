@@ -26,8 +26,8 @@ ENGINE_IMAGE = (
     "5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93"
 )
 LB_IMAGE = (
-    "ghcr.io/helixml/ramjet:v0.6.1@sha256:"
-    "bdd58ba1d2d98240df76f85b595a4d52420feedf809dda6462b36f97ce14f0a1"
+    "ghcr.io/helixml/ramjet:v0.6.2@sha256:"
+    "53047a816c8ae1dbade7e27b86d2e3eda40cfeaa48826ae06bf2ac1d35a27cc6"
 )
 ENGINE_SHAPE = {
     "glm53nvidia-a": {

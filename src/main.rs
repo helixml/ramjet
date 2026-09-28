@@ -230,6 +230,8 @@ fn log_startup(config: &Config) {
         prefix_single_flight_min_blocks = config.route_prefix_single_flight_min_blocks,
         prefix_single_flight_capacity = config.route_prefix_single_flight_capacity,
         prefix_single_flight_max_load_delta = config.route_prefix_single_flight_max_load_delta,
+        long_prompt_bytes = config.route_long_prompt_bytes,
+        long_prompt_upstreams = ?config.route_long_prompt_upstreams,
         session_affinity_mode = ?config.session_affinity_mode,
         session_affinity_bonus_blocks = config.session_affinity_bonus_blocks,
         session_affinity_max_load_delta = config.session_affinity_max_load_delta,

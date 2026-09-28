@@ -21,6 +21,19 @@ inside `ramjet_kev_systemone`, a fixed internal-only Docker network. No Kev
 port is published. The runtime is non-root, read-only, and offline after the
 pinned Hugging Face cache has been populated.
 
+The long-prompt lane is off by default (`RJ_ROUTE_LONG_PROMPT_BYTES=0`).
+Setting a positive threshold, for example 600,000 bytes (roughly 150k tokens),
+routes larger request bodies only to `glm53sm120-c` while it is serving, and
+`ramjet_route_long_prompt_total` counts `lane` versus `fallback` decisions.
+It was on from 2026-09-25 to 2026-09-26 and was turned off after a replay:
+two concurrent ~290k-token conversations do not fit `glm53sm120-c`'s
+500k-token KV pool together, so both re-read about half their prompt on every
+turn (23-30s instead of about 4s) and every other session on `c` lost its
+cache. With the per-path snapshot cap on the GLM replicas, one long prompt no
+longer evicts other sessions, so ordinary routing, which spreads concurrent
+long conversations across both replicas, is better. The lane needs an LB
+image that includes it; older images ignore both variables.
+
 ## Validate and build
 
 ```bash

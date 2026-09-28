@@ -1,5 +1,167 @@
 # node06 experiment journal
 
+## 2026-09-26 — GLM snapshot ROI: retention beyond the GPU would recover 0.44% of prompt tokens
+
+**Question.** Would CPU/NVMe-backed KDA snapshots that outlive GPU residency pay
+for themselves? Answered offline from the route-journal archive; no GPU work.
+
+**Method.** `bench/snapshot_roi.py` links each GLM turn to its predecessor via
+the served-block ages in journal v11+ (97% match a predecessor finish within
+±1ms) and credits the predecessor's engine-reported prompt as the prefix a
+snapshot would have supplied, per retention horizon. 30,557 requests on
+`glm53sm120-b`/`-c`, 2026-09-12 to 2026-09-26, excluding the 07:00-07:13
+synthetic lane replay.
+
+**Result.** Engines served 98.58% of 3.44B prompt tokens from cache. Infinite
+retention on either replica would add 0.44% (15.3M tokens, 380 GPU-s/day); 75%
+of that needed <5 min and 94.5% <30 min, i.e. device-pool thrash, not idle
+expiry. After the 2026-09-25 cap-2 + HiCache rollout: 0.025% same-replica,
+0.125% any-replica. Of 28,848 linked turns 131 came back after >1h and 115 of
+those still hit. Snapshots that would actually be reused peak at 16 GB; a blind
+24h-7d TTL tier would need 0.5-1.3 TB. Verified geometry: 81.3 MB of KDA state
+per replica plus 15.85 KB/token of KV+draft KV, so KV dominates past ~5k tokens.
+Restore would be ~9x faster than prefill; volume, not unit economics, is what
+is missing.
+
+**Decision.** A (little benefit): no snapshot tier. Full report:
+`docs/glm_snapshot_roi.md`. Re-run weekly against the archive.
+
+**Also found.** node06's installed journal collector rejected v12 from the
+v0.6.2 LB rollout onward (19 hours uncollected). Reinstalled from `main`
+(old copy `route_journal_archive.py.v11-backup-20260926`) and recovered the
+stopped container `bb2d425b7967` by ID (2,843 records).
+
+## 2026-09-26 — long-prompt lane turned off: two long conversations do not fit one replica
+
+**Replay.** Through the live LB (lane on), two synthetic conversations started
+at ~279k tokens and grew by 4k tokens a turn, alternating with six 20k-token
+agent sessions that grew by 1.5k a turn, six rounds, `max_tokens=1`, under
+the thermal guard. The lane sent both long conversations to `glm53sm120-c`.
+
+| turns 3-6 | cached | time per turn |
+|---|---|---|
+| long1 / long2 (287k-299k tokens) on C | 135k-166k | 23.4-30.2s |
+| agents placed on C by affinity (agent1, agent4) | 0 every turn | 3.8-4.6s |
+| agents on B (agent2, 3, 5, 6) | 99.3-99.4% | 0.42-0.45s |
+
+Two ~290k-token conversations need ~580k tokens of KV and C holds 499,968, so
+the token pool (not the snapshot pool) became the limit and the lane made the
+long conversations and everything else on C evict each other. Ordinary routing
+would place the two conversations on different replicas.
+
+**Production (all LB traffic, route journal).** Requests with prompts of at
+least 150k tokens: 946 in the 89 h before the 2026-09-25 rollout had 7.4% cold
+(<50% cached), 67 waits over 30s and p99 TTFT 79.8s; 379 in the 14.5 h after
+had 1.1% cold, 3 over 30s and p99 27.4s. 8k-150k-token requests: 5.3% cold and
+70 waits over 10s in 12,747 before; 3.1% cold and 1 over 10s in 514 after. The
+after window is short and quiet and did not appear to contain two concurrent
+long conversations; in the 21-25 Sep Helix records two sessions of at least
+150k tokens were active together in 82 of 522 active minutes.
+
+**Decision.** `RJ_ROUTE_LONG_PROMPT_BYTES` now defaults to 0 in
+`deploy/qwen38_glm53_kev`. The GLM per-path snapshot cap already prevents one
+long prompt from evicting other sessions. The lane code stays as an opt-in.
+
+## 2026-09-25 — v0.6.2 released: GLM cache settings on both replicas, long-prompt lane live
+
+**GLM rollout.** From the merged canonical file (SHA-256 `8c2e04eb…`), C then
+B were recreated with `node06-engine-rollout.sh` under the thermal guard and
+deployment lock while the peer served. Recreate to ready took 1,003-1,012s per
+engine; both have zero restarts and run image `sha256:899fe8eb…`. Host
+MemAvailable is 38.8GB with HiCache pinned on both engines (53.7GB before).
+
+**LB.** Drone #699 published `rust-962b7b2@sha256:53047a81…` (0.6.2 labels,
+release revision) in 473s, including a cold dependency-image rebuild (236s).
+`deploy/qwen38_glm53_kev/node06-rollout.sh` qualified a canary on the
+alternate ports and replaced only the LB. Rendered baseline vs candidate
+differed only in the image and the two `RJ_ROUTE_LONG_PROMPT_*` variables.
+`/health` reported 4/4, and there were no LB errors or 5xx. A 654KB (233,551-token) request went
+through the lane to `glm53sm120-c` (`ramjet_route_long_prompt_total{outcome="lane"}`),
+and a short request went to B. Two real long prompts followed it into the lane
+within minutes. Main build #697 (the GLM merge) failed only on the known
+`kv_transport::stalled_replay_has_a_bounded_drain_window` runner-starvation
+race; it passed 5/5 locally and on #699. Tag pipeline #700 promoted
+`v0.6.2`/`companion-v0.6.2` with identical digests. Rollback container:
+`ds4-loadbalancer-rollback-20260925T151249Z` (systemone-6b025f7).
+
+**Helix end-to-end (Dubai broker intake suite, 11 cases).** Per-session
+LLM-call records via `/api/v1/agents/<app>/llm-calls?session=`:
+
+| run | engines | hit (all) | first large call | TTFT p50 / p90 | pass |
+|---|---|---|---|---|---|
+| before | B only, old config, cache warm 8 days | 91.7% | 90.5% | 1.18 / 2.35s | 10/11 |
+| after, just restarted | B+C, new config | 84.8% | 76.5% | 1.20 / 3.57s | 8/11 |
+| after, warm | B+C, new config | 93.1% | 98.9% | 1.10 / 2.17s | 9/11 |
+
+The just-restarted run is cold by construction: each engine's first session got
+0%. The suite runs its sessions seconds apart, so it never saw the long-prompt
+evictions this change fixes; the isolated probes above measure those. Pass-rate
+changes are not attributable to the engine: another operator re-applied the
+broker prompt at 15:06 UTC between the before and after runs, adding
+final-step declaration content. `submission-gate` now fails 3/4 on the
+jargon rule (the reply says "session") while the judge accepts the behaviour.
+`owner-needs-second-role` fails in every run, including before.
+
+## 2026-09-25 — GLM-5.3 prefix cache was bounded by linear-attention state slots, not KV
+
+**Symptom.** Helix bot sessions on `glm-5.3-flash` saw 0-cached first and mid
+calls (8-10s recomputes at 40-50k tokens, one 68s stall). Each coincided with a
+~310k-token prompt from another bot.
+
+**Cause.** GLM-5.3 is hybrid; SGLang's `UnifiedRadixCache` can resume a prefix
+only at a node holding a saved linear-attention state. Every 6,144-token
+prefill chunk stores one (`cache_unfinished_req` -> `_alloc_mamba_slot`) in a
+28-slot pool (`--max-mamba-cache-size=28`, ~38MB/slot/GPU) evicted LRU, and
+running requests hold ~4 slots each (max `mamba num` 16 at 4 running over nine
+days of logs). A 310k prompt (~51 chunks) therefore swept every other state
+while the 500k-token fp8 KV pool had room: engine B cached a 49,152-token
+prefix at 12:31:59, the 313k prompt arrived at 12:33, and the prefix was cold
+at 12:35:04. More KV space, or a smaller checkpoint, cannot help; NVIDIA's
+official GLM-5.3-Flash NVFP4 (190.4GiB of safetensors) is about 25GiB larger than the
+running W4A16 checkpoint (165.8GiB).
+
+**Change.** On C only, isolated from the shared LB by a private Compose network
+while B served, under the thermal guard and the deployment lock:
+
+1. `--mamba-max-states-per-path` (keeps tail, forks, and the deepest states).
+2. Derived image `sha256:899fe8eb…` (`Dockerfile.swiglu-clamp`, 7.75s build):
+   the pinned SGLang runner and FlashInfer 0.7.0 dispatch dropped GLM-5.3's
+   `swiglu_limit = 10.0` before the SM120 W4A16 routed-expert kernel, which
+   already implements the clamp.
+3. HiCache (`--hicache-size=4`, write-through): per rank 308,288 KV tokens
+   (1.95GB) plus 1.57GB of states; host MemAvailable fell 53.7 -> 45.6GB.
+
+`bench/prefix_eviction_probe.py` (salted synthetic 20k-token sessions, max_tokens=1):
+
+| probe | baseline C | cap 4 + clamp | cap 2 + clamp + HiCache |
+|---|---|---|---|
+| 6 sessions, one 308k prompt, re-query | 0/6, 3.35s each | 6/6 at 99.6%, 0.15-0.30s | - |
+| 12 sessions, cyclic re-query | - | 0/12 (LRU thrash) | 12/12 at 99.2%, 0.15-0.30s |
+| 14 sessions, recall a code (`bench/prefix_recall_probe.py`) | - | - | 11/14 restored from host at 0.43s; 14/14 exact |
+| 16 sessions (exceeds host KV) | - | - | 5/16 hit (one partial); 16/16 exact |
+
+Cap 4 leaves ~24 free slots / 4 = ~6 sessions; cap 2 doubles that, and the
+host tier adds 2-3 sessions plus 0.43s restores. HiCache backed up KV and state
+pools (`hicache_backup_tokens_total`) and dropped 274,944 KV tokens as
+write-through-unbacked evictions under the cyclic stress (lost cache, not
+correctness).
+
+**Correctness and speed.** Full GSM8K test split (1,319, temperature 0,
+`reasoning_effort=low`, `bench/gsm8k_check.py`) at c2: baseline 1,270
+(96.29%, 492s) vs clamp 1,272 (96.44%, 492s); 10 fixed, 8 broken, 732
+completion lengths changed, so the clamp is active and accuracy is neutral to
+slightly positive. Five-case agent corpus 5/5 on both candidates. 300 GSM8K
+questions at c4: 87.2s (cap 4) vs 88.5s (HiCache), within noise.
+
+**Rejected.** `--enable-int8-mamba-checkpoint`: this build wires it only into
+`MambaRadixCache` (not the unified cache in use), rejects it with HiCache, and
+allocates from headroom that is ~53MiB here. Shrinking `--max-total-tokens` to
+fund slots: running requests alone reached 0.99 of the pool. TP4: not
+qualified upstream and removes a replica.
+
+Loads: 1,003s and 1,012s from recreate to ready. Evidence (owner-only):
+`/home/luke/inference/glm53_flash_sm120/.experiments/20260925-cache-capacity/`.
+
 ## 2026-09-21 — Kev-0.8B System One latency through the live heterogeneous Ramjet
 
 Question: after adding the TypeSafe System One API profile to the production

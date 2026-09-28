@@ -95,6 +95,25 @@ class Glm53Sm120DeployTests(unittest.TestCase):
             rollout.index('glm_c_probe || fail'),
         )
 
+    def test_engine_rollout_keeps_a_peer_serving_and_defers_inference_budget(self):
+        rollout = (DEPLOY / "node06-engine-rollout.sh").read_text()
+        self.assertIn("refusing to remove the last GLM replica", rollout)
+        self.assertIn("ramjet-node06-deployment.lock", rollout)
+        self.assertIn('up -d --no-deps --force-recreate "$service"', rollout)
+        self.assertNotIn("ds4-loadbalancer", rollout)
+        self.assertLess(
+            rollout.index("start_inference_budget\n"),
+            rollout.index("probe || fail"),
+        )
+
+    def test_recipe_documents_cache_capacity_and_clamp(self):
+        readme = (DEPLOY / "README.md").read_text()
+        compose = (DEPLOY / "docker-compose.yaml").read_text()
+        for required in ("Prefix-cache capacity", "Routed-expert SwiGLU clamp", "Dockerfile.swiglu-clamp"):
+            self.assertIn(required, readme)
+        self.assertIn("${GLM53_MAMBA_MAX_STATES_PER_PATH:-2}", compose)
+        self.assertIn("--enable-hierarchical-cache", compose)
+
 
 if __name__ == "__main__":
     unittest.main()
