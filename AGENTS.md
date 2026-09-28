@@ -1181,6 +1181,26 @@ tokens only to observe reservations whose KV events have not arrived. It is
 not future cache truth and stays observation-only until repeated capacity-
 boundary evidence proves otherwise.
 
+### Coding-agent fleet — `agent_swarm_bench.py BASE MODEL`
+
+The routing A/B for agent traffic. It is open-loop and time-bounded: many
+developers share a few harness system prompts and repository contexts, grow
+private histories to ~110k tokens, compact, pause for tools and humans, and fan
+out sub-agents. Structure follows `--seed` and text follows `--salt`, so keep
+the seed fixed across a comparison and use a fresh salt for every run. It
+reports TTFT/e2e by context bucket, TTFT SLO goodput, cache ratio, and session
+stickiness from `x-ramjet-upstream`; it never writes completion text.
+
+```bash
+python3 bench/agent_swarm_bench.py http://127.0.0.1:8006 MODEL \
+  --developers 64 --duration 900 --warmup 180 --seed swarm-v1 \
+  --requests-jsonl /tmp/swarm-requests.jsonl
+```
+
+Size it so the working set sits between one replica's KV pool and the fleet's:
+that is where placement decides cache residency. Point it at a single engine
+for a direct control; stickiness is then trivially 1.0.
+
 ### Concurrent same-app load — `concurrent_sameapp.sh BASE N SALT TOK`
 
 The test that separates the routers: N concurrent sessions sharing one system
