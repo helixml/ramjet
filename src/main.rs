@@ -51,12 +51,7 @@ async fn main() -> anyhow::Result<()> {
         affinity_basis: config.route_affinity_basis,
         affinity_groups: config.route_affinity_groups(),
     }));
-    let client = reqwest::Client::builder()
-        .pool_max_idle_per_host(256)
-        .connect_timeout(Duration::from_secs(30))
-        .tcp_keepalive(Duration::from_secs(30))
-        .build()
-        .context("build upstream client")?;
+    let client = ramjet::proxy::upstream_client(&config).context("build upstream client")?;
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let snapshot_consumers = SnapshotRouteConsumers::start(&config, &metrics)
         .context("initialize snapshot route consumers")?;

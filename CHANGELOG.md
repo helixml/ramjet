@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Upstream connections now expire after 4s idle
+  (`RJ_UPSTREAM_POOL_IDLE_TIMEOUT_MS`), below the 5s keep-alive of vLLM and
+  SGLang. reqwest's 90s default reused sockets the engine was closing: under a
+  96-developer agent load on two SGLang replicas that produced 20 failovers
+  and a burst of 502s while both engines were healthy, and each failover
+  marked a healthy replica down until its next 15s probe. Failovers are now
+  counted in `ramjet_upstream_failovers_total{from,to,reason}` and logged with
+  their reason.
 - Adds `RJ_ROUTE_AFFINITY_BASIS=marginal` (default `absolute`, unchanged).
   With a shared system prompt longer than the 64KiB affinity cap, every
   replica scored full affinity and one load unit moved an agent session off

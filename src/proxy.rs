@@ -1501,6 +1501,7 @@ impl Proxy {
         }
         self.publish_fail_open(failing_open && !serving_candidates.is_empty());
         let mut last_error = None;
+        let mut failover_reason = None;
         let mut selected = None;
         for (attempt, &(candidate, units)) in serving_candidates.iter().enumerate() {
             let url = upstream_url(&self.inner.config.upstreams[candidate], &parts.uri);
@@ -1511,6 +1512,7 @@ impl Proxy {
                 .body(body.clone());
             outbound = outbound.headers(filtered_headers(&parts.headers));
             let Some(load) = self.acquire_for_dispatch(candidate, units, failing_open) else {
+                failover_reason = Some("not_admitted");
                 continue;
             };
             if failing_open {
@@ -1527,23 +1529,37 @@ impl Proxy {
                         StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE
                     ) && attempt + 1 < serving_candidates.len() =>
                 {
+                    failover_reason = Some(if response.status() == StatusCode::BAD_GATEWAY {
+                        "status_502"
+                    } else {
+                        "status_503"
+                    });
                     self.publish_upstream_health(candidate, false);
                     self.record_upstream_request(candidate, response.status());
                     drop(load);
                 }
                 Ok(response) => {
                     if attempt > 0 {
-                        tracing::warn!(
-                            from = decision.candidates[0],
-                            to = candidate,
-                            "upstream failover"
-                        );
+                        let from = serving_candidates[0].0;
+                        let reason = failover_reason.unwrap_or("unknown");
+                        tracing::warn!(from, to = candidate, reason, "upstream failover");
+                        self.inner
+                            .metrics
+                            .upstream_failovers
+                            .with_label_values(&[
+                                &self.upstream_label(from),
+                                &self.upstream_label(candidate),
+                                reason,
+                            ])
+                            .inc();
                     }
                     selected = Some((candidate, response, load, units));
                     break;
                 }
                 Err(error) => {
-                    last_error = Some(upstream_error_reason(&error));
+                    let reason = upstream_error_reason(&error);
+                    last_error = Some(reason);
+                    failover_reason = Some(reason);
                     self.publish_upstream_health(candidate, false);
                     drop(load);
                 }
@@ -3293,6 +3309,28 @@ fn hop_header(name: &HeaderName) -> bool {
     )
 }
 
+/// Builds the HTTP client used for every proxied upstream request.
+///
+/// Idle pooled connections expire before the engines' keep-alive does. `vLLM`
+/// and `SGLang` both serve through uvicorn with a 5s idle keep-alive; reqwest's
+/// own default keeps idle connections for 90s, so a request could be written
+/// onto a socket the server was closing. That surfaced as a `protocol` error,
+/// a failover, and the healthy replica marked down until its next probe.
+///
+/// # Errors
+///
+/// Returns the builder error if the TLS backend cannot be initialized.
+pub fn upstream_client(config: &Config) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(256)
+        .pool_idle_timeout(Duration::from_millis(
+            u64::try_from(config.upstream_pool_idle_timeout_ms).unwrap_or(u64::MAX),
+        ))
+        .connect_timeout(Duration::from_secs(30))
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+}
+
 fn upstream_error_reason(error: &reqwest::Error) -> &'static str {
     if error.is_timeout() {
         "timeout"
@@ -3605,7 +3643,163 @@ mod tests {
             affinity_basis: crate::config::AffinityBasis::Absolute,
             affinity_groups: Vec::new(),
         }));
-        Proxy::new(config, reqwest::Client::new(), metrics, router, inventories).unwrap()
+        let client = upstream_client(&config).unwrap();
+        Proxy::new(config, client, metrics, router, inventories).unwrap()
+    }
+
+    /// An HTTP/1.1 upstream that keeps connections alive but, like a server
+    /// whose keep-alive expired a moment ago, drops a request that arrives on a
+    /// connection idle for longer than `idle_close` without answering it. It
+    /// never sends FIN on its own, so the client cannot see the close coming:
+    /// this is the reuse race, made deterministic.
+    async fn start_expiring_keep_alive_upstream(
+        idle_close: Duration,
+    ) -> (Url, tokio::task::JoinHandle<()>, Arc<AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&dropped);
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let counter = Arc::clone(&counter);
+                tokio::spawn(async move {
+                    let mut last_response: Option<Instant> = None;
+                    let mut buffer = Vec::new();
+                    loop {
+                        let mut chunk = [0_u8; 4096];
+                        let header_end = loop {
+                            if let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break end + 4;
+                            }
+                            match stream.read(&mut chunk).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                            }
+                        };
+                        let headers =
+                            String::from_utf8_lossy(&buffer[..header_end]).to_ascii_lowercase();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .map_or(0, |value| value.trim().parse::<usize>().unwrap());
+                        while buffer.len() < header_end + length {
+                            match stream.read(&mut chunk).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                            }
+                        }
+                        buffer.drain(..header_end + length);
+                        if last_response.is_some_and(|at| at.elapsed() > idle_close) {
+                            counter.fetch_add(1, Ordering::Relaxed);
+                            return;
+                        }
+                        let body = r#"{"ok":true}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if stream.write_all(response.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        last_response = Some(Instant::now());
+                    }
+                });
+            }
+        });
+        (
+            Url::parse(&format!("http://{address}")).unwrap(),
+            task,
+            dropped,
+        )
+    }
+
+    fn pool_idle_config(upstreams: &[Url], pool_idle_ms: &str) -> Config {
+        let joined = upstreams
+            .iter()
+            .map(Url::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_POOL_IDLE_TIMEOUT_MS" => Some(pool_idle_ms.to_owned()),
+            _ => None,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pooled_connections_expire_before_the_engine_keep_alive() {
+        let idle_close = Duration::from_millis(200);
+        for (pool_idle_ms, reused) in [("10000", true), ("50", false)] {
+            let (url, task, dropped) = start_expiring_keep_alive_upstream(idle_close).await;
+            let client =
+                upstream_client(&pool_idle_config(std::slice::from_ref(&url), pool_idle_ms))
+                    .unwrap();
+            let send = || client.post(url.clone()).body("{}").send();
+            assert!(send().await.unwrap().status().is_success());
+            tokio::time::sleep(idle_close * 2).await;
+            let second = send().await;
+            // A pool that outlives the keep-alive writes onto the expired
+            // connection and fails; one that expires first dials afresh.
+            assert_eq!(second.is_err(), reused, "pool idle {pool_idle_ms}ms");
+            assert_eq!(dropped.load(Ordering::Relaxed), usize::from(reused));
+            task.abort();
+        }
+    }
+
+    fn counter_sum(vec: &prometheus::CounterVec, label: &str, value: &str) -> f64 {
+        use prometheus::core::Collector;
+        vec.collect()
+            .iter()
+            .flat_map(prometheus::proto::MetricFamily::get_metric)
+            .filter(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|pair| pair.name() == label && pair.value() == value)
+            })
+            .map(|metric| metric.get_counter().get_value())
+            .sum()
+    }
+
+    #[tokio::test]
+    async fn expired_keep_alive_connections_no_longer_fail_requests() {
+        // Both replicas expire idle connections, as uvicorn does after 5s.
+        let idle_close = Duration::from_millis(200);
+        for (pool_idle_ms, expected) in [("10000", StatusCode::BAD_GATEWAY), ("50", StatusCode::OK)]
+        {
+            let (first, first_task, _) = start_expiring_keep_alive_upstream(idle_close).await;
+            let (second, second_task, _) = start_expiring_keep_alive_upstream(idle_close).await;
+            let proxy = proxy_for_config(
+                pool_idle_config(&[first, second], pool_idle_ms),
+                Arc::from([]),
+            );
+            let chat = || {
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap()
+            };
+            // Leave one pooled connection to each replica, then idle past
+            // the engine keep-alive.
+            for _ in 0..2 {
+                assert_eq!(proxy.serve(chat()).await.status(), StatusCode::OK);
+            }
+            tokio::time::sleep(idle_close * 2).await;
+            let status = proxy.serve(chat()).await.status();
+            assert_eq!(status, expected, "pool idle {pool_idle_ms}ms");
+            let protocol_errors =
+                counter_sum(&proxy.inner.metrics.upstream_errors, "reason", "protocol");
+            let expected_errors = if expected == StatusCode::OK { 0.0 } else { 1.0 };
+            assert!((protocol_errors - expected_errors).abs() < f64::EPSILON);
+            first_task.abort();
+            second_task.abort();
+        }
     }
 
     /// Builds a proxy with the idle-drain policy configured, using the
@@ -5403,6 +5597,7 @@ mod tests {
         let (healthy_url, healthy_task) = start_upstream(healthy).await;
         let (failing_url, failing_task) = start_upstream(failing).await;
         // The first cold decision starts at ordinal 1, so this exercises 1 -> 0 failover.
+        let healthy_label = healthy_url.as_str().trim_end_matches('/').to_owned();
         let proxy = proxy_for(&[healthy_url, failing_url]);
         let request = Request::builder()
             .method(Method::POST)
@@ -5418,6 +5613,9 @@ mod tests {
             to_bytes(response.into_body(), 1024).await.unwrap(),
             Bytes::from_static(b"{\"ok\":true}")
         );
+        let failovers = &proxy.inner.metrics.upstream_failovers;
+        assert!((counter_sum(failovers, "reason", "status_503") - 1.0).abs() < f64::EPSILON);
+        assert!((counter_sum(failovers, "to", &healthy_label) - 1.0).abs() < f64::EPSILON);
         healthy_task.abort();
         failing_task.abort();
     }

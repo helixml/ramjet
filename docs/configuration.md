@@ -58,6 +58,7 @@ resolving across the rename.
 | `RJ_UPSTREAM_APIS` | `openai` per upstream | Dense API ownership map: exactly one `openai` or `systemone` profile per `RJ_UPSTREAM` entry. `/v1/systemone` can reach only System One upstreams; all other routes can reach only OpenAI upstreams. |
 | `RJ_MACHINEVIEW_UPSTREAM_GPUS` | unset | Optional observation-only dense GPU ownership map, with semicolon-separated sets matching `RJ_UPSTREAM` (for example `0,1,2,3;4,5`). Machine view derives displayed TP size from each set. GPU indices must be unique. |
 | `RJ_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
+| `RJ_UPSTREAM_POOL_IDLE_TIMEOUT_MS` | `4000` | How long an idle pooled upstream connection may be reused (1 to 300000). Keep it below the engines' HTTP keep-alive: vLLM and SGLang both close idle connections after 5 seconds, and a request written onto a socket the server is closing fails as `protocol`, fails over, and marks a healthy replica down until its next probe. |
 | `RJ_UPSTREAM_WARMUP_MODE` | `off` | `off`, observation-only `shadow`, or `enforce` passive admission for a replica recovering from observed health loss. HTTP admission only. |
 | `RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES` | `3` | Successful existing readiness probes required after recovery before passive warmup admits the replica. |
 | `RJ_UPSTREAM_WARMUP_STABLE_SECONDS` | `30` | Minimum healthy interval from the first successful recovery probe to admission. |
@@ -759,6 +760,10 @@ families are:
   `ramjet_upstream_probe_suppressed_total` for probe failures outvoted by
   recent serving traffic.
 - `ramjet_route_decisions_total` for route distribution.
+- `ramjet_upstream_failovers_total{from,to,reason}` for requests a later
+  candidate served after the first attempt failed. `reason` is the first
+  failure: `protocol`, `connect`, `timeout`, `status_502`, `status_503`, or
+  `not_admitted` when the first candidate's reservation was refused.
 - `ramjet_route_long_prompt_total` for long-prompt lane decisions by selected
   upstream and `lane` or `fallback` outcome.
 - `ramjet_cache_requests_total` and prompt/cached token counters for observed
