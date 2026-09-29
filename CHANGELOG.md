@@ -26,6 +26,13 @@
     DP8 with 16 agent developers, prefix routing across ranks gave 71.9
     turns/min and 92.9% cached prompt, against 43.0 and 65.6% for SGLang's
     own round robin.
+  - Failover prefers other nodes: after a failure, replicas sharing the
+    failed one's node move behind the rest of the attempt budget, and a
+    refused connection marks every DP rank of that engine down.
+  - `RJ_UPSTREAM_RANK_PROBE=on` probes each DP-rank upstream with a one-token
+    generation pinned to its rank, fencing a wedged rank that `/health` and
+    `/v1/models` still report as up. Recent real completions override a probe
+    timeout, so busy ranks stay routable.
   - `examples/route_scale_bench.rs` measures scoring cost: 0.3ms median at 40
     replicas in the fully warm worst case, against 2.7ms to fingerprint the
     same prompt outside the lock.
