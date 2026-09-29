@@ -247,6 +247,9 @@ struct ModelListResponse {
 #[derive(Serialize)]
 struct ReplicaHealth {
     index: usize,
+    /// Only a topology-declared name; `/health` never publishes upstream hosts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node: Option<String>,
     active: bool,
     healthy: bool,
     reliability_state: &'static str,
@@ -783,26 +786,37 @@ fn publish_initial_replica_state(
             guard.status().state,
             config.dspark_guard_expected_positions,
         );
-        let upstream_label = config.upstreams[index].as_str().trim_end_matches('/');
-        guard.publish_probe_health(router, metrics, index, upstream_label, initial_probe_health);
+        let upstream_label = config.upstream_label(index);
+        metrics
+            .upstream_info
+            .with_label_values(&[&upstream_label, config.upstream_node(index)])
+            .set(1.0);
+        guard.publish_probe_health(
+            router,
+            metrics,
+            index,
+            &upstream_label,
+            initial_probe_health,
+        );
     }
     if config.upstream_admission_mode != UpstreamAdmissionMode::Compatibility {
         return;
     }
-    for (index, upstream) in config.upstreams.iter().enumerate() {
+    for index in 0..config.upstreams.len() {
         router.set_healthy(index, false);
-        let label = upstream.as_str().trim_end_matches('/');
-        metrics.upstream_up.with_label_values(&[label]).set(0.0);
+        let label = config.upstream_label(index);
+        metrics.upstream_up.with_label_values(&[&label]).set(0.0);
         metrics
             .upstream_compatibility_admitted
-            .with_label_values(&[label])
+            .with_label_values(&[&label])
             .set(0.0);
     }
 }
 
 fn initialize_warmup_admission(config: &Config, metrics: &Metrics) -> Option<WarmupAdmission> {
-    for upstream in &config.upstreams {
-        let label = upstream.as_str().trim_end_matches('/');
+    for index in 0..config.upstreams.len() {
+        let label = config.upstream_label(index);
+        let label = label.as_str();
         metrics
             .upstream_warmup_ready
             .with_label_values(&[label])
@@ -1201,6 +1215,12 @@ impl Proxy {
                         });
                         ReplicaHealth {
                             index,
+                            node: proxy
+                                .inner
+                                .config
+                                .upstream_nodes
+                                .as_ref()
+                                .and_then(|nodes| nodes.get(index).cloned()),
                             active: proxy.topology_active(index),
                             healthy,
                             reliability_state: reliability.state.label(),
@@ -1499,20 +1519,39 @@ impl Proxy {
         if failing_open {
             serving_candidates = self.fail_open_candidates(&decision);
         }
+        // Across many nodes, trying every replica in turn can hold a request
+        // through dozens of connect timeouts; the last attempt returns its
+        // failure instead. The list is not truncated up front because a failure
+        // reorders what remains.
+        let attempt_limit = if failing_open {
+            serving_candidates.len()
+        } else {
+            self.inner
+                .config
+                .route_max_attempts
+                .unwrap_or(usize::MAX)
+                .min(serving_candidates.len())
+        };
         self.publish_fail_open(failing_open && !serving_candidates.is_empty());
         let mut last_error = None;
         let mut failover_reason = None;
         let mut selected = None;
-        for (attempt, &(candidate, units)) in serving_candidates.iter().enumerate() {
+        let mut attempt = 0;
+        while attempt < attempt_limit {
+            let (candidate, units) = serving_candidates[attempt];
             let url = upstream_url(&self.inner.config.upstreams[candidate], &parts.uri);
-            let mut outbound = self
-                .inner
-                .client
-                .request(parts.method.clone(), url)
-                .body(body.clone());
+            let mut outbound =
+                self.inner
+                    .client
+                    .request(parts.method.clone(), url)
+                    .body(pin_dp_rank(
+                        &body,
+                        self.inner.config.upstream_dp_rank(candidate),
+                    ));
             outbound = outbound.headers(filtered_headers(&parts.headers));
             let Some(load) = self.acquire_for_dispatch(candidate, units, failing_open) else {
                 failover_reason = Some("not_admitted");
+                attempt += 1;
                 continue;
             };
             if failing_open {
@@ -1527,7 +1566,7 @@ impl Proxy {
                     if matches!(
                         response.status(),
                         StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE
-                    ) && attempt + 1 < serving_candidates.len() =>
+                    ) && attempt + 1 < attempt_limit =>
                 {
                     failover_reason = Some(if response.status() == StatusCode::BAD_GATEWAY {
                         "status_502"
@@ -1537,6 +1576,7 @@ impl Proxy {
                     self.publish_upstream_health(candidate, false);
                     self.record_upstream_request(candidate, response.status());
                     drop(load);
+                    self.fail_over_from(&mut serving_candidates, attempt, false);
                 }
                 Ok(response) => {
                     if attempt > 0 {
@@ -1562,8 +1602,10 @@ impl Proxy {
                     failover_reason = Some(reason);
                     self.publish_upstream_health(candidate, false);
                     drop(load);
+                    self.fail_over_from(&mut serving_candidates, attempt, reason == "connect");
                 }
             }
+            attempt += 1;
         }
 
         let Some((upstream, response, load_guard, request_load_units)) = selected else {
@@ -2370,11 +2412,34 @@ impl Proxy {
             .inc();
     }
 
+    /// After the candidate at `failed` fails, tries replicas on other nodes
+    /// before any sharing the failed one's node: a machine that has dropped
+    /// off the network takes every replica and DP rank on it down together,
+    /// and a bounded attempt budget must not be spent on them. When the
+    /// engine refused the connection outright, every upstream sharing its URL
+    /// (its other DP ranks) is marked down as well.
+    fn fail_over_from(
+        &self,
+        candidates: &mut [(usize, usize)],
+        failed: usize,
+        engine_unreachable: bool,
+    ) {
+        let config = &self.inner.config;
+        let upstream = candidates[failed].0;
+        if engine_unreachable {
+            for (sibling, url) in config.upstreams.iter().enumerate() {
+                if sibling != upstream && *url == config.upstreams[upstream] {
+                    self.publish_upstream_health(sibling, false);
+                }
+            }
+        }
+        let node = config.upstream_node(upstream);
+        candidates[failed + 1..]
+            .sort_by_key(|(candidate, _)| config.upstream_node(*candidate) == node);
+    }
+
     fn upstream_label(&self, upstream: usize) -> String {
-        self.inner.config.upstreams[upstream]
-            .as_str()
-            .trim_end_matches('/')
-            .to_owned()
+        self.inner.config.upstream_label(upstream)
     }
 
     pub async fn probe_loop(self) {
@@ -2889,6 +2954,19 @@ impl Proxy {
         if initially_all_fenced {
             return;
         }
+        if self.inner.config.upstream_admission_mode != UpstreamAdmissionMode::Compatibility {
+            // Nothing below depends on probe order without compatibility
+            // admission. Probing one at a time would let a 5s timeout per
+            // replica stretch a 40-upstream round far past the probe interval.
+            futures_util::stream::iter(healthy)
+                .for_each_concurrent(Some(MAX_CONCURRENT_UPSTREAM_PROBES), |upstream| {
+                    self.probe(upstream)
+                })
+                .await;
+            return;
+        }
+        // Compatibility admission never fences the last admitted replica, so
+        // each check must see the outcome of the one before it.
         for upstream in healthy {
             let healthy_count = (0..self.inner.config.upstreams.len())
                 .filter(|index| self.inner.router.state(*index).is_some_and(|state| state.3))
@@ -2913,6 +2991,7 @@ impl Proxy {
         self.probe_with_admission(upstream, true).await;
     }
 
+    #[allow(clippy::too_many_lines)] // One probe round owns every admission signal.
     async fn probe_with_admission(&self, upstream: usize, fence_before_check: bool) {
         let started = Instant::now();
         let label = self.upstream_label(upstream);
@@ -2952,6 +3031,13 @@ impl Proxy {
             Ok(_) => (false, "http", None),
             Err(error) => (false, upstream_error_reason(&error), None),
         };
+        if healthy
+            && let Some(models_body) = &models_body
+            && let Some(failure) = self.rank_probe(upstream, models_body).await
+        {
+            healthy = false;
+            reason = failure;
+        }
         if let Some(models_body) = models_body {
             if let Some(expected) = self.inner.config.upstream_models.get(upstream) {
                 let advertised = match self.inner.config.upstream_api_profiles[upstream] {
@@ -3011,6 +3097,60 @@ impl Proxy {
             .upstream_probe_time
             .with_label_values(&[&label])
             .set(started.elapsed().as_secs_f64());
+    }
+
+    /// One-token generation pinned to this upstream's DP rank, or `None` when
+    /// it answered (or rank probing does not apply). The `SGLang` front end
+    /// serves `/health` and `/v1/models` and keeps answering while one rank's
+    /// scheduler is wedged, so only a generation on that rank can tell. A timeout is reported as `rank_timeout`, which recent real
+    /// completions on the rank override, so a busy rank is never fenced.
+    async fn rank_probe(&self, upstream: usize, models_body: &Bytes) -> Option<&'static str> {
+        let config = &self.inner.config;
+        let rank = config.upstream_dp_rank(upstream)?;
+        let timeout_ms = config.upstream_rank_probe_timeout_ms?;
+        if config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility {
+            return None;
+        }
+        let model = config
+            .upstream_models
+            .get(upstream)
+            .cloned()
+            .or_else(|| {
+                serde_json::from_slice::<Value>(models_body)
+                    .ok()?
+                    .get("data")?
+                    .get(0)?
+                    .get("id")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "default".to_owned());
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "ok"}],
+            "max_tokens": 1,
+            "temperature": 0,
+            "routed_dp_rank": rank,
+        });
+        let uri = Uri::from_static("/v1/chat/completions");
+        let mut request = self
+            .inner
+            .client
+            .post(upstream_url(&config.upstreams[upstream], &uri))
+            .timeout(Duration::from_millis(
+                u64::try_from(timeout_ms).unwrap_or(u64::MAX),
+            ))
+            .header("content-type", "application/json")
+            .body(body.to_string());
+        if let Some(token) = &config.upstream_token {
+            request = request.bearer_auth(token);
+        }
+        match request.send().await {
+            Ok(response) if response.status() == StatusCode::OK => None,
+            Ok(_) => Some("rank_http"),
+            Err(error) if error.is_timeout() => Some("rank_timeout"),
+            Err(error) => Some(upstream_error_reason(&error)),
+        }
     }
 
     fn mark_probe(&self, upstream: usize, healthy: bool, reason: &str) {
@@ -3077,7 +3217,7 @@ impl Proxy {
     /// attestation to serve, so an unreachable engine must fail closed.
     fn probe_failure_is_starvation(&self, upstream: usize, reason: &str) -> bool {
         if self.inner.config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility
-            || !matches!(reason, "timeout" | "connect")
+            || !matches!(reason, "timeout" | "connect" | "rank_timeout")
         {
             return false;
         }
@@ -3238,6 +3378,30 @@ const fn upstream_admission_label(mode: UpstreamAdmissionMode) -> &'static str {
     }
 }
 
+/// Pins a JSON-object request body to an `SGLang` data-parallel attention
+/// rank by appending `"routed_dp_rank"`. Appending rather than parsing keeps a
+/// multi-megabyte prompt to one copy, and because the engine keeps the last
+/// duplicate key, a caller cannot override the rank the router chose. A body
+/// that is not a JSON object is sent unchanged.
+fn pin_dp_rank(body: &Bytes, rank: Option<u32>) -> Bytes {
+    let Some(rank) = rank else {
+        return body.clone();
+    };
+    let content = body.trim_ascii();
+    let (Some(b'{'), Some(b'}')) = (content.first(), content.last()) else {
+        return body.clone();
+    };
+    let inner = content[1..content.len() - 1].trim_ascii();
+    let field = format!("\"routed_dp_rank\":{rank}}}");
+    let mut pinned = Vec::with_capacity(content.len() + field.len() + 1);
+    pinned.extend_from_slice(&content[..content.len() - 1]);
+    if !inner.is_empty() {
+        pinned.push(b',');
+    }
+    pinned.extend_from_slice(field.as_bytes());
+    Bytes::from(pinned)
+}
+
 fn upstream_url(base: &Url, uri: &Uri) -> Url {
     let mut url = base.clone();
     let base_path = base.path().trim_end_matches('/');
@@ -3326,7 +3490,9 @@ pub fn upstream_client(config: &Config) -> reqwest::Result<reqwest::Client> {
         .pool_idle_timeout(Duration::from_millis(
             u64::try_from(config.upstream_pool_idle_timeout_ms).unwrap_or(u64::MAX),
         ))
-        .connect_timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_millis(
+            u64::try_from(config.upstream_connect_timeout_ms).unwrap_or(u64::MAX),
+        ))
         .tcp_keepalive(Duration::from_secs(30))
         .build()
 }
@@ -3484,7 +3650,10 @@ mod tests {
         sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     };
 
-    use axum::{Router as AxumRouter, routing::any};
+    use axum::{
+        Router as AxumRouter,
+        routing::{any, get},
+    };
     use prometheus::Registry;
 
     use super::*;
@@ -5620,6 +5789,354 @@ mod tests {
         failing_task.abort();
     }
 
+    #[test]
+    fn pinning_appends_the_rank_so_it_wins_over_a_caller_value() {
+        let pin = |body: &str, rank| {
+            String::from_utf8(pin_dp_rank(&Bytes::from(body.to_owned()), rank).to_vec()).unwrap()
+        };
+        assert_eq!(pin(r#"{"a":1}"#, None), r#"{"a":1}"#);
+        assert_eq!(pin(r#"{"a":1}"#, Some(3)), r#"{"a":1,"routed_dp_rank":3}"#);
+        let empty: serde_json::Value = serde_json::from_str(&pin(" { } \n", Some(0))).unwrap();
+        assert_eq!(empty, serde_json::json!({"routed_dp_rank": 0}));
+        assert_eq!(pin("[1,2]", Some(2)), "[1,2]");
+        let pinned = pin(r#"{"routed_dp_rank":7,"messages":[]}"#, Some(1));
+        let parsed: serde_json::Value = serde_json::from_str(&pinned).unwrap();
+        assert_eq!(parsed["routed_dp_rank"], 1, "the last duplicate key wins");
+    }
+
+    #[tokio::test]
+    async fn each_dp_rank_upstream_pins_its_requests_and_has_its_own_label() {
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        let (url, task) = start_upstream(AxumRouter::new().fallback(any(move |body: Bytes| {
+            let recorder = Arc::clone(&recorder);
+            async move {
+                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                recorder.lock().push(value["routed_dp_rank"].as_u64());
+                (StatusCode::OK, [("content-type", "application/json")], "{}")
+            }
+        })))
+        .await;
+        let joined = format!("{url},{url}");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_DP_RANKS" => Some("0,1".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        // The rank each request carries must be the upstream the router chose.
+        let mut chosen = Vec::new();
+        for _ in 0..2 {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .body(Body::from(
+                    r#"{"messages":[{"role":"user","content":"x"}]}"#,
+                ))
+                .unwrap();
+            let response = proxy.serve(request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let upstream: usize = response.headers()["x-ramjet-upstream"]
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            chosen.push(Some(u64::try_from(upstream).unwrap()));
+            proxy.publish_upstream_health(upstream, false);
+        }
+        assert_eq!(*seen.lock(), chosen);
+        let mut ranks = chosen.clone();
+        ranks.sort_unstable();
+        assert_eq!(ranks, [Some(0), Some(1)]);
+        let base = url.as_str().trim_end_matches('/');
+        assert_eq!(
+            upstream_labels(&proxy.inner.metrics.upstream_up),
+            [format!("{base}#dp0"), format!("{base}#dp1")]
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn health_names_topology_nodes_and_metrics_join_them() {
+        let dir = std::env::temp_dir().join(format!("ramjet-health-nodes-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fleet.json");
+        fs::write(
+            &path,
+            r#"{"nodes": [
+                {"name": "h200-01", "replicas": [{"url": "http://127.0.0.1:1"}, {"url": "http://127.0.0.1:2"}]},
+                {"name": "h200-02", "replicas": [{"url": "http://127.0.0.1:3"}]}]}"#,
+        )
+        .unwrap();
+        let path = path.to_str().unwrap().to_owned();
+        let config =
+            Config::from_lookup(|key| (key == "RJ_TOPOLOGY_FILE").then(|| path.clone())).unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        let response = Proxy::health(State(proxy.clone())).await;
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let nodes = health["replicas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|replica| replica["node"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(nodes, ["h200-01", "h200-01", "h200-02"]);
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .upstream_info
+                .with_label_values(&["http://127.0.0.1:3", "h200-02"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    fn counting_upstream(status: StatusCode, calls: Arc<AtomicUsize>) -> AxumRouter {
+        AxumRouter::new().fallback(any(move || {
+            let calls = Arc::clone(&calls);
+            async move {
+                calls.fetch_add(1, Ordering::Relaxed);
+                (status, [("content-type", "application/json")], "{}")
+            }
+        }))
+    }
+
+    fn write_topology(name: &str, contents: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("ramjet-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fleet.json");
+        fs::write(&path, contents).unwrap();
+        path.to_str().unwrap().to_owned()
+    }
+
+    /// A body long enough to span `blocks` 2KiB fingerprint blocks.
+    fn long_chat(blocks: usize) -> String {
+        let content = "x".repeat(blocks * 2048);
+        format!(r#"{{"messages":[{{"role":"user","content":"{content}"}}]}}"#)
+    }
+
+    #[tokio::test]
+    async fn failover_tries_another_node_before_the_failed_nodes_siblings() {
+        let calls = [0, 1, 2].map(|_| Arc::new(AtomicUsize::new(0)));
+        let (a0, t0) = start_upstream(counting_upstream(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Arc::clone(&calls[0]),
+        ))
+        .await;
+        let (a1, t1) = start_upstream(counting_upstream(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Arc::clone(&calls[1]),
+        ))
+        .await;
+        let (b0, t2) =
+            start_upstream(counting_upstream(StatusCode::OK, Arc::clone(&calls[2]))).await;
+        let path = write_topology(
+            "failover-node",
+            &format!(
+                r#"{{"nodes": [
+                    {{"name": "a", "replicas": [{{"url": "{a0}"}}, {{"url": "{a1}"}}]}},
+                    {{"name": "b", "replicas": [{{"url": "{b0}"}}]}}]}}"#
+            ),
+        );
+        let config = Config::from_lookup(|key| match key {
+            "RJ_TOPOLOGY_FILE" => Some(path.clone()),
+            "RJ_ROUTE_MAX_ATTEMPTS" => Some("2".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        // Prefix affinity ranks node a's replicas first: a0 fully warm, a1
+        // partly, b0 cold. Without node awareness both attempts go to node a.
+        let body = long_chat(20);
+        let fingerprints = proxy.inner.router.fingerprints(body.as_bytes());
+        proxy.inner.router.observe(0, &fingerprints);
+        proxy.inner.router.observe(1, &fingerprints[..10]);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(body))
+            .unwrap();
+        let response = proxy.serve(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-ramjet-upstream"], "2");
+        let counts = calls.each_ref().map(|calls| calls.load(Ordering::Relaxed));
+        assert_eq!(counts, [1, 0, 1], "a1 shares a0's node and is skipped");
+        for task in [t0, t1, t2] {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_marks_the_engines_other_ranks_down() {
+        let dead = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            drop(listener);
+            Url::parse(&format!("http://{address}")).unwrap()
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (live, task) =
+            start_upstream(counting_upstream(StatusCode::OK, Arc::clone(&calls))).await;
+        let joined = format!("{dead},{dead},{live}");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_DP_RANKS" => Some("0,1,-".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        let body = long_chat(20);
+        let fingerprints = proxy.inner.router.fingerprints(body.as_bytes());
+        proxy.inner.router.observe(0, &fingerprints);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(body))
+            .unwrap();
+        let response = proxy.serve(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-ramjet-upstream"], "2");
+        assert!(!proxy.inner.router.state(0).unwrap().3);
+        assert!(
+            !proxy.inner.router.state(1).unwrap().3,
+            "rank 1 shares the unreachable engine"
+        );
+        assert!(proxy.inner.router.state(2).unwrap().3);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn rank_probe_fences_a_wedged_rank_but_not_a_serving_one() {
+        let engine = AxumRouter::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"object":"list","data":[{"id":"glm"}]}"#,
+                    )
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(|body: Bytes| async move {
+                    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(value["model"], "glm");
+                    if value["routed_dp_rank"] == 1 {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    (StatusCode::OK, [("content-type", "application/json")], "{}")
+                }),
+            );
+        let (url, task) = start_upstream(engine).await;
+        let joined = format!("{url},{url}");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_DP_RANKS" => Some("0,1".to_owned()),
+            "RJ_UPSTREAM_RANK_PROBE" => Some("on".to_owned()),
+            "RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS" => Some("300".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        proxy.probe_round().await;
+        assert!(proxy.inner.router.state(0).unwrap().3);
+        assert!(
+            !proxy.inner.router.state(1).unwrap().3,
+            "a rank that cannot generate is fenced although /v1/models answers"
+        );
+
+        // A rank that has just completed real traffic is busy, not wedged.
+        proxy.note_upstream_serving_success(1);
+        proxy.probe_round().await;
+        assert!(proxy.inner.router.state(1).unwrap().3);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn max_attempts_bounds_failover_across_a_failing_fleet() {
+        for (limit, expected_calls) in [(None, 4), (Some("2"), 2)] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut urls = Vec::new();
+            let mut tasks = Vec::new();
+            for _ in 0..4 {
+                let counter = Arc::clone(&calls);
+                let (url, task) = start_upstream(AxumRouter::new().fallback(any(move || {
+                    let counter = Arc::clone(&counter);
+                    async move {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                })))
+                .await;
+                urls.push(url);
+                tasks.push(task);
+            }
+            let joined = urls.iter().map(Url::as_str).collect::<Vec<_>>().join(",");
+            let config = Config::from_lookup(|key| match key {
+                "RJ_UPSTREAM" => Some(joined.clone()),
+                "RJ_ROUTE_MAX_ATTEMPTS" => limit.map(str::to_owned),
+                _ => None,
+            })
+            .unwrap();
+            let proxy = proxy_for_config(config, Arc::from([]));
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .body(Body::from(
+                    r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap();
+            let response = proxy.serve(request).await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(calls.load(Ordering::Relaxed), expected_calls, "{limit:?}");
+            for task in tasks {
+                task.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn healthy_replicas_are_probed_concurrently_without_compatibility_admission() {
+        let mut urls = Vec::new();
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let (url, task) = start_upstream(AxumRouter::new().route(
+                "/v1/models",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"object":"list","data":[]}"#,
+                    )
+                }),
+            ))
+            .await;
+            urls.push(url);
+            tasks.push(task);
+        }
+        let proxy = proxy_for(&urls);
+        let started = Instant::now();
+        proxy.probe_round().await;
+        // One at a time this round takes 4s; a 40-replica fleet would take 20s,
+        // longer than the probe interval.
+        assert!(started.elapsed() < Duration::from_millis(2_500));
+        for upstream in 0..urls.len() {
+            assert!(proxy.inner.router.state(upstream).unwrap().3);
+        }
+        for task in tasks {
+            task.abort();
+        }
+    }
+
     #[tokio::test]
     async fn known_unhealthy_replica_never_receives_serving_traffic() {
         let unhealthy_requests = Arc::new(AtomicUsize::new(0));
@@ -5679,6 +6196,7 @@ mod tests {
         assert_eq!(health["replicas"][0]["healthy"], true);
         assert_eq!(health["replicas"][1]["healthy"], false);
         assert_eq!(health["replicas"][0]["reliability_state"], "disabled");
+        assert!(health["replicas"][0].get("node").is_none());
         assert_eq!(health["replicas"][0]["quarantined"], false);
         assert!(health["replicas"][0].get("exact_inventory").is_none());
         assert!(

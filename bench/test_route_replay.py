@@ -80,6 +80,22 @@ class RouteReplayTest(unittest.TestCase):
         self.assertTrue(affinity_horizon_record_mismatch(record))
         record["affinity_basis"] = "relative"
         self.assertTrue(affinity_horizon_record_mismatch(record))
+        # Relative credits the leader's capped overlap less the trailing gap.
+        record["candidates"][1]["affinity_blocks"] = 2
+        self.assertFalse(affinity_horizon_record_mismatch(record))
+
+    def test_relative_basis_ignores_a_cold_peer_that_zeroes_the_marginal_floor(self):
+        # Upstream 0 holds the session, 1 the shared prompt, 2 is cold.
+        record = start(left=(100, 1), right=(60, 0))
+        record["candidates"].append(
+            {"upstream": 2, "rank": 2, "overlap_blocks": 0, "affinity_blocks": 0, "load_units": 0, "request_load_units": 1, "healthy": True}
+        )
+        self.assertEqual(choose(record, alpha=4, cap=32, affinity_basis="marginal"), 1)
+        self.assertEqual(choose(record, alpha=4, cap=32, affinity_basis="relative"), 0)
+        # Below the cap it is absolute.
+        record = start(left=(20, 0), right=(10, 1))
+        for basis in ("absolute", "relative"):
+            self.assertEqual(choose(record, alpha=4, cap=32, affinity_basis=basis), 0)
 
     def test_affinity_basis_sweep_labels_rows(self):
         record = start(left=(100, 1), right=(60, 0))
@@ -87,8 +103,9 @@ class RouteReplayTest(unittest.TestCase):
         self.assertEqual([row["affinity_basis"] for row in rows], ["absolute", "marginal"])
         self.assertEqual([row["route_counts"] for row in rows], [{"1": 1}, {"0": 1}])
         self.assertEqual(parse_affinity_bases("marginal, absolute,marginal"), ["marginal", "absolute"])
+        self.assertEqual(parse_affinity_bases("relative"), ["relative"])
         with self.assertRaises(argparse.ArgumentTypeError):
-            parse_affinity_bases("relative")
+            parse_affinity_bases("leader")
 
     def test_deeper_overlap_breaks_equal_load_capped_tie(self):
         record = start(left=(100, 0), right=(40, 0), rotation=1)

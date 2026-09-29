@@ -1,7 +1,41 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-09-29
 
+- Multi-node routing: one ramjet can front a fleet of nodes
+  (`docs/multi-node.md`).
+  - `RJ_ROUTE_AFFINITY_BASIS=relative` scores each replica against the
+    warmest serving peer of its model. `marginal`'s floor is the least-warm
+    peer, and beyond two replicas that peer is usually cold, so it fell back to
+    `absolute`. In `tests/fleet_routing_simulation.rs` at 40 replicas,
+    `relative` kept 90% of agent turns on the replica holding their session,
+    against 51% for `absolute` and `marginal`. At two replicas it makes the
+    same decisions as `marginal`. `route_replay.py --affinity-bases` replays
+    it.
+  - `RJ_TOPOLOGY_FILE` describes the fleet as named nodes and their replicas
+    instead of index-aligned comma lists. `ramjet_upstream_info{upstream,node}`
+    and the `/health` replica entries carry the node name.
+  - Healthy replicas are probed concurrently under `http` admission, so a
+    40-replica probe round no longer serializes 5s timeouts.
+  - `RJ_ROUTE_MAX_ATTEMPTS` bounds failover, and
+    `RJ_UPSTREAM_CONNECT_TIMEOUT_MS` (default 30000, unchanged) sets the
+    connect budget for replicas on other machines.
+  - SGLang data-parallel attention ranks can be upstreams:
+    `RJ_UPSTREAM_DP_RANKS`, or `"dp_ranks": N` on a topology replica, pins
+    each upstream's requests to one rank with `routed_dp_rank`. On GLM-5.3
+    DP8 with 16 agent developers, prefix routing across ranks gave 71.9
+    turns/min and 92.9% cached prompt, against 43.0 and 65.6% for SGLang's
+    own round robin.
+  - Failover prefers other nodes: after a failure, replicas sharing the
+    failed one's node move behind the rest of the attempt budget, and a
+    refused connection marks every DP rank of that engine down.
+  - `RJ_UPSTREAM_RANK_PROBE=on` probes each DP-rank upstream with a one-token
+    generation pinned to its rank, fencing a wedged rank that `/health` and
+    `/v1/models` still report as up. Recent real completions override a probe
+    timeout, so busy ranks stay routable.
+  - `examples/route_scale_bench.rs` measures scoring cost: 0.3ms median at 40
+    replicas in the fully warm worst case, against 2.7ms to fingerprint the
+    same prompt outside the lock.
 - Upstream connections now expire after 4s idle
   (`RJ_UPSTREAM_POOL_IDLE_TIMEOUT_MS`), below the 5s keep-alive of vLLM and
   SGLang. reqwest's 90s default reused sockets the engine was closing: under a

@@ -128,7 +128,7 @@ steps:
         mkdir -p /kaniko/.docker
         printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" >/kaniko/.docker/config.json
         exec /kaniko/executor --context . --dockerfile Dockerfile.deps \
-          --destination ghcr.io/helixml/ramjet:rust-deps-sha256-e9f1725e0c05537345e6d1448cdae94ddc44bbee92f93c65248083bc09f4c038 \
+          --destination ghcr.io/helixml/ramjet:rust-deps-sha256-acd0a2740ac787f53518073d4649e7344cd81369820358c27a3c942d0b559954 \
           --cache=true --cache-repo=ghcr.io/helixml/ramjet-build-cache \
           --cache-ttl=336h --snapshot-mode=redo --reproducible
     when:

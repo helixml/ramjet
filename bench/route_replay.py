@@ -6,7 +6,7 @@ Usage:
   python3 route_replay.py trace.log --alphas 1,2,4,8 --caps 8,16,32,64
   python3 route_replay.py trace.log --projected-loads off,on
   python3 route_replay.py trace.log --horizons inf,60,300,900
-  python3 route_replay.py trace.log --affinity-bases absolute,marginal
+  python3 route_replay.py trace.log --affinity-bases absolute,marginal,relative
 
 The journal deliberately excludes prompts and fingerprints. Replay therefore
 holds each observed cache-overlap/load snapshot fixed and asks which upstream
@@ -19,11 +19,13 @@ Journal v11 records the age of every served leading block per candidate, so
 model; it cannot see the engine's real free queue.
 
 Journal v14 records the affinity basis. `--affinity-bases` re-scores under
-`absolute` (overlap, capped) or `marginal` (overlap above the least-warm
-healthy candidate, capped). Healthy candidates in a record are exactly the
-model's serving replicas, so this reproduces the router's peer-group floor,
-except that a long-prompt lane also marks its protected replicas unhealthy;
-those records replay with the lane members' floor.
+`absolute` (overlap, capped), `marginal` (overlap above the least-warm
+healthy candidate, capped), or `relative` (the warmest healthy candidate's
+capped overlap, less how far this candidate trails it, capped). Healthy
+candidates in a record are exactly the model's serving replicas, so this
+reproduces the router's peer-group floor and leader, except that a long-prompt
+lane also marks its protected replicas unhealthy; those records replay with
+the lane members' floor and leader.
 """
 
 import argparse
@@ -76,7 +78,7 @@ def horizon_label(horizon_ms):
     return "inf" if horizon_ms is None else f"{horizon_ms / 1000:g}"
 
 
-AFFINITY_BASES = ("absolute", "marginal")
+AFFINITY_BASES = ("absolute", "marginal", "relative")
 
 
 def parse_affinity_bases(raw):
@@ -87,12 +89,14 @@ def parse_affinity_bases(raw):
             continue
         if label not in AFFINITY_BASES:
             raise argparse.ArgumentTypeError(
-                "affinity bases must be a comma-separated subset of absolute,marginal"
+                "affinity bases must be a comma-separated subset of absolute,marginal,relative"
             )
         if label not in values:
             values.append(label)
     if not values:
-        raise argparse.ArgumentTypeError("affinity bases must include absolute or marginal")
+        raise argparse.ArgumentTypeError(
+            "affinity bases must include absolute, marginal, or relative"
+        )
     return values
 
 
@@ -105,6 +109,22 @@ def marginal_floor(candidates, overlaps):
     """Overlap of the least-warm healthy candidate, or zero if none is healthy."""
     healthy = [overlaps[candidate["upstream"]] for candidate in candidates if candidate["healthy"]]
     return min(healthy, default=0)
+
+
+def relative_lead(candidates, overlaps):
+    """Overlap of the warmest healthy candidate, or zero if none is healthy."""
+    healthy = [overlaps[candidate["upstream"]] for candidate in candidates if candidate["healthy"]]
+    return max(healthy, default=0)
+
+
+def credited_affinity(basis, overlap, candidates, overlaps, cap):
+    """Mirror of the router's credited_affinity for one candidate."""
+    if basis == "marginal":
+        return min(max(overlap - marginal_floor(candidates, overlaps), 0), cap)
+    if basis == "relative":
+        lead = relative_lead(candidates, overlaps)
+        return max(min(lead, cap) - min(max(lead - overlap, 0), cap), 0)
+    return min(overlap, cap)
 
 
 def affinity_horizon_outcome(record):
@@ -197,13 +217,14 @@ def affinity_horizon_record_mismatch(record):
             if candidate["overlap_blocks"] != expected:
                 return True
             expected_overlaps[candidate["upstream"]] = expected
-        if basis == "marginal" and lane_restricted:
-            # The router's floor included replicas the lane later fenced.
+        if basis != "absolute" and lane_restricted:
+            # The router's peers included replicas the lane later fenced.
             return False
-        floor = marginal_floor(candidates, expected_overlaps) if basis == "marginal" else 0
         for candidate in candidates:
-            expected = expected_overlaps[candidate["upstream"]]
-            if candidate["affinity_blocks"] != min(max(expected - floor, 0), cap):
+            expected = credited_affinity(
+                basis, expected_overlaps[candidate["upstream"]], candidates, expected_overlaps, cap
+            )
+            if candidate["affinity_blocks"] != expected:
                 return True
     except (KeyError, TypeError, ValueError):
         return True
@@ -398,7 +419,10 @@ def choose(
         for candidate in candidates
     }
     basis = affinity_basis or recorded_affinity_basis(record)
-    floor = marginal_floor(candidates, overlaps) if basis == "marginal" else 0
+    affinities = {
+        upstream: credited_affinity(basis, overlap, candidates, overlaps, cap)
+        for upstream, overlap in overlaps.items()
+    }
     for candidate in candidates:
         load = candidate["load_units"]
         if projected_load:
@@ -421,8 +445,8 @@ def choose(
         right_load = scored_loads[right["upstream"]]
         left_overlap = overlaps[left["upstream"]]
         right_overlap = overlaps[right["upstream"]]
-        left_score = min(max(left_overlap - floor, 0), cap) - alpha * left_load
-        right_score = min(max(right_overlap - floor, 0), cap) - alpha * right_load
+        left_score = affinities[left["upstream"]] - alpha * left_load
+        right_score = affinities[right["upstream"]] - alpha * right_load
         if left_score != right_score:
             return -1 if left_score > right_score else 1
         if left_overlap != right_overlap and (tie_break == "overlap" or left_load == right_load):
