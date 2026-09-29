@@ -20,6 +20,12 @@
   - `RJ_ROUTE_MAX_ATTEMPTS` bounds failover, and
     `RJ_UPSTREAM_CONNECT_TIMEOUT_MS` (default 30000, unchanged) sets the
     connect budget for replicas on other machines.
+  - SGLang data-parallel attention ranks can be upstreams:
+    `RJ_UPSTREAM_DP_RANKS`, or `"dp_ranks": N` on a topology replica, pins
+    each upstream's requests to one rank with `routed_dp_rank`. On GLM-5.3
+    DP8 with 16 agent developers, prefix routing across ranks gave 71.9
+    turns/min and 92.9% cached prompt, against 43.0 and 65.6% for SGLang's
+    own round robin.
   - `examples/route_scale_bench.rs` measures scoring cost: 0.3ms median at 40
     replicas in the fully warm worst case, against 2.7ms to fingerprint the
     same prompt outside the lock.
