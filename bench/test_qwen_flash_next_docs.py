@@ -18,7 +18,7 @@ class QwenFlashNextDocumentationTests(unittest.TestCase):
 
         for expected in (
             "rust-962b7b2",
-            "53047a816c8ae1dbade7e27b86d2e3eda40cfeaa48826ae06bf2ac1d35a27cc6",
+            "dca028638314ca3171120532a075faaa70483e1494dd3d04bddc4db4eb88c01d",
             compose_sha,
             manifest_sha,
             "Qwen exact placement is admitted and live",
