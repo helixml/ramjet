@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-09-29
 
 - Multi-node routing: one ramjet can front a fleet of nodes
   (`docs/multi-node.md`).
