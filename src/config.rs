@@ -64,6 +64,10 @@ pub struct Config {
     /// to with `routed_dp_rank`, or `None` for a whole engine. Empty when
     /// `RJ_UPSTREAM_DP_RANKS` is unset.
     pub upstream_dp_ranks: Vec<Option<u32>>,
+    /// When set, each DP-rank upstream is also probed with a one-token
+    /// generation pinned to its rank, within this budget. The engine-level
+    /// `/v1/models` probe cannot see one wedged rank.
+    pub upstream_rank_probe_timeout_ms: Option<usize>,
     /// Node name of each upstream, in upstream order, when `RJ_TOPOLOGY_FILE`
     /// declares them. Operator-chosen names, unlike hosts, are safe to publish
     /// on `/health`.
@@ -979,6 +983,25 @@ impl Config {
             upstream_token,
             upstream_nodes,
             upstream_dp_ranks,
+            upstream_rank_probe_timeout_ms: {
+                let timeout = bounded_positive(
+                    &mut get,
+                    "RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS",
+                    20_000,
+                    MAX_UPSTREAM_CONNECT_TIMEOUT_MS,
+                )?;
+                match get("RJ_UPSTREAM_RANK_PROBE").as_deref().unwrap_or("off") {
+                    "off" => None,
+                    "on" => Some(timeout),
+                    value => {
+                        return Err(invalid(
+                            "RJ_UPSTREAM_RANK_PROBE",
+                            value.to_owned(),
+                            "off or on",
+                        ));
+                    }
+                }
+            },
             upstream_admission_mode,
             upstream_warmup_mode,
             upstream_warmup_consecutive_successes,
@@ -3238,6 +3261,25 @@ mod tests {
             );
         }
         assert!(two_upstreams(&[]).unwrap().upstream_dp_ranks.is_empty());
+    }
+
+    #[test]
+    fn rank_probe_is_off_by_default_and_validated() {
+        let defaults = Config::from_lookup(|_| None).unwrap();
+        assert_eq!(defaults.upstream_rank_probe_timeout_ms, None);
+        let values = HashMap::from([
+            ("RJ_UPSTREAM_RANK_PROBE", "on"),
+            ("RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS", "5000"),
+        ]);
+        let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(config.upstream_rank_probe_timeout_ms, Some(5_000));
+        for (key, value) in [
+            ("RJ_UPSTREAM_RANK_PROBE", "yes"),
+            ("RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS", "0"),
+        ] {
+            let values = HashMap::from([(key, value)]);
+            assert!(Config::from_lookup(|k| values.get(k).map(ToString::to_string)).is_err());
+        }
     }
 
     #[test]

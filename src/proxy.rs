@@ -1518,17 +1518,27 @@ impl Proxy {
         let failing_open = serving_candidates.is_empty();
         if failing_open {
             serving_candidates = self.fail_open_candidates(&decision);
-        } else if let Some(limit) = self.inner.config.route_max_attempts {
-            // Across many nodes, trying every replica in turn can hold a
-            // request through dozens of connect timeouts; the last attempt
-            // returns its failure instead.
-            serving_candidates.truncate(limit);
         }
+        // Across many nodes, trying every replica in turn can hold a request
+        // through dozens of connect timeouts; the last attempt returns its
+        // failure instead. The list is not truncated up front because a failure
+        // reorders what remains.
+        let attempt_limit = if failing_open {
+            serving_candidates.len()
+        } else {
+            self.inner
+                .config
+                .route_max_attempts
+                .unwrap_or(usize::MAX)
+                .min(serving_candidates.len())
+        };
         self.publish_fail_open(failing_open && !serving_candidates.is_empty());
         let mut last_error = None;
         let mut failover_reason = None;
         let mut selected = None;
-        for (attempt, &(candidate, units)) in serving_candidates.iter().enumerate() {
+        let mut attempt = 0;
+        while attempt < attempt_limit {
+            let (candidate, units) = serving_candidates[attempt];
             let url = upstream_url(&self.inner.config.upstreams[candidate], &parts.uri);
             let mut outbound =
                 self.inner
@@ -1541,6 +1551,7 @@ impl Proxy {
             outbound = outbound.headers(filtered_headers(&parts.headers));
             let Some(load) = self.acquire_for_dispatch(candidate, units, failing_open) else {
                 failover_reason = Some("not_admitted");
+                attempt += 1;
                 continue;
             };
             if failing_open {
@@ -1555,7 +1566,7 @@ impl Proxy {
                     if matches!(
                         response.status(),
                         StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE
-                    ) && attempt + 1 < serving_candidates.len() =>
+                    ) && attempt + 1 < attempt_limit =>
                 {
                     failover_reason = Some(if response.status() == StatusCode::BAD_GATEWAY {
                         "status_502"
@@ -1565,6 +1576,7 @@ impl Proxy {
                     self.publish_upstream_health(candidate, false);
                     self.record_upstream_request(candidate, response.status());
                     drop(load);
+                    self.fail_over_from(&mut serving_candidates, attempt, false);
                 }
                 Ok(response) => {
                     if attempt > 0 {
@@ -1590,8 +1602,10 @@ impl Proxy {
                     failover_reason = Some(reason);
                     self.publish_upstream_health(candidate, false);
                     drop(load);
+                    self.fail_over_from(&mut serving_candidates, attempt, reason == "connect");
                 }
             }
+            attempt += 1;
         }
 
         let Some((upstream, response, load_guard, request_load_units)) = selected else {
@@ -2398,6 +2412,32 @@ impl Proxy {
             .inc();
     }
 
+    /// After the candidate at `failed` fails, tries replicas on other nodes
+    /// before any sharing the failed one's node: a machine that has dropped
+    /// off the network takes every replica and DP rank on it down together,
+    /// and a bounded attempt budget must not be spent on them. When the
+    /// engine refused the connection outright, every upstream sharing its URL
+    /// (its other DP ranks) is marked down as well.
+    fn fail_over_from(
+        &self,
+        candidates: &mut [(usize, usize)],
+        failed: usize,
+        engine_unreachable: bool,
+    ) {
+        let config = &self.inner.config;
+        let upstream = candidates[failed].0;
+        if engine_unreachable {
+            for (sibling, url) in config.upstreams.iter().enumerate() {
+                if sibling != upstream && *url == config.upstreams[upstream] {
+                    self.publish_upstream_health(sibling, false);
+                }
+            }
+        }
+        let node = config.upstream_node(upstream);
+        candidates[failed + 1..]
+            .sort_by_key(|(candidate, _)| config.upstream_node(*candidate) == node);
+    }
+
     fn upstream_label(&self, upstream: usize) -> String {
         self.inner.config.upstream_label(upstream)
     }
@@ -2951,6 +2991,7 @@ impl Proxy {
         self.probe_with_admission(upstream, true).await;
     }
 
+    #[allow(clippy::too_many_lines)] // One probe round owns every admission signal.
     async fn probe_with_admission(&self, upstream: usize, fence_before_check: bool) {
         let started = Instant::now();
         let label = self.upstream_label(upstream);
@@ -2990,6 +3031,13 @@ impl Proxy {
             Ok(_) => (false, "http", None),
             Err(error) => (false, upstream_error_reason(&error), None),
         };
+        if healthy
+            && let Some(models_body) = &models_body
+            && let Some(failure) = self.rank_probe(upstream, models_body).await
+        {
+            healthy = false;
+            reason = failure;
+        }
         if let Some(models_body) = models_body {
             if let Some(expected) = self.inner.config.upstream_models.get(upstream) {
                 let advertised = match self.inner.config.upstream_api_profiles[upstream] {
@@ -3049,6 +3097,60 @@ impl Proxy {
             .upstream_probe_time
             .with_label_values(&[&label])
             .set(started.elapsed().as_secs_f64());
+    }
+
+    /// One-token generation pinned to this upstream's DP rank, or `None` when
+    /// it answered (or rank probing does not apply). The `SGLang` front end
+    /// serves `/health` and `/v1/models` and keeps answering while one rank's
+    /// scheduler is wedged, so only a generation on that rank can tell. A timeout is reported as `rank_timeout`, which recent real
+    /// completions on the rank override, so a busy rank is never fenced.
+    async fn rank_probe(&self, upstream: usize, models_body: &Bytes) -> Option<&'static str> {
+        let config = &self.inner.config;
+        let rank = config.upstream_dp_rank(upstream)?;
+        let timeout_ms = config.upstream_rank_probe_timeout_ms?;
+        if config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility {
+            return None;
+        }
+        let model = config
+            .upstream_models
+            .get(upstream)
+            .cloned()
+            .or_else(|| {
+                serde_json::from_slice::<Value>(models_body)
+                    .ok()?
+                    .get("data")?
+                    .get(0)?
+                    .get("id")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "default".to_owned());
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "ok"}],
+            "max_tokens": 1,
+            "temperature": 0,
+            "routed_dp_rank": rank,
+        });
+        let uri = Uri::from_static("/v1/chat/completions");
+        let mut request = self
+            .inner
+            .client
+            .post(upstream_url(&config.upstreams[upstream], &uri))
+            .timeout(Duration::from_millis(
+                u64::try_from(timeout_ms).unwrap_or(u64::MAX),
+            ))
+            .header("content-type", "application/json")
+            .body(body.to_string());
+        if let Some(token) = &config.upstream_token {
+            request = request.bearer_auth(token);
+        }
+        match request.send().await {
+            Ok(response) if response.status() == StatusCode::OK => None,
+            Ok(_) => Some("rank_http"),
+            Err(error) if error.is_timeout() => Some("rank_timeout"),
+            Err(error) => Some(upstream_error_reason(&error)),
+        }
     }
 
     fn mark_probe(&self, upstream: usize, healthy: bool, reason: &str) {
@@ -3115,7 +3217,7 @@ impl Proxy {
     /// attestation to serve, so an unreachable engine must fail closed.
     fn probe_failure_is_starvation(&self, upstream: usize, reason: &str) -> bool {
         if self.inner.config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility
-            || !matches!(reason, "timeout" | "connect")
+            || !matches!(reason, "timeout" | "connect" | "rank_timeout")
         {
             return false;
         }
@@ -5793,6 +5895,169 @@ mod tests {
                 .abs()
                 < f64::EPSILON
         );
+    }
+
+    fn counting_upstream(status: StatusCode, calls: Arc<AtomicUsize>) -> AxumRouter {
+        AxumRouter::new().fallback(any(move || {
+            let calls = Arc::clone(&calls);
+            async move {
+                calls.fetch_add(1, Ordering::Relaxed);
+                (status, [("content-type", "application/json")], "{}")
+            }
+        }))
+    }
+
+    fn write_topology(name: &str, contents: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("ramjet-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fleet.json");
+        fs::write(&path, contents).unwrap();
+        path.to_str().unwrap().to_owned()
+    }
+
+    /// A body long enough to span `blocks` 2KiB fingerprint blocks.
+    fn long_chat(blocks: usize) -> String {
+        let content = "x".repeat(blocks * 2048);
+        format!(r#"{{"messages":[{{"role":"user","content":"{content}"}}]}}"#)
+    }
+
+    #[tokio::test]
+    async fn failover_tries_another_node_before_the_failed_nodes_siblings() {
+        let calls = [0, 1, 2].map(|_| Arc::new(AtomicUsize::new(0)));
+        let (a0, t0) = start_upstream(counting_upstream(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Arc::clone(&calls[0]),
+        ))
+        .await;
+        let (a1, t1) = start_upstream(counting_upstream(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Arc::clone(&calls[1]),
+        ))
+        .await;
+        let (b0, t2) =
+            start_upstream(counting_upstream(StatusCode::OK, Arc::clone(&calls[2]))).await;
+        let path = write_topology(
+            "failover-node",
+            &format!(
+                r#"{{"nodes": [
+                    {{"name": "a", "replicas": [{{"url": "{a0}"}}, {{"url": "{a1}"}}]}},
+                    {{"name": "b", "replicas": [{{"url": "{b0}"}}]}}]}}"#
+            ),
+        );
+        let config = Config::from_lookup(|key| match key {
+            "RJ_TOPOLOGY_FILE" => Some(path.clone()),
+            "RJ_ROUTE_MAX_ATTEMPTS" => Some("2".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        // Prefix affinity ranks node a's replicas first: a0 fully warm, a1
+        // partly, b0 cold. Without node awareness both attempts go to node a.
+        let body = long_chat(20);
+        let fingerprints = proxy.inner.router.fingerprints(body.as_bytes());
+        proxy.inner.router.observe(0, &fingerprints);
+        proxy.inner.router.observe(1, &fingerprints[..10]);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(body))
+            .unwrap();
+        let response = proxy.serve(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-ramjet-upstream"], "2");
+        let counts = calls.each_ref().map(|calls| calls.load(Ordering::Relaxed));
+        assert_eq!(counts, [1, 0, 1], "a1 shares a0's node and is skipped");
+        for task in [t0, t1, t2] {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_marks_the_engines_other_ranks_down() {
+        let dead = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            drop(listener);
+            Url::parse(&format!("http://{address}")).unwrap()
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (live, task) =
+            start_upstream(counting_upstream(StatusCode::OK, Arc::clone(&calls))).await;
+        let joined = format!("{dead},{dead},{live}");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_DP_RANKS" => Some("0,1,-".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        let body = long_chat(20);
+        let fingerprints = proxy.inner.router.fingerprints(body.as_bytes());
+        proxy.inner.router.observe(0, &fingerprints);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(body))
+            .unwrap();
+        let response = proxy.serve(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-ramjet-upstream"], "2");
+        assert!(!proxy.inner.router.state(0).unwrap().3);
+        assert!(
+            !proxy.inner.router.state(1).unwrap().3,
+            "rank 1 shares the unreachable engine"
+        );
+        assert!(proxy.inner.router.state(2).unwrap().3);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn rank_probe_fences_a_wedged_rank_but_not_a_serving_one() {
+        let engine = AxumRouter::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"object":"list","data":[{"id":"glm"}]}"#,
+                    )
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(|body: Bytes| async move {
+                    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(value["model"], "glm");
+                    if value["routed_dp_rank"] == 1 {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    (StatusCode::OK, [("content-type", "application/json")], "{}")
+                }),
+            );
+        let (url, task) = start_upstream(engine).await;
+        let joined = format!("{url},{url}");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_DP_RANKS" => Some("0,1".to_owned()),
+            "RJ_UPSTREAM_RANK_PROBE" => Some("on".to_owned()),
+            "RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS" => Some("300".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        proxy.probe_round().await;
+        assert!(proxy.inner.router.state(0).unwrap().3);
+        assert!(
+            !proxy.inner.router.state(1).unwrap().3,
+            "a rank that cannot generate is fenced although /v1/models answers"
+        );
+
+        // A rank that has just completed real traffic is busy, not wedged.
+        proxy.note_upstream_serving_success(1);
+        proxy.probe_round().await;
+        assert!(proxy.inner.router.state(1).unwrap().3);
+        task.abort();
     }
 
     #[tokio::test]

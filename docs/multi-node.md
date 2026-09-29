@@ -76,8 +76,14 @@ still led: 46.9 against 42.0 turns/min, and 72.4% against 56.6% cached.
 
 `routed_dp_rank` is appended as the last key of the JSON body. The engine
 keeps the last duplicate key, so a caller cannot choose a rank the router did
-not. Health probes still go to the whole engine, so a single wedged rank is
-not detected on its own.
+not.
+
+A rank can wedge on its own. On H200 we saw one DP rank's scheduler stop after
+a contained GPU error while `/health` and `/v1/models` kept answering 200.
+`RJ_UPSTREAM_RANK_PROBE=on` adds a one-token generation pinned to each rank to
+its readiness probe. A timeout fences only that rank's upstream, unless the
+rank completed real traffic in the last 30 seconds, since a busy rank queues
+the probe behind real work.
 
 ## Recommended settings
 
@@ -86,6 +92,7 @@ RJ_TOPOLOGY_FILE: /etc/ramjet/topology.json
 RJ_ROUTE_AFFINITY_BASIS: relative
 RJ_ROUTE_MAX_ATTEMPTS: "3"
 RJ_UPSTREAM_CONNECT_TIMEOUT_MS: "2000"
+RJ_UPSTREAM_RANK_PROBE: "on"      # with dp_ranks
 RJ_UPSTREAM_TOKEN: ${ENGINE_BEARER}
 ```
 
@@ -94,9 +101,12 @@ RJ_UPSTREAM_TOKEN: ${ENGINE_BEARER}
   cold, so it degrades to `absolute`. `relative` measures from the warmest
   peer instead and makes the same decisions as `marginal` at two replicas. See
   the table below.
-- **Bounded failover.** A request otherwise tries every serving replica in
-  turn. When a node disappears, its replicas stay routable until the next
-  probe, and each attempt can cost a full connect timeout.
+- **Bounded, node-aware failover.** A request otherwise tries every serving
+  replica in turn. When a node disappears, its replicas stay routable until
+  the next probe, and each attempt can cost a full connect timeout. After a
+  failure, ramjet tries replicas on other nodes before the failed replica's
+  siblings. A refused connection also marks the engine's other DP ranks down
+  immediately.
 - **Short connect timeout.** The 30s default suits a Docker network on one
   host. It does not suit a machine that has dropped off the network.
 - **One bearer for all engines.** `RJ_UPSTREAM_TOKEN` is shared by every
