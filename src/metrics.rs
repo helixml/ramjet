@@ -36,6 +36,9 @@ pub struct Metrics {
     pub parse_failures: CounterVec,
     pub finish_reasons: CounterVec,
     pub upstream_up: GaugeVec,
+    /// Constant 1 per upstream, naming the node it runs on, for joining any
+    /// `upstream`-labelled series to its machine.
+    pub upstream_info: GaugeVec,
     pub upstream_warmup_ready: GaugeVec,
     pub upstream_warmup_admission: CounterVec,
     pub idle_drain_state: GaugeVec,
@@ -300,6 +303,11 @@ impl Metrics {
                 "ramjet_upstream_up",
                 "Whether the upstream passes the configured serving-admission probe",
                 &["upstream"],
+            )?,
+            upstream_info: gauge(
+                "ramjet_upstream_info",
+                "Constant 1 naming the node each upstream runs on",
+                &["upstream", "node"],
             )?,
             upstream_warmup_ready: gauge(
                 "ramjet_upstream_warmup_ready",
@@ -1065,6 +1073,7 @@ impl Metrics {
             Box::new(self.parse_failures.clone()),
             Box::new(self.finish_reasons.clone()),
             Box::new(self.upstream_up.clone()),
+            Box::new(self.upstream_info.clone()),
             Box::new(self.upstream_warmup_ready.clone()),
             Box::new(self.upstream_warmup_admission.clone()),
             Box::new(self.idle_drain_state.clone()),
@@ -1250,6 +1259,10 @@ mod tests {
             .with_label_values(&["upstream-0"])
             .set(1.0);
         metrics
+            .upstream_info
+            .with_label_values(&["upstream-0", "node-0"])
+            .set(1.0);
+        metrics
             .upstream_compatibility_admitted
             .with_label_values(&["upstream-0"])
             .set(1.0);
@@ -1357,6 +1370,7 @@ mod tests {
         for expected in [
             "ramjet_requests_total",
             "ramjet_upstream_up",
+            "ramjet_upstream_info",
             "ramjet_upstream_compatibility_admitted",
             "ramjet_upstream_admission_checks_total",
             "ramjet_dspark_guard_state",

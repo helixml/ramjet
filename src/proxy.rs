@@ -247,6 +247,9 @@ struct ModelListResponse {
 #[derive(Serialize)]
 struct ReplicaHealth {
     index: usize,
+    /// Only a topology-declared name; `/health` never publishes upstream hosts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node: Option<String>,
     active: bool,
     healthy: bool,
     reliability_state: &'static str,
@@ -784,6 +787,10 @@ fn publish_initial_replica_state(
             config.dspark_guard_expected_positions,
         );
         let upstream_label = config.upstreams[index].as_str().trim_end_matches('/');
+        metrics
+            .upstream_info
+            .with_label_values(&[upstream_label, config.upstream_node(index)])
+            .set(1.0);
         guard.publish_probe_health(router, metrics, index, upstream_label, initial_probe_health);
     }
     if config.upstream_admission_mode != UpstreamAdmissionMode::Compatibility {
@@ -1201,6 +1208,12 @@ impl Proxy {
                         });
                         ReplicaHealth {
                             index,
+                            node: proxy
+                                .inner
+                                .config
+                                .upstream_nodes
+                                .as_ref()
+                                .and_then(|nodes| nodes.get(index).cloned()),
                             active: proxy.topology_active(index),
                             healthy,
                             reliability_state: reliability.state.label(),
@@ -1498,6 +1511,11 @@ impl Proxy {
         let failing_open = serving_candidates.is_empty();
         if failing_open {
             serving_candidates = self.fail_open_candidates(&decision);
+        } else if let Some(limit) = self.inner.config.route_max_attempts {
+            // Across many nodes, trying every replica in turn can hold a
+            // request through dozens of connect timeouts; the last attempt
+            // returns its failure instead.
+            serving_candidates.truncate(limit);
         }
         self.publish_fail_open(failing_open && !serving_candidates.is_empty());
         let mut last_error = None;
@@ -2889,6 +2907,19 @@ impl Proxy {
         if initially_all_fenced {
             return;
         }
+        if self.inner.config.upstream_admission_mode != UpstreamAdmissionMode::Compatibility {
+            // Nothing below depends on probe order without compatibility
+            // admission. Probing one at a time would let a 5s timeout per
+            // replica stretch a 40-upstream round far past the probe interval.
+            futures_util::stream::iter(healthy)
+                .for_each_concurrent(Some(MAX_CONCURRENT_UPSTREAM_PROBES), |upstream| {
+                    self.probe(upstream)
+                })
+                .await;
+            return;
+        }
+        // Compatibility admission never fences the last admitted replica, so
+        // each check must see the outcome of the one before it.
         for upstream in healthy {
             let healthy_count = (0..self.inner.config.upstreams.len())
                 .filter(|index| self.inner.router.state(*index).is_some_and(|state| state.3))
@@ -3326,7 +3357,9 @@ pub fn upstream_client(config: &Config) -> reqwest::Result<reqwest::Client> {
         .pool_idle_timeout(Duration::from_millis(
             u64::try_from(config.upstream_pool_idle_timeout_ms).unwrap_or(u64::MAX),
         ))
-        .connect_timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_millis(
+            u64::try_from(config.upstream_connect_timeout_ms).unwrap_or(u64::MAX),
+        ))
         .tcp_keepalive(Duration::from_secs(30))
         .build()
 }
@@ -3484,7 +3517,10 @@ mod tests {
         sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     };
 
-    use axum::{Router as AxumRouter, routing::any};
+    use axum::{
+        Router as AxumRouter,
+        routing::{any, get},
+    };
     use prometheus::Registry;
 
     use super::*;
@@ -5621,6 +5657,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_names_topology_nodes_and_metrics_join_them() {
+        let dir = std::env::temp_dir().join(format!("ramjet-health-nodes-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fleet.json");
+        fs::write(
+            &path,
+            r#"{"nodes": [
+                {"name": "h200-01", "replicas": [{"url": "http://127.0.0.1:1"}, {"url": "http://127.0.0.1:2"}]},
+                {"name": "h200-02", "replicas": [{"url": "http://127.0.0.1:3"}]}]}"#,
+        )
+        .unwrap();
+        let path = path.to_str().unwrap().to_owned();
+        let config =
+            Config::from_lookup(|key| (key == "RJ_TOPOLOGY_FILE").then(|| path.clone())).unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        let response = Proxy::health(State(proxy.clone())).await;
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let nodes = health["replicas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|replica| replica["node"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(nodes, ["h200-01", "h200-01", "h200-02"]);
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .upstream_info
+                .with_label_values(&["http://127.0.0.1:3", "h200-02"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[tokio::test]
+    async fn max_attempts_bounds_failover_across_a_failing_fleet() {
+        for (limit, expected_calls) in [(None, 4), (Some("2"), 2)] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut urls = Vec::new();
+            let mut tasks = Vec::new();
+            for _ in 0..4 {
+                let counter = Arc::clone(&calls);
+                let (url, task) = start_upstream(AxumRouter::new().fallback(any(move || {
+                    let counter = Arc::clone(&counter);
+                    async move {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                })))
+                .await;
+                urls.push(url);
+                tasks.push(task);
+            }
+            let joined = urls.iter().map(Url::as_str).collect::<Vec<_>>().join(",");
+            let config = Config::from_lookup(|key| match key {
+                "RJ_UPSTREAM" => Some(joined.clone()),
+                "RJ_ROUTE_MAX_ATTEMPTS" => limit.map(str::to_owned),
+                _ => None,
+            })
+            .unwrap();
+            let proxy = proxy_for_config(config, Arc::from([]));
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .body(Body::from(
+                    r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap();
+            let response = proxy.serve(request).await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(calls.load(Ordering::Relaxed), expected_calls, "{limit:?}");
+            for task in tasks {
+                task.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn healthy_replicas_are_probed_concurrently_without_compatibility_admission() {
+        let mut urls = Vec::new();
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let (url, task) = start_upstream(AxumRouter::new().route(
+                "/v1/models",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"object":"list","data":[]}"#,
+                    )
+                }),
+            ))
+            .await;
+            urls.push(url);
+            tasks.push(task);
+        }
+        let proxy = proxy_for(&urls);
+        let started = Instant::now();
+        proxy.probe_round().await;
+        // One at a time this round takes 4s; a 40-replica fleet would take 20s,
+        // longer than the probe interval.
+        assert!(started.elapsed() < Duration::from_millis(2_500));
+        for upstream in 0..urls.len() {
+            assert!(proxy.inner.router.state(upstream).unwrap().3);
+        }
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn known_unhealthy_replica_never_receives_serving_traffic() {
         let unhealthy_requests = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&unhealthy_requests);
@@ -5679,6 +5831,7 @@ mod tests {
         assert_eq!(health["replicas"][0]["healthy"], true);
         assert_eq!(health["replicas"][1]["healthy"], false);
         assert_eq!(health["replicas"][0]["reliability_state"], "disabled");
+        assert!(health["replicas"][0].get("node").is_none());
         assert_eq!(health["replicas"][0]["quarantined"], false);
         assert!(health["replicas"][0].get("exact_inventory").is_none());
         assert!(
