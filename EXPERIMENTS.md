@@ -1,5 +1,131 @@
 # node06 experiment journal
 
+## 2026-09-29 — GLM-5.3 (753B FP8) on 8x H200: DP-rank pinning and a host KV tier more than double one node
+
+**Question.** Can the full `zai-org/GLM-5.3` FP8 checkpoint (753B, revision
+`aca966e4`, 755.7GB) be served from one 8x H200 VM at a throughput and latency
+worth selling, and which engine layout does it? No node06 work; the
+deployment is `deploy/glm53_h200`.
+
+**Method.** The same open-loop coding-agent fleet as the Flash entry below
+(`bench/agent_swarm_bench.py`, seed `swarm-v1`, fresh salt per cell), through
+ramjet unless marked direct. Cells ran 300s at 16 developers and 600-900s
+above, after 60-180s warm-up. Mean prompts were 34-43k tokens, maximum 115k.
+Three VMs of the same type were used in sequence and in parallel. The
+16/64-developer baseline reproduced across the first two within 1-3% turns/min
+(72.7 vs 71.9 and 45.9 vs 46.9). The 32/48-developer DeepEP cells ran on the
+third, which repeated DeepEP at 16 and 64 developers for calibration. It
+matched the second VM within 2.5% at 16 (75.0 vs 73.2 turns/min) but ran 10%
+faster at 64 (104.6 vs 95.1) with near-identical latency. With one cell each,
+treat differences under 10% between VMs at high load as unresolved. Every
+engine passed a tool-call smoke before measurement,
+and every HiCache engine passed a host-reload gate first. That gate floods the
+rank until an 86k-token prompt is evicted to host memory, then checks recall
+and a typed tool call from 86,144 host-reloaded tokens. No request failed in
+any cell.
+
+**Fit.** Weights take ~94GB per GPU at TP8 and 103.9GB under DP8 attention,
+which replicates the attention weights per rank. KV is the constraint:
+
+| layout | KV tokens |
+|---|---|
+| TP8, BF16 KV, TileLang DSA | 353k, replicated on every GPU |
+| DP8 attention, FP8 KV (`fp8_e4m3`, FlashMLA DSA) | 1.55M (193,472 per rank) |
+| DP8 + DeepEP + 32GB/rank HiCache | 1.36M on device (170,048 per rank) + host tier |
+| DP8, no DeepEP, + HiCache ("tuned") | 1.65M on device (206,848 per rank) + host tier |
+| vLLM v0.30.0 TP8 + DCP8, `fp8_ds_mla` | 4.8M, one shared copy |
+
+FP8 KV is valid for this model on SM90; the Flash entry's BF16-only finding
+is specific to GLM-5.3-Flash's attention.
+
+**Layout and routing.** TP8 collapsed at 64 developers (29.6 turns/min, TTFT
+p50 94s, 59% cache). An IMEX fabric channel made no difference (16 devs 52.5
+vs 60.7, 64 devs 30.4 vs 29.6, single cells). DP8 attention with the official
+H200 recipe (DeepEP EP8, FP8 KV, MTP 1/1/2, mem 0.85, 32k chunks, `hrrn`)
+fixed capacity but, with SGLang placing requests itself, scattered each
+session over private per-rank caches: 43.0 turns/min at 16 developers, 65.6%
+cached. Listing each rank as a ramjet upstream (`RJ_UPSTREAM_DP_RANKS`, #299)
+with `relative` affinity kept 94.5% of turns on their rank:
+
+| 16 developers | TP8 BF16 | DP8, SGLang placement | DP8, ramjet per-rank |
+|---|---|---|---|
+| turns/min | 60.7 | 43.0 | **72.7** |
+| cache hit | 89.5% | 65.6% | **92.8%** |
+| TTFT p50 / p90 | 0.83 / 4.4s | 2.6 / 5.0s | **0.76 / 1.7s** |
+
+At 64 developers pinning still led (45.9 vs 42.0 turns/min, 71.8% vs 56.6%
+cached), but the device pools overflowed.
+
+**Host KV tier.** A 32GB-per-rank HiCache tier (`write_through`,
+`page_first`, `kernel` I/O) doubled the overflowing cell: 95.1 vs 45.9
+turns/min, 66.7k vs 27.7k prompt tok/s, 91.8% vs 71.8% cached, TTFT p90 46s vs
+67s. On an idle rank, an 86k-token context reloaded from host in 0.8-1.0s
+against 11-16s cold. It is neutral when everything fits (73.2 at 16).
+
+**Load curve** (all DP8 + ramjet per-rank + HiCache; prompt kilo-tokens/s;
+TTFT p50/p90 seconds; share of turns with TTFT ≤5s):
+
+| developers | DeepEP turns/min | prompt k/s | TTFT | ≤5s | no-DeepEP "tuned" turns/min | prompt k/s | TTFT | ≤5s |
+|---|---|---|---|---|---|---|---|---|
+| 16 | 73.2 | 44.5 | 0.84 / 1.7 | 99.6% | 62.7 | 35.6 | 1.06 / 2.0 | 100% |
+| 32 | **98.2**† | **70.9**† | 1.27 / 7.0 | 85% | 87.6 | 62.2 | 1.45 / 4.9 | 90% |
+| 48 | **108.5**† | **77.0**† | 2.77 / 17.5 | 61% | 101.2 | 67.3 | 1.69 / 10.5 | 80% |
+| 64 | 95.1 / 104.6† | 66.7 / 73.9† | 11.4 / 46.1 | 26% | 101.3 | 69.4 | 6.6 / 30.8 | 45% |
+| 96 | 101.7 | 65.2 | 18.6 / 80 | 13% | 106.3 | 65.7 | 14.4 / 60 | 26% |
+
+The "tuned" arm drops DeepEP for the all-gather MoE path and adds the
+Q8KV8/`SGLANG_DP_USE_GATHERV` switches, NVLS, and decode graphs capped at 32.
+That gains 22% KV per rank but costs compute. Its 0.88/64k-chunk form
+OOM-crashed; the table is at 0.85/32k. Raising max running requests from
+128 to 256 (32 per rank) changed nothing: 98.0 and 99.4 turns/min at 48 and
+64 developers, same TTFT.
+
+† DeepEP at 32 and 48 developers, and the second 64-developer value, ran on
+the third VM; every other cell ran on the second. DeepEP's light-load lead
+over "tuned" (73.2 vs 62.7, same VM) is solid. Its 7-12% lead at 32-48 is
+within the unresolved cross-VM spread. "Tuned" has the lower TTFT tail from
+48 developers up.
+
+**vLLM DCP8.** vLLM v0.30.0 with decode context parallelism (`ag_rs`; GLM
+rejects the default) keeps one shared 4.8M-token pool with no pinning: 65.1 /
+92.3 / 86.7 turns/min at 16 / 64 / 96 developers. It had the tightest
+64-developer tail (TTFT p90 18.3s) and the fastest light-load decode (TPOT p50
+21ms), but saturated earlier than SGLang. Its host offload and 128 max
+sequences are untested. The SGLang DCP patch stack (#39330/#39638/#39639)
+needs `ServerArgs` fields newer than v0.5.20 and was abandoned after two
+backport attempts.
+
+**Host fault.** Four Xid 94 events across two VMs, always with HiCache on,
+were not GPU faults. A plain pinned-memory copy loop, with no SGLang,
+reproduced them in ~40s on any GPU against NUMA node 0's memory, and ran clean
+against nodes 1 and 3. A pagemap census tied them to pages in the sub-4GiB
+32-bit BAR window (PFN `0x90000-0xBFFFF`). The host's PCIe switch ports had
+ACS disabled and the guest has no vIOMMU, so DMA to those addresses was routed
+peer-to-peer inside the switch. ECC counters stayed zero throughout, which
+also corrects the Flash entry's "contained SM ECC error" reading. A host-side
+ACS change was retested at 10:12 UTC and still faulted in 73s, so every engine
+keeps rank 0's memory on node 1 (`--numa-node 1 1 2 3 4 5 6 7`). That makes
+node 1 hold two host pools, hence 32GB per rank.
+
+**Economics.** At OpenRouter's blended GLM-5.3 rate (~$0.27 per million prompt
+tokens, which already folds in its cache mix and output), full utilisation
+yields about $60/node-hour for tuned at 32 developers (TTFT p90 4.9s) and $64
+at 48 (p90 10.5s); DeepEP on the third VM gave $68 at 32 (p90 7.0s) and $74 at
+48 (p90 17.5s). The morning's
+DP8 baseline at 64 developers was $27. Market H200 rental is roughly
+$24-36/node-hour. DeepEP at 48 developers is 34.7M prompt tokens per
+GPU-hour.
+
+**Decision.** `deploy/glm53_h200` pins DP8 + DeepEP + FP8 KV + MTP 1/1/2 +
+`hrrn` + 32GB/rank HiCache, with rank 0 on NUMA node 1. ramjet v0.7.0 lists
+all eight ranks with `relative` affinity and the per-rank generation probe
+(#300). The probe was not active during these cells; it is on because a
+wedged rank still answers `/health`. "Tuned" (`GLM_MOE_A2A_BACKEND=none`
+plus its switches) is the alternative for a tail-latency target at 48+
+developers. Size admission at 32-48 developers per node, depending on the
+TTFT target; past that, throughput is flat and only latency grows. Drop the NUMA remap only after a host
+passes the node-0 copy test with the census covering the BAR window.
+
 ## 2026-09-28 — GLM-5.3-Flash FP8 on 8x H200: routing, engine and host qualification
 
 **Question.** How should GLM-5.3-Flash be served on an 8x H200 host behind

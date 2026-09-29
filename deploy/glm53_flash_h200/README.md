@@ -63,8 +63,11 @@ is ~130-210s against ~460s cold.
   `unspecified launch failure`) under sustained host copies, on any GPU. A
   plain pinned-memory copy loop reproduces it in about 40s against node 0 and
   runs clean against nodes 1-7. HiCache's pinned host tier is the only serving
-  path that copies enough to hit it. The fault is in the host, not the GPUs;
-  drop the remap once the host is fixed.
+  path that copies enough to hit it. The fault is in the host, not the GPUs:
+  ACS is disabled on its PCIe switch ports and the guest has no vIOMMU, so DMA
+  into node 0's sub-4GiB 32-bit BAR window is routed peer-to-peer inside the
+  switch. Drop the remap once the host passes a node-0 copy test whose buffer
+  covers PFN `0x90000-0xBFFFF`.
 - **Rejected, measured:** `--enable-mixed-chunk` OOM-crashed a replica under
   the swarm (sparse-attention indexer top-k buffer, 30MiB free at 0.88);
   `--speculative-adaptive` with SGLang's default table fails graph capture at
