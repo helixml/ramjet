@@ -26,14 +26,15 @@ same OpenAI API; engines need no ramjet-specific integration.
 
 ## What we wrote about each model
 
-How ramjet and the engines behind it were tuned for each model on our
-8× RTX PRO 6000 server, written up on the Helix blog:
+How ramjet and the engines behind it were tuned for each model, written up
+on the Helix blog. GLM-5.3 ran on an 8× H200 server; the others on our
+8× RTX PRO 6000 server:
 
-| GLM-5.3-Flash | Qwen3.8-Flash-Next | Qwen3.8-27B | DeepSeek V4 |
-| --- | --- | --- | --- |
-| [Part 1: getting day-zero serving to work](https://helix.ml/blog/glm53-flash-on-rtx-pro-6000-part-1) (27 Aug) | [On eight GPUs: what actually helped](https://helix.ml/blog/qwen38-flash-next-on-rtx-pro-6000) (27 Aug) | [Chasing a 454 tok/s tweet](https://helix.ml/blog/chasing-454-toks-qwen38-rtx-pro-6000) (22 Aug) | [SGLang vs DwarfStar vs vLLM+DSpark](https://helix.ml/blog/running-ds4-on-rtx-pro-6000) (14 Aug) |
-| [Running on 2, 4 or 8 GPUs](https://helix.ml/blog/glm53-flash-tp2-rtx-pro-6000) (14 Sep) | [One model, two speeds: smart routing](https://helix.ml/blog/smarter-qwen-routing-with-ramjet) (28 Aug) | [Doubling throughput by reading a log line](https://helix.ml/blog/the-ceiling-was-a-state-cache) (23 Aug) | [V4.1 Flash: encoder, Engram and KV cache](https://helix.ml/blog/deepseek-v41-flash-explained) (10 Sep) |
-| [Ran out of cache snapshots, not cache tokens](https://helix.ml/blog/glm53-flash-hybrid-attention-prefix-cache) (26 Sep) | | [A better lm_head, tested and shipped](https://helix.ml/blog/qwen38-bf16-lm-head-rollout) (25 Aug) | |
+| GLM-5.3 (8× H200) | GLM-5.3-Flash | Qwen3.8-Flash-Next | Qwen3.8-27B | DeepSeek V4 |
+| --- | --- | --- | --- | --- |
+| [48 coding agents from one server](https://helix.ml/blog/glm53-on-8x-h200) (29 Sep) | [Part 1: getting day-zero serving to work](https://helix.ml/blog/glm53-flash-on-rtx-pro-6000-part-1) (27 Aug) | [On eight GPUs: what actually helped](https://helix.ml/blog/qwen38-flash-next-on-rtx-pro-6000) (27 Aug) | [Chasing a 454 tok/s tweet](https://helix.ml/blog/chasing-454-toks-qwen38-rtx-pro-6000) (22 Aug) | [SGLang vs DwarfStar vs vLLM+DSpark](https://helix.ml/blog/running-ds4-on-rtx-pro-6000) (14 Aug) |
+| | [Running on 2, 4 or 8 GPUs](https://helix.ml/blog/glm53-flash-tp2-rtx-pro-6000) (14 Sep) | [One model, two speeds: smart routing](https://helix.ml/blog/smarter-qwen-routing-with-ramjet) (28 Aug) | [Doubling throughput by reading a log line](https://helix.ml/blog/the-ceiling-was-a-state-cache) (23 Aug) | [V4.1 Flash: encoder, Engram and KV cache](https://helix.ml/blog/deepseek-v41-flash-explained) (10 Sep) |
+| | [Ran out of cache snapshots, not cache tokens](https://helix.ml/blog/glm53-flash-hybrid-attention-prefix-cache) (26 Sep) | | [A better lm_head, tested and shipped](https://helix.ml/blog/qwen38-bf16-lm-head-rollout) (25 Aug) | |
 
 ## Why it exists
 
@@ -105,6 +106,22 @@ at 714 tok/s. Its cost is cold long-context prefill: a 196K-token first
 turn pays ~57s of TTFT on one GPU, with prefix-cached follow-ups at 2–4s.
 [Model profiles](docs/models.md) covers the sizing, sharding, and
 speculative-decoding trade-offs behind these numbers.
+
+### Full GLM-5.3 on one 8× H200 server
+
+[`deploy/glm53_h200`](deploy/glm53_h200/README.md) runs the 753B FP8
+checkpoint as one SGLang engine with eight data-parallel attention ranks, and
+ramjet lists each rank as its own upstream (`RJ_UPSTREAM_DP_RANKS`). On a
+simulated team of continuously working coding agents:
+
+| Result | Measured outcome |
+| --- | ---: |
+| 16 agents, SGLang rank placement → ramjet per-rank routing | **43.0 → 72.7 turns/min · 65.6% → 92.8% cached** |
+| 64 agents, plus a 32 GB host KV tier per rank | **45.9 → 95.1 turns/min** |
+| Capacity per server | **32–48 agents · 98–109 turns/min · TTFT p50 1.3–2.8s** |
+
+The [blog post](https://helix.ml/blog/glm53-on-8x-h200) walks through each
+step; the raw cells are in [EXPERIMENTS.md](EXPERIMENTS.md) (2026-09-29).
 
 ## Start in one minute
 
