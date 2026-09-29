@@ -32,9 +32,10 @@ as nodes and replicas:
 ```
 
 Each replica takes `url` and optionally `model`, `api` (`openai` or
-`systemone`), `speculation_profile`, and `kv_capacity_tokens`. The file expands
-into `RJ_UPSTREAM`, `RJ_UPSTREAM_MODELS`, `RJ_UPSTREAM_APIS`,
-`RJ_ROUTE_SPECULATION_PROFILES`, and `RJ_ROUTE_KV_CAPACITY_TOKENS`, so every
+`systemone`), `speculation_profile`, `kv_capacity_tokens`, and `dp_ranks` (see
+below). The file expands into `RJ_UPSTREAM`, `RJ_UPSTREAM_MODELS`,
+`RJ_UPSTREAM_APIS`, `RJ_UPSTREAM_DP_RANKS`, `RJ_ROUTE_SPECULATION_PROFILES`,
+and `RJ_ROUTE_KV_CAPACITY_TOKENS`, so every
 existing per-upstream check applies and upstream ordinals follow file order.
 Setting one of those variables as well is a startup error, not a merge.
 `model` and `speculation_profile` go on every replica or none. Unknown fields,
@@ -44,6 +45,39 @@ Node names appear as the `node` label of `ramjet_upstream_info` and in each
 `/health` replica entry. Without a topology file, `ramjet_upstream_info` uses
 the URL host and `/health` omits the field, because `/health` never publishes
 upstream addresses.
+
+## Data-parallel attention ranks
+
+SGLang's DP attention gives each GPU rank its own KV cache. That multiplies
+a node's cache capacity, but only if every turn of a session reaches the rank
+holding it. SGLang's built-in balancers (round robin, request counts, token
+counts) ignore prefixes. Give the replica `"dp_ranks": 8` and it expands into
+eight upstreams that share the URL. Each one pins its requests with
+`routed_dp_rank`, and prefix affinity chooses the rank:
+
+```json
+{"nodes": [
+  {"name": "h200-01", "replicas": [
+    {"url": "http://10.0.0.11:8073", "model": "glm-5.3", "dp_ranks": 8}
+  ]}
+]}
+```
+
+On one 8×H200 node serving GLM-5.3 FP8 (DP8 attention, DeepEP, FP8 KV,
+193k tokens per rank), in a coding-agent swarm with 16 developers:
+
+| rank placement | turns/min | prompt cached | TTFT p50 / p90 |
+|---|---:|---:|---:|
+| SGLang round robin | 43.0 | 65.6% | 2.6s / 5.0s |
+| ramjet, one upstream per rank | 71.9 | 92.9% | 0.75s / 1.7s |
+
+With 64 developers the working set exceeds the device pools. The pinned fleet
+still led: 46.9 against 42.0 turns/min, and 72.4% against 56.6% cached.
+
+`routed_dp_rank` is appended as the last key of the JSON body. The engine
+keeps the last duplicate key, so a caller cannot choose a rank the router did
+not. Health probes still go to the whole engine, so a single wedged rank is
+not detected on its own.
 
 ## Recommended settings
 

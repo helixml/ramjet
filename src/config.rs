@@ -60,6 +60,10 @@ pub struct Config {
     /// `RJ_UPSTREAM_APIS` preserves the historical all-OpenAI deployment.
     pub upstream_api_profiles: Vec<UpstreamApiProfile>,
     pub upstream_token: Option<String>,
+    /// `SGLang` data-parallel attention rank each upstream pins its requests
+    /// to with `routed_dp_rank`, or `None` for a whole engine. Empty when
+    /// `RJ_UPSTREAM_DP_RANKS` is unset.
+    pub upstream_dp_ranks: Vec<Option<u32>>,
     /// Node name of each upstream, in upstream order, when `RJ_TOPOLOGY_FILE`
     /// declares them. Operator-chosen names, unlike hosts, are safe to publish
     /// on `/health`.
@@ -513,6 +517,22 @@ pub fn reject_legacy_env(keys: impl Iterator<Item = String>) -> Result<(), Confi
 }
 
 impl Config {
+    /// DP rank this upstream pins requests to, if any.
+    #[must_use]
+    pub fn upstream_dp_rank(&self, index: usize) -> Option<u32> {
+        self.upstream_dp_ranks.get(index).copied().flatten()
+    }
+
+    /// The `upstream` metric label: the URL without a trailing slash, plus
+    /// `#dp<rank>` for a data-parallel rank, so ranks of one engine stay
+    /// distinct series.
+    #[must_use]
+    pub fn upstream_label(&self, index: usize) -> String {
+        let url = self.upstreams[index].as_str().trim_end_matches('/');
+        self.upstream_dp_rank(index)
+            .map_or_else(|| url.to_owned(), |rank| format!("{url}#dp{rank}"))
+    }
+
     /// Node each upstream runs on: the topology file's name, else the URL host.
     #[must_use]
     pub fn upstream_node(&self, index: usize) -> &str {
@@ -606,6 +626,7 @@ impl Config {
             return Err(ConfigError::NoUpstreams);
         }
         let upstream_nodes = topology.as_ref().map(Topology::upstream_nodes);
+        let upstream_dp_ranks = upstream_dp_ranks(&mut get, &upstreams)?;
         let upstream_models = match get("RJ_UPSTREAM_MODELS") {
             None => Vec::new(),
             Some(raw) => {
@@ -957,6 +978,7 @@ impl Config {
             upstream_api_profiles,
             upstream_token,
             upstream_nodes,
+            upstream_dp_ranks,
             upstream_admission_mode,
             upstream_warmup_mode,
             upstream_warmup_consecutive_successes,
@@ -2268,6 +2290,45 @@ fn positive(
     Ok(value)
 }
 
+/// Largest data-parallel attention size a rank map may address.
+const MAX_UPSTREAM_DP_RANK: u32 = 255;
+
+fn upstream_dp_ranks(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    upstreams: &[Url],
+) -> Result<Vec<Option<u32>>, ConfigError> {
+    const KEY: &str = "RJ_UPSTREAM_DP_RANKS";
+    let Some(raw) = get(KEY) else {
+        return Ok(Vec::new());
+    };
+    let entries = raw.split(',').map(str::trim).collect::<Vec<_>>();
+    if entries.len() != upstreams.len() {
+        return Err(invalid(
+            KEY,
+            raw,
+            "exactly one rank or - per RJ_UPSTREAM entry",
+        ));
+    }
+    let mut ranks = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        ranks.push(match *entry {
+            "-" => None,
+            value => match value.parse::<u32>() {
+                Ok(rank) if rank <= MAX_UPSTREAM_DP_RANK => Some(rank),
+                _ => return Err(invalid(KEY, raw, "each entry a rank 0-255 or -")),
+            },
+        });
+    }
+    // Two upstreams may share an engine URL only as different ranks of it.
+    let mut seen = HashSet::new();
+    for (url, rank) in upstreams.iter().zip(&ranks) {
+        if !seen.insert((url.as_str(), *rank)) {
+            return Err(invalid(KEY, raw, "each engine URL at most once per rank"));
+        }
+    }
+    Ok(ranks)
+}
+
 fn bounded_positive(
     get: &mut impl FnMut(&str) -> Option<String>,
     key: &'static str,
@@ -3149,6 +3210,34 @@ mod tests {
         for (index, url) in config.upstreams.iter().enumerate() {
             assert_eq!(config.upstream_node(index), url.host_str().unwrap());
         }
+    }
+
+    #[test]
+    fn dp_rank_map_is_dense_bounded_and_unique_per_engine() {
+        let with = |ranks: &str| {
+            let values = HashMap::from([
+                ("RJ_UPSTREAM", "http://e:8000,http://e:8000,http://f:8000"),
+                ("RJ_UPSTREAM_DP_RANKS", ranks),
+            ]);
+            Config::from_lookup(|key| values.get(key).map(ToString::to_string))
+        };
+        let config = with("0,1,-").unwrap();
+        assert_eq!(config.upstream_dp_ranks, [Some(0), Some(1), None]);
+        assert_eq!(config.upstream_label(1), "http://e:8000#dp1");
+        assert_eq!(config.upstream_label(2), "http://f:8000");
+        for invalid in ["0,1", "0,0,-", "0,256,-", "0,x,-"] {
+            assert!(
+                matches!(
+                    with(invalid),
+                    Err(ConfigError::InvalidValue {
+                        key: "RJ_UPSTREAM_DP_RANKS",
+                        ..
+                    })
+                ),
+                "{invalid}"
+            );
+        }
+        assert!(two_upstreams(&[]).unwrap().upstream_dp_ranks.is_empty());
     }
 
     #[test]

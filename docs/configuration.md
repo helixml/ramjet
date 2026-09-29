@@ -54,11 +54,12 @@ resolving across the rename.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `RJ_UPSTREAM` | `http://ds4-flash:8000` | Comma-separated engine URLs. |
-| `RJ_TOPOLOGY_FILE` | unset | JSON file describing the fleet as nodes and their replicas; it supplies `RJ_UPSTREAM`, `RJ_UPSTREAM_MODELS`, `RJ_UPSTREAM_APIS`, `RJ_ROUTE_SPECULATION_PROFILES`, and `RJ_ROUTE_KV_CAPACITY_TOKENS`, which must then be unset. See [multi-node.md](multi-node.md). |
+| `RJ_TOPOLOGY_FILE` | unset | JSON file describing the fleet as nodes and their replicas; it supplies `RJ_UPSTREAM`, `RJ_UPSTREAM_MODELS`, `RJ_UPSTREAM_APIS`, `RJ_UPSTREAM_DP_RANKS`, `RJ_ROUTE_SPECULATION_PROFILES`, and `RJ_ROUTE_KV_CAPACITY_TOKENS`, which must then be unset. See [multi-node.md](multi-node.md). |
 | `RJ_UPSTREAM_MODELS` | unset | Optional dense model ownership map: exactly one model ID per `RJ_UPSTREAM` entry. Enables model-aware routing and combined `/v1/models`; duplicate IDs represent replicas of one model. |
 | `RJ_UPSTREAM_APIS` | `openai` per upstream | Dense API ownership map: exactly one `openai` or `systemone` profile per `RJ_UPSTREAM` entry. `/v1/systemone` can reach only System One upstreams; all other routes can reach only OpenAI upstreams. |
 | `RJ_MACHINEVIEW_UPSTREAM_GPUS` | unset | Optional observation-only dense GPU ownership map, with semicolon-separated sets matching `RJ_UPSTREAM` (for example `0,1,2,3;4,5`). Machine view derives displayed TP size from each set. GPU indices must be unique. |
 | `RJ_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
+| `RJ_UPSTREAM_DP_RANKS` | unset | Dense map of one SGLang data-parallel attention rank (0–255) or `-` per `RJ_UPSTREAM` entry. An upstream with a rank pins every request to it by appending `"routed_dp_rank"` to the JSON body, so each rank of one engine can be listed as its own upstream and chosen by prefix affinity. An engine URL may repeat only with different ranks. Metric labels become `<url>#dp<rank>`. |
 | `RJ_UPSTREAM_CONNECT_TIMEOUT_MS` | `30000` | TCP connect budget per upstream attempt (1 to 300000). Lower it for replicas on other nodes so an unreachable machine fails over quickly. |
 | `RJ_ROUTE_MAX_ATTEMPTS` | unset (every serving replica) | Most candidates one request tries before returning the last failure (1 to 64). Unset keeps trying every serving replica, which grows with the fleet. |
 | `RJ_UPSTREAM_POOL_IDLE_TIMEOUT_MS` | `4000` | How long an idle pooled upstream connection may be reused (1 to 300000). Keep it below the engines' HTTP keep-alive: vLLM and SGLang both close idle connections after 5 seconds, and a request written onto a socket the server is closing fails as `protocol`, fails over, and marks a healthy replica down until its next probe. |
