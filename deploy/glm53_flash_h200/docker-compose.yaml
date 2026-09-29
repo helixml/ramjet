@@ -77,8 +77,10 @@ x-glm-engine: &glm-engine
     GLM_TP: "4"
     GLM_EP: "4"
     # Host NUMA node per TP rank. Container GPU ordinals restart at 0, so the
-    # mapping is explicit rather than auto-detected.
-    GLM_NUMA_NODES: "0 1 2 3"
+    # mapping is explicit rather than auto-detected. Rank 0 is bound to node 1,
+    # not node 0: on this VM, GPU DMA against NUMA node 0's memory raises
+    # contained errors (Xid 94) under HiCache-scale host copies, on any GPU.
+    GLM_NUMA_NODES: "1 1 2 3"
     # Hopper: FP8 KV is not a valid SM90 combination for this NoPE sparse MLA;
     # TileLang DSA with BF16 KV is the verified H200 cell.
     GLM_TOKENIZER_WORKERS: ${GLM_TOKENIZER_WORKERS:-4}
@@ -137,7 +139,7 @@ services:
       <<: *glm-env
       GLM_TP: "8"
       GLM_EP: "8"
-      GLM_NUMA_NODES: "0 1 2 3 4 5 6 7"
+      GLM_NUMA_NODES: "1 1 2 3 4 5 6 7"
     volumes:
       - ${MODEL_DIR:-${HOME}/models/zai-org/GLM-5.3-Flash-eb9eb208}:/models/glm53:ro
       - ${CACHE_ROOT:-${HOME}/engine-cache}/sglang-tp8:/root/.cache
@@ -148,9 +150,9 @@ services:
             - {driver: nvidia, device_ids: ["0", "1", "2", "3", "4", "5", "6", "7"], capabilities: [gpu]}
 
   ramjet:
-    # Main after #294 (marginal affinity basis) and #296 (upstream pool idle). The v0.6.2 control is
+    # v0.7.0 carries #294 (marginal affinity basis) and #296 (upstream pool idle). The v0.6.2 control is
     # ghcr.io/helixml/ramjet:v0.6.2@sha256:53047a816c8ae1dbade7e27b86d2e3eda40cfeaa48826ae06bf2ac1d35a27cc6.
-    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:rust-a524263@sha256:7f874182ee28dca1764454107647fcba67696292481d8c068b5ca9ab8ce3092c}
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.7.0@sha256:dca028638314ca3171120532a075faaa70483e1494dd3d04bddc4db4eb88c01d}
     container_name: ramjet
     restart: unless-stopped
     ports:

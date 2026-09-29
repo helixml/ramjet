@@ -35,6 +35,7 @@ class Glm53H200DeployTests(unittest.TestCase):
             ("mixed chunk", "${GLM_EXTRA_ARGS:-}", "${GLM_EXTRA_ARGS:---enable-mixed-chunk}"),
             ("shared gpu", 'device_ids: ["4", "5", "6", "7"]', 'device_ids: ["3", "4", "5", "6"]'),
             ("wrong socket", 'GLM_NUMA_NODES: "4 5 6 7"', 'GLM_NUMA_NODES: "0 1 2 3"'),
+            ("rank 0 on numa node 0", 'GLM_NUMA_NODES: "1 1 2 3"', 'GLM_NUMA_NODES: "0 1 2 3"'),
             ("no sys_nice", "cap_add: [SYS_NICE]", "cap_add: []"),
             ("single tokenizer", "${GLM_TOKENIZER_WORKERS:-4}", "${GLM_TOKENIZER_WORKERS:-1}"),
             ("10s worker healthcheck", "${SGLANG_UVICORN_WORKER_HEALTHCHECK_TIMEOUT:-60}", "${SGLANG_UVICORN_WORKER_HEALTHCHECK_TIMEOUT:-10}"),

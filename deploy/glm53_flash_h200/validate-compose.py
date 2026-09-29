@@ -11,20 +11,20 @@ ROOT = pathlib.Path(__file__).resolve().parent
 COMPOSE = ROOT / "docker-compose.yaml"
 SGLANG_IMAGE = "lmsysorg/sglang@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f"
 LB_IMAGE = (
-    "ghcr.io/helixml/ramjet:rust-a524263@sha256:"
-    "7f874182ee28dca1764454107647fcba67696292481d8c068b5ca9ab8ce3092c"
+    "ghcr.io/helixml/ramjet:v0.7.0@sha256:"
+    "dca028638314ca3171120532a075faaa70483e1494dd3d04bddc4db4eb88c01d"
 )
 MODEL_REVISION = "eb9eb208eb0d988989d07a6a12d0fdeb5f52574a"
 MTP = "--speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4"
 ENGINES = {
-    "glm53-a": {"port": "8070", "devices": ["0", "1", "2", "3"], "tp": "4", "cache": "sglang-a", "numa": "0 1 2 3"},
+    "glm53-a": {"port": "8070", "devices": ["0", "1", "2", "3"], "tp": "4", "cache": "sglang-a", "numa": "1 1 2 3"},
     "glm53-b": {"port": "8071", "devices": ["4", "5", "6", "7"], "tp": "4", "cache": "sglang-b", "numa": "4 5 6 7"},
     "glm53-tp8": {
         "port": "8072",
         "devices": [str(i) for i in range(8)],
         "tp": "8",
         "cache": "sglang-tp8",
-        "numa": "0 1 2 3 4 5 6 7",
+        "numa": "1 1 2 3 4 5 6 7",
     },
 }
 
@@ -66,7 +66,8 @@ for name, expected in ENGINES.items():
     if env.get("GLM_TP") != expected["tp"] or env.get("GLM_EP") != expected["tp"]:
         fail(f"{name} must use TP/EP {expected['tp']}")
     # Each GPU hangs off its own host NUMA node (GPU i on node i, sockets 0-3
-    # and 4-7). Without SYS_NICE SGLang silently skips the bind.
+    # and 4-7). Without SYS_NICE SGLang silently skips the bind. Rank 0 uses
+    # node 1: GPU DMA against node 0's memory faults on this VM (Xid 94).
     if env.get("GLM_NUMA_NODES") != expected["numa"] or "SYS_NICE" not in service.get("cap_add", []):
         fail(f"{name} must bind TP ranks to NUMA nodes {expected['numa']} with SYS_NICE")
     if env.get("GLM_KV_DTYPE") != "bfloat16":

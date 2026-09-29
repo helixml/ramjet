@@ -58,6 +58,13 @@ is ~130-210s against ~460s cold.
   silently skipped its bind and each replica's ~48GB-per-rank pinned host tier
   landed on the opposite socket; now every rank's CPUs and memory are local.
   This is a placement fix; no throughput change was measurable past the cliff.
+  The exception is rank 0, which binds to node 1. On this VM, GPU DMA against
+  NUMA node 0's memory raises contained errors (Xid 94, then CUDA
+  `unspecified launch failure`) under sustained host copies, on any GPU. A
+  plain pinned-memory copy loop reproduces it in about 40s against node 0 and
+  runs clean against nodes 1-7. HiCache's pinned host tier is the only serving
+  path that copies enough to hit it. The fault is in the host, not the GPUs;
+  drop the remap once the host is fixed.
 - **Rejected, measured:** `--enable-mixed-chunk` OOM-crashed a replica under
   the swarm (sparse-attention indexer top-k buffer, 30MiB free at 0.88);
   `--speculative-adaptive` with SGLang's default table fails graph capture at
