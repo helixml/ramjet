@@ -1,5 +1,65 @@
 # node06 experiment journal
 
+## 2026-09-30 — ramjet vs NVIDIA Dynamo 1.5.0 KV router on GLM-5.3, one 8x H200 node
+
+**Question.** On the `deploy/glm53_h200` engine config (TP8 + DP8 attention,
+DeepEP, FP8 KV, MTP 1/1/2, 32GB/rank HiCache, rank 0 on NUMA node 1), how does
+Dynamo's KV-event router compare with ramjet's per-rank prefix affinity? No
+node06 work.
+
+**Method.** One fresh VM, weights from a shared volume, and four arms run in
+sequence:
+
+- Dynamo 1.5.0 (`ai-dynamo/sglang-runtime:1.5.0`, bundled SGLang 0.5.18), with
+  frontend `--router-mode kv`, per-rank ZMQ KV events and file discovery.
+- The same with `--router-kv-overlap-score-credit 2.0`.
+- ramjet v0.7.0 on the same SGLang 0.5.18, launched directly.
+- ramjet on SGLang 0.5.20 + `hrrn`.
+
+Cells were the agent swarm at 32 and 48 developers, 600s after a 120s warm-up,
+seed `swarm-v1`, one run per cell, Dynamo first. Every arm passed the tool-call
+smoke. The ramjet arms also passed the HiCache reload gate; Dynamo does not
+forward `routed_dp_rank`, so the gate cannot pin a rank through it.
+
+| arm | devs | turns/min | prompt tok/s | cache | TTFT p50/p90 s | TPOT p50 ms |
+|---|---|---|---|---|---|---|
+| Dynamo | 32 | 73.0 | 50.0k | 85.0% | 2.06 / 7.73 | 71 |
+| Dynamo, credit 2.0 | 32 | 69.7 | 47.1k | 83.4% | 2.36 / 5.89 | 78 |
+| ramjet, SGLang 0.5.18 | 32 | 88.9 | 63.9k | 92.4% | 1.53 / 8.71 | 52 |
+| ramjet, SGLang 0.5.20 | 32 | 95.9 | 69.3k | 92.4% | 1.28 / 7.50 | 48 |
+| Dynamo | 48 | 77.3 | 48.6k | 84.7% | 2.92 / 19.98 | 107 |
+| Dynamo, credit 2.0 | 48 | 82.5 | 53.2k | 84.9% | 3.01 / 19.20 | 102 |
+| ramjet, SGLang 0.5.18 | 48 | 99.5 | 67.3k | 91.7% | 2.88 / 20.48 | 73 |
+| ramjet, SGLang 0.5.20 | 48 | 102.8 | 71.2k | 92.0% | 2.99 / 20.32 | 66 |
+
+No request failed and no Xid occurred.
+
+**Result.**
+- On the identical engine, ramjet did +22% and +29% turns/min at the same TTFT.
+  The SGLang 0.5.20 + `hrrn` upgrade added a further +8% and +3%.
+- Dynamo's cache hit stayed at 83-85% against 92%. The extra re-prefill shows
+  as 37-47% slower decode.
+- Neither rank blindness nor a block-size mismatch explains the gap. Dynamo
+  spread requests evenly across ranks (87-131 per rank in the first cell), saw
+  host-tier blocks in 19% of decisions, and registered the engine's 64-token
+  pages.
+- Doubling the overlap credit did not raise hits, but gave the best TTFT p90
+  (5.89s at 32).
+- The cause of the gap is unresolved.
+
+**Setup notes.**
+- Dynamo's image runs as a non-root user and could not write `/root/.cache`;
+  run it `--user root`.
+- SGLang 0.5.18 fails the NUMA bind for node 1. This affected both 0.5.18 arms,
+  not the 0.5.20 arm.
+- One tuned-Dynamo start timed out when one rank's weight load stalled on the
+  shared volume; the retry was clean.
+
+**Caveats.** Single runs, fixed order, one node, one model and one workload.
+Nothing here measures multi-node behaviour, router replicas, a shared Mooncake
+tier or disaggregation, which is where Dynamo's design is aimed. Write-up:
+`docs/blog/2026-09-30-ramjet-vs-dynamo.md`.
+
 ## 2026-09-29 — GLM-5.3 (753B FP8) on 8x H200: DP-rank pinning and a host KV tier more than double one node
 
 **Question.** Can the full `zai-org/GLM-5.3` FP8 checkpoint (753B, revision
