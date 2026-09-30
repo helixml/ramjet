@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Listen addresses are configurable: `RJ_API_ADDR` (default `0.0.0.0:8000`)
+  and `RJ_METRICS_ADDR` (default `0.0.0.0:9090`) let deployments whose
+  containers share the host network move off ports the host already uses, for
+  example `RJ_METRICS_ADDR=127.0.0.1:19090`. Values must be `IP:port` and are
+  validated at startup.
+
 ## 0.7.0 — 2026-09-29
 
 - Multi-node routing: one ramjet can front a fleet of nodes

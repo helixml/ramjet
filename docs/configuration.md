@@ -20,6 +20,19 @@ The proxy listens on `0.0.0.0:8000`; Prometheus metrics listen on
 behavior. Keep secrets in an uncommitted mode-`0600` environment file or a
 secret manager.
 
+## Listener addresses
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `RJ_API_ADDR` | `0.0.0.0:8000` | `IP:port` the OpenAI-compatible API listener binds. |
+| `RJ_METRICS_ADDR` | `0.0.0.0:9090` | `IP:port` the Prometheus metrics and machine-view UI listener binds. |
+
+Both must parse as an `IP:port` socket address; a hostname such as
+`localhost:9090` is rejected at startup. Use them when the host's ports are
+already taken — for example a deployment whose containers share the host
+network can set `RJ_METRICS_ADDR=127.0.0.1:19090`. The published Compose files
+map `127.0.0.1:8007:9090`, so they do not need either variable.
+
 ## The RJ_ prefix, and the retired ones
 
 Settings use `RJ_*`. Two earlier prefixes were retired, `DS4_` and then `MD_`,
