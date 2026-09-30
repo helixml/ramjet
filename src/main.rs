@@ -133,10 +133,10 @@ async fn main() -> anyhow::Result<()> {
             .expect("adaptive UI authority checked above");
         metrics_api = metrics_api.merge(auth.protect(controller.router()));
     }
-    let api_listener = TcpListener::bind("0.0.0.0:8000")
+    let api_listener = TcpListener::bind(config.api_addr)
         .await
         .context("bind API listener")?;
-    let metrics_listener = TcpListener::bind("0.0.0.0:9090")
+    let metrics_listener = TcpListener::bind(config.metrics_addr)
         .await
         .context("bind metrics listener")?;
 
@@ -200,6 +200,8 @@ fn log_startup(config: &Config) {
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         upstreams = ?config.upstreams,
+        api_addr = %config.api_addr,
+        metrics_addr = %config.metrics_addr,
         multi_model = !config.upstream_models.is_empty(),
         upstream_admission_mode = ?config.upstream_admission_mode,
         upstream_admission_timeout_ms = config.upstream_admission_timeout_ms,
@@ -265,7 +267,9 @@ fn log_startup(config: &Config) {
         idle_drain_cooldown_seconds = config.idle_drain.cooldown.as_secs(),
         idle_drain_grace_seconds = config.idle_drain.drain_grace.as_secs(),
         idle_drain_interval_seconds = config.idle_drain_interval_seconds,
-        "ramjet up: API :8000, metrics :9090"
+        "ramjet up: API {}, metrics {}",
+        config.api_addr,
+        config.metrics_addr
     );
 }
 

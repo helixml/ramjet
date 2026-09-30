@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     env, fmt,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Component, Path, PathBuf},
     time::Duration,
 };
@@ -47,6 +48,8 @@ const MAX_AFFINITY_HORIZON_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_UPSTREAM_WARMUP_STABLE_SECONDS: usize = 15 * 60;
 const MAX_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES: usize = 60;
 const MAX_UPSTREAM_MODEL_BYTES: usize = 256;
+const DEFAULT_API_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8000);
+const DEFAULT_METRICS_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 9090);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -173,6 +176,13 @@ pub struct Config {
     pub snapshot_route_attempt_timeout_ms: usize,
     pub snapshot_route_reconnect_min_ms: usize,
     pub snapshot_route_reconnect_max_ms: usize,
+    /// Address the API listener binds. Defaults to `0.0.0.0:8000` and is
+    /// overridden by `RJ_API_ADDR` for hosts where those ports are taken, for
+    /// example deployments whose containers share the host network.
+    pub api_addr: SocketAddr,
+    /// Address the metrics listener binds. Defaults to `0.0.0.0:9090` and is
+    /// overridden by `RJ_METRICS_ADDR` for hosts where those ports are taken.
+    pub metrics_addr: SocketAddr,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -975,6 +985,8 @@ impl Config {
         }
         let idle_drain = idle_drain_settings(&mut get, upstreams.len())?;
         let engine_park = engine_park_settings(&mut get, idle_drain.mode, upstreams.len())?;
+        let api_addr = listen_addr(&mut get, "RJ_API_ADDR", DEFAULT_API_ADDR)?;
+        let metrics_addr = listen_addr(&mut get, "RJ_METRICS_ADDR", DEFAULT_METRICS_ADDR)?;
 
         Ok(Self {
             upstreams,
@@ -1125,6 +1137,8 @@ impl Config {
             snapshot_route_attempt_timeout_ms: snapshot_route.attempt_timeout_ms,
             snapshot_route_reconnect_min_ms: snapshot_route.reconnect_min_ms,
             snapshot_route_reconnect_max_ms: snapshot_route.reconnect_max_ms,
+            api_addr,
+            metrics_addr,
         })
     }
 }
@@ -2301,6 +2315,22 @@ fn parse<T: std::str::FromStr>(
     value.parse().map_err(|_| invalid(key, value, reason))
 }
 
+/// Parses a listener `IP:port` setting, falling back to the documented
+/// default. Hostnames are rejected on purpose: startup should bind exactly
+/// the address the operator wrote, not whatever a resolver answers with.
+fn listen_addr(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    key: &'static str,
+    fallback: SocketAddr,
+) -> Result<SocketAddr, ConfigError> {
+    let Some(value) = get(key).filter(|value| !value.is_empty()) else {
+        return Ok(fallback);
+    };
+    value
+        .parse()
+        .map_err(|_| invalid(key, value, "an IP:port listen address"))
+}
+
 fn positive(
     get: &mut impl FnMut(&str) -> Option<String>,
     key: &'static str,
@@ -2656,6 +2686,49 @@ mod tests {
             "RJ_UPSTREAM" => Some("http://a:8000,http://b:8000".to_owned()),
             other => overrides.get(other).map(|value| (*value).to_owned()),
         })
+    }
+
+    #[test]
+    fn listen_addresses_default_to_the_documented_ports() {
+        let config = two_upstreams(&[]).expect("defaults must start");
+        assert_eq!(config.api_addr, "0.0.0.0:8000".parse().unwrap());
+        assert_eq!(config.metrics_addr, "0.0.0.0:9090".parse().unwrap());
+    }
+
+    #[test]
+    fn listen_addresses_move_to_any_ip_and_port() {
+        let config = two_upstreams(&[
+            ("RJ_API_ADDR", "127.0.0.1:18000"),
+            ("RJ_METRICS_ADDR", "127.0.0.1:19090"),
+        ])
+        .expect("valid listen addresses must start");
+        assert_eq!(config.api_addr, "127.0.0.1:18000".parse().unwrap());
+        assert_eq!(config.metrics_addr, "127.0.0.1:19090".parse().unwrap());
+    }
+
+    #[test]
+    fn an_invalid_listen_address_refuses_to_start() {
+        for (key, value) in [
+            ("RJ_API_ADDR", "localhost:8000"),
+            ("RJ_API_ADDR", "0.0.0.0"),
+            ("RJ_API_ADDR", "0.0.0.0:not-a-port"),
+            ("RJ_METRICS_ADDR", "10.0.0.1:99999"),
+            ("RJ_METRICS_ADDR", "nope"),
+        ] {
+            let error = two_upstreams(&[(key, value)])
+                .expect_err("an invalid listen address must fail startup");
+            let message = error.to_string();
+            assert!(message.contains(key), "{message}");
+            assert!(message.contains(value), "{message}");
+        }
+    }
+
+    #[test]
+    fn an_empty_listen_address_falls_back_to_the_default() {
+        let config = two_upstreams(&[("RJ_API_ADDR", ""), ("RJ_METRICS_ADDR", "")])
+            .expect("an empty value must not fail startup");
+        assert_eq!(config.api_addr, "0.0.0.0:8000".parse().unwrap());
+        assert_eq!(config.metrics_addr, "0.0.0.0:9090".parse().unwrap());
     }
 
     #[test]
