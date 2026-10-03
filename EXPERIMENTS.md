@@ -11069,3 +11069,54 @@ Ramjet remained healthy with one upstream and zero in-flight requests after the
 reload. The live rollback file is
 `/etc/caddy/Caddyfile.pre-canonical-v1-20260827T142817Z`; evidence is under
 `/home/luke/inference/glm53_flash/.experiments/20260827T142817Z-canonical-v1`.
+
+## 2026-10-03 — persistent Qwen-name alias to stock GLM-5.3-Flash
+
+User requested restoring `qwen3.8-flash-next` routing to stock GLM-5.3-Flash,
+leaving the uncensored pool separate. Deployed an LB-only patch based exactly
+on the running 962b7b2 revision; source commit `3c08865` on
+`fix/node06-qwen-model-alias` in `~/worktrees/ramjet-qwen-alias`.
+`RJ_MODEL_ALIASES=qwen3.8-flash-next=glm-5.3-flash` resolves before request
+preparation, fingerprinting, tokenization, and model eligibility. Both stock
+TP2 replicas remain eligible; uncensored requests retain their dedicated TP4
+pool. Responses report the canonical GLM model name. Model discovery exposes
+all three request names. Alias targets must be configured canonical models;
+chains, duplicate aliases, and canonical-name collisions fail startup.
+
+The canonical on-box Compose file at
+`/home/luke/inference/qwen38_glm53_kev/docker-compose.yaml` now persists the
+alias and pins local immutable image
+`sha256:8197c573270f33ed32e1a81947763e3a5fa8ec7b6ceddd269b5459c9ef205151`.
+The adjacent validator enforces the alias. This is a locally built and
+transferred image, not a published GHCR release; retain the image in node06's
+image store. The live render changed only the image and alias environment
+entry. The original Compose render/hash matched the original container before
+mutation. The common deployment lock covered inspect, canary, cutover, and
+verification; the detached owner completed successfully at 08:16:13 UTC.
+
+Verification: 667 Rust unit tests plus all Rust integration tests passed;
+fmt, all-target/all-feature Clippy, locked release build and agentbench
+validation passed. Python: 732/733 passed; the unchanged archive maintenance
+test uses September 2 with a 30-day retention window and now deletes its own
+fixture (October 3). Focused regressions prove canonical wire/fingerprint/
+tokenizer parity, both stock replica choices, unknown-model rejection, and no
+fallback into the uncensored pool when stock replicas are drained.
+
+A private canary, promoted loopback LB, and authenticated public Caddy endpoint
+each passed nonstreaming and streaming Qwen-name requests plus both canonical
+model names. Qwen-name requests selected a stock replica and returned canonical
+`glm-5.3-flash`; uncensored requests selected the uncensored replica. All 3
+replicas healthy, all engine IDs/start times unchanged. No sustained benchmark
+was run; all smoke requests were capped at 8 output tokens, with intake at
+40C before each. Bookworm image release compilation took 56.13s (cached
+dependencies/UI); image transfer took 3.81s; LB stop-to-ready took 2.658s.
+Helix session-level validation was unavailable because no Helix API key was
+present; the authenticated endpoint used by clients was verified directly.
+
+Rollback: stopped container
+`ds4-loadbalancer-rollback-20261003t081601z` and protected baseline Compose,
+validator, and rendered configuration under
+`/home/luke/inference/qwen38_glm53_kev/evidence/qwen-alias-20261003T081601Z`.
+Restore the baseline configuration and original container together under the
+same deployment lock. Qwen engines remain stopped; this is a persistent
+compatibility alias, not a Qwen engine restart.
