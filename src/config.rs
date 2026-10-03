@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     env, fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Component, Path, PathBuf},
@@ -83,6 +83,8 @@ pub struct Config {
     /// homogeneous-fleet contract in which every upstream may serve every
     /// request and `/v1/models` is proxied from one selected replica.
     pub upstream_models: Vec<String>,
+    /// Explicit one-hop aliases to configured canonical model IDs.
+    pub model_aliases: BTreeMap<String, String>,
     /// API family served by each upstream. This map is always dense so a
     /// request can never fail open from one protocol into another. An unset
     /// `RJ_UPSTREAM_APIS` preserves the historical all-OpenAI deployment.
@@ -696,6 +698,46 @@ impl Config {
                 models.into_iter().map(str::to_owned).collect()
             }
         };
+        let model_aliases = match get("RJ_MODEL_ALIASES") {
+            None => BTreeMap::new(),
+            Some(raw) => {
+                if raw.chars().any(char::is_control) {
+                    return Err(invalid(
+                        "RJ_MODEL_ALIASES",
+                        raw,
+                        "aliases without control characters",
+                    ));
+                }
+                let mut aliases = BTreeMap::new();
+                for entry in raw.split(',') {
+                    let Some((alias, target)) = entry.split_once('=') else {
+                        return Err(invalid(
+                            "RJ_MODEL_ALIASES",
+                            raw,
+                            "comma-separated alias=canonical-model pairs",
+                        ));
+                    };
+                    let (alias, target) = (alias.trim(), target.trim());
+                    if aliases.len() >= 64
+                        || alias.is_empty()
+                        || alias.len() > MAX_UPSTREAM_MODEL_BYTES
+                        || alias.chars().any(char::is_control)
+                        || upstream_models.iter().any(|model| model == alias)
+                        || !upstream_models.iter().any(|model| model == target)
+                        || aliases
+                            .insert(alias.to_owned(), target.to_owned())
+                            .is_some()
+                    {
+                        return Err(invalid(
+                            "RJ_MODEL_ALIASES",
+                            raw,
+                            "at most 64 unique non-canonical aliases of 1-256 bytes targeting configured models",
+                        ));
+                    }
+                }
+                aliases
+            }
+        };
         let upstream_api_profiles = match get("RJ_UPSTREAM_APIS") {
             None => vec![UpstreamApiProfile::OpenAi; upstreams.len()],
             Some(raw) => {
@@ -1041,6 +1083,7 @@ impl Config {
         Ok(Self {
             upstreams,
             upstream_models,
+            model_aliases,
             upstream_api_profiles,
             upstream_token,
             upstream_nodes,
@@ -2862,6 +2905,36 @@ mod tests {
                 "{invalid_models:?}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn model_aliases_require_unique_names_and_canonical_targets() {
+        let config = two_upstreams(&[
+            ("RJ_UPSTREAM_MODELS", "glm,uncensored"),
+            ("RJ_MODEL_ALIASES", "qwen=glm,old=glm"),
+        ])
+        .unwrap();
+        assert_eq!(config.model_aliases["qwen"], "glm");
+        for aliases in [
+            "",
+            "qwen",
+            "qwen=missing",
+            "glm=uncensored",
+            "qwen=glm,qwen=uncensored",
+            "qwen=glm,old=qwen",
+            "=glm",
+            "qwen\n=glm",
+        ] {
+            assert!(
+                two_upstreams(&[
+                    ("RJ_UPSTREAM_MODELS", "glm,uncensored"),
+                    ("RJ_MODEL_ALIASES", aliases)
+                ])
+                .is_err(),
+                "{aliases:?}"
+            );
+        }
+        assert!(two_upstreams(&[("RJ_MODEL_ALIASES", "qwen=glm")]).is_err());
     }
 
     #[test]
