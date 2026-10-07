@@ -17,7 +17,7 @@ deployment.
 # host, once per boot: let the shared-memory Engram table use huge pages
 echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
 docker pull lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
-./prewarm.sh                                   # page-cache the weights
+sync && echo 1 | sudo tee /proc/sys/vm/drop_caches   # see "Memory" below
 docker compose up -d                           # 2x TP4 + ramjet, ~15 min to serve
 python3 validate-compose.py
 ```
@@ -74,6 +74,14 @@ In the order they mattered:
   to one ~110GB node, and the 203GB of Engram tables is then OOM-killed
   (`CONSTRAINT_MEMORY_POLICY`). Turning NUMA off avoids that but loses ~5%;
   the patch keeps the CPU bind and makes memory a preference.
+- **Memory: start from a clean page cache.** The two replicas' Engram
+  tables take ~350GB of shared-memory huge pages, and each replica copies its
+  tables in while the page cache is full of checkpoint. On a host whose cache
+  already held the weights (`prewarm.sh`, or an earlier start), free memory
+  fell to 2GB, the kernel stalled on reclaim and compaction (`/proc/pressure/memory`
+  `full` at 84%), and both replicas sat at "Load weight begin" for 35
+  minutes; dropping the clean page cache let them continue within seconds.
+  `prewarm.sh` is for the `tp8` profile, which keeps Engram in HBM.
 - **A private `/dev/shm` per replica** (no `ipc: host`). SGLang hands its
   tokenizer workers their channels through `/dev/shm/multi_tokenizer_args_<pid>`.
   Two containers sharing the host's `/dev/shm` sometimes drew the same PID,
