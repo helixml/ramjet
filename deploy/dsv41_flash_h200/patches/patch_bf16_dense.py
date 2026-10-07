@@ -10,6 +10,8 @@ root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "/sgl-workspace/sglang
 
 def edit(rel, old, new):
     p = root / rel; s = p.read_text()
+    if new in s:  # a container restart re-runs the start command
+        print("already patched", rel); return
     if s.count(old) != 1:
         raise SystemExit(f"anchor not unique/found in {rel}: {old[:80]!r} ({s.count(old)})")
     p.write_text(s.replace(old, new)); print("patched", rel)

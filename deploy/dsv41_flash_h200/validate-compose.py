@@ -40,7 +40,7 @@ def render(*profile):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DS_", "RJ_", "LB_", "SGLANG_"))}
     env.update(MODEL_DIR="/models-under-test", CACHE_ROOT="/cache-under-test")
     rendered = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE), *profile, "config", "--format", "json"],
+        ["docker", "compose", "--env-file", os.devnull, "-f", str(COMPOSE), *profile, "config", "--format", "json"],
         cwd=ROOT,
         env=env,
         check=True,
@@ -88,7 +88,11 @@ for name, expected in ENGINES.items():
     if env.get("DS_SPEC_ARGS") != DSPARK:
         fail(f"{name} must default to DSpark with block size 5")
     if env.get("DS_CONTEXT_LENGTH") != "262144":
-        fail(f"{name}: DSpark OOMs in graph capture at the native 1M context on H200")
+        fail(f"{name}: DSpark OOMs in graph capture at the native 1M context at these defaults")
+    if env.get("DS_MEM_FRACTION") != "0.75" or env.get("DS_CUDA_GRAPH_MAX_BS") != "64":
+        fail(f"{name} must default to memory fraction 0.75 and graph cap 64, the measured cell")
+    if service.get("init") is not True or service.get("ulimits", {}).get("memlock") != -1:
+        fail(f"{name} needs init and an unlimited memlock")
     if env.get("DS_MOE_PRECISION") != "fp8":
         fail(f"{name} must default to FP8 MoE activations (W4A8)")
     if env.get("DS_TOKENIZER_WORKERS") != "4" or env.get("SGLANG_UVICORN_WORKER_HEALTHCHECK_TIMEOUT") != "60":
@@ -101,6 +105,12 @@ for name, expected in ENGINES.items():
     if "--enable-dp-attention" in command:
         fail(f"{name}: DP attention with DSpark hangs after weight load")
     for flag in (
+        "for p in $$DS_PATCHES; do python3 /opt/dsv41-patches/$$p",
+        "--tp-size=$$DS_TP --ep-size=$$DS_EP",
+        "--context-length=$$DS_CONTEXT_LENGTH",
+        "--mem-fraction-static=$$DS_MEM_FRACTION",
+        "--cuda-graph-max-bs-decode=$$DS_CUDA_GRAPH_MAX_BS",
+        "--enable-decoder-swa-bounded-replay",
         "--attention-backend=dsv4",
         "--moe-runner-backend=flashinfer_mxfp4",
         "--flashinfer-mxfp4-moe-precision=$$DS_MOE_PRECISION",
