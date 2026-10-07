@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -238,9 +240,35 @@ impl PreparedRequest {
         router: &Router,
         prepare_tokenizer_body: bool,
     ) -> Self {
+        Self::with_model_aliases(
+            endpoint,
+            raw,
+            threshold,
+            router,
+            prepare_tokenizer_body,
+            &BTreeMap::new(),
+        )
+    }
+
+    pub(crate) fn with_model_aliases(
+        endpoint: Endpoint,
+        raw: &[u8],
+        threshold: i64,
+        router: &Router,
+        prepare_tokenizer_body: bool,
+        aliases: &BTreeMap<String, String>,
+    ) -> Self {
         let parsed = serde_json::from_slice::<Value>(raw).ok();
         let (body, object, output_limit, requested_model) = match parsed {
             Some(Value::Object(mut object)) => {
+                let alias_target = object
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .and_then(|model| aliases.get(model));
+                let alias_changed = alias_target.is_some();
+                if let Some(target) = alias_target {
+                    object.insert("model".to_owned(), Value::String(target.clone()));
+                }
                 let requested_model = match object.get("model") {
                     None | Some(Value::Null) => RequestedModel::Missing,
                     Some(Value::String(model))
@@ -265,7 +293,7 @@ impl PreparedRequest {
                     had_max_completion_tokens,
                     stream_mode,
                 );
-                let body = if changed {
+                let body = if changed || alias_changed {
                     serde_json::to_vec(&object).unwrap_or_else(|_| raw.to_vec())
                 } else {
                     raw.to_vec()
@@ -431,6 +459,43 @@ mod tests {
         assert_eq!(
             PreparedRequest::new(Endpoint::Chat, raw, 100_000, &router).body,
             raw
+        );
+    }
+
+    #[test]
+    fn model_alias_prepares_canonical_wire_fingerprints_and_tokenizer_input() {
+        let router = router();
+        let aliases = BTreeMap::from([("qwen".to_owned(), "glm".to_owned())]);
+        let raw = br#"{"model":"qwen","messages":[{"role":"user","content":"qwen"}],"stream":true,"max_tokens":8}"#;
+        let canonical = br#"{"model":"glm","messages":[{"role":"user","content":"qwen"}],"stream":true,"max_tokens":8}"#;
+        let actual = PreparedRequest::with_model_aliases(
+            Endpoint::Chat,
+            raw,
+            100_000,
+            &router,
+            true,
+            &aliases,
+        );
+        let expected =
+            PreparedRequest::with_tokenizer(Endpoint::Chat, canonical, 100_000, &router, true);
+        assert_eq!(actual.requested_model, expected.requested_model);
+        assert_eq!(actual.fingerprints, expected.fingerprints);
+        assert_eq!(actual.tokenizer_body, expected.tokenizer_body);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&actual.body).unwrap(),
+            serde_json::from_slice::<Value>(canonical).unwrap()
+        );
+        assert_eq!(
+            PreparedRequest::with_model_aliases(
+                Endpoint::Chat,
+                canonical,
+                100_000,
+                &router,
+                false,
+                &aliases
+            )
+            .body,
+            canonical
         );
     }
 

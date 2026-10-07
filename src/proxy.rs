@@ -1316,12 +1316,13 @@ impl Proxy {
             self.inner
                 .tokenizer
                 .assign_canary(endpoint, prepare_tokenizer_body, opaque_session);
-        let prepared = PreparedRequest::with_tokenizer(
+        let prepared = PreparedRequest::with_model_aliases(
             endpoint,
             &raw_body,
             self.inner.config.max_tokens_strip,
             &self.inner.router,
             prepare_tokenizer_body,
+            &self.inner.config.model_aliases,
         );
         let output_limit = prepared.output_limit;
         let decode_load_units = output_limit.decode_load_units(
@@ -1986,6 +1987,12 @@ impl Proxy {
                 started.elapsed(),
             );
             return json_error(StatusCode::BAD_GATEWAY, "model discovery unavailable");
+        }
+        for (alias, target) in &self.inner.config.model_aliases {
+            if let Some(mut model) = models.get(target).cloned() {
+                model["id"] = Value::String(alias.clone());
+                models.insert(alias.clone(), model);
+            }
         }
         let encoded = serde_json::to_vec(&ModelListResponse {
             object: "list",
@@ -5033,6 +5040,97 @@ mod tests {
             ),
         ] {
             assert!((actual - expected).abs() < f64::EPSILON);
+        }
+    }
+
+    #[tokio::test]
+    async fn model_alias_rewrites_body_and_never_escapes_canonical_pool() {
+        let mut urls = Vec::new();
+        let mut tasks = Vec::new();
+        for model in ["glm", "glm", "uncensored"] {
+            let app = AxumRouter::new().fallback(any(move |request: Request<Body>| async move {
+                let response = if is_models_request(request.method(), request.uri()) {
+                    serde_json::json!({"object":"list","data":[{"id":model,"object":"model"}]})
+                } else {
+                    let bytes = to_bytes(request.into_body(), MAX_REQUEST_BODY)
+                        .await
+                        .unwrap();
+                    let body: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(body["model"], model);
+                    serde_json::json!({"model":model,"choices":[]})
+                };
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(response.to_string()))
+                    .unwrap()
+            }));
+            let (url, task) = start_upstream(app).await;
+            urls.push(url);
+            tasks.push(task);
+        }
+        let joined = urls.iter().map(Url::as_str).collect::<Vec<_>>().join(",");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_MODELS" => Some("glm,glm,uncensored".to_owned()),
+            "RJ_MODEL_ALIASES" => Some("qwen=glm".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        let response = proxy
+            .serve(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let models: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(models["data"].as_array().unwrap().len(), 3);
+        assert!(
+            models["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == "qwen")
+        );
+        for stock_upstream in [0, 1] {
+            proxy.inner.router.set_healthy(1 - stock_upstream, false);
+            proxy.inner.router.set_healthy(stock_upstream, true);
+            for model in ["qwen", "glm", "uncensored", "unknown"] {
+                let response = proxy.serve(Request::builder().method(Method::POST).uri("/v1/chat/completions").body(Body::from(format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}]}}"#))).unwrap()).await;
+                if model == "unknown" {
+                    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+                    continue;
+                }
+                assert_eq!(response.status(), StatusCode::OK);
+                let expected = if model == "uncensored" {
+                    2
+                } else {
+                    stock_upstream
+                };
+                assert_eq!(
+                    response.headers()["x-ramjet-upstream"],
+                    expected.to_string()
+                );
+                let _ = to_bytes(response.into_body(), 4096).await.unwrap();
+            }
+        }
+        proxy.inner.router.set_drained(0, true);
+        proxy.inner.router.set_drained(1, true);
+        let response = proxy
+            .serve(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .body(Body::from(r#"{"model":"qwen","messages":[]}"#))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        for task in tasks {
+            task.abort();
         }
     }
 
