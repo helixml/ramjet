@@ -1406,6 +1406,36 @@ capture; compare. Never reuse a salt across the two — warm state leaks.
 Read the router's own decisions with
 `curl -s :8007/metrics | grep ramjet_route_decisions_total`.
 
+### Record throughput, latency, and cache hits for every cell
+
+The README's "Measured on real hardware" and "Models with a validated stack"
+tables are built from EXPERIMENTS.md, with one column each for throughput,
+latency, and cache hits. When they were filled on 2026-10-07, many cells had
+to stay empty or be recovered from a PR description: the run had measured the
+value, but its entry kept only the headline metric. The Qwen3.8-Flash-Next
+proxy-overhead TTFT survives only as "slightly better", because its result
+files were never saved and only the thermal journals remain on node06.
+
+For every qualification or A/B cell (model bring-up, engine candidate,
+routing change), write all of these into the EXPERIMENTS.md entry for both
+baseline and candidate, even when they are not the point of the experiment:
+
+- **Throughput:** aggregate output tok/s, or turns/min for agent fleets, with
+  concurrency and max output tokens.
+- **Latency:** TTFT p50 and p90, or p95 if that is what the tool reports.
+  For a new model or engine, also single-stream decode tok/s at c1 and the
+  best qualified full-box throughput with its shape.
+- **Cache hits:** the cached prompt-token share, and whether it comes from
+  response usage or engine-native counters.
+- **Shape:** model, engine and version, topology, GPU type and count.
+
+Put them in a before → after table and keep the regressions in it. A routing
+win that costs TTFT p95 or long-request throughput is still a result, and the
+README shows it in red. If a metric genuinely was not recorded, say so in the
+entry rather than leaving it out. Keep the raw per-cell result files (the
+bench's JSON/JSONL output) beside the thermal journal under `.experiments/`,
+never only on stdout or in an SSH scrollback.
+
 
 ### Using both TP4 pairs without invalidating the result
 
@@ -1484,9 +1514,11 @@ EXPERIMENTS.md — add yours there too):
    sessions/chat` against the org test app (ids + creds: infra repo,
    `node06/inference/dspark_0731/README.md`). This catches harness-shim
    regressions that synthetic benches miss.
-7. **Record**: append the run to EXPERIMENTS.md (config, numbers, verdict),
-   update RESULTS.md if it changes a headline, and either promote the tag in
-   the canonical ramjet Compose (`LB_IMAGE` default) or note why not.
+7. **Record**: append the run to EXPERIMENTS.md (config, numbers, verdict)
+   with the throughput, latency, and cache-hit values listed in "Record
+   throughput, latency, and cache hits for every cell". Update RESULTS.md and
+   the README result tables if it changes a headline, and either promote the
+   tag in the canonical ramjet Compose (`LB_IMAGE` default) or note why not.
 8. **Mirror a promoted config**: validate the canonical Compose file, run
    `deploy/dspark_0731/sync-compose.sh ../infra`, and commit the infra
    mirror. Never hand-edit the infra copy.
