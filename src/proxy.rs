@@ -1391,10 +1391,12 @@ impl Proxy {
             );
             return json_error(StatusCode::NOT_FOUND, "model not found for API profile");
         }
-        // Confine a very long prompt to its model's lane before any later
-        // stage (session affinity, exact placement, single-flight) reads the
-        // decision, so none of them can move it back onto a protected replica.
-        let long_prompt_lane = long_prompt_lane::confine(
+        // Confine a very long prompt to its model's lane, or under an
+        // exclusive lane keep a short one off it, before any later stage
+        // (session affinity, exact placement, single-flight) reads the
+        // decision, so none of them can undo the split. An excluded short
+        // prompt keeps the lane as a failover tail for the retry loop.
+        let (long_prompt_lane, lane_failover) = long_prompt_lane::confine_with_failover(
             &mut approximate_decision,
             prepared.body.len(),
             self.inner.config.route_long_prompt_bytes,
@@ -1512,6 +1514,23 @@ impl Proxy {
                     .map(|state| (*candidate, state.request_load_units))
             })
             .collect::<Vec<_>>();
+        // Exclusion protects latency, not availability: once every protected
+        // replica has failed, an excluded short prompt may still reach the
+        // lane. The tail follows the routed candidates, so it is only tried
+        // after them. Its members were serving when it was built; the
+        // restriction has since marked them non-serving in the decision.
+        for upstream in lane_failover {
+            if serving_candidates
+                .iter()
+                .all(|(candidate, _)| *candidate != upstream)
+                && let Some(state) = decision
+                    .candidate_state
+                    .iter()
+                    .find(|state| state.index == upstream)
+            {
+                serving_candidates.push((upstream, state.request_load_units));
+            }
+        }
         // Nothing is healthy. Shedding here converts a fleet that is merely
         // saturated — the state in which its readiness probes starve first —
         // into a total outage, so dispatch anyway: a busy engine still answers,
@@ -2401,13 +2420,13 @@ impl Proxy {
     /// the router selected for them. Below-threshold and lane-less requests
     /// are not recorded, so the series stays proportional to long prompts.
     ///
-    /// Short prompts governed by an `avoid` or `exclusive` lane are counted
-    /// separately, so neither series changes meaning when that is switched on.
+    /// Short prompts kept off an `exclusive` lane are counted separately, so
+    /// neither series changes meaning when exclusion is switched on.
     fn record_long_prompt_lane(&self, outcome: LongPromptLaneOutcome, decision: &Decision) {
         let counter = if outcome.counted() {
             &self.inner.metrics.route_long_prompt
-        } else if outcome.exclusion_counted() {
-            &self.inner.metrics.route_lane_exclusion
+        } else if outcome.short_counted() {
+            &self.inner.metrics.route_long_prompt_short
         } else {
             return;
         };
@@ -5205,11 +5224,11 @@ mod tests {
         }
     }
 
-    fn lane_exclusion_count(proxy: &Proxy, upstream: &Url, outcome: &str) -> f64 {
+    fn long_prompt_short_count(proxy: &Proxy, upstream: &Url, outcome: &str) -> f64 {
         proxy
             .inner
             .metrics
-            .route_lane_exclusion
+            .route_long_prompt_short
             .with_label_values(&[upstream.as_str().trim_end_matches('/'), outcome])
             .get()
     }
@@ -5235,9 +5254,9 @@ mod tests {
             served_upstream(&proxy, "qwen3.8-flash-next", 200, 256).await,
             "0"
         );
-        assert!((lane_exclusion_count(&proxy, &urls[1], "excluded") - 8.0).abs() < f64::EPSILON);
+        assert!((long_prompt_short_count(&proxy, &urls[1], "excluded") - 8.0).abs() < f64::EPSILON);
         assert!((long_prompt_count(&proxy, &urls[2], "lane") - 4.0).abs() < f64::EPSILON);
-        assert!(lane_exclusion_count(&proxy, &urls[0], "excluded").abs() < f64::EPSILON);
+        assert!(long_prompt_short_count(&proxy, &urls[0], "excluded").abs() < f64::EPSILON);
 
         // With the protected replica fenced, short prompts use the lane.
         proxy.inner.router.set_healthy(1, false);
@@ -5249,7 +5268,7 @@ mod tests {
             );
         }
         assert!(
-            (lane_exclusion_count(&proxy, &urls[2], "excluded_fallback") - 4.0).abs()
+            (long_prompt_short_count(&proxy, &urls[2], "excluded_fallback") - 4.0).abs()
                 < f64::EPSILON
         );
         for task in tasks {
@@ -5258,20 +5277,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_avoiding_lane_keeps_an_idle_fleets_short_prompts_off_the_lane() {
-        let (proxy, urls, tasks) = long_prompt_lane_fleet("avoid").await;
-        for salt in 0..8 {
-            assert_eq!(
-                served_upstream(&proxy, "glm-5.3-flash", salt, 256).await,
-                "1"
-            );
+    async fn an_excluded_short_prompt_fails_over_to_the_lane() {
+        let calls = [0, 1].map(|_| Arc::new(AtomicUsize::new(0)));
+        let mut urls = Vec::new();
+        let mut tasks = Vec::new();
+        for (status, calls) in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK]
+            .iter()
+            .zip(&calls)
+        {
+            let (url, task) = start_upstream(counting_upstream(*status, Arc::clone(calls))).await;
+            urls.push(url);
+            tasks.push(task);
         }
+        let joined = urls.iter().map(Url::as_str).collect::<Vec<_>>().join(",");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_MODELS" => Some("glm-5.3-flash,glm-5.3-flash".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_BYTES" => Some("4096".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_UPSTREAMS" => Some("-,lane".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_SHORT" => Some("exclusive".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+
+        // The protected replica still looks healthy, so the request is
+        // excluded from the lane; its 503 must not end the request.
         assert_eq!(
-            served_upstream(&proxy, "glm-5.3-flash", 100, 8_192).await,
-            "2"
+            served_upstream(&proxy, "glm-5.3-flash", 0, 256).await,
+            "1",
+            "availability beats isolation"
         );
-        assert!((lane_exclusion_count(&proxy, &urls[1], "excluded") - 8.0).abs() < f64::EPSILON);
-        assert!(lane_exclusion_count(&proxy, &urls[2], "spilled").abs() < f64::EPSILON);
+        assert_eq!(
+            calls.each_ref().map(|calls| calls.load(Ordering::Relaxed)),
+            [1, 1]
+        );
+        assert!((long_prompt_short_count(&proxy, &urls[0], "excluded") - 1.0).abs() < f64::EPSILON);
         for task in tasks {
             task.abort();
         }

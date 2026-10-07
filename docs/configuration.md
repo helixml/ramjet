@@ -106,8 +106,7 @@ resolving across the rename.
 | `RJ_ROUTE_KV_CAPACITY_TOKENS` | unset | Engine KV capacity in tokens, one value or one per upstream (vLLM logs `GPU KV cache size: N tokens` per incarnation; re-read it after an engine restart). `-` marks a replica whose capacity has not been observed, which is modelled as never evicting. Required by the `fill` source, rejected with `static`. |
 | `RJ_ROUTE_LONG_PROMPT_BYTES` | unset (off) | Request-body bytes at or above which a request is confined to its model's long-prompt lane. `0` is off; roughly 4 bytes per prompt token. Requires `RJ_ROUTE_LONG_PROMPT_UPSTREAMS`. |
 | `RJ_ROUTE_LONG_PROMPT_UPSTREAMS` | unset (off) | Dense lane map: exactly one `lane` or `-` per `RJ_UPSTREAM` entry, with at least one `lane`, all on `openai`-profile upstreams (for example `-,-,lane,-`). Requires `RJ_ROUTE_LONG_PROMPT_BYTES`. |
-| `RJ_ROUTE_LONG_PROMPT_SHORT` | `shared` | Whether requests below the threshold may use lane members: `shared` (yes), `avoid` (only while every protected replica is busier than the least-loaded lane member by more than `RJ_ROUTE_LONG_PROMPT_AVOID_LOAD_UNITS`), or `exclusive` (never, while a protected replica is serving). Non-`shared` values require `RJ_ROUTE_LONG_PROMPT_UPSTREAMS`; inert while the threshold is `0`. |
-| `RJ_ROUTE_LONG_PROMPT_AVOID_LOAD_UNITS` | `8` | `avoid` margin in load units; a fully cold request reserves up to `RJ_ROUTE_MAX_LOAD_UNITS`. |
+| `RJ_ROUTE_LONG_PROMPT_SHORT` | `shared` | Whether requests below the threshold may use lane members: `shared` (yes) or `exclusive` (only as failover, while a protected replica is serving). `exclusive` requires `RJ_ROUTE_LONG_PROMPT_UPSTREAMS` and is inert while the threshold is `0`. |
 | `RJ_ROUTE_JOURNAL` | `false` | Emit privacy-bounded route start/finish records for offline replay. |
 | `RJ_MAX_TOKENS_STRIP` | `100000` | Strip client `max_tokens` at or above this compatibility boundary; `0` disables the legacy strip. |
 | `RJ_ADVERTISE_CTX_MARGIN` | `16384` | Context tokens withheld when rewriting upstream model metadata. |
@@ -230,39 +229,35 @@ the request routes exactly as it would without a lane, because availability
 beats isolation. Once lane members have been chosen, dispatch retries stay
 among them rather than spilling onto a protected replica; a transport failure
 marks that member down, so later long prompts fall back until its readiness
-probe recovers. Requests below the threshold, and
-models with no lane member, are unaffected; they may still use a lane
-replica. `ramjet_route_long_prompt_total{upstream,outcome}` counts each long
+probe recovers. Models with no lane member are unaffected, and by default so
+are requests below the threshold, which may still use a lane replica. `ramjet_route_long_prompt_total{upstream,outcome}` counts each long
 request against its selected upstream as `lane` or `fallback`.
 `RJ_ROUTE_LONG_PROMPT_BYTES=0` is the rollback: it disables the lane while the
 member list is still validated but ignored. Setting either variable without
 the other fails startup.
 
 `RJ_ROUTE_LONG_PROMPT_SHORT` decides whether short requests share the lane.
-`shared`, the default, suits a lane replica identical to its peers: between
-long prompts it is an ordinary replica. A lane replica that is slower at
-ordinary work, typically one configured for a much longer context window,
-should not receive short traffic. On 8x H200 with DeepSeek-V4.1-Flash and
-DSpark, a TP4 replica serving a 1M context decoded 75 tok/s per stream at 16
-concurrent streams, against 189 for its 262k peer; sharing it gave half the
-short traffic to it, and a 64-developer agent swarm dropped from 264 to 191
-turns/min.
+`shared`, the default, lets short requests use the lane between long prompts.
+`exclusive` sends them only to the model's serving non-lane replicas, which
+protects them from a lane replica that is slow at ordinary work, typically one
+configured for a much longer context window. On 8x H200 with
+DeepSeek-V4.1-Flash and DSpark, a TP4 replica serving a 1M context decoded 75
+tok/s per stream at 16 concurrent streams, against 189 for its 262k peer.
 
-- `exclusive` sends short requests only to the model's serving non-lane
-  replicas. It protects latency completely but idles the lane replica between
-  long prompts, which suits a fleet where one lane serves several protected
-  replicas better than a two-replica node.
-- `avoid` keeps short requests off the lane while the protected replicas are
-  no busier than the least-loaded lane member plus
-  `RJ_ROUTE_LONG_PROMPT_AVOID_LOAD_UNITS`, and routes as usual beyond that, so
-  the lane absorbs overflow instead of idling.
+Measure before choosing `exclusive`. It idles the lane between long prompts,
+and on a node with one lane and one protected replica that cost more than the
+slow replica did: the same 64-developer agent swarm completed 231 turns/min
+with `shared` and 148 with `exclusive`. It suits a fleet where one lane sits
+beside several protected replicas.
 
-Either way, if none of the model's non-lane replicas is serving, short
-requests route as usual and may use the lane: availability still beats
-isolation. Models whose replicas are all lane members, or include none, are
-unaffected. `ramjet_route_lane_exclusion_total{upstream,outcome}` counts these
-short requests as `excluded`, `spilled`, or `excluded_fallback`, so the
-long-prompt series keeps its meaning.
+Exclusion protects latency, not availability. If every protected replica fails
+during dispatch, an excluded request fails over to the serving lane members,
+and if none of the model's non-lane replicas is serving, short requests route
+as usual. Models whose replicas are all lane members, or include none, are
+unaffected. `ramjet_route_long_prompt_short_total{upstream,outcome}` counts
+short requests under an exclusive lane against their first selected upstream,
+as `excluded` or `excluded_fallback`, so the long-prompt series keeps its
+meaning.
 
 `GET /health` returns opaque replica ordinals, serving health, DSpark
 reliability state, inflight work, load units, and index size. It returns `200 ok` when every replica is healthy,
@@ -831,9 +826,9 @@ families are:
   `not_admitted` when the first candidate's reservation was refused.
 - `ramjet_route_long_prompt_total` for long-prompt lane decisions by selected
   upstream and `lane` or `fallback` outcome.
-- `ramjet_route_lane_exclusion_total` for short requests governed by an
-  `avoid` or `exclusive` lane, by selected upstream and `excluded`, `spilled`,
-  or `excluded_fallback` outcome.
+- `ramjet_route_long_prompt_short_total` for short requests under an
+  `exclusive` lane, by first selected upstream and `excluded` or
+  `excluded_fallback` outcome.
 - `ramjet_cache_requests_total` and prompt/cached token counters for observed
   cache outcomes; `ramjet_model_{prompt,cached_prompt,completion}_tokens_total`
   and `ramjet_model_requests_total` split the same successful inference usage
@@ -918,10 +913,10 @@ Journal v14 adds `affinity_basis`, `absolute` or `marginal`. Candidate
 `affinity_blocks` are scored under that basis; replay recomputes the marginal
 floor from the record's healthy candidates.
 Journal v12 adds `long_request_lane`, an object with one fixed `outcome`
-label: `off`, `below`, `no_lane`, `lane`, or `fallback`. It records neither
-the threshold, the request size, nor any upstream address; lane-restricted
-records show the excluded replicas as non-serving candidates, so replay
-reproduces the restriction.
+label: `off`, `below`, `no_lane`, `lane`, `fallback`, `excluded`, or
+`excluded_fallback`. It records neither the threshold, the request size, nor
+any upstream address; `lane` and `excluded` records show the replicas they
+kept out as non-serving candidates, so replay reproduces the restriction.
 Journal v9 adds the bounded `projected_load` policy bit to the start record so
 offline replay can reproduce whether candidate-specific request cost affected
 the approximate score.

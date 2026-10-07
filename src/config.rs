@@ -70,12 +70,9 @@ pub enum LongPromptLaneSharing {
     /// members included.
     #[default]
     Shared,
-    /// `avoid`: short prompts stay off lane members unless every serving
-    /// protected replica carries more than `margin_units` load units above the
-    /// least-loaded serving lane member.
-    Avoid { margin_units: usize },
     /// `exclusive`: short prompts stay off lane members while another replica
-    /// of their model is serving.
+    /// of their model is serving, and fail over to them only once those
+    /// replicas fail.
     Exclusive,
 }
 
@@ -1977,18 +1974,11 @@ fn long_prompt_lane_settings(
     const BYTES: &str = "RJ_ROUTE_LONG_PROMPT_BYTES";
     const UPSTREAMS: &str = "RJ_ROUTE_LONG_PROMPT_UPSTREAMS";
     const SHORT: &str = "RJ_ROUTE_LONG_PROMPT_SHORT";
-    const AVOID_UNITS: &str = "RJ_ROUTE_LONG_PROMPT_AVOID_LOAD_UNITS";
-    let margin_units = parse(get, AVOID_UNITS, 8, "a non-negative integer")?;
     let sharing = match get(SHORT).filter(|value| !value.is_empty()).as_deref() {
         None | Some("shared") => LongPromptLaneSharing::Shared,
-        Some("avoid") => LongPromptLaneSharing::Avoid { margin_units },
         Some("exclusive") => LongPromptLaneSharing::Exclusive,
         Some(value) => {
-            return Err(invalid(
-                SHORT,
-                value.to_owned(),
-                "shared, avoid or exclusive",
-            ));
+            return Err(invalid(SHORT, value.to_owned(), "shared or exclusive"));
         }
     };
     let raw_bytes = get(BYTES).filter(|value| !value.is_empty());
@@ -2045,7 +2035,7 @@ fn long_prompt_lane_settings(
     if sharing != LongPromptLaneSharing::Shared && members.is_empty() {
         return Err(invalid(
             SHORT,
-            String::new(),
+            "exclusive".to_owned(),
             "shared unless RJ_ROUTE_LONG_PROMPT_UPSTREAMS is set",
         ));
     }
@@ -2955,32 +2945,19 @@ mod tests {
 
     #[test]
     fn long_prompt_short_sharing_parses_and_validates() {
-        for (short, units, expected) in [
-            ("shared", None, LongPromptLaneSharing::Shared),
-            ("exclusive", None, LongPromptLaneSharing::Exclusive),
-            (
-                "avoid",
-                None,
-                LongPromptLaneSharing::Avoid { margin_units: 8 },
-            ),
-            (
-                "avoid",
-                Some("0"),
-                LongPromptLaneSharing::Avoid { margin_units: 0 },
-            ),
+        for (short, expected) in [
+            ("shared", LongPromptLaneSharing::Shared),
+            ("exclusive", LongPromptLaneSharing::Exclusive),
         ] {
-            let mut values = vec![
+            let values = [
                 ("RJ_ROUTE_LONG_PROMPT_BYTES", "600000"),
                 ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,lane,-"),
                 ("RJ_ROUTE_LONG_PROMPT_SHORT", short),
             ];
-            if let Some(units) = units {
-                values.push(("RJ_ROUTE_LONG_PROMPT_AVOID_LOAD_UNITS", units));
-            }
             assert_eq!(
                 live_shape(&values).unwrap().route_long_prompt_sharing,
                 expected,
-                "{short} {units:?}"
+                "{short}"
             );
         }
 
@@ -2995,27 +2972,17 @@ mod tests {
             LongPromptLaneSharing::Shared,
             "the rollback flip also disables exclusion"
         );
-        for (key, value, with_lane, case) in [
-            ("RJ_ROUTE_LONG_PROMPT_SHORT", "always", true, "unknown mode"),
-            (
-                "RJ_ROUTE_LONG_PROMPT_SHORT",
-                "avoid",
-                false,
-                "without lane members",
-            ),
-            (
-                "RJ_ROUTE_LONG_PROMPT_AVOID_LOAD_UNITS",
-                "-1",
-                true,
-                "negative margin",
-            ),
+        for (value, with_lane, case) in [
+            ("always", true, "unknown mode"),
+            ("avoid", true, "the withdrawn avoid mode"),
+            ("exclusive", false, "without lane members"),
         ] {
-            let mut extra = vec![(key, value)];
+            let mut extra = vec![("RJ_ROUTE_LONG_PROMPT_SHORT", value)];
             if with_lane {
                 extra.push(("RJ_ROUTE_LONG_PROMPT_BYTES", "600000"));
                 extra.push(("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,lane,-"));
             }
-            assert_invalid(live_shape(&extra), key, case);
+            assert_invalid(live_shape(&extra), "RJ_ROUTE_LONG_PROMPT_SHORT", case);
         }
     }
 

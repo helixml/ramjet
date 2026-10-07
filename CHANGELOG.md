@@ -11,17 +11,14 @@
   reaches its scheduler. Only a generation catches it. A recent real
   completion still overrides a probe timeout. System One upstreams and parked
   engines are never sent the generation.
-- `RJ_ROUTE_LONG_PROMPT_SHORT=shared|avoid|exclusive` decides whether
-  requests below the long-prompt threshold may use lane members. `shared`
-  (default) is unchanged behaviour. `exclusive` keeps them off while another
-  replica of their model is serving; `avoid` does so until the protected
-  replicas are busier than the lane by more than
-  `RJ_ROUTE_LONG_PROMPT_AVOID_LOAD_UNITS` (default 8), then lets the lane
-  absorb overflow. Both fall back to ordinary routing when no protected
-  replica is serving. For a lane replica that is slow at ordinary work, such
-  as one serving a 1M context next to 262k peers (on H200 with
-  DeepSeek-V4.1-Flash and DSpark, 75 vs 189 tok/s per stream at 16 streams).
-  New counter `ramjet_route_lane_exclusion_total{upstream,outcome}`.
+- `RJ_ROUTE_LONG_PROMPT_SHORT=shared|exclusive` decides whether requests
+  below the long-prompt threshold may use lane members. `shared` (default) is
+  unchanged behaviour. `exclusive` keeps them off while another replica of
+  their model is serving, fails over to the lane if those replicas fail
+  mid-request, and routes as usual when none is serving. For a fleet where one
+  slow lane replica (say a 1M context next to 262k peers) sits beside several
+  protected ones; on a two-replica node `shared` measured faster. New counter
+  `ramjet_route_long_prompt_short_total{upstream,outcome}`.
 - Listen addresses are configurable: `RJ_API_ADDR` (default `0.0.0.0:8000`)
   and `RJ_METRICS_ADDR` (default `0.0.0.0:9090`) let deployments whose
   containers share the host network move off ports the host already uses, for
