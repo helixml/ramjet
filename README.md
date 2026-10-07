@@ -62,22 +62,24 @@ You can also just plug it into prometheus, `/metrics` API is available.
 ## Measured on real hardware
 
 Each metric has its own column, so green always means better: throughput
-and cache hits up, time to first token (TTFT) down. Red marks a measured
-cost and grey a change within noise.
+and cache hits up, latency down. Red marks a measured cost, grey a change
+within noise, and a dash a metric that run did not record.
 
-| Result | Throughput | TTFT | Cache hits |
+| Result | Throughput | Latency | Cache hits |
 | :-- | --: | --: | --: |
 | **DeepSeek-V4-Flash**&nbsp;&nbsp;<sub>2× TP4 · 8× RTX PRO 6000</sub> |  |  |  |
-| <sub>12 same-app sessions, load-blind router → ramjet</sub> | <sub>298&nbsp;→&nbsp;**469**&nbsp;tok/s<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 57%</sub> |  |  |
-| <sub>Fresh 3-app × 4-session locality run</sub> |  |  | <sub>**82.5%**</sub> |
-| <sub>Whole-box deterministic code, c24/max256</sub> | <sub>**1,820–1,844**&nbsp;tok/s</sub> |  |  |
+| <sub>12 same-app sessions, load-blind hash router → ramjet</sub> | <sub>298&nbsp;→&nbsp;**469**&nbsp;tok/s<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 57%</sub> | <sub>batch wall time<br>7.5&nbsp;→&nbsp;**4.5**&nbsp;s<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 40%</sub> | <sub>no locality loss<br><img src="docs/assets/delta-flat.svg" alt="–" width="10" height="9"> tie</sub> |
+| <sub>2–3 apps × 4 sessions × 2–3 turns, hash router → ramjet</sub> | <sub>—</sub> | <sub>—</sub> | <sub>82.9%&nbsp;→&nbsp;**82.9%**<br><img src="docs/assets/delta-flat.svg" alt="–" width="10" height="9"> tie</sub> |
+| <sub>Whole-box deterministic code, c24/max256</sub> | <sub>**1,820–1,844**&nbsp;tok/s</sub> | <sub>TTFT&nbsp;p50&nbsp;**948–960**&nbsp;ms<br>p95&nbsp;1,270–1,319&nbsp;ms</sub> | <sub>—</sub> |
 | **Qwen3.8-Flash-Next**&nbsp;&nbsp;<sub>2× TP4 · 8× RTX PRO 6000</sub> |  |  |  |
-| <sub>Request queued behind a long one, phase-aware load release</sub> | <sub>long request<br>100%&nbsp;→&nbsp;**99.1%**<br><img src="docs/assets/delta-down-bad.svg" alt="▼" width="10" height="9"> 0.9%</sub> | <sub>queued request<br>2,496&nbsp;→&nbsp;**287**&nbsp;ms<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 88.5%</sub> |  |
-| <sub>Direct vLLM → same engine through ramjet</sub> | <sub>c1&nbsp;−0.03% · c16&nbsp;−0.24%<br><img src="docs/assets/delta-flat.svg" alt="–" width="10" height="9"> ≈&nbsp;0</sub> |  |  |
+| <sub>Load-only → prefix routing, returning request beside a long one</sub> | <sub>long request<br>100%&nbsp;→&nbsp;**93.6%**<br><img src="docs/assets/delta-down-bad.svg" alt="▼" width="10" height="9"> 6.4%</sub> | <sub>TTFT&nbsp;p50&nbsp;1,119&nbsp;→&nbsp;**908**&nbsp;ms<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 19%</sub> | <sub>23.9%&nbsp;→&nbsp;**35.8%**<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 12&nbsp;pts</sub> |
+| <sub>Prefix routing → phase-aware load release, same probe</sub> | <sub>long request<br>100%&nbsp;→&nbsp;**99.1%**<br><img src="docs/assets/delta-down-bad.svg" alt="▼" width="10" height="9"> 0.9%</sub> | <sub>TTFT&nbsp;2,496&nbsp;→&nbsp;**287**&nbsp;ms<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 88.5%</sub> | <sub>—</sub> |
+| <sub>Phase-aware load release under c32 load</sub> | <sub>2,639.9&nbsp;→&nbsp;**2,711.8**&nbsp;tok/s<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 2.7%</sub> | <sub>TTFT p95<br><img src="docs/assets/delta-up-bad.svg" alt="▲" width="10" height="9"> 7.3%</sub> | <sub>—</sub> |
+| <sub>Direct vLLM → same engine through ramjet</sub> | <sub>c1&nbsp;−0.03% · c16&nbsp;−0.24%<br><img src="docs/assets/delta-flat.svg" alt="–" width="10" height="9"> ≈&nbsp;0</sub> | <sub>TTFT slightly lower<br><img src="docs/assets/delta-flat.svg" alt="–" width="10" height="9"> ≈&nbsp;0</sub> | <sub>—</sub> |
 | **GLM-5.3-Flash**&nbsp;&nbsp;<sub>2× TP4 · 8× H200</sub> |  |  |  |
-| <sub>Coding-agent swarm, prefix routing → `marginal` affinity basis</sub> | <sub>194–197&nbsp;→&nbsp;**243–249**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 23–28%</sub> | <sub>p90<br>5.3–5.5&nbsp;→&nbsp;**3.2–3.3**&nbsp;s<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 38–42%</sub> |  |
+| <sub>Coding-agent swarm, prefix routing → `marginal` affinity basis</sub> | <sub>194–197&nbsp;→&nbsp;**243–249**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 23–28%</sub> | <sub>TTFT&nbsp;p90&nbsp;5.3–5.5&nbsp;→<br>**3.2–3.3**&nbsp;s<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 38–42%</sub> | <sub>85.5–86.0%&nbsp;→<br>**92.0–92.4%**<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 6–7&nbsp;pts</sub> |
 | **GLM-5.3**&nbsp;&nbsp;<sub>DP8 attention · 8× H200</sub> |  |  |  |
-| <sub>NVIDIA Dynamo 1.5.0 → ramjet, same engine, 32 and 48 agents</sub> | <sub>73.0&nbsp;→&nbsp;**88.9**<br>77.3&nbsp;→&nbsp;**99.5**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 22%, 29%</sub> |  | <sub>85%&nbsp;→&nbsp;**92%**<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 7&nbsp;pts</sub> |
+| <sub>NVIDIA Dynamo 1.5.0 → ramjet, same engine, 32 and 48 agents</sub> | <sub>73.0&nbsp;→&nbsp;**88.9**<br>77.3&nbsp;→&nbsp;**99.5**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 22%, 29%</sub> | <sub>TTFT&nbsp;p50&nbsp;2.06&nbsp;→&nbsp;**1.53**&nbsp;s<br>2.92&nbsp;→&nbsp;**2.88**&nbsp;s<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 26%, 1%<br>p90 <img src="docs/assets/delta-up-bad.svg" alt="▲" width="10" height="9"> 13%, 2.5%</sub> | <sub>85.0%&nbsp;→&nbsp;**92.4%**<br>84.7%&nbsp;→&nbsp;**91.7%**<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 7&nbsp;pts</sub> |
 
 These are workload results, not theoretical peaks. Reproduce the DeepSeek rows
 from [RESULTS.md](RESULTS.md); inspect every accepted and rejected experiment in
@@ -141,11 +143,11 @@ checkpoint as one SGLang engine with eight data-parallel attention ranks, and
 ramjet lists each rank as its own upstream (`RJ_UPSTREAM_DP_RANKS`). On a
 simulated team of continuously working coding agents:
 
-| Result | Throughput | TTFT | Cache hits |
+| Result | Throughput | Latency | Cache hits |
 | :-- | --: | --: | --: |
-| <sub>16 agents: SGLang rank placement → ramjet per-rank routing</sub> | <sub>43.0&nbsp;→&nbsp;**72.7**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 69%</sub> |  | <sub>65.6%&nbsp;→&nbsp;**92.8%**<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 27&nbsp;pts</sub> |
-| <sub>64 agents: same, plus a 32 GB host KV tier per rank</sub> | <sub>45.9&nbsp;→&nbsp;**95.1**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 107%</sub> |  |  |
-| <sub>Capacity per server: 32–48 agents</sub> | <sub>**98–109**<br>turns/min</sub> | <sub>p50<br>**1.3–2.8**&nbsp;s</sub> |  |
+| <sub>16 agents: SGLang rank placement → ramjet per-rank routing</sub> | <sub>43.0&nbsp;→&nbsp;**72.7**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 69%</sub> | <sub>TTFT&nbsp;p50&nbsp;2.6&nbsp;→&nbsp;**0.76**&nbsp;s<br>p90&nbsp;5.0&nbsp;→&nbsp;**1.7**&nbsp;s<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 66–71%</sub> | <sub>65.6%&nbsp;→&nbsp;**92.8%**<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 27&nbsp;pts</sub> |
+| <sub>64 agents on ramjet per-rank routing: adding a 32 GB host KV tier per rank</sub> | <sub>45.9&nbsp;→&nbsp;**95.1**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 107%</sub> | <sub>TTFT&nbsp;p90&nbsp;67&nbsp;→&nbsp;**46**&nbsp;s<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 31%</sub> | <sub>71.8%&nbsp;→&nbsp;**91.8%**<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 20&nbsp;pts</sub> |
+| <sub>Capacity per server: 32–48 agents</sub> | <sub>**98–109**<br>turns/min</sub> | <sub>TTFT&nbsp;p50&nbsp;**1.3–2.8**&nbsp;s</sub> | <sub>—</sub> |
 
 The [blog post](https://helix.ml/blog/glm53-on-8x-h200) walks through each
 step, and [Ramjet vs NVIDIA Dynamo](https://helix.ml/blog/ramjet-vs-nvidia-dynamo)
