@@ -94,13 +94,15 @@ services:
     # the metric prefix moved to ramjet_ separately, which is what the
     # dashboards actually query.
     # Override only with another immutable tag+digest pair. This pin is the
-    # v0.7.0 release (OCI revision 2e124d8), released after CI without node06
-    # acceptance. The last node06-qualified image is v0.6.2
-    # sha256:53047a816c8ae1dbade7e27b86d2e3eda40cfeaa48826ae06bf2ac1d35a27cc6
-    # (revision 962b7b2), which is also the rollback target.
+    # v0.8.0 release (OCI revision cad744e), deployed and verified by digest
+    # on the node06 qwen38_glm53_kev stack on 2026-10-07. The last published
+    # fallback is v0.7.0
+    # sha256:dca028638314ca3171120532a075faaa70483e1494dd3d04bddc4db4eb88c01d;
+    # the node06-qualified predecessor there was the locally built alias image
+    # sha256:8197c573270f33ed32e1a81947763e3a5fa8ec7b6ceddd269b5459c9ef205151.
     # It must stay a post-rename image: the RJ_ settings below are ignored by
     # anything older, which would come up healthy and differently tuned.
-    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.7.0@sha256:dca028638314ca3171120532a075faaa70483e1494dd3d04bddc4db4eb88c01d}
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:

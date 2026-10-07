@@ -28,7 +28,7 @@ services:
   ds4-loadbalancer:
     # SO_PEERCRED is part of the session authority. Numeric identity avoids a
     # mutable passwd database and is required only when this overlay is used.
-    image: ${SNAPSHOT_LB_IMAGE:-ghcr.io/helixml/ramjet:v0.7.0@sha256:dca028638314ca3171120532a075faaa70483e1494dd3d04bddc4db4eb88c01d}
+    image: ${SNAPSHOT_LB_IMAGE:-ghcr.io/helixml/ramjet:v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673}
     user: "12002:12000"
     environment:
       # Raw vLLM event consumers and companion snapshots are mutually exclusive.

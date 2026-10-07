@@ -39,7 +39,7 @@ runner=$(realpath -e -- "$0")
   fail "execute the staged campaign authority"
 [[ $(sha256sum "$qwen_compose" | awk '{print $1}') == "$EXPECTED_QWEN_COMPOSE_SHA256" ]] ||
   fail "operational Qwen Compose bytes drifted"
-[[ $(sha256sum "$glm_compose" | awk '{print $1}') == fe3b0461ad53ab8c9f4d5375daa6c8ff38810b6eb2d68ec262a66ea4a6580db5 ]] ||
+[[ $(sha256sum "$glm_compose" | awk '{print $1}') == ed875f00fd2a02d36a38d58d2c80d665781cccbddc4e79404cd78fa8524f0e3d ]] ||
   fail "operational GLM Compose bytes drifted"
 
 # shellcheck disable=SC1091

@@ -11,8 +11,8 @@ ROOT = pathlib.Path(__file__).resolve().parent
 COMPOSE = ROOT / "docker-compose.yaml"
 SGLANG_IMAGE = "lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469"
 LB_IMAGE = (
-    "ghcr.io/helixml/ramjet:v0.7.0@sha256:"
-    "dca028638314ca3171120532a075faaa70483e1494dd3d04bddc4db4eb88c01d"
+    "ghcr.io/helixml/ramjet:v0.8.0@sha256:"
+    "fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673"
 )
 MODEL_REVISION = "2cba9e42aa026125f3ed06c6d98c1db82f7ca027"
 DSPARK = "--speculative-algorithm DSPARK --speculative-dspark-block-size 5"

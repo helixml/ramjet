@@ -10,8 +10,8 @@ The checkpoint and image are immutable inputs:
 - model revision: `bcd9f01ddc9cff2316eb84281bebcd5b058bddce`
 - model payload: 185,502,232,570 bytes across 131 safetensors shards
 - linux/amd64 vLLM image: `sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
-- released ramjet Compose default: `v0.7.0@sha256:dca028638314ca3171120532a075faaa70483e1494dd3d04bddc4db4eb88c01d` (released after CI; not yet node06-qualified)
-- node06-qualified live ramjet image: `rust-962b7b2@sha256:53047a816c8ae1dbade7e27b86d2e3eda40cfeaa48826ae06bf2ac1d35a27cc6` (v0.6.2 long-prompt lane qualified on the Qwen/GLM/Kev topology; previous `systemone-6b025f7-8fa31d5cec1d@sha256:bcd132f97171f6203715e04f0fc5ab3784a8b8e8cb656e7bf74c1c39b9884f93`)
+- released ramjet Compose default: `v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673` (deployed and verified on the node06 `qwen38_glm53_kev` shared stack on 2026-10-07; see EXPERIMENTS.md)
+- node06-qualified live ramjet image: `v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673` (previous: locally built alias image `sha256:8197c573270f33ed32e1a81947763e3a5fa8ec7b6ceddd269b5459c9ef205151` from 2026-10-03, then `rust-962b7b2@sha256:53047a816c8ae1dbade7e27b86d2e3eda40cfeaa48826ae06bf2ac1d35a27cc6`, the v0.6.2 long-prompt lane build)
 - exact-route manifest: `compat/qwen38-flash-next-r134.json`, SHA-256 `a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67`
 
 The day-zero vLLM image config labels its source/build revision as `unknown`.
@@ -287,7 +287,7 @@ qualified. Emergency candidate
 or rollback renders must carry an explicit immutable `LB_IMAGE` override on
 every `docker compose` invocation, including cleanup traps; ordinary
 production renders use the released default. The canonical Compose SHA-256 is
-`fbeb7436ae0715e4f2eacb22c2ed4cb2858e094c992c0d07b0ce83f0e2f4c8fb`; the file
+`f4d4ed79437af1661e479d29a95a83bd5ce09d576575a0a9dde3150c3799f85a`; the file
 last admitted on node06, with the v0.6.2 default, was
 `a4e00f81ab1a2ec8b67fb5c64349e216383cbc1feced84965f959b300ecfef0c`;
 the adaptive policy SHA-256 is

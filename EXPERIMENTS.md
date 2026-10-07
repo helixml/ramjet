@@ -1,5 +1,57 @@
 # node06 experiment journal
 
+## 2026-10-07 — v0.8.0 released: model aliases formalized, LB swapped to a published digest
+
+**Why.** Production had served the locally built `node06-qwen-alias-20261003`
+image (source `fix/node06-qwen-model-alias` commits `3c08865`/`bd5746c`, based
+on the v0.6.2 line) since 2026-10-03 — code that existed on no remote and in no
+release. `main` also carried four unreleased entries since v0.7.0 (2026-09-29).
+The release closes both gaps so source, release notes, and the deployed
+artifact identify the same build.
+
+**Flow.** The two alias commits cherry-picked cleanly onto current `main`
+(PR #312; Drone #767). Local gate on the rebase: fmt clean, Clippy
+`-D warnings` clean, 716 Rust unit tests plus integration suites, locked
+release build 55.6s, `agentbench validate` valid, 772 Python tests OK. The
+release commit (version 0.8.0, dated CHANGELOG with the alias entry,
+`rust_deps_image.py --update`) failed Drone #769 only on the Dockerfile OCI
+version labels, which `--update` does not touch; fixed and re-validated
+(#770). Main pipeline #771 (7.5 min, including the content-keyed
+dependency-image rebuild and both app publishers) published
+`rust-cad744e@sha256:fe432bbc…` and
+`companion-rust-cad744e@sha256:48c0aca7…`, both labeled 0.8.0/cad744e.
+
+**node06 deploy.** The published LB digest was pulled on the box (not a local
+campaign build). Under `/run/lock/ramjet-node06-deployment.lock`: preflight
+confirmed the live image was the expected `sha256:8197c573…`, the rendered
+baseline-vs-candidate diff was exactly the one image line, and the LB-only
+recreate (`--no-deps ds4-loadbalancer`, project
+`qwen_alias_release_20261003t081601z`, protected `--env-file` from the
+container's own labels) reached `/health` 200 in 3s. Two earlier lock attempts
+aborted safely before mutation: the first restored the Compose backup after a
+wrong not-image-only assertion, and the second died silently after `sed`
+because `set -e` treats `grep -vc`'s zero-match exit as failure — the on-disk
+candidate was already render-verified image-only, so the third attempt only
+had to confirm and recreate. Engines were never touched: glm53sm120-b/c keep
+their 2026-09-25 start times, glm53-unc-fp8 its 2026-10-07 one, restarts 0.
+
+**Verification.** `ramjet_upstream_up` 1 for all three upstreams. Smoke
+requests (8 output tokens each): `qwen3.8-flash-next` → upstream 0 with
+canonical response model `glm-5.3-flash`; `glm-5.3-flash` → upstream 0;
+`glm-5.3-flash-uncensored` → upstream 2. No WARN/ERROR in LB logs after the
+swap. No sustained benchmark gate was run: the alias routing is the exact
+code qualified on 2026-10-03, and live traffic is the ongoing watch.
+
+**Tag and promotion.** Annotated `v0.8.0` on deployed merge commit `cad744e`;
+tag pipeline #774 promoted `v0.8.0`/`companion-v0.8.0` with digests identical
+to the qualified builds. GitHub release notes published with both digests.
+README quickstart and all eight deployment Compose `LB_IMAGE` defaults
+promoted to `v0.8.0@sha256:fe432bbc…`. Rollback: the pre-swap Compose is
+preserved on-box as `docker-compose.yaml.bak-v080-release-20261007` and the
+previous image (`sha256:8197c573…`) is retained in node06's image store;
+restoring both under the same lock is the rollback path. The last published
+fallback is `v0.7.0@sha256:dca02863…`.
+
 ## 2026-10-07 — keeping short prompts off a slow 1M lane does not pay on two replicas
 
 **Question.** On 8x H200 running DeepSeek-V4.1-Flash with DSpark as 2x TP4,
