@@ -28,7 +28,8 @@ use url::Url;
 
 use crate::{
     config::{
-        Config, DsparkGuardMode, UpstreamAdmissionMode, UpstreamApiProfile, WarmupAdmissionMode,
+        Config, DsparkGuardMode, RankProbeScope, UpstreamAdmissionMode, UpstreamApiProfile,
+        WarmupAdmissionMode,
     },
     dspark_guard::{
         AttestedEngineCoreIncarnation, DsparkCounters, DsparkGuard, IncarnationOutcome,
@@ -3099,14 +3100,19 @@ impl Proxy {
             .set(started.elapsed().as_secs_f64());
     }
 
-    /// One-token generation pinned to this upstream's DP rank, or `None` when
-    /// it answered (or rank probing does not apply). The `SGLang` front end
-    /// serves `/health` and `/v1/models` and keeps answering while one rank's
-    /// scheduler is wedged, so only a generation on that rank can tell. A timeout is reported as `rank_timeout`, which recent real
-    /// completions on the rank override, so a busy rank is never fenced.
+    /// One-token generation, pinned to this upstream's DP rank when it has
+    /// one, or `None` when it answered (or the probe does not apply). The
+    /// `SGLang` front end serves `/health` and `/v1/models` and keeps answering
+    /// while a scheduler is wedged or no longer receives requests, so only a
+    /// generation can tell. A timeout is reported as `rank_timeout`, which
+    /// recent real completions on the upstream override, so a busy one is
+    /// never fenced.
     async fn rank_probe(&self, upstream: usize, models_body: &Bytes) -> Option<&'static str> {
         let config = &self.inner.config;
-        let rank = config.upstream_dp_rank(upstream)?;
+        let rank = config.upstream_dp_rank(upstream);
+        if rank.is_none() && config.upstream_rank_probe_scope != RankProbeScope::Every {
+            return None;
+        }
         let timeout_ms = config.upstream_rank_probe_timeout_ms?;
         if config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility {
             return None;
@@ -3125,13 +3131,15 @@ impl Proxy {
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| "default".to_owned());
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "messages": [{"role": "user", "content": "ok"}],
             "max_tokens": 1,
             "temperature": 0,
-            "routed_dp_rank": rank,
         });
+        if let Some(rank) = rank {
+            body["routed_dp_rank"] = rank.into();
+        }
         let uri = Uri::from_static("/v1/chat/completions");
         let mut request = self
             .inner
@@ -6058,6 +6066,80 @@ mod tests {
         proxy.probe_round().await;
         assert!(proxy.inner.router.state(1).unwrap().3);
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn generation_probe_all_fences_a_replica_that_cannot_generate() {
+        let serving = AxumRouter::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"object":"list","data":[{"id":"glm"}]}"#,
+                    )
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(|body: Bytes| async move {
+                    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert!(
+                        value.get("routed_dp_rank").is_none(),
+                        "a plain upstream is not pinned to a rank"
+                    );
+                    (StatusCode::OK, [("content-type", "application/json")], "{}")
+                }),
+            );
+        // Answers /v1/models but never finishes a generation, like a front end
+        // whose scheduler no longer receives its requests.
+        let stuck = AxumRouter::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"object":"list","data":[{"id":"glm"}]}"#,
+                    )
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(|| async {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    StatusCode::OK
+                }),
+            );
+        let (serving_url, serving_task) = start_upstream(serving).await;
+        let (stuck_url, stuck_task) = start_upstream(stuck).await;
+        let joined = format!("{serving_url},{stuck_url}");
+        for (scope, stuck_fenced) in [("on", false), ("all", true)] {
+            let config = Config::from_lookup(|key| match key {
+                "RJ_UPSTREAM" => Some(joined.clone()),
+                "RJ_UPSTREAM_RANK_PROBE" => Some(scope.to_owned()),
+                "RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS" => Some("300".to_owned()),
+                _ => None,
+            })
+            .unwrap();
+            let proxy = proxy_for_config(config, Arc::from([]));
+            proxy.probe_round().await;
+            assert!(proxy.inner.router.state(0).unwrap().3, "{scope}");
+            assert_eq!(
+                !proxy.inner.router.state(1).unwrap().3,
+                stuck_fenced,
+                "{scope}: only `all` probes plain upstreams with a generation"
+            );
+            if stuck_fenced {
+                // Recent real completions still prove liveness.
+                proxy.note_upstream_serving_success(1);
+                proxy.probe_round().await;
+                assert!(proxy.inner.router.state(1).unwrap().3);
+            }
+        }
+        serving_task.abort();
+        stuck_task.abort();
     }
 
     #[tokio::test]

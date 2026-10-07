@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `RJ_UPSTREAM_RANK_PROBE=all` extends the one-token generation probe from
+  DP-rank upstreams to every upstream (DP ranks stay pinned with
+  `routed_dp_rank`). Two SGLang replicas on one H200 host sharing `/dev/shm`
+  (`--ipc host`) can cross-wire: when their main processes get the same PID,
+  one overwrites the other's `multi_tokenizer_args_<pid>` segment, and that
+  replica keeps answering `/health` and `/v1/models` while no request ever
+  reaches its scheduler. Only a generation catches it. A recent real
+  completion still overrides a probe timeout.
 - Listen addresses are configurable: `RJ_API_ADDR` (default `0.0.0.0:8000`)
   and `RJ_METRICS_ADDR` (default `0.0.0.0:9090`) let deployments whose
   containers share the host network move off ports the host already uses, for

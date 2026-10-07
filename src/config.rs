@@ -51,6 +51,16 @@ const MAX_UPSTREAM_MODEL_BYTES: usize = 256;
 const DEFAULT_API_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8000);
 const DEFAULT_METRICS_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 9090);
 
+/// Which upstreams `RJ_UPSTREAM_RANK_PROBE` sends a one-token generation to.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RankProbeScope {
+    /// `on`: data-parallel rank upstreams only.
+    #[default]
+    DpRanks,
+    /// `all`: every upstream; DP ranks are still pinned with `routed_dp_rank`.
+    Every,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub upstreams: Vec<Url>,
@@ -71,6 +81,8 @@ pub struct Config {
     /// generation pinned to its rank, within this budget. The engine-level
     /// `/v1/models` probe cannot see one wedged rank.
     pub upstream_rank_probe_timeout_ms: Option<usize>,
+    /// Which upstreams that generation probe covers.
+    pub upstream_rank_probe_scope: RankProbeScope,
     /// Node name of each upstream, in upstream order, when `RJ_TOPOLOGY_FILE`
     /// declares them. Operator-chosen names, unlike hosts, are safe to publish
     /// on `/health`.
@@ -988,6 +1000,26 @@ impl Config {
         let api_addr = listen_addr(&mut get, "RJ_API_ADDR", DEFAULT_API_ADDR)?;
         let metrics_addr = listen_addr(&mut get, "RJ_METRICS_ADDR", DEFAULT_METRICS_ADDR)?;
 
+        let (upstream_rank_probe_timeout_ms, upstream_rank_probe_scope) = {
+            let timeout = bounded_positive(
+                &mut get,
+                "RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS",
+                20_000,
+                MAX_UPSTREAM_CONNECT_TIMEOUT_MS,
+            )?;
+            match get("RJ_UPSTREAM_RANK_PROBE").as_deref().unwrap_or("off") {
+                "off" => (None, RankProbeScope::DpRanks),
+                "on" => (Some(timeout), RankProbeScope::DpRanks),
+                "all" => (Some(timeout), RankProbeScope::Every),
+                value => {
+                    return Err(invalid(
+                        "RJ_UPSTREAM_RANK_PROBE",
+                        value.to_owned(),
+                        "off, on or all",
+                    ));
+                }
+            }
+        };
         Ok(Self {
             upstreams,
             upstream_models,
@@ -995,25 +1027,8 @@ impl Config {
             upstream_token,
             upstream_nodes,
             upstream_dp_ranks,
-            upstream_rank_probe_timeout_ms: {
-                let timeout = bounded_positive(
-                    &mut get,
-                    "RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS",
-                    20_000,
-                    MAX_UPSTREAM_CONNECT_TIMEOUT_MS,
-                )?;
-                match get("RJ_UPSTREAM_RANK_PROBE").as_deref().unwrap_or("off") {
-                    "off" => None,
-                    "on" => Some(timeout),
-                    value => {
-                        return Err(invalid(
-                            "RJ_UPSTREAM_RANK_PROBE",
-                            value.to_owned(),
-                            "off or on",
-                        ));
-                    }
-                }
-            },
+            upstream_rank_probe_timeout_ms,
+            upstream_rank_probe_scope,
             upstream_admission_mode,
             upstream_warmup_mode,
             upstream_warmup_consecutive_successes,
@@ -3346,6 +3361,12 @@ mod tests {
         ]);
         let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
         assert_eq!(config.upstream_rank_probe_timeout_ms, Some(5_000));
+        assert_eq!(config.upstream_rank_probe_scope, RankProbeScope::DpRanks);
+        assert_eq!(defaults.upstream_rank_probe_scope, RankProbeScope::DpRanks);
+        let values = HashMap::from([("RJ_UPSTREAM_RANK_PROBE", "all")]);
+        let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(config.upstream_rank_probe_timeout_ms, Some(20_000));
+        assert_eq!(config.upstream_rank_probe_scope, RankProbeScope::Every);
         for (key, value) in [
             ("RJ_UPSTREAM_RANK_PROBE", "yes"),
             ("RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS", "0"),
