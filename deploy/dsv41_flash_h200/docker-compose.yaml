@@ -85,7 +85,7 @@ x-ds-engine: &ds-engine
     # took one stream from 234 to 392 tok/s (TP8).
     SGLANG_BLOCK_FP8_DEQUANT_BF16: ${SGLANG_BLOCK_FP8_DEQUANT_BF16:-1}
     # Bind memory to the rank's NUMA node as a preference, not a hard bind, so
-    # the ~190GB host Engram table can spill instead of being OOM-killed.
+    # the 203GB host Engram tables can spill instead of being OOM-killed.
     SGLANG_NUMA_MEM_PREFERRED: ${SGLANG_NUMA_MEM_PREFERRED:-1}
     # The two Engram tables (203GB) live in host memory, shared by a
     # replica's ranks; this is what fits a TP4 replica on four GPUs.
@@ -99,8 +99,8 @@ x-ds-engine: &ds-engine
     DS_TOKENIZER_WORKERS: ${DS_TOKENIZER_WORKERS:-4}
     # W4A8: FP4 experts with FP8 activations (Hopper has no FP4 tensor cores).
     DS_MOE_PRECISION: ${DS_MOE_PRECISION:-fp8}
-    # DSpark needs the 262k context on H200: at the native 1M its verify
-    # graphs OOM in capture.
+    # DSpark needs the 262k context at these defaults (graph cap 64, memory
+    # fraction 0.75): at the native 1M its verify graphs OOM in capture.
     DS_CONTEXT_LENGTH: ${DS_CONTEXT_LENGTH:-262144}
     DS_MEM_FRACTION: ${DS_MEM_FRACTION:-0.75}
     DS_CUDA_GRAPH_MAX_BS: ${DS_CUDA_GRAPH_MAX_BS:-64}
@@ -115,8 +115,8 @@ services:
     container_name: dsv41-a
     ports: ["127.0.0.1:8070:8000"]
     volumes:
-      - ${MODEL_DIR:-${HOME}/models/deepseek-ai/DeepSeek-V4.1-Flash-2cba9e42}:/models/dsv41:ro
-      - ${CACHE_ROOT:-${HOME}/engine-cache}/dsv41-a:/root/.cache
+      - ${MODEL_DIR:-${DS_H200_ROOT:-${HOME}}/models/deepseek-ai/DeepSeek-V4.1-Flash-2cba9e42}:/models/dsv41:ro
+      - ${CACHE_ROOT:-${DS_H200_ROOT:-${HOME}}/engine-cache}/dsv41-a:/root/.cache
       - ./patches:/opt/dsv41-patches:ro
     deploy:
       resources:
@@ -133,12 +133,12 @@ services:
       DS_NUMA_NODES: "4 5 6 7"
       # Replica B doubles as a 1M-context lane: DS_B_CONTEXT_LENGTH=1048576
       # DS_B_MEM_FRACTION=0.73 DS_B_CUDA_GRAPH_MAX_BS=32 (see README).
-      DS_CONTEXT_LENGTH: ${DS_B_CONTEXT_LENGTH:-262144}
-      DS_MEM_FRACTION: ${DS_B_MEM_FRACTION:-0.75}
-      DS_CUDA_GRAPH_MAX_BS: ${DS_B_CUDA_GRAPH_MAX_BS:-64}
+      DS_CONTEXT_LENGTH: ${DS_B_CONTEXT_LENGTH:-${DS_CONTEXT_LENGTH:-262144}}
+      DS_MEM_FRACTION: ${DS_B_MEM_FRACTION:-${DS_MEM_FRACTION:-0.75}}
+      DS_CUDA_GRAPH_MAX_BS: ${DS_B_CUDA_GRAPH_MAX_BS:-${DS_CUDA_GRAPH_MAX_BS:-64}}
     volumes:
-      - ${MODEL_DIR:-${HOME}/models/deepseek-ai/DeepSeek-V4.1-Flash-2cba9e42}:/models/dsv41:ro
-      - ${CACHE_ROOT:-${HOME}/engine-cache}/dsv41-b:/root/.cache
+      - ${MODEL_DIR:-${DS_H200_ROOT:-${HOME}}/models/deepseek-ai/DeepSeek-V4.1-Flash-2cba9e42}:/models/dsv41:ro
+      - ${CACHE_ROOT:-${DS_H200_ROOT:-${HOME}}/engine-cache}/dsv41-b:/root/.cache
       - ./patches:/opt/dsv41-patches:ro
     deploy:
       resources:
@@ -160,8 +160,8 @@ services:
       # start and half the host memory, for fewer turns/min.
       SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE: "0"
     volumes:
-      - ${MODEL_DIR:-${HOME}/models/deepseek-ai/DeepSeek-V4.1-Flash-2cba9e42}:/models/dsv41:ro
-      - ${CACHE_ROOT:-${HOME}/engine-cache}/dsv41-tp8:/root/.cache
+      - ${MODEL_DIR:-${DS_H200_ROOT:-${HOME}}/models/deepseek-ai/DeepSeek-V4.1-Flash-2cba9e42}:/models/dsv41:ro
+      - ${CACHE_ROOT:-${DS_H200_ROOT:-${HOME}}/engine-cache}/dsv41-tp8:/root/.cache
       - ./patches:/opt/dsv41-patches:ro
     deploy:
       resources:
