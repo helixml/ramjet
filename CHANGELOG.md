@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `deploy/dsv41_flash_h200`: DeepSeek-V4.1-Flash on one 8x H200 host as two
+  TP4/EP4 SGLang v0.5.21 replicas with DSpark, BF16 dense layers and host
+  Engram tables behind ramjet with `marginal` affinity. 140 / 217 / 276 / 287
+  agent turns/min at 16 / 32 / 64 / 96 developers; 354 tok/s for one stream.
 - `RJ_UPSTREAM_RANK_PROBE=all` extends the one-token generation probe from
   DP-rank upstreams to every upstream (DP ranks stay pinned with
   `routed_dp_rank`). Two SGLang replicas on one H200 host sharing `/dev/shm`

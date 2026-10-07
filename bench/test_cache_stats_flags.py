@@ -42,6 +42,7 @@ DEPLOYMENTS = {
     "glm53_flash": "sglang",
     "glm53_flash_sm120": "sglang",
     "glm53_flash_h200": "sglang",
+    "dsv41_flash_h200": "sglang",
     "glm53_h200": "sglang",
     "glm53_flash_nvidia": "vllm",
     "qwen38_glm53_kev": "kev",
