@@ -1,7 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — 2026-10-07
 
+- `RJ_MODEL_ALIASES=alias=canonical,...` rewrites request model names to
+  configured canonical models before request preparation, fingerprinting,
+  tokenization, and model eligibility. Responses report the canonical model
+  and model discovery exposes every request name. Alias targets must be
+  configured canonical models; chains, duplicate aliases, and canonical-name
+  collisions fail startup. This formalizes the alias node06 production has
+  served since 2026-10-03.
 - `deploy/dsv41_flash_h200`: DeepSeek-V4.1-Flash on one 8x H200 host as two
   TP4/EP4 SGLang v0.5.21 replicas with DSpark, BF16 dense layers and host
   Engram tables behind ramjet with `marginal` affinity. 140 / 217 / 276 / 287
