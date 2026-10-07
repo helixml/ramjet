@@ -67,18 +67,18 @@ within noise, and a dash a metric that run did not record.
 
 | Result | Throughput | Latency | Cache hits |
 | :-- | --: | --: | --: |
-| **DeepSeek-V4-Flash**&nbsp;&nbsp;<sub>2× TP4 · 8× RTX PRO 6000</sub> |  |  |  |
+| **DeepSeek-V4-Flash**&nbsp;&nbsp;<sub>2×&nbsp;TP4&nbsp;·&nbsp;8×&nbsp;RTX&nbsp;PRO&nbsp;6000</sub> |  |  |  |
 | <sub>12 same-app sessions, load-blind hash router → ramjet</sub> | <sub>298&nbsp;→&nbsp;**469**&nbsp;tok/s<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 57%</sub> | <sub>batch wall time<br>7.5&nbsp;→&nbsp;**4.5**&nbsp;s<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 40%</sub> | <sub>no locality loss<br><img src="docs/assets/delta-flat.svg" alt="–" width="10" height="9"> tie</sub> |
 | <sub>2–3 apps × 4 sessions × 2–3 turns, hash router → ramjet</sub> | <sub>—</sub> | <sub>—</sub> | <sub>82.9%&nbsp;→&nbsp;**82.9%**<br><img src="docs/assets/delta-flat.svg" alt="–" width="10" height="9"> tie</sub> |
 | <sub>Whole-box deterministic code, c24/max256</sub> | <sub>**1,820–1,844**&nbsp;tok/s</sub> | <sub>TTFT&nbsp;p50&nbsp;**948–960**&nbsp;ms<br>p95&nbsp;1,270–1,319&nbsp;ms</sub> | <sub>—</sub> |
-| **Qwen3.8-Flash-Next**&nbsp;&nbsp;<sub>2× TP4 · 8× RTX PRO 6000</sub> |  |  |  |
+| **Qwen3.8-Flash-Next**&nbsp;&nbsp;<sub>2×&nbsp;TP4&nbsp;·&nbsp;8×&nbsp;RTX&nbsp;PRO&nbsp;6000</sub> |  |  |  |
 | <sub>Load-only → prefix routing, returning request beside a long one</sub> | <sub>long request<br>100%&nbsp;→&nbsp;**93.6%**<br><img src="docs/assets/delta-down-bad.svg" alt="▼" width="10" height="9"> 6.4%</sub> | <sub>TTFT&nbsp;p50&nbsp;1,119&nbsp;→&nbsp;**908**&nbsp;ms<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 19%</sub> | <sub>23.9%&nbsp;→&nbsp;**35.8%**<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 12&nbsp;pts</sub> |
 | <sub>Prefix routing → phase-aware load release, same probe</sub> | <sub>long request<br>100%&nbsp;→&nbsp;**99.1%**<br><img src="docs/assets/delta-down-bad.svg" alt="▼" width="10" height="9"> 0.9%</sub> | <sub>TTFT&nbsp;2,496&nbsp;→&nbsp;**287**&nbsp;ms<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 88.5%</sub> | <sub>—</sub> |
 | <sub>Phase-aware load release under c32 load</sub> | <sub>2,639.9&nbsp;→&nbsp;**2,711.8**&nbsp;tok/s<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 2.7%</sub> | <sub>TTFT p95<br><img src="docs/assets/delta-up-bad.svg" alt="▲" width="10" height="9"> 7.3%</sub> | <sub>—</sub> |
-| <sub>Direct vLLM → same engine through ramjet</sub> | <sub>c1&nbsp;−0.03% · c16&nbsp;−0.24%<br><img src="docs/assets/delta-flat.svg" alt="–" width="10" height="9"> ≈&nbsp;0</sub> | <sub>TTFT slightly lower<br><img src="docs/assets/delta-flat.svg" alt="–" width="10" height="9"> ≈&nbsp;0</sub> | <sub>—</sub> |
-| **GLM-5.3-Flash**&nbsp;&nbsp;<sub>2× TP4 · 8× H200</sub> |  |  |  |
+| <sub>Direct vLLM → same engine through ramjet</sub> | <sub>c1&nbsp;−0.03%<br>c16&nbsp;−0.24%<br><img src="docs/assets/delta-flat.svg" alt="–" width="10" height="9"> ≈&nbsp;0</sub> | <sub>TTFT slightly lower<br><img src="docs/assets/delta-flat.svg" alt="–" width="10" height="9"> ≈&nbsp;0</sub> | <sub>—</sub> |
+| **GLM-5.3-Flash**&nbsp;&nbsp;<sub>2×&nbsp;TP4&nbsp;·&nbsp;8×&nbsp;H200</sub> |  |  |  |
 | <sub>Coding-agent swarm, prefix routing → `marginal` affinity basis</sub> | <sub>194–197&nbsp;→&nbsp;**243–249**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 23–28%</sub> | <sub>TTFT&nbsp;p90&nbsp;5.3–5.5&nbsp;→<br>**3.2–3.3**&nbsp;s<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 38–42%</sub> | <sub>85.5–86.0%&nbsp;→<br>**92.0–92.4%**<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 6–7&nbsp;pts</sub> |
-| **GLM-5.3**&nbsp;&nbsp;<sub>DP8 attention · 8× H200</sub> |  |  |  |
+| **GLM-5.3**&nbsp;&nbsp;<sub>DP8&nbsp;attention&nbsp;·&nbsp;8×&nbsp;H200</sub> |  |  |  |
 | <sub>NVIDIA Dynamo 1.5.0 → ramjet, same engine, 32 and 48 agents</sub> | <sub>73.0&nbsp;→&nbsp;**88.9**<br>77.3&nbsp;→&nbsp;**99.5**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 22%, 29%</sub> | <sub>TTFT&nbsp;p50&nbsp;2.06&nbsp;→&nbsp;**1.53**&nbsp;s<br>2.92&nbsp;→&nbsp;**2.88**&nbsp;s<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 26%, 1%<br>p90 <img src="docs/assets/delta-up-bad.svg" alt="▲" width="10" height="9"> 13%, 2.5%</sub> | <sub>85.0%&nbsp;→&nbsp;**92.4%**<br>84.7%&nbsp;→&nbsp;**91.7%**<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 7&nbsp;pts</sub> |
 
 These are workload results, not theoretical peaks. Reproduce the DeepSeek rows
