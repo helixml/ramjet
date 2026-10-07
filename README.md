@@ -33,8 +33,8 @@ on the Helix blog. GLM-5.3 ran on an 8× H200 server; the others on our
 | GLM-5.3 (8× H200) | GLM-5.3-Flash | Qwen3.8-Flash-Next | Qwen3.8-27B | DeepSeek V4 |
 | --- | --- | --- | --- | --- |
 | [48 coding agents from one server](https://helix.ml/blog/glm53-on-8x-h200) (29 Sep) | [Part 1: getting day-zero serving to work](https://helix.ml/blog/glm53-flash-on-rtx-pro-6000-part-1) (27 Aug) | [On eight GPUs: what actually helped](https://helix.ml/blog/qwen38-flash-next-on-rtx-pro-6000) (27 Aug) | [Chasing a 454 tok/s tweet](https://helix.ml/blog/chasing-454-toks-qwen38-rtx-pro-6000) (22 Aug) | [SGLang vs DwarfStar vs vLLM+DSpark](https://helix.ml/blog/running-ds4-on-rtx-pro-6000) (14 Aug) |
-| | [Running on 2, 4 or 8 GPUs](https://helix.ml/blog/glm53-flash-tp2-rtx-pro-6000) (14 Sep) | [One model, two speeds: smart routing](https://helix.ml/blog/smarter-qwen-routing-with-ramjet) (28 Aug) | [Doubling throughput by reading a log line](https://helix.ml/blog/the-ceiling-was-a-state-cache) (23 Aug) | [V4.1 Flash: encoder, Engram and KV cache](https://helix.ml/blog/deepseek-v41-flash-explained) (10 Sep) |
-| | [Ran out of cache snapshots, not cache tokens](https://helix.ml/blog/glm53-flash-hybrid-attention-prefix-cache) (26 Sep) | | [A better lm_head, tested and shipped](https://helix.ml/blog/qwen38-bf16-lm-head-rollout) (25 Aug) | |
+| [Ramjet vs NVIDIA Dynamo](https://helix.ml/blog/ramjet-vs-nvidia-dynamo) (30 Sep) | [Running on 2, 4 or 8 GPUs](https://helix.ml/blog/glm53-flash-tp2-rtx-pro-6000) (14 Sep) | [One model, two speeds: smart routing](https://helix.ml/blog/smarter-qwen-routing-with-ramjet) (28 Aug) | [Doubling throughput by reading a log line](https://helix.ml/blog/the-ceiling-was-a-state-cache) (23 Aug) | [V4.1 Flash: encoder, Engram and KV cache](https://helix.ml/blog/deepseek-v41-flash-explained) (10 Sep) |
+| | [Ran out of cache snapshots, not cache tokens](https://helix.ml/blog/glm53-flash-hybrid-attention-prefix-cache) (26 Sep) | [Swift 1.5 cut thinking tokens](https://helix.ml/blog/swift-flash-next-four-gpu-evaluation) (27 Sep) | [A better lm_head, tested and shipped](https://helix.ml/blog/qwen38-bf16-lm-head-rollout) (25 Aug) | |
 
 ## Why it exists
 
@@ -61,16 +61,18 @@ You can also just plug it into prometheus, `/metrics` API is available.
 
 ## Measured on real hardware
 
-Reference stack: DeepSeek-V4-Flash-0731, two TP4 replicas, 8× RTX PRO 6000.
+| Model · server | Result | Measured outcome |
+| --- | --- | ---: |
+| DeepSeek-V4-Flash · 2× TP4, 8× RTX PRO 6000 | Shared-app concurrency, load-blind → ramjet | **298 → 469 output tok/s · 1.57×** |
+| DeepSeek-V4-Flash · 2× TP4, 8× RTX PRO 6000 | Fresh 3-app × 4-session locality run | **82.5% cached prompt tokens** |
+| DeepSeek-V4-Flash · 2× TP4, 8× RTX PRO 6000 | Whole-box deterministic code, c24/max256 | **1,820–1,844 output tok/s** |
+| Qwen3.8-Flash-Next · 2× TP4, 8× RTX PRO 6000 | Related request queued behind a long one, phase-aware load release | **TTFT 2,496 → 287 ms · long request keeps 99.1% throughput** |
+| Qwen3.8-Flash-Next · 2× TP4, 8× RTX PRO 6000 | Direct vLLM → same engine through ramjet | **−0.03% at c1 · −0.24% at c16** |
+| GLM-5.3-Flash · 2× TP4, 8× H200 | Coding-agent swarm, prefix routing → `marginal` affinity basis | **197/194 → 243/249 turns/min · TTFT p90 5.3–5.5 → 3.2–3.3s** |
+| GLM-5.3 · DP8 attention, 8× H200 | 32 / 48 coding agents, NVIDIA Dynamo 1.5.0 → ramjet, same engine | **73.0 → 88.9 / 77.3 → 99.5 turns/min · 85% → 92% cached** |
 
-| Result | Measured outcome |
-| --- | ---: |
-| Shared-app concurrency, load-blind → ramjet | **298 → 469 output tok/s · 1.57×** |
-| Fresh 3-app × 4-session locality run | **82.5% cached prompt tokens** |
-| Whole-box deterministic code, c24/max256 | **1,820–1,844 output tok/s** |
-
-These are workload results, not theoretical peaks. Reproduce them from
-[RESULTS.md](RESULTS.md); inspect every accepted and rejected experiment in
+These are workload results, not theoretical peaks. Reproduce the DeepSeek rows
+from [RESULTS.md](RESULTS.md); inspect every accepted and rejected experiment in
 [EXPERIMENTS.md](EXPERIMENTS.md).
 
 ### Models with a validated stack
@@ -84,14 +86,16 @@ point recorded for that stack, not a shared concurrency level.
 | DeepSeek-V4-Flash (sparse MoE) | `deepseek-v4-flash` | 245.1 tok/s | 1,891.2 tok/s | 2× TP4, c24/max256 | [`deploy/dspark_0731`](deploy/dspark_0731/docker-compose.yaml) |
 | Qwen3.8-27B FP8 (dense, vLLM) | `qwen3.8-27b` | 77 tok/s · 121 with MTP | 7,890.9 tok/s | 2× TP4, c256/max256, MTP off | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
 | Qwen3.8-27B NVFP4/BF16 head (dense, SGLang + DFlash2) | `qwen3.8-27b` | 153.3 tok/s greedy median · +7.5% matched A/B | Not yet requalified (former Inferact target: 7,882.6 tok/s) | 8× TP1, 208 slots, bf16 SSM, DFlash2 on | [`deploy/qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml) |
+| Qwen3.8-Flash-Next FP8 (sparse MoE, vLLM) | `qwen3.8-flash-next` | 113 tok/s · 202 with MTP3 | 3,340.5 tok/s | 2× TP4+EP, c64, MTP3 on both | [`deploy/qwen38_flash_next`](deploy/qwen38_flash_next/docker-compose.yaml) |
+| GLM-5.3-Flash W4A16, FP8 experts (sparse MoE, SGLang) | `glm-5.3-flash` | 164.8 tok/s with EAGLE | 388.2 tok/s per 2-GPU replica | TP2, c4/max256; whole box not yet saturated | [`deploy/glm53_flash_sm120`](deploy/glm53_flash_sm120/docker-compose.yaml) |
 
-Neither model — and neither Qwen stack — is simply better. Single-stream
+No model — and neither Qwen3.8-27B stack — is simply better. Single-stream
 decode is what an interactive user feels; the full-box figure is a capacity
 landmark for a saturated agent fleet. These maxima come from separate
 model-specific workloads, so they are not a matched head-to-head benchmark.
 The vLLM row's saturation result has MTP off because speculation improves
 low-concurrency latency but wastes rejected drafts once the batch saturates
-the GPU. The current SGLang production target is RadixArk's immutable
+the GPU. The SGLang row uses RadixArk's immutable
 BF16-`lm_head` checkpoint. Its matched one-engine canary measured 153.3 tok/s
 against 142.6 for the former Inferact target (+7.5%), with the same 7/8
 objective answers and 20/25 deterministic agent-protocol cases. The smaller
@@ -104,6 +108,20 @@ p95 from 3.99s to 0.221s. The same
 tokens**, and 12 concurrent same-app requests spread across 7 of 8 engines
 at 714 tok/s. Its cost is cold long-context prefill: a 196K-token first
 turn pays ~57s of TTFT on one GPU, with prefix-cached follow-ups at 2–4s.
+
+Qwen3.8-Flash-Next shows the same speculation trade-off: on 256-token outputs
+MTP3 adds 79% at c1 but only 7.5% at c32. The qualified pair therefore runs
+MTP3 on one engine and standard decoding on the other, and ramjet uses the
+requested output length to pick between them only once cache and load tie. Its
+full-box figure predates that split, with MTP3 on both engines. GLM-5.3-Flash
+runs on two GPUs per replica; its prefix cache is bounded by saved
+linear-attention states rather than KV tokens. Keeping two states per path
+instead of four, plus a 4 GB host tier, took a probe of 12 cyclic 20k-token
+sessions from 0/12 to 12/12 cached. The [Kev
+stack](deploy/qwen38_glm53_kev/README.md) adds a 0.8B decision model to the
+same server, sharing one Qwen GPU behind a second API profile: 77 ms p50 per
+short three-question request at c1 and 20.3 requests/s at c4, measured beside
+live traffic rather than saturated.
 [Model profiles](docs/models.md) covers the sizing, sharding, and
 speculative-decoding trade-offs behind these numbers.
 
@@ -121,7 +139,9 @@ simulated team of continuously working coding agents:
 | Capacity per server | **32–48 agents · 98–109 turns/min · TTFT p50 1.3–2.8s** |
 
 The [blog post](https://helix.ml/blog/glm53-on-8x-h200) walks through each
-step; the raw cells are in [EXPERIMENTS.md](EXPERIMENTS.md) (2026-09-29).
+step, and [Ramjet vs NVIDIA Dynamo](https://helix.ml/blog/ramjet-vs-nvidia-dynamo)
+compares the router against Dynamo 1.5.0's KV router on the same engine; the
+raw cells are in [EXPERIMENTS.md](EXPERIMENTS.md) (2026-09-29 and 2026-09-30).
 
 ## Start in one minute
 
@@ -241,6 +261,43 @@ authoritative response usage still enforces the token-density gate. See the
 
 See [AGENTS.md](AGENTS.md) for the GPU-free inner loop, full release gate, and
 node06 benchmark contract.
+
+## Resources
+
+Everything we have written about serving on the
+[Helix blog](https://helix.ml/blog), grouped by topic and newest first. The
+[per-model table](#what-we-wrote-about-each-model) above picks from the same
+posts.
+
+**Routing with ramjet**
+
+- [Ramjet vs NVIDIA Dynamo: Which Router for Coding-Agent Traffic?](https://helix.ml/blog/ramjet-vs-nvidia-dynamo) (30 Sep)
+- [Serving Full GLM-5.3 to 48 Coding Agents From One 8×H200 Server](https://helix.ml/blog/glm53-on-8x-h200) (29 Sep)
+- [Self-Hosting Kev on an RTX PRO 6000 With Ramjet](https://helix.ml/blog/one-ramjet-two-apis-kev-systemone) (22 Sep)
+- [One Qwen Model, Two Speeds: What Smart Routing Bought Us](https://helix.ml/blog/smarter-qwen-routing-with-ramjet) (28 Aug)
+
+**GLM-5.3-Flash**
+
+- [GLM-5.3-Flash Ran Out of Cache Snapshots, Not Cache Tokens](https://helix.ml/blog/glm53-flash-hybrid-attention-prefix-cache) (26 Sep)
+- [Running GLM-5.3-Flash on 2, 4 or 8 RTX PRO 6000 GPUs](https://helix.ml/blog/glm53-flash-tp2-rtx-pro-6000) (14 Sep)
+- [GLM-5.3-Flash on RTX PRO 6000, Part 1: Getting Day-Zero Serving to Work](https://helix.ml/blog/glm53-flash-on-rtx-pro-6000-part-1) (27 Aug)
+
+**Qwen3.8**
+
+- [Swift 1.5 Flash-Next Cut Qwen3.8's Thinking Tokens in Our Pilot](https://helix.ml/blog/swift-flash-next-four-gpu-evaluation) (27 Sep)
+- [Qwen3.8-Flash-Next on Eight GPUs: What Actually Helped](https://helix.ml/blog/qwen38-flash-next-on-rtx-pro-6000) (27 Aug)
+- [A Better lm_head for Qwen3.8-27B: How We Tested and Shipped It](https://helix.ml/blog/qwen38-bf16-lm-head-rollout) (25 Aug)
+- [We Doubled Our Inference Throughput by Reading a Log Line](https://helix.ml/blog/the-ceiling-was-a-state-cache) (23 Aug)
+- [Chasing a 454 tok/s tweet: a day of tuning Qwen3.8-27B on the RTX PRO 6000](https://helix.ml/blog/chasing-454-toks-qwen38-rtx-pro-6000) (22 Aug)
+
+**DeepSeek**
+
+- [DeepSeek V4.1 Flash: Why Its Encoder, Engram and KV Cache Matter](https://helix.ml/blog/deepseek-v41-flash-explained) (10 Sep)
+- [SGLang vs DwarfStar vs vLLM+DSpark: Running DeepSeek 4 on the RTX Pro 6000](https://helix.ml/blog/running-ds4-on-rtx-pro-6000) (14 Aug)
+
+**Hardware**
+
+- [What's Actually in the Sovereign Server](https://helix.ml/blog/whats-inside-the-sovereign-server) (14 Aug)
 
 ## License
 
