@@ -76,6 +76,7 @@ pub struct Metrics {
     pub route_speculation_profile: CounterVec,
     pub route_prefix_single_flight: CounterVec,
     pub route_long_prompt: CounterVec,
+    pub route_lane_exclusion: CounterVec,
     pub route_affinity_horizon: CounterVec,
     pub route_affinity_horizon_seconds: GaugeVec,
     pub route_stale_overlap: Histogram,
@@ -496,6 +497,11 @@ impl Metrics {
             route_long_prompt: counter(
                 "ramjet_route_long_prompt_total",
                 "Requests at or above the long-prompt threshold by selected upstream and lane or fallback outcome",
+                &["upstream", "outcome"],
+            )?,
+            route_lane_exclusion: counter(
+                "ramjet_route_lane_exclusion_total",
+                "Requests below the long-prompt threshold governed by an exclusive lane, by selected upstream and excluded or excluded_fallback outcome",
                 &["upstream", "outcome"],
             )?,
             route_affinity_horizon: counter(
@@ -1111,6 +1117,7 @@ impl Metrics {
             Box::new(self.route_speculation_profile.clone()),
             Box::new(self.route_prefix_single_flight.clone()),
             Box::new(self.route_long_prompt.clone()),
+            Box::new(self.route_lane_exclusion.clone()),
             Box::new(self.route_affinity_horizon.clone()),
             Box::new(self.route_affinity_horizon_seconds.clone()),
             Box::new(self.route_stale_overlap.clone()),
@@ -1313,6 +1320,10 @@ mod tests {
             .with_label_values(&["http://glm53sm120-c:8000", "lane"])
             .inc();
         metrics
+            .route_lane_exclusion
+            .with_label_values(&["http://glm53sm120-c:8000", "excluded"])
+            .inc();
+        metrics
             .route_affinity_horizon_seconds
             .with_label_values(&["0"])
             .set(f64::INFINITY);
@@ -1398,6 +1409,7 @@ mod tests {
             "ramjet_exact_route_canary_total",
             "ramjet_session_affinity_total",
             "ramjet_route_long_prompt_total",
+            "ramjet_route_lane_exclusion_total",
             "ramjet_shadow_soak_source_attempts_total",
             "ramjet_compat_attested",
             "ramjet_kv_event_trusted",

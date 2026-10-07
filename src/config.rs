@@ -62,6 +62,23 @@ pub enum RankProbeScope {
     All,
 }
 
+/// Whether prompts below the long-prompt threshold may use lane members
+/// (`RJ_ROUTE_LONG_PROMPT_SHORT`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LongPromptLaneSharing {
+    /// `shared`: short prompts may use any replica of their model, lane
+    /// members included.
+    #[default]
+    Shared,
+    /// `avoid`: short prompts stay off lane members unless every serving
+    /// protected replica carries more than `margin_units` load units above the
+    /// least-loaded serving lane member.
+    Avoid { margin_units: usize },
+    /// `exclusive`: short prompts stay off lane members while another replica
+    /// of their model is serving.
+    Exclusive,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub upstreams: Vec<Url>,
@@ -139,6 +156,9 @@ pub struct Config {
     /// Lane membership per upstream, aligned with `upstreams`. Empty when the
     /// lane is not configured.
     pub route_long_prompt_upstreams: Vec<bool>,
+    /// Whether prompts below the threshold may use lane members. Always
+    /// `Shared` while the lane is off.
+    pub route_long_prompt_sharing: LongPromptLaneSharing,
     pub affinity: Affinity,
     pub route_affinity_basis: AffinityBasis,
     pub route_affinity_horizon: AffinityHorizonConfig,
@@ -829,7 +849,7 @@ impl Config {
                 "no greater than RJ_ROUTE_MAX_LOAD_UNITS",
             ));
         }
-        let (route_long_prompt_bytes, route_long_prompt_upstreams) =
+        let (route_long_prompt_bytes, route_long_prompt_upstreams, route_long_prompt_sharing) =
             long_prompt_lane_settings(&mut get, &upstream_api_profiles)?;
         let session_affinity = session_affinity_settings(
             &mut get,
@@ -1103,6 +1123,7 @@ impl Config {
             route_prefix_single_flight_max_load_delta,
             route_long_prompt_bytes,
             route_long_prompt_upstreams,
+            route_long_prompt_sharing,
             affinity,
             route_affinity_basis,
             route_affinity_horizon,
@@ -1947,13 +1968,29 @@ fn speculation_route_settings(
 /// an explicit `0` disables the lane while leaving a still-validated member
 /// list inert, so an operator can switch it off without editing the list.
 /// Lane members must be OpenAI-profile upstreams because the size signal is
-/// an OpenAI-family request body.
+/// an OpenAI-family request body. A non-`shared` `RJ_ROUTE_LONG_PROMPT_SHORT`
+/// needs a member list and is inert while the threshold is `0`.
 fn long_prompt_lane_settings(
     get: &mut impl FnMut(&str) -> Option<String>,
     profiles: &[UpstreamApiProfile],
-) -> Result<(usize, Vec<bool>), ConfigError> {
+) -> Result<(usize, Vec<bool>, LongPromptLaneSharing), ConfigError> {
     const BYTES: &str = "RJ_ROUTE_LONG_PROMPT_BYTES";
     const UPSTREAMS: &str = "RJ_ROUTE_LONG_PROMPT_UPSTREAMS";
+    const SHORT: &str = "RJ_ROUTE_LONG_PROMPT_SHORT";
+    const AVOID_UNITS: &str = "RJ_ROUTE_LONG_PROMPT_AVOID_LOAD_UNITS";
+    let margin_units = parse(get, AVOID_UNITS, 8, "a non-negative integer")?;
+    let sharing = match get(SHORT).filter(|value| !value.is_empty()).as_deref() {
+        None | Some("shared") => LongPromptLaneSharing::Shared,
+        Some("avoid") => LongPromptLaneSharing::Avoid { margin_units },
+        Some("exclusive") => LongPromptLaneSharing::Exclusive,
+        Some(value) => {
+            return Err(invalid(
+                SHORT,
+                value.to_owned(),
+                "shared, avoid or exclusive",
+            ));
+        }
+    };
     let raw_bytes = get(BYTES).filter(|value| !value.is_empty());
     let threshold = match &raw_bytes {
         None => None,
@@ -2005,8 +2042,15 @@ fn long_prompt_lane_settings(
         }
         members
     };
+    if sharing != LongPromptLaneSharing::Shared && members.is_empty() {
+        return Err(invalid(
+            SHORT,
+            String::new(),
+            "shared unless RJ_ROUTE_LONG_PROMPT_UPSTREAMS is set",
+        ));
+    }
     match (threshold, members.is_empty()) {
-        (None, true) | (Some(0), _) => Ok((0, Vec::new())),
+        (None, true) | (Some(0), _) => Ok((0, Vec::new(), LongPromptLaneSharing::Shared)),
         (None, false) => Err(invalid(
             BYTES,
             String::new(),
@@ -2017,7 +2061,7 @@ fn long_prompt_lane_settings(
             String::new(),
             "set whenever RJ_ROUTE_LONG_PROMPT_BYTES is positive",
         )),
-        (Some(threshold), false) => Ok((threshold, members)),
+        (Some(threshold), false) => Ok((threshold, members, sharing)),
     }
 }
 
@@ -2875,6 +2919,11 @@ mod tests {
             lane.route_long_prompt_upstreams,
             [false, false, true, false]
         );
+        assert_eq!(
+            lane.route_long_prompt_sharing,
+            LongPromptLaneSharing::Shared
+        );
+        assert_eq!(off.route_long_prompt_sharing, LongPromptLaneSharing::Shared);
 
         // An explicit zero is the rollback flip: the list stays validated but
         // the lane is inert.
@@ -2902,6 +2951,72 @@ mod tests {
         .unwrap();
         assert_eq!(empty.route_long_prompt_bytes, 0);
         assert!(empty.route_long_prompt_upstreams.is_empty());
+    }
+
+    #[test]
+    fn long_prompt_short_sharing_parses_and_validates() {
+        for (short, units, expected) in [
+            ("shared", None, LongPromptLaneSharing::Shared),
+            ("exclusive", None, LongPromptLaneSharing::Exclusive),
+            (
+                "avoid",
+                None,
+                LongPromptLaneSharing::Avoid { margin_units: 8 },
+            ),
+            (
+                "avoid",
+                Some("0"),
+                LongPromptLaneSharing::Avoid { margin_units: 0 },
+            ),
+        ] {
+            let mut values = vec![
+                ("RJ_ROUTE_LONG_PROMPT_BYTES", "600000"),
+                ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,lane,-"),
+                ("RJ_ROUTE_LONG_PROMPT_SHORT", short),
+            ];
+            if let Some(units) = units {
+                values.push(("RJ_ROUTE_LONG_PROMPT_AVOID_LOAD_UNITS", units));
+            }
+            assert_eq!(
+                live_shape(&values).unwrap().route_long_prompt_sharing,
+                expected,
+                "{short} {units:?}"
+            );
+        }
+
+        let rolled_back_exclusive = live_shape(&[
+            ("RJ_ROUTE_LONG_PROMPT_BYTES", "0"),
+            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,lane,-"),
+            ("RJ_ROUTE_LONG_PROMPT_SHORT", "exclusive"),
+        ])
+        .unwrap();
+        assert_eq!(
+            rolled_back_exclusive.route_long_prompt_sharing,
+            LongPromptLaneSharing::Shared,
+            "the rollback flip also disables exclusion"
+        );
+        for (key, value, with_lane, case) in [
+            ("RJ_ROUTE_LONG_PROMPT_SHORT", "always", true, "unknown mode"),
+            (
+                "RJ_ROUTE_LONG_PROMPT_SHORT",
+                "avoid",
+                false,
+                "without lane members",
+            ),
+            (
+                "RJ_ROUTE_LONG_PROMPT_AVOID_LOAD_UNITS",
+                "-1",
+                true,
+                "negative margin",
+            ),
+        ] {
+            let mut extra = vec![(key, value)];
+            if with_lane {
+                extra.push(("RJ_ROUTE_LONG_PROMPT_BYTES", "600000"));
+                extra.push(("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,lane,-"));
+            }
+            assert_invalid(live_shape(&extra), key, case);
+        }
     }
 
     #[test]

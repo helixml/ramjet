@@ -1399,6 +1399,7 @@ impl Proxy {
             prepared.body.len(),
             self.inner.config.route_long_prompt_bytes,
             &self.inner.config.route_long_prompt_upstreams,
+            self.inner.config.route_long_prompt_sharing,
         );
         self.inner
             .metrics
@@ -2399,16 +2400,21 @@ impl Proxy {
     /// Counts requests governed by a long-prompt lane against the upstream
     /// the router selected for them. Below-threshold and lane-less requests
     /// are not recorded, so the series stays proportional to long prompts.
+    ///
+    /// Short prompts governed by an `avoid` or `exclusive` lane are counted
+    /// separately, so neither series changes meaning when that is switched on.
     fn record_long_prompt_lane(&self, outcome: LongPromptLaneOutcome, decision: &Decision) {
-        if !outcome.counted() {
+        let counter = if outcome.counted() {
+            &self.inner.metrics.route_long_prompt
+        } else if outcome.exclusion_counted() {
+            &self.inner.metrics.route_lane_exclusion
+        } else {
             return;
-        }
+        };
         let Some(&upstream) = decision.candidates.first() else {
             return;
         };
-        self.inner
-            .metrics
-            .route_long_prompt
+        counter
             .with_label_values(&[&self.upstream_label(upstream), outcome.label()])
             .inc();
     }
@@ -5099,7 +5105,9 @@ mod tests {
 
     /// The live node06 shape with the long-prompt lane on the second GLM
     /// replica, a 4 KiB threshold, and one counting echo upstream per slot.
-    async fn long_prompt_lane_fleet() -> (Proxy, Vec<Url>, Vec<tokio::task::JoinHandle<()>>) {
+    async fn long_prompt_lane_fleet(
+        short: &'static str,
+    ) -> (Proxy, Vec<Url>, Vec<tokio::task::JoinHandle<()>>) {
         let mut urls = Vec::new();
         let mut tasks = Vec::new();
         for index in 0..4 {
@@ -5122,6 +5130,7 @@ mod tests {
             "RJ_UPSTREAM_APIS" => Some("openai,openai,openai,systemone".to_owned()),
             "RJ_ROUTE_LONG_PROMPT_BYTES" => Some("4096".to_owned()),
             "RJ_ROUTE_LONG_PROMPT_UPSTREAMS" => Some("-,-,lane,-".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_SHORT" => Some(short.to_owned()),
             _ => None,
         })
         .unwrap();
@@ -5162,7 +5171,7 @@ mod tests {
 
     #[tokio::test]
     async fn long_prompts_are_confined_to_the_lane_and_short_prompts_are_not() {
-        let (proxy, urls, tasks) = long_prompt_lane_fleet().await;
+        let (proxy, urls, tasks) = long_prompt_lane_fleet("shared").await;
 
         let mut short = HashSet::new();
         for salt in 0..8 {
@@ -5196,9 +5205,81 @@ mod tests {
         }
     }
 
+    fn lane_exclusion_count(proxy: &Proxy, upstream: &Url, outcome: &str) -> f64 {
+        proxy
+            .inner
+            .metrics
+            .route_lane_exclusion
+            .with_label_values(&[upstream.as_str().trim_end_matches('/'), outcome])
+            .get()
+    }
+
+    #[tokio::test]
+    async fn an_exclusive_lane_keeps_short_prompts_off_the_lane_replica() {
+        let (proxy, urls, tasks) = long_prompt_lane_fleet("exclusive").await;
+        for salt in 0..8 {
+            assert_eq!(
+                served_upstream(&proxy, "glm-5.3-flash", salt, 256).await,
+                "1",
+                "short prompts stay on the protected replica"
+            );
+        }
+        for salt in 100..104 {
+            assert_eq!(
+                served_upstream(&proxy, "glm-5.3-flash", salt, 8_192).await,
+                "2"
+            );
+        }
+        // A model without a lane member is unaffected.
+        assert_eq!(
+            served_upstream(&proxy, "qwen3.8-flash-next", 200, 256).await,
+            "0"
+        );
+        assert!((lane_exclusion_count(&proxy, &urls[1], "excluded") - 8.0).abs() < f64::EPSILON);
+        assert!((long_prompt_count(&proxy, &urls[2], "lane") - 4.0).abs() < f64::EPSILON);
+        assert!(lane_exclusion_count(&proxy, &urls[0], "excluded").abs() < f64::EPSILON);
+
+        // With the protected replica fenced, short prompts use the lane.
+        proxy.inner.router.set_healthy(1, false);
+        for salt in 300..304 {
+            assert_eq!(
+                served_upstream(&proxy, "glm-5.3-flash", salt, 256).await,
+                "2",
+                "availability beats isolation"
+            );
+        }
+        assert!(
+            (lane_exclusion_count(&proxy, &urls[2], "excluded_fallback") - 4.0).abs()
+                < f64::EPSILON
+        );
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_avoiding_lane_keeps_an_idle_fleets_short_prompts_off_the_lane() {
+        let (proxy, urls, tasks) = long_prompt_lane_fleet("avoid").await;
+        for salt in 0..8 {
+            assert_eq!(
+                served_upstream(&proxy, "glm-5.3-flash", salt, 256).await,
+                "1"
+            );
+        }
+        assert_eq!(
+            served_upstream(&proxy, "glm-5.3-flash", 100, 8_192).await,
+            "2"
+        );
+        assert!((lane_exclusion_count(&proxy, &urls[1], "excluded") - 8.0).abs() < f64::EPSILON);
+        assert!(lane_exclusion_count(&proxy, &urls[2], "spilled").abs() < f64::EPSILON);
+        for task in tasks {
+            task.abort();
+        }
+    }
+
     #[tokio::test]
     async fn a_fenced_lane_falls_back_to_the_protected_replica() {
-        let (proxy, urls, tasks) = long_prompt_lane_fleet().await;
+        let (proxy, urls, tasks) = long_prompt_lane_fleet("shared").await;
         for (fence, restore) in [
             (
                 (|proxy: &Proxy| proxy.inner.router.set_healthy(2, false)) as fn(&Proxy),
