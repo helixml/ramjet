@@ -1,0 +1,212 @@
+# DeepSeek-V4.1-Flash on one 8x H200 (Hopper SM90) host.
+#
+# Default topology: two TP4/EP4 SGLang replicas (GPUs 0-3, 4-7) with DSpark,
+# BF16 dense layers and the Engram tables in host memory, behind one ramjet.
+# The `tp8` profile is the single-engine alternative on all eight GPUs; it
+# owns the same devices, so never start it beside dsv41-a/dsv41-b.
+#
+#   docker compose up -d                          # 2x TP4 + ramjet
+#   docker compose --profile tp8 up -d dsv41-tp8  # TP8 (engines A/B stopped)
+#
+# Every tunable is a ${VAR:-default}; do not add overlay files.
+name: dsv41_flash_h200
+
+x-ds-engine: &ds-engine
+  image: ${SGLANG_IMAGE:-lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469}
+  pull_policy: never
+  labels:
+    ai.ramjet.model.repository: deepseek-ai/DeepSeek-V4.1-Flash
+    ai.ramjet.model.revision: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
+    ai.ramjet.runtime.release: sglang-v0.5.21
+  # The stock image plus two small source patches applied at start (see
+  # patches/). Each one is a no-op unless its env switch below is set, and
+  # each fails the start if its anchor is missing, so an image bump cannot
+  # silently drop one.
+  entrypoint: ["bash", "-c"]
+  command:
+    - >-
+      set -e;
+      for p in $$DS_PATCHES; do python3 /opt/dsv41-patches/$$p /sgl-workspace/sglang/python/sglang; done;
+      exec python3 -m sglang.launch_server
+      --model-path=/models/dsv41
+      --served-model-name=deepseek-v4.1-flash
+      --trust-remote-code
+      --tp-size=$$DS_TP --ep-size=$$DS_EP
+      --attention-backend=dsv4
+      --moe-runner-backend=flashinfer_mxfp4
+      --flashinfer-mxfp4-moe-precision=$$DS_MOE_PRECISION
+      --context-length=$$DS_CONTEXT_LENGTH
+      --mem-fraction-static=$$DS_MEM_FRACTION
+      --cuda-graph-max-bs-decode=$$DS_CUDA_GRAPH_MAX_BS
+      --enable-decoder-swa-bounded-replay
+      --reasoning-parser=auto
+      --tool-call-parser=auto
+      --enable-metrics
+      --enable-cache-report
+      --numa-node $$DS_NUMA_NODES
+      --tokenizer-worker-num $$DS_TOKENIZER_WORKERS
+      --host=0.0.0.0 --port=8000
+      $$DS_SPEC_ARGS
+      $$DS_EXTRA_ARGS
+  restart: "no"
+  init: true
+  # No `ipc: host`. SGLang names a shared-memory segment after its own main
+  # PID (/dev/shm/multi_tokenizer_args_<pid>). Two containers sharing the
+  # host's /dev/shm can draw the same PID, and one replica then answers
+  # /health and /v1/models while never running a request. A private /dev/shm
+  # per container avoids it; the host Engram table is a memfd and needs none.
+  shm_size: 64gb
+  # SGLang binds each TP rank's CPUs to its GPU's NUMA node, but only with
+  # CAP_SYS_NICE; without it the bind is skipped.
+  cap_add: [SYS_NICE]
+  stop_grace_period: 120s
+  ulimits:
+    memlock: -1
+    stack: 67108864
+    nofile: {soft: 1048576, hard: 1048576}
+  environment: &ds-env
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    # /health otherwise generates a token through the scheduler and times out
+    # ramjet's probe under load.
+    SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION: "0"
+    SGLANG_UVICORN_WORKER_HEALTHCHECK_TIMEOUT: ${SGLANG_UVICORN_WORKER_HEALTHCHECK_TIMEOUT:-60}
+    TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+    TILELANG_CACHE_DIR: /root/.cache/tilelang
+    TRITON_CACHE_DIR: /root/.cache/triton
+    CUDA_CACHE_PATH: /root/.cache/nv/ComputeCache
+    SGLANG_DG_CACHE_DIR: /root/.cache/deep_gemm
+    FLASHINFER_WORKSPACE_BASE: /root/.cache
+    DS_PATCHES: ${DS_PATCHES:-patch_bf16_dense.py patch_numa_preferred.py}
+    # The checkpoint's dense layers are FP8 with 32x32 ue8m0 block scales,
+    # which on Hopper only run on SGLang's Triton block-FP8 kernel: half of all
+    # GPU time at decode. Dequantizing them to BF16 once at load is exact and
+    # took one stream from 234 to 392 tok/s (TP8).
+    SGLANG_BLOCK_FP8_DEQUANT_BF16: ${SGLANG_BLOCK_FP8_DEQUANT_BF16:-1}
+    # Bind memory to the rank's NUMA node as a preference, not a hard bind, so
+    # the ~190GB host Engram table can spill instead of being OOM-killed.
+    SGLANG_NUMA_MEM_PREFERRED: ${SGLANG_NUMA_MEM_PREFERRED:-1}
+    # The two Engram tables (203GB) live in host memory, shared by a
+    # replica's ranks; this is what fits a TP4 replica on four GPUs.
+    SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE: "1"
+    DS_TP: "4"
+    DS_EP: "4"
+    # Host NUMA node per TP rank. Container GPU ordinals restart at 0, so the
+    # mapping is explicit. Rank 0 binds to node 1, as in glm53_flash_h200:
+    # some H200 VMs fault on GPU DMA against node 0's low memory window.
+    DS_NUMA_NODES: "1 1 2 3"
+    DS_TOKENIZER_WORKERS: ${DS_TOKENIZER_WORKERS:-4}
+    # W4A8: FP4 experts with FP8 activations (Hopper has no FP4 tensor cores).
+    DS_MOE_PRECISION: ${DS_MOE_PRECISION:-fp8}
+    # DSpark needs the 262k context on H200: at the native 1M its verify
+    # graphs OOM in capture.
+    DS_CONTEXT_LENGTH: ${DS_CONTEXT_LENGTH:-262144}
+    DS_MEM_FRACTION: ${DS_MEM_FRACTION:-0.75}
+    DS_CUDA_GRAPH_MAX_BS: ${DS_CUDA_GRAPH_MAX_BS:-64}
+    # DSpark draft-and-verify, block 5: about 3x one stream's decode speed.
+    # DS_SPEC_ARGS=" " disables.
+    DS_SPEC_ARGS: ${DS_SPEC_ARGS:---speculative-algorithm DSPARK --speculative-dspark-block-size 5}
+    DS_EXTRA_ARGS: ${DS_EXTRA_ARGS:-}
+
+services:
+  dsv41-a:
+    <<: *ds-engine
+    container_name: dsv41-a
+    ports: ["127.0.0.1:8070:8000"]
+    volumes:
+      - ${MODEL_DIR:-${HOME}/models/deepseek-ai/DeepSeek-V4.1-Flash-2cba9e42}:/models/dsv41:ro
+      - ${CACHE_ROOT:-${HOME}/engine-cache}/dsv41-a:/root/.cache
+      - ./patches:/opt/dsv41-patches:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["0", "1", "2", "3"], capabilities: [gpu]}
+
+  dsv41-b:
+    <<: *ds-engine
+    container_name: dsv41-b
+    ports: ["127.0.0.1:8071:8000"]
+    environment:
+      <<: *ds-env
+      DS_NUMA_NODES: "4 5 6 7"
+      # Replica B doubles as a 1M-context lane: DS_B_CONTEXT_LENGTH=1048576
+      # DS_B_MEM_FRACTION=0.73 DS_B_CUDA_GRAPH_MAX_BS=32 (see README).
+      DS_CONTEXT_LENGTH: ${DS_B_CONTEXT_LENGTH:-262144}
+      DS_MEM_FRACTION: ${DS_B_MEM_FRACTION:-0.75}
+      DS_CUDA_GRAPH_MAX_BS: ${DS_B_CUDA_GRAPH_MAX_BS:-64}
+    volumes:
+      - ${MODEL_DIR:-${HOME}/models/deepseek-ai/DeepSeek-V4.1-Flash-2cba9e42}:/models/dsv41:ro
+      - ${CACHE_ROOT:-${HOME}/engine-cache}/dsv41-b:/root/.cache
+      - ./patches:/opt/dsv41-patches:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["4", "5", "6", "7"], capabilities: [gpu]}
+
+  dsv41-tp8:
+    <<: *ds-engine
+    profiles: ["tp8"]
+    container_name: dsv41-tp8
+    ports: ["127.0.0.1:8072:8000"]
+    environment:
+      <<: *ds-env
+      DS_TP: "8"
+      DS_EP: "8"
+      DS_NUMA_NODES: "1 1 2 3 4 5 6 7"
+      # Row-sharded over eight GPUs the Engram tables fit in HBM: a faster
+      # start and half the host memory, for fewer turns/min.
+      SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE: "0"
+    volumes:
+      - ${MODEL_DIR:-${HOME}/models/deepseek-ai/DeepSeek-V4.1-Flash-2cba9e42}:/models/dsv41:ro
+      - ${CACHE_ROOT:-${HOME}/engine-cache}/dsv41-tp8:/root/.cache
+      - ./patches:/opt/dsv41-patches:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["0", "1", "2", "3", "4", "5", "6", "7"], capabilities: [gpu]}
+
+  ramjet:
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.7.0@sha256:dca028638314ca3171120532a075faaa70483e1494dd3d04bddc4db4eb88c01d}
+    container_name: ramjet
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8006:8000"
+      - "127.0.0.1:8007:9090"
+    environment:
+      RJ_UPSTREAM: ${RJ_UPSTREAM:-http://dsv41-a:8000,http://dsv41-b:8000}
+      RJ_UPSTREAM_TOKEN: ${RJ_UPSTREAM_TOKEN:-ds-local}
+      RJ_ADVERTISE_CTX_MARGIN: "8192"
+      RJ_MAX_TOKENS_STRIP: "0"
+      RJ_AFFINITY: ${RJ_AFFINITY:-prefix}
+      RJ_ROUTE_ALPHA: ${RJ_ROUTE_ALPHA:-4}
+      RJ_ROUTE_CHUNK_BYTES: ${RJ_ROUTE_CHUNK_BYTES:-2048}
+      RJ_ROUTE_MAX_PREFIX_BYTES: ${RJ_ROUTE_MAX_PREFIX_BYTES:-2097152}
+      RJ_ROUTE_MAX_OVERLAP_BLOCKS: ${RJ_ROUTE_MAX_OVERLAP_BLOCKS:-32}
+      # Coding-harness prompts share a system prompt larger than the affinity
+      # cap; under `absolute` both replicas score the same and sessions hop.
+      # `marginal` was worth +18% turns/min at 64 developers.
+      RJ_ROUTE_AFFINITY_BASIS: ${RJ_ROUTE_AFFINITY_BASIS:-marginal}
+      RJ_ROUTE_LOAD_UNIT_BYTES: ${RJ_ROUTE_LOAD_UNIT_BYTES:-32768}
+      RJ_ROUTE_MAX_LOAD_UNITS: ${RJ_ROUTE_MAX_LOAD_UNITS:-8}
+      RJ_ROUTE_PHASE_AWARE_LOAD: ${RJ_ROUTE_PHASE_AWARE_LOAD:-true}
+      RJ_ROUTE_DECODE_LOAD_UNIT_TOKENS: "256"
+      RJ_ROUTE_DECODE_MAX_LOAD_UNITS: "4"
+      RJ_ROUTE_PROJECTED_LOAD: "false"
+      RJ_ROUTE_SPECULATION_MODE: "off"
+      RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE:-off}
+      RJ_ROUTE_AFFINITY_HORIZON_MODE: "off"
+      RJ_ROUTE_JOURNAL: ${RJ_ROUTE_JOURNAL:-true}
+      # Empty unless replica B serves the 1M lane (see README).
+      RJ_ROUTE_LONG_PROMPT_BYTES: ${RJ_ROUTE_LONG_PROMPT_BYTES:-}
+      RJ_ROUTE_LONG_PROMPT_UPSTREAMS: ${RJ_ROUTE_LONG_PROMPT_UPSTREAMS:-}
+      # SGLang publishes no vLLM KV-event feed and no DeepSeek renderer profile exists.
+      RJ_TOKENIZER_MODE: "off"
+      RJ_EXACT_ROUTE_MODE: "off"
+      RJ_KV_EVENT_MODE: "off"
+      RJ_SNAPSHOT_ROUTE_MODE: "off"
+      RJ_UPSTREAM_ADMISSION_MODE: http
+      RJ_IDLE_DRAIN_MODE: "off"

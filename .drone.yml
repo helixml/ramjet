@@ -91,10 +91,11 @@ steps:
       - python3 deploy/qwen38_flash_next/validate-compose.py
       - python3 deploy/glm53_flash_sm120/validate-compose.py
       - python3 deploy/glm53_flash_h200/validate-compose.py
+      - python3 deploy/dsv41_flash_h200/validate-compose.py
       - python3 deploy/glm53_h200/validate-compose.py
       - python3 deploy/qwen38_glm53_multimodel/validate-compose.py
       - python3 deploy/qwen38_glm53_kev/validate-compose.py
-      - python3 -m unittest bench.test_persistent_jit_cache_compose bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose bench.test_qwen_flash_next_compose bench.test_glm53_sm120_deploy bench.test_glm53_h200_deploy bench.test_glm53_full_h200_deploy bench.test_qwen_glm_multimodel_deploy bench.test_qwen_glm_kev_deploy
+      - python3 -m unittest bench.test_persistent_jit_cache_compose bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose bench.test_qwen_flash_next_compose bench.test_glm53_sm120_deploy bench.test_glm53_h200_deploy bench.test_dsv41_h200_deploy bench.test_glm53_full_h200_deploy bench.test_qwen_glm_multimodel_deploy bench.test_qwen_glm_kev_deploy
 
   - name: quality-complete
     image: alpine:3.23
@@ -328,10 +329,11 @@ steps:
       - python3 deploy/qwen38_flash_next/validate-compose.py
       - python3 deploy/glm53_flash_sm120/validate-compose.py
       - python3 deploy/glm53_flash_h200/validate-compose.py
+      - python3 deploy/dsv41_flash_h200/validate-compose.py
       - python3 deploy/glm53_h200/validate-compose.py
       - python3 deploy/qwen38_glm53_multimodel/validate-compose.py
       - python3 deploy/qwen38_glm53_kev/validate-compose.py
-      - python3 -m unittest bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose bench.test_qwen_flash_next_compose bench.test_glm53_sm120_deploy bench.test_glm53_h200_deploy bench.test_glm53_full_h200_deploy bench.test_qwen_glm_multimodel_deploy bench.test_qwen_glm_kev_deploy
+      - python3 -m unittest bench.test_snapshot_production_compose bench.test_serving_identity_compose bench.test_dspark_guard_compose bench.test_dspark_guard_host bench.test_infernal_r11_compose bench.test_qwen_flash_next_compose bench.test_glm53_sm120_deploy bench.test_glm53_h200_deploy bench.test_dsv41_h200_deploy bench.test_glm53_full_h200_deploy bench.test_qwen_glm_multimodel_deploy bench.test_qwen_glm_kev_deploy
 
   - name: release-quality-complete
     image: alpine:3.23
