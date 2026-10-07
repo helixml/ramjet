@@ -170,7 +170,7 @@ services:
             - {driver: nvidia, device_ids: ["0", "1", "2", "3", "4", "5", "6", "7"], capabilities: [gpu]}
 
   ramjet:
-    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.7.0@sha256:dca028638314ca3171120532a075faaa70483e1494dd3d04bddc4db4eb88c01d}
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673}
     container_name: ramjet
     restart: unless-stopped
     ports:
