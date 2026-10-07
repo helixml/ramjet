@@ -62,18 +62,22 @@ You can also just plug it into prometheus, `/metrics` API is available.
 ## Measured on real hardware
 
 Each metric has its own column, so green always means better: throughput
-and cache hits up, time to first token (TTFT) down. Red marks a measured cost and
-grey a change within noise.
+and cache hits up, time to first token (TTFT) down. Red marks a measured
+cost and grey a change within noise.
 
-| Model · server | What changed | Throughput | TTFT | Cache hits |
-| :-- | :-- | --: | --: | --: |
-| <sub>**DeepSeek-V4-Flash**<br>2× TP4 · 8× RTX PRO 6000</sub> | <sub>12 same-app sessions, load-blind router → ramjet</sub> | <sub>298 → **469** tok/s<br>$`\color{#2DA44E}\blacktriangle`$ 57%</sub> |  |  |
-|  | <sub>Fresh 3-app × 4-session locality run</sub> |  |  | <sub>**82.5%**</sub> |
-|  | <sub>Whole-box deterministic code, c24/max256</sub> | <sub>**1,820–1,844** tok/s</sub> |  |  |
-| <sub>**Qwen3.8-Flash-Next**<br>2× TP4 · 8× RTX PRO 6000</sub> | <sub>Request queued behind a long one, phase-aware load release</sub> | <sub>long request keeps **99.1%**<br>$`\color{#E5534B}\blacktriangledown`$ 0.9%</sub> | <sub>2,496 → **287** ms<br>$`\color{#2DA44E}\blacktriangledown`$ 88.5%</sub> |  |
-|  | <sub>Direct vLLM → same engine through ramjet</sub> | <sub>c1 −0.03% · c16 −0.24%<br>$`\color{#8B949E}\blacktriangledown`$ ≈ 0</sub> |  |  |
-| <sub>**GLM-5.3-Flash**<br>2× TP4 · 8× H200</sub> | <sub>Coding-agent swarm, prefix routing → `marginal` affinity</sub> | <sub>197 / 194 → **243 / 249** turns/min<br>$`\color{#2DA44E}\blacktriangle`$ 23–28%</sub> | <sub>p90 5.3–5.5 → **3.2–3.3** s<br>$`\color{#2DA44E}\blacktriangledown`$ 38–42%</sub> |  |
-| <sub>**GLM-5.3**<br>DP8 attention · 8× H200</sub> | <sub>32 / 48 coding agents, NVIDIA Dynamo 1.5.0 → ramjet, same engine</sub> | <sub>73.0 / 77.3 → **88.9 / 99.5** turns/min<br>$`\color{#2DA44E}\blacktriangle`$ 22% / 29%</sub> |  | <sub>85% → **92%**<br>$`\color{#2DA44E}\blacktriangle`$ 7 pts</sub> |
+| Result | Throughput | TTFT | Cache hits |
+| :-- | --: | --: | --: |
+| **DeepSeek-V4-Flash**&nbsp;&nbsp;<sub>2× TP4 · 8× RTX PRO 6000</sub> |  |  |  |
+| <sub>12 same-app sessions, load-blind router → ramjet</sub> | <sub>298&nbsp;→&nbsp;**469**&nbsp;tok/s<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 57%</sub> |  |  |
+| <sub>Fresh 3-app × 4-session locality run</sub> |  |  | <sub>**82.5%**</sub> |
+| <sub>Whole-box deterministic code, c24/max256</sub> | <sub>**1,820–1,844**&nbsp;tok/s</sub> |  |  |
+| **Qwen3.8-Flash-Next**&nbsp;&nbsp;<sub>2× TP4 · 8× RTX PRO 6000</sub> |  |  |  |
+| <sub>Request queued behind a long one, phase-aware load release</sub> | <sub>long request<br>100%&nbsp;→&nbsp;**99.1%**<br><img src="docs/assets/delta-down-bad.svg" alt="▼" width="10" height="9"> 0.9%</sub> | <sub>queued request<br>2,496&nbsp;→&nbsp;**287**&nbsp;ms<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 88.5%</sub> |  |
+| <sub>Direct vLLM → same engine through ramjet</sub> | <sub>c1&nbsp;−0.03% · c16&nbsp;−0.24%<br><img src="docs/assets/delta-flat.svg" alt="–" width="10" height="9"> ≈&nbsp;0</sub> |  |  |
+| **GLM-5.3-Flash**&nbsp;&nbsp;<sub>2× TP4 · 8× H200</sub> |  |  |  |
+| <sub>Coding-agent swarm, prefix routing → `marginal` affinity basis</sub> | <sub>194–197&nbsp;→&nbsp;**243–249**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 23–28%</sub> | <sub>p90<br>5.3–5.5&nbsp;→&nbsp;**3.2–3.3**&nbsp;s<br><img src="docs/assets/delta-down-good.svg" alt="▼" width="10" height="9"> 38–42%</sub> |  |
+| **GLM-5.3**&nbsp;&nbsp;<sub>DP8 attention · 8× H200</sub> |  |  |  |
+| <sub>NVIDIA Dynamo 1.5.0 → ramjet, same engine, 32 and 48 agents</sub> | <sub>73.0&nbsp;→&nbsp;**88.9**<br>77.3&nbsp;→&nbsp;**99.5**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 22%, 29%</sub> |  | <sub>85%&nbsp;→&nbsp;**92%**<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 7&nbsp;pts</sub> |
 
 These are workload results, not theoretical peaks. Reproduce the DeepSeek rows
 from [RESULTS.md](RESULTS.md); inspect every accepted and rejected experiment in
@@ -82,16 +86,17 @@ from [RESULTS.md](RESULTS.md); inspect every accepted and rejected experiment in
 ### Models with a validated stack
 
 All measured on node06 — 8× RTX PRO 6000 Blackwell; the engine topology is
-listed per row. The full-box column reports the best qualified saturation
-point recorded for that stack, not a shared concurrency level.
+listed per row, and each model name links to its Compose stack. The full-box
+column reports the best qualified saturation point recorded for that stack,
+not a shared concurrency level.
 
-| Model · served as | Engine · measured shape | Decode @ c1 | Full-box peak | Compose |
-| :-- | :-- | --: | --: | :-- |
-| <sub>**DeepSeek-V4-Flash**<br>sparse MoE · `deepseek-v4-flash`</sub> | <sub>vLLM + DSpark<br>2× TP4 · c24/max256</sub> | <sub>**245.1** tok/s</sub> | <sub>**1,891.2** tok/s</sub> | <sub>[`dspark_0731`](deploy/dspark_0731/docker-compose.yaml)</sub> |
-| <sub>**Qwen3.8-27B FP8**<br>dense · `qwen3.8-27b`</sub> | <sub>vLLM<br>2× TP4 · c256/max256 · MTP off</sub> | <sub>77 → **121** tok/s<br>$`\color{#2DA44E}\blacktriangle`$ 57% with MTP</sub> | <sub>**7,890.9** tok/s</sub> | <sub>[`qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml)</sub> |
-| <sub>**Qwen3.8-27B NVFP4 + BF16 head**<br>dense · `qwen3.8-27b`</sub> | <sub>SGLang + DFlash2<br>8× TP1 · 208 slots · bf16 SSM</sub> | <sub>**153.3** tok/s greedy median<br>$`\color{#2DA44E}\blacktriangle`$ 7.5% vs Inferact</sub> | <sub>not yet requalified<br>Inferact target: 7,882.6 tok/s</sub> | <sub>[`qwen38_27b`](deploy/qwen38_27b/docker-compose.yaml)</sub> |
-| <sub>**Qwen3.8-Flash-Next FP8**<br>sparse MoE · `qwen3.8-flash-next`</sub> | <sub>vLLM<br>2× TP4+EP · c64 · MTP3 on both</sub> | <sub>113 → **202** tok/s<br>$`\color{#2DA44E}\blacktriangle`$ 79% with MTP3</sub> | <sub>**3,340.5** tok/s</sub> | <sub>[`qwen38_flash_next`](deploy/qwen38_flash_next/docker-compose.yaml)</sub> |
-| <sub>**GLM-5.3-Flash W4A16, FP8 experts**<br>sparse MoE · `glm-5.3-flash`</sub> | <sub>SGLang + EAGLE<br>TP2 · c4/max256</sub> | <sub>**164.8** tok/s</sub> | <sub>**388.2** tok/s per 2-GPU replica<br>whole box not yet saturated</sub> | <sub>[`glm53_flash_sm120`](deploy/glm53_flash_sm120/docker-compose.yaml)</sub> |
+| Model | Engine · measured shape | Decode @ c1 | Full-box peak |
+| :-- | :-- | --: | --: |
+| <sub>[**DeepSeek-V4-Flash**](deploy/dspark_0731/docker-compose.yaml)<br>`deepseek-v4-flash`<br>sparse MoE</sub> | <sub>vLLM + DSpark<br>2× TP4 · c24/max256</sub> | <sub>**245.1**&nbsp;tok/s</sub> | <sub>**1,891.2**&nbsp;tok/s</sub> |
+| <sub>[**Qwen3.8-27B FP8**](deploy/qwen38_27b/docker-compose.yaml)<br>`qwen3.8-27b`<br>dense</sub> | <sub>vLLM<br>2× TP4 · c256/max256 · MTP off</sub> | <sub>77&nbsp;→&nbsp;**121**&nbsp;tok/s<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 57% with MTP</sub> | <sub>**7,890.9**&nbsp;tok/s</sub> |
+| <sub>[**Qwen3.8-27B NVFP4 + BF16 head**](deploy/qwen38_27b/docker-compose.yaml)<br>`qwen3.8-27b`<br>dense</sub> | <sub>SGLang + DFlash2<br>8× TP1 · 208 slots · bf16 SSM</sub> | <sub>**153.3**&nbsp;tok/s<br>greedy median<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 7.5% vs Inferact</sub> | <sub>not yet requalified<br>Inferact target:<br>7,882.6&nbsp;tok/s</sub> |
+| <sub>[**Qwen3.8-Flash-Next FP8**](deploy/qwen38_flash_next/docker-compose.yaml)<br>`qwen3.8-flash-next`<br>sparse MoE</sub> | <sub>vLLM<br>2× TP4+EP · c64 · MTP3 on both</sub> | <sub>113&nbsp;→&nbsp;**202**&nbsp;tok/s<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 79% with MTP3</sub> | <sub>**3,340.5**&nbsp;tok/s</sub> |
+| <sub>[**GLM-5.3-Flash W4A16, FP8 experts**](deploy/glm53_flash_sm120/docker-compose.yaml)<br>`glm-5.3-flash`<br>sparse MoE</sub> | <sub>SGLang + EAGLE<br>TP2 · c4/max256</sub> | <sub>**164.8**&nbsp;tok/s</sub> | <sub>**388.2**&nbsp;tok/s<br>per 2-GPU replica;<br>box not yet saturated</sub> |
 
 No model — and neither Qwen3.8-27B stack — is simply better. Single-stream
 decode is what an interactive user feels; the full-box figure is a capacity
@@ -136,11 +141,11 @@ checkpoint as one SGLang engine with eight data-parallel attention ranks, and
 ramjet lists each rank as its own upstream (`RJ_UPSTREAM_DP_RANKS`). On a
 simulated team of continuously working coding agents:
 
-| Agents | What changed | Throughput | TTFT | Cache hits |
-| :-- | :-- | --: | --: | --: |
-| <sub>16</sub> | <sub>SGLang rank placement → ramjet per-rank routing</sub> | <sub>43.0 → **72.7** turns/min<br>$`\color{#2DA44E}\blacktriangle`$ 69%</sub> |  | <sub>65.6% → **92.8%**<br>$`\color{#2DA44E}\blacktriangle`$ 27 pts</sub> |
-| <sub>64</sub> | <sub>Same, plus a 32 GB host KV tier per rank</sub> | <sub>45.9 → **95.1** turns/min<br>$`\color{#2DA44E}\blacktriangle`$ 107%</sub> |  |  |
-| <sub>32–48</sub> | <sub>Capacity per server</sub> | <sub>**98–109** turns/min</sub> | <sub>p50 **1.3–2.8** s</sub> |  |
+| Result | Throughput | TTFT | Cache hits |
+| :-- | --: | --: | --: |
+| <sub>16 agents: SGLang rank placement → ramjet per-rank routing</sub> | <sub>43.0&nbsp;→&nbsp;**72.7**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 69%</sub> |  | <sub>65.6%&nbsp;→&nbsp;**92.8%**<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 27&nbsp;pts</sub> |
+| <sub>64 agents: same, plus a 32 GB host KV tier per rank</sub> | <sub>45.9&nbsp;→&nbsp;**95.1**<br>turns/min<br><img src="docs/assets/delta-up.svg" alt="▲" width="10" height="9"> 107%</sub> |  |  |
+| <sub>Capacity per server: 32–48 agents</sub> | <sub>**98–109**<br>turns/min</sub> | <sub>p50<br>**1.3–2.8**&nbsp;s</sub> |  |
 
 The [blog post](https://helix.ml/blog/glm53-on-8x-h200) walks through each
 step, and [Ramjet vs NVIDIA Dynamo](https://helix.ml/blog/ramjet-vs-nvidia-dynamo)
