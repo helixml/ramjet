@@ -1391,14 +1391,17 @@ impl Proxy {
             );
             return json_error(StatusCode::NOT_FOUND, "model not found for API profile");
         }
-        // Confine a very long prompt to its model's lane before any later
-        // stage (session affinity, exact placement, single-flight) reads the
-        // decision, so none of them can move it back onto a protected replica.
-        let long_prompt_lane = long_prompt_lane::confine(
+        // Confine a very long prompt to its model's lane, or under an
+        // exclusive lane keep a short one off it, before any later stage
+        // (session affinity, exact placement, single-flight) reads the
+        // decision, so none of them can undo the split. An excluded short
+        // prompt keeps the lane as a failover tail for the retry loop.
+        let (long_prompt_lane, lane_failover) = long_prompt_lane::confine_with_failover(
             &mut approximate_decision,
             prepared.body.len(),
             self.inner.config.route_long_prompt_bytes,
             &self.inner.config.route_long_prompt_upstreams,
+            self.inner.config.route_long_prompt_sharing,
         );
         self.inner
             .metrics
@@ -1511,6 +1514,25 @@ impl Proxy {
                     .map(|state| (*candidate, state.request_load_units))
             })
             .collect::<Vec<_>>();
+        // Exclusion protects latency, not availability: once every protected
+        // replica has failed, an excluded short prompt may still reach the
+        // lane. The tail follows the routed candidates and failover keeps it
+        // there, so it is only tried after them. Its members were serving when
+        // it was built; the restriction has since marked them non-serving in
+        // the decision.
+        let routed = serving_candidates.len();
+        for upstream in lane_failover {
+            if serving_candidates
+                .iter()
+                .all(|(candidate, _)| *candidate != upstream)
+                && let Some(state) = decision
+                    .candidate_state
+                    .iter()
+                    .find(|state| state.index == upstream)
+            {
+                serving_candidates.push((upstream, state.request_load_units));
+            }
+        }
         // Nothing is healthy. Shedding here converts a fleet that is merely
         // saturated — the state in which its readiness probes starve first —
         // into a total outage, so dispatch anyway: a busy engine still answers,
@@ -1520,6 +1542,11 @@ impl Proxy {
         if failing_open {
             serving_candidates = self.fail_open_candidates(&decision);
         }
+        let failover_tail = if failing_open {
+            0
+        } else {
+            serving_candidates.len() - routed
+        };
         // Across many nodes, trying every replica in turn can hold a request
         // through dozens of connect timeouts; the last attempt returns its
         // failure instead. The list is not truncated up front because a failure
@@ -1577,7 +1604,7 @@ impl Proxy {
                     self.publish_upstream_health(candidate, false);
                     self.record_upstream_request(candidate, response.status());
                     drop(load);
-                    self.fail_over_from(&mut serving_candidates, attempt, false);
+                    self.fail_over_from(&mut serving_candidates, failover_tail, attempt, false);
                 }
                 Ok(response) => {
                     if attempt > 0 {
@@ -1603,7 +1630,12 @@ impl Proxy {
                     failover_reason = Some(reason);
                     self.publish_upstream_health(candidate, false);
                     drop(load);
-                    self.fail_over_from(&mut serving_candidates, attempt, reason == "connect");
+                    self.fail_over_from(
+                        &mut serving_candidates,
+                        failover_tail,
+                        attempt,
+                        reason == "connect",
+                    );
                 }
             }
             attempt += 1;
@@ -2399,16 +2431,21 @@ impl Proxy {
     /// Counts requests governed by a long-prompt lane against the upstream
     /// the router selected for them. Below-threshold and lane-less requests
     /// are not recorded, so the series stays proportional to long prompts.
+    ///
+    /// Short prompts kept off an `exclusive` lane are counted separately, so
+    /// neither series changes meaning when exclusion is switched on.
     fn record_long_prompt_lane(&self, outcome: LongPromptLaneOutcome, decision: &Decision) {
-        if !outcome.counted() {
+        let counter = if outcome.counted() {
+            &self.inner.metrics.route_long_prompt
+        } else if outcome.short_counted() {
+            &self.inner.metrics.route_long_prompt_short
+        } else {
             return;
-        }
+        };
         let Some(&upstream) = decision.candidates.first() else {
             return;
         };
-        self.inner
-            .metrics
-            .route_long_prompt
+        counter
             .with_label_values(&[&self.upstream_label(upstream), outcome.label()])
             .inc();
     }
@@ -2419,9 +2456,13 @@ impl Proxy {
     /// and a bounded attempt budget must not be spent on them. When the
     /// engine refused the connection outright, every upstream sharing its URL
     /// (its other DP ranks) is marked down as well.
+    ///
+    /// The last `tail` candidates are a failover tail (an exclusive lane's
+    /// members) and stay behind every routed candidate whatever their node.
     fn fail_over_from(
         &self,
         candidates: &mut [(usize, usize)],
+        tail: usize,
         failed: usize,
         engine_unreachable: bool,
     ) {
@@ -2435,8 +2476,10 @@ impl Proxy {
             }
         }
         let node = config.upstream_node(upstream);
-        candidates[failed + 1..]
-            .sort_by_key(|(candidate, _)| config.upstream_node(*candidate) == node);
+        let same_node = |(candidate, _): &(usize, usize)| config.upstream_node(*candidate) == node;
+        let tail_start = (candidates.len() - tail).max(failed + 1);
+        candidates[failed + 1..tail_start].sort_by_key(same_node);
+        candidates[tail_start..].sort_by_key(same_node);
     }
 
     fn upstream_label(&self, upstream: usize) -> String {
@@ -5099,7 +5142,9 @@ mod tests {
 
     /// The live node06 shape with the long-prompt lane on the second GLM
     /// replica, a 4 KiB threshold, and one counting echo upstream per slot.
-    async fn long_prompt_lane_fleet() -> (Proxy, Vec<Url>, Vec<tokio::task::JoinHandle<()>>) {
+    async fn long_prompt_lane_fleet(
+        short: &'static str,
+    ) -> (Proxy, Vec<Url>, Vec<tokio::task::JoinHandle<()>>) {
         let mut urls = Vec::new();
         let mut tasks = Vec::new();
         for index in 0..4 {
@@ -5122,6 +5167,7 @@ mod tests {
             "RJ_UPSTREAM_APIS" => Some("openai,openai,openai,systemone".to_owned()),
             "RJ_ROUTE_LONG_PROMPT_BYTES" => Some("4096".to_owned()),
             "RJ_ROUTE_LONG_PROMPT_UPSTREAMS" => Some("-,-,lane,-".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_SHORT" => Some(short.to_owned()),
             _ => None,
         })
         .unwrap();
@@ -5162,7 +5208,7 @@ mod tests {
 
     #[tokio::test]
     async fn long_prompts_are_confined_to_the_lane_and_short_prompts_are_not() {
-        let (proxy, urls, tasks) = long_prompt_lane_fleet().await;
+        let (proxy, urls, tasks) = long_prompt_lane_fleet("shared").await;
 
         let mut short = HashSet::new();
         for salt in 0..8 {
@@ -5196,9 +5242,153 @@ mod tests {
         }
     }
 
+    fn long_prompt_short_count(proxy: &Proxy, upstream: &Url, outcome: &str) -> f64 {
+        proxy
+            .inner
+            .metrics
+            .route_long_prompt_short
+            .with_label_values(&[upstream.as_str().trim_end_matches('/'), outcome])
+            .get()
+    }
+
+    #[tokio::test]
+    async fn an_exclusive_lane_keeps_short_prompts_off_the_lane_replica() {
+        let (proxy, urls, tasks) = long_prompt_lane_fleet("exclusive").await;
+        for salt in 0..8 {
+            assert_eq!(
+                served_upstream(&proxy, "glm-5.3-flash", salt, 256).await,
+                "1",
+                "short prompts stay on the protected replica"
+            );
+        }
+        for salt in 100..104 {
+            assert_eq!(
+                served_upstream(&proxy, "glm-5.3-flash", salt, 8_192).await,
+                "2"
+            );
+        }
+        // A model without a lane member is unaffected.
+        assert_eq!(
+            served_upstream(&proxy, "qwen3.8-flash-next", 200, 256).await,
+            "0"
+        );
+        assert!((long_prompt_short_count(&proxy, &urls[1], "excluded") - 8.0).abs() < f64::EPSILON);
+        assert!((long_prompt_count(&proxy, &urls[2], "lane") - 4.0).abs() < f64::EPSILON);
+        assert!(long_prompt_short_count(&proxy, &urls[0], "excluded").abs() < f64::EPSILON);
+
+        // With the protected replica fenced, short prompts use the lane.
+        proxy.inner.router.set_healthy(1, false);
+        for salt in 300..304 {
+            assert_eq!(
+                served_upstream(&proxy, "glm-5.3-flash", salt, 256).await,
+                "2",
+                "availability beats isolation"
+            );
+        }
+        assert!(
+            (long_prompt_short_count(&proxy, &urls[2], "excluded_fallback") - 4.0).abs()
+                < f64::EPSILON
+        );
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_excluded_short_prompt_fails_over_to_the_lane() {
+        let calls = [0, 1].map(|_| Arc::new(AtomicUsize::new(0)));
+        let mut urls = Vec::new();
+        let mut tasks = Vec::new();
+        for (status, calls) in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK]
+            .iter()
+            .zip(&calls)
+        {
+            let (url, task) = start_upstream(counting_upstream(*status, Arc::clone(calls))).await;
+            urls.push(url);
+            tasks.push(task);
+        }
+        let joined = urls.iter().map(Url::as_str).collect::<Vec<_>>().join(",");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_MODELS" => Some("glm-5.3-flash,glm-5.3-flash".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_BYTES" => Some("4096".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_UPSTREAMS" => Some("-,lane".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_SHORT" => Some("exclusive".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+
+        // The protected replica still looks healthy, so the request is
+        // excluded from the lane; its 503 must not end the request.
+        assert_eq!(
+            served_upstream(&proxy, "glm-5.3-flash", 0, 256).await,
+            "1",
+            "availability beats isolation"
+        );
+        assert_eq!(
+            calls.each_ref().map(|calls| calls.load(Ordering::Relaxed)),
+            [1, 1]
+        );
+        assert!((long_prompt_short_count(&proxy, &urls[0], "excluded") - 1.0).abs() < f64::EPSILON);
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn failover_tries_every_protected_replica_before_the_lane() {
+        let calls = [0, 1, 2].map(|_| Arc::new(AtomicUsize::new(0)));
+        let mut urls = Vec::new();
+        let mut tasks = Vec::new();
+        for (status, calls) in [
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::OK,
+            StatusCode::OK,
+        ]
+        .iter()
+        .zip(&calls)
+        {
+            let (url, task) = start_upstream(counting_upstream(*status, Arc::clone(calls))).await;
+            urls.push(url);
+            tasks.push(task);
+        }
+        // The lane is on another node, so node-aware failover would prefer
+        // it over the protected replica sharing the failed one's node.
+        urls[2].set_host(Some("localhost")).unwrap();
+        let joined = urls.iter().map(Url::as_str).collect::<Vec<_>>().join(",");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_MODELS" => Some("glm-5.3-flash,glm-5.3-flash,glm-5.3-flash".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_BYTES" => Some("4096".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_UPSTREAMS" => Some("-,-,lane".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_SHORT" => Some("exclusive".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        for salt in 0..6 {
+            // A 503 marks the replica down; restore it so every request
+            // starts from both protected replicas.
+            proxy.inner.router.set_healthy(0, true);
+            assert_eq!(
+                served_upstream(&proxy, "glm-5.3-flash", salt, 256).await,
+                "1"
+            );
+        }
+        assert!(
+            calls[0].load(Ordering::Relaxed) > 0,
+            "the failing replica was tried"
+        );
+        assert_eq!(calls[2].load(Ordering::Relaxed), 0, "the lane stayed idle");
+        for task in tasks {
+            task.abort();
+        }
+    }
+
     #[tokio::test]
     async fn a_fenced_lane_falls_back_to_the_protected_replica() {
-        let (proxy, urls, tasks) = long_prompt_lane_fleet().await;
+        let (proxy, urls, tasks) = long_prompt_lane_fleet("shared").await;
         for (fence, restore) in [
             (
                 (|proxy: &Proxy| proxy.inner.router.set_healthy(2, false)) as fn(&Proxy),

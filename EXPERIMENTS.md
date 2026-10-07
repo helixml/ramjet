@@ -1,5 +1,33 @@
 # node06 experiment journal
 
+## 2026-10-07 — keeping short prompts off a slow 1M lane does not pay on two replicas
+
+**Question.** On 8x H200 running DeepSeek-V4.1-Flash with DSpark as 2x TP4,
+one replica serving a 1M context decodes 75 tok/s per stream at 16 streams
+against 189 for a 262k replica. Should short prompts stay off it?
+
+**Method.** One 262k replica plus one 1M lane replica
+(`RJ_ROUTE_LONG_PROMPT_BYTES=1000000`), same engines throughout, only
+`RJ_ROUTE_LONG_PROMPT_SHORT` changed between cells. `agent_swarm_bench.py`,
+300s cells after a 60s warm-up, fresh prompt text per cell. Agent turns/min:
+
+| short-prompt policy | 16 devs | 32 devs | 64 devs | session stickiness |
+|---|---:|---:|---:|---:|
+| `shared` | **123.6** | **181.8** | **230.7** | 0.86-0.93 |
+| `exclusive` | 109.1 | 143.3 | 147.6 | 1.00 |
+| load-based `avoid` | 117.1 | 170.8 | 211.6 | 0.53-0.60 |
+| two 262k replicas, no lane | 131.4 | n/a | 276.2 | |
+
+**Result.** `shared` won at every load, latency included. `exclusive` puts all
+short traffic on one replica and halves the node's capacity for it. `avoid`
+(stay off the lane until the protected replica is busier by a margin) moved
+sessions by load alone, broke prefix stickiness, and re-prefilled.
+
+**Decision.** `shared` stays the default. `exclusive` ships for fleets where one
+lane sits beside several protected replicas, with the lane as a failover tail.
+`avoid` was dropped; a version that keeps warm sessions in place and steers only
+cold work is untested.
+
 ## 2026-09-30 — ramjet vs NVIDIA Dynamo 1.5.0 KV router on GLM-5.3, one 8x H200 node
 
 **Question.** On the `deploy/glm53_h200` engine config (TP8 + DP8 attention,

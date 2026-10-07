@@ -11,6 +11,15 @@
   reaches its scheduler. Only a generation catches it. A recent real
   completion still overrides a probe timeout. System One upstreams and parked
   engines are never sent the generation.
+- `RJ_ROUTE_LONG_PROMPT_SHORT=shared|exclusive` decides whether requests
+  below the long-prompt threshold may use lane members. `shared` (default) is
+  unchanged behaviour. `exclusive` keeps them off while another replica of
+  their model is serving, fails over to the lane (last, within
+  `RJ_ROUTE_MAX_ATTEMPTS`) if those replicas fail during dispatch, and routes
+  as usual when none is serving. For a fleet where one
+  slow lane replica (say a 1M context next to 262k peers) sits beside several
+  protected ones; on a two-replica node `shared` measured faster. New counter
+  `ramjet_route_long_prompt_short_total{upstream,outcome}`.
 - Listen addresses are configurable: `RJ_API_ADDR` (default `0.0.0.0:8000`)
   and `RJ_METRICS_ADDR` (default `0.0.0.0:9090`) let deployments whose
   containers share the host network move off ports the host already uses, for

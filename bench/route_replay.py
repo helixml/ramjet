@@ -202,7 +202,7 @@ def affinity_horizon_record_mismatch(record):
     if basis not in AFFINITY_BASES:
         return True
     lane = record.get("long_request_lane")
-    lane_restricted = isinstance(lane, dict) and lane.get("outcome") == "lane"
+    lane_restricted = isinstance(lane, dict) and lane.get("outcome") in {"lane", "excluded"}
     try:
         candidates = record.get("candidates", [])
         expected_overlaps = {}

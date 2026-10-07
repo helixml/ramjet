@@ -18,10 +18,18 @@
 //! ownership has already narrowed the decision, and it only ever removes
 //! candidates. Availability beats isolation, so a model whose lane members are
 //! all unavailable routes exactly as it would without a lane.
+//!
+//! Prompts below the threshold may share the lane (`shared`, the default) or
+//! stay off it while a protected replica serves (`exclusive`). Keeping short
+//! prompts off is for a lane replica that is slower at ordinary work, such as
+//! one serving a far longer context window. The same availability rule applies
+//! in reverse: a short prompt uses the lane when none of its model's other
+//! replicas is serving, and an excluded short prompt may still fail over to a
+//! serving lane member after its protected replicas fail.
 
 use serde::Serialize;
 
-use crate::router::Decision;
+use crate::{config::LongPromptLaneSharing, router::Decision};
 
 /// What the lane rule did to one request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +45,11 @@ pub enum LongPromptLaneOutcome {
     /// Every lane member for this model is unavailable, so ordinary routing
     /// applies.
     Fallback,
+    /// An exclusive lane kept a prompt below the threshold off its members.
+    Excluded,
+    /// An exclusive lane, but none of the model's non-lane replicas is
+    /// serving, so the short prompt routes as usual and may use the lane.
+    ExcludedFallback,
 }
 
 impl LongPromptLaneOutcome {
@@ -48,6 +61,8 @@ impl LongPromptLaneOutcome {
             Self::NoLane => "no_lane",
             Self::Lane => "lane",
             Self::Fallback => "fallback",
+            Self::Excluded => "excluded",
+            Self::ExcludedFallback => "excluded_fallback",
         }
     }
 
@@ -56,6 +71,13 @@ impl LongPromptLaneOutcome {
     #[must_use]
     pub const fn counted(self) -> bool {
         matches!(self, Self::Lane | Self::Fallback)
+    }
+
+    /// Whether this request was a short prompt governed by an exclusive lane,
+    /// the population `ramjet_route_long_prompt_short_total` records.
+    #[must_use]
+    pub const fn short_counted(self) -> bool {
+        matches!(self, Self::Excluded | Self::ExcludedFallback)
     }
 }
 
@@ -73,28 +95,51 @@ impl From<LongPromptLaneOutcome> for LongPromptLaneObservation {
     }
 }
 
-/// The lane mask a long prompt should be restricted to.
+/// The mask a prompt should be restricted to.
 ///
 /// `members` is aligned with the configured upstreams; an empty slice or a
-/// zero threshold means the feature is off. `candidates` are the upstreams
-/// that already own the requested model and API profile, and `serving`
-/// reports whether an upstream is currently admitted (healthy, not fenced,
-/// not drained). The returned mask is `Some` only for [`LongPromptLaneOutcome::Lane`].
+/// zero threshold means the feature is off. `sharing` says whether prompts
+/// below the threshold may use lane members. `candidates` are the upstreams
+/// that already own the requested model and API profile, and `serving` reports
+/// whether an upstream is currently admitted (healthy, not fenced, not
+/// drained). The returned mask is `Some` only for
+/// [`LongPromptLaneOutcome::Lane`] and [`LongPromptLaneOutcome::Excluded`].
 #[must_use]
 pub fn select(
     prompt_bytes: usize,
     threshold_bytes: usize,
     members: &[bool],
+    sharing: LongPromptLaneSharing,
     candidates: &[usize],
     serving: impl Fn(usize) -> bool,
 ) -> (LongPromptLaneOutcome, Option<Vec<bool>>) {
     if threshold_bytes == 0 || members.is_empty() {
         return (LongPromptLaneOutcome::Off, None);
     }
-    if prompt_bytes < threshold_bytes {
-        return (LongPromptLaneOutcome::Below, None);
-    }
     let is_member = |upstream: usize| members.get(upstream).copied().unwrap_or(false);
+    if prompt_bytes < threshold_bytes {
+        // Only a model with both lane and non-lane replicas has a lane to
+        // keep short prompts off.
+        if sharing == LongPromptLaneSharing::Shared
+            || !candidates.iter().any(|&upstream| is_member(upstream))
+            || candidates.iter().all(|&upstream| is_member(upstream))
+        {
+            return (LongPromptLaneOutcome::Below, None);
+        }
+        let mut mask = vec![false; members.len()];
+        let mut any = false;
+        for &upstream in candidates {
+            if !is_member(upstream) && serving(upstream) {
+                mask[upstream] = true;
+                any = true;
+            }
+        }
+        return if any {
+            (LongPromptLaneOutcome::Excluded, Some(mask))
+        } else {
+            (LongPromptLaneOutcome::ExcludedFallback, None)
+        };
+    }
     if !candidates.iter().any(|&upstream| is_member(upstream)) {
         return (LongPromptLaneOutcome::NoLane, None);
     }
@@ -118,28 +163,54 @@ pub fn select(
 /// Eligibility is read from the decision itself: its candidate list is the
 /// model/API-eligible set and each candidate's `healthy` flag already folds in
 /// probe health, `DSpark` quarantine, durable fences, and idle-drain parking.
-pub fn confine(
+///
+/// Also returns the serving lane members an excluded short request may fail
+/// over to once its protected replicas fail: exclusion protects latency, not
+/// availability. A long prompt confined to the lane gets none; its retries
+/// stay on the lane, as before.
+pub fn confine_with_failover(
     decision: &mut Decision,
     prompt_bytes: usize,
     threshold_bytes: usize,
     members: &[bool],
-) -> LongPromptLaneOutcome {
+    sharing: LongPromptLaneSharing,
+) -> (LongPromptLaneOutcome, Vec<usize>) {
+    let serving = |decision: &Decision, upstream: usize| {
+        decision
+            .candidate_state
+            .iter()
+            .any(|state| state.index == upstream && state.healthy)
+    };
     let (outcome, mask) = select(
         prompt_bytes,
         threshold_bytes,
         members,
+        sharing,
         &decision.candidates,
-        |upstream| {
-            decision
-                .candidate_state
-                .iter()
-                .any(|state| state.index == upstream && state.healthy)
-        },
+        |upstream| serving(decision, upstream),
     );
-    match mask {
-        Some(mask) if decision.restrict_to(&mask) => outcome,
-        Some(_) => LongPromptLaneOutcome::Fallback,
-        None => outcome,
+    let Some(mask) = mask else {
+        return (outcome, Vec::new());
+    };
+    let failover = if outcome == LongPromptLaneOutcome::Excluded {
+        decision
+            .candidates
+            .iter()
+            .copied()
+            .filter(|&upstream| !mask[upstream] && serving(decision, upstream))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if decision.restrict_to(&mask) {
+        return (outcome, failover);
+    }
+    // Defensive: the mask always holds a serving candidate of full length, so
+    // restriction does not fail in practice.
+    if outcome == LongPromptLaneOutcome::Excluded {
+        (LongPromptLaneOutcome::ExcludedFallback, Vec::new())
+    } else {
+        (LongPromptLaneOutcome::Fallback, Vec::new())
     }
 }
 
@@ -157,6 +228,18 @@ mod tests {
     };
 
     const THRESHOLD: usize = 600_000;
+    const SHARED: LongPromptLaneSharing = LongPromptLaneSharing::Shared;
+    const EXCLUSIVE: LongPromptLaneSharing = LongPromptLaneSharing::Exclusive;
+
+    fn confine(
+        decision: &mut Decision,
+        prompt_bytes: usize,
+        threshold_bytes: usize,
+        members: &[bool],
+        sharing: LongPromptLaneSharing,
+    ) -> LongPromptLaneOutcome {
+        confine_with_failover(decision, prompt_bytes, threshold_bytes, members, sharing).0
+    }
 
     /// The live node06 shape: qwen, two GLM replicas, and a System One
     /// upstream, with the lane on the second GLM replica only.
@@ -222,7 +305,10 @@ mod tests {
         ] {
             let mut decision = model_decision(&router, "glm-5.3-flash", bytes);
             let before = decision.clone();
-            assert_eq!(confine(&mut decision, bytes, threshold, members), expected);
+            assert_eq!(
+                confine(&mut decision, bytes, threshold, members, SHARED),
+                expected
+            );
             assert_eq!(decision, before);
         }
     }
@@ -237,7 +323,7 @@ mod tests {
             let mut decision = model_decision(&router, "glm-5.3-flash", THRESHOLD);
             firsts.insert(decision.candidates[0]);
             assert_eq!(
-                confine(&mut decision, THRESHOLD, THRESHOLD, &LIVE_LANE),
+                confine(&mut decision, THRESHOLD, THRESHOLD, &LIVE_LANE, SHARED),
                 LongPromptLaneOutcome::Lane
             );
             assert_eq!(decision.candidates, [2]);
@@ -270,7 +356,7 @@ mod tests {
             let mut decision = model_decision(&router, "glm-5.3-flash", THRESHOLD);
             let before = decision.clone();
             assert_eq!(
-                confine(&mut decision, THRESHOLD * 2, THRESHOLD, &LIVE_LANE),
+                confine(&mut decision, THRESHOLD * 2, THRESHOLD, &LIVE_LANE, SHARED),
                 LongPromptLaneOutcome::Fallback
             );
             assert_eq!(decision, before);
@@ -285,7 +371,7 @@ mod tests {
             let mut decision = model_decision(&router, model, THRESHOLD * 4);
             let before = decision.clone();
             assert_eq!(
-                confine(&mut decision, THRESHOLD * 4, THRESHOLD, &LIVE_LANE),
+                confine(&mut decision, THRESHOLD * 4, THRESHOLD, &LIVE_LANE, SHARED),
                 LongPromptLaneOutcome::NoLane
             );
             assert_eq!(decision, before);
@@ -294,13 +380,20 @@ mod tests {
 
     #[test]
     fn a_lane_covering_every_replica_keeps_them_all() {
-        let (outcome, mask) = select(THRESHOLD, THRESHOLD, &[true, true], &[1, 0], |_| true);
+        let (outcome, mask) = select(THRESHOLD, THRESHOLD, &[true, true], SHARED, &[1, 0], |_| {
+            true
+        });
         assert_eq!(outcome, LongPromptLaneOutcome::Lane);
         assert_eq!(mask, Some(vec![true, true]));
         // Only serving members enter the mask.
-        let (outcome, mask) = select(THRESHOLD, THRESHOLD, &[true, true], &[1, 0], |upstream| {
-            upstream == 0
-        });
+        let (outcome, mask) = select(
+            THRESHOLD,
+            THRESHOLD,
+            &[true, true],
+            SHARED,
+            &[1, 0],
+            |upstream| upstream == 0,
+        );
         assert_eq!(outcome, LongPromptLaneOutcome::Lane);
         assert_eq!(mask, Some(vec![true, false]));
     }
@@ -308,23 +401,144 @@ mod tests {
     #[test]
     fn lane_members_outside_the_candidate_set_never_widen_it() {
         // Upstream 2 is a lane member but does not own the requested model.
-        let (outcome, mask) = select(THRESHOLD, THRESHOLD, &[false, false, true], &[0, 1], |_| {
-            true
-        });
+        let (outcome, mask) = select(
+            THRESHOLD,
+            THRESHOLD,
+            &[false, false, true],
+            SHARED,
+            &[0, 1],
+            |_| true,
+        );
         assert_eq!(outcome, LongPromptLaneOutcome::NoLane);
         assert_eq!(mask, None);
     }
 
     #[test]
-    fn only_lane_and_fallback_are_counted() {
-        for (outcome, counted, label) in [
-            (LongPromptLaneOutcome::Off, false, "off"),
-            (LongPromptLaneOutcome::Below, false, "below"),
-            (LongPromptLaneOutcome::NoLane, false, "no_lane"),
-            (LongPromptLaneOutcome::Lane, true, "lane"),
-            (LongPromptLaneOutcome::Fallback, true, "fallback"),
+    fn an_exclusive_lane_keeps_short_prompts_on_the_protected_replica() {
+        let router = router(4);
+        let mut firsts = std::collections::HashSet::new();
+        for _ in 0..4 {
+            let mut decision = model_decision(&router, "glm-5.3-flash", 1_000);
+            firsts.insert(decision.candidates[0]);
+            assert_eq!(
+                confine(&mut decision, 1_000, THRESHOLD, &LIVE_LANE, EXCLUSIVE),
+                LongPromptLaneOutcome::Excluded
+            );
+            assert_eq!(decision.candidates, [1]);
+            assert_eq!(decision.outcome, Outcome::Single);
+            assert_eq!(decision.candidate_state.len(), 4);
+        }
+        assert_eq!(
+            firsts,
+            [1, 2].into(),
+            "ordinary routing picks either replica"
+        );
+        // Long prompts still go to the lane.
+        let mut decision = model_decision(&router, "glm-5.3-flash", THRESHOLD);
+        assert_eq!(
+            confine(&mut decision, THRESHOLD, THRESHOLD, &LIVE_LANE, EXCLUSIVE),
+            LongPromptLaneOutcome::Lane
+        );
+        assert_eq!(decision.candidates, [2]);
+    }
+
+    #[test]
+    fn an_exclusive_lane_serves_short_prompts_when_nothing_else_can() {
+        for fence in [
+            |router: &Router| router.set_healthy(1, false),
+            |router: &Router| router.set_drained(1, true),
         ] {
-            assert_eq!(outcome.counted(), counted);
+            let router = router(4);
+            fence(&router);
+            let mut decision = model_decision(&router, "glm-5.3-flash", 1_000);
+            let before = decision.clone();
+            assert_eq!(
+                confine(&mut decision, 1_000, THRESHOLD, &LIVE_LANE, EXCLUSIVE),
+                LongPromptLaneOutcome::ExcludedFallback
+            );
+            assert_eq!(decision, before);
+            assert_eq!(decision.candidates[0], 2, "the lane serves");
+        }
+    }
+
+    #[test]
+    fn an_exclusive_lane_leaves_other_models_and_all_lane_fleets_alone() {
+        let router = router(4);
+        for model in ["qwen3.8-flash-next", "kev-latest"] {
+            let mut decision = model_decision(&router, model, 1_000);
+            let before = decision.clone();
+            assert_eq!(
+                confine(&mut decision, 1_000, THRESHOLD, &LIVE_LANE, EXCLUSIVE),
+                LongPromptLaneOutcome::Below
+            );
+            assert_eq!(decision, before);
+        }
+        // Every replica is a lane member: there is nothing to keep short
+        // prompts on, so they route as usual.
+        let (outcome, mask) = select(1_000, THRESHOLD, &[true, true], EXCLUSIVE, &[1, 0], |_| {
+            true
+        });
+        assert_eq!(outcome, LongPromptLaneOutcome::Below);
+        assert_eq!(mask, None);
+        // Exclusion is inert when the lane itself is off.
+        let (outcome, mask) = select(1_000, 0, &LIVE_LANE, EXCLUSIVE, &[1, 2], |_| true);
+        assert_eq!(outcome, LongPromptLaneOutcome::Off);
+        assert_eq!(mask, None);
+    }
+
+    #[test]
+    fn an_excluded_short_prompt_may_fail_over_to_the_lane() {
+        let router = router(4);
+        let mut decision = model_decision(&router, "glm-5.3-flash", 1_000);
+        let (outcome, failover) =
+            confine_with_failover(&mut decision, 1_000, THRESHOLD, &LIVE_LANE, EXCLUSIVE);
+        assert_eq!(outcome, LongPromptLaneOutcome::Excluded);
+        assert_eq!(
+            decision.candidates,
+            [1],
+            "the first attempt stays protected"
+        );
+        assert_eq!(
+            failover,
+            [2],
+            "the serving lane member is the failover tail"
+        );
+
+        // A lane member that is not serving is no failover target.
+        router.set_healthy(2, false);
+        let mut decision = model_decision(&router, "glm-5.3-flash", 1_000);
+        let (_, failover) =
+            confine_with_failover(&mut decision, 1_000, THRESHOLD, &LIVE_LANE, EXCLUSIVE);
+        assert!(failover.is_empty());
+        router.set_healthy(2, true);
+
+        // Long prompts keep their retries on the lane, and shared adds nothing.
+        for (bytes, sharing) in [(THRESHOLD, EXCLUSIVE), (1_000, SHARED)] {
+            let mut decision = model_decision(&router, "glm-5.3-flash", bytes);
+            let (_, failover) =
+                confine_with_failover(&mut decision, bytes, THRESHOLD, &LIVE_LANE, sharing);
+            assert!(failover.is_empty(), "{bytes} {sharing:?}");
+        }
+    }
+
+    #[test]
+    fn each_outcome_is_counted_in_exactly_one_series() {
+        for (outcome, long, short, label) in [
+            (LongPromptLaneOutcome::Off, false, false, "off"),
+            (LongPromptLaneOutcome::Below, false, false, "below"),
+            (LongPromptLaneOutcome::NoLane, false, false, "no_lane"),
+            (LongPromptLaneOutcome::Lane, true, false, "lane"),
+            (LongPromptLaneOutcome::Fallback, true, false, "fallback"),
+            (LongPromptLaneOutcome::Excluded, false, true, "excluded"),
+            (
+                LongPromptLaneOutcome::ExcludedFallback,
+                false,
+                true,
+                "excluded_fallback",
+            ),
+        ] {
+            assert_eq!(outcome.counted(), long, "{label}");
+            assert_eq!(outcome.short_counted(), short, "{label}");
             assert_eq!(outcome.label(), label);
             assert_eq!(LongPromptLaneObservation::from(outcome).outcome, label);
         }
