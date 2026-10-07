@@ -1516,9 +1516,11 @@ impl Proxy {
             .collect::<Vec<_>>();
         // Exclusion protects latency, not availability: once every protected
         // replica has failed, an excluded short prompt may still reach the
-        // lane. The tail follows the routed candidates, so it is only tried
-        // after them. Its members were serving when it was built; the
-        // restriction has since marked them non-serving in the decision.
+        // lane. The tail follows the routed candidates and failover keeps it
+        // there, so it is only tried after them. Its members were serving when
+        // it was built; the restriction has since marked them non-serving in
+        // the decision.
+        let routed = serving_candidates.len();
         for upstream in lane_failover {
             if serving_candidates
                 .iter()
@@ -1540,6 +1542,11 @@ impl Proxy {
         if failing_open {
             serving_candidates = self.fail_open_candidates(&decision);
         }
+        let failover_tail = if failing_open {
+            0
+        } else {
+            serving_candidates.len() - routed
+        };
         // Across many nodes, trying every replica in turn can hold a request
         // through dozens of connect timeouts; the last attempt returns its
         // failure instead. The list is not truncated up front because a failure
@@ -1597,7 +1604,7 @@ impl Proxy {
                     self.publish_upstream_health(candidate, false);
                     self.record_upstream_request(candidate, response.status());
                     drop(load);
-                    self.fail_over_from(&mut serving_candidates, attempt, false);
+                    self.fail_over_from(&mut serving_candidates, failover_tail, attempt, false);
                 }
                 Ok(response) => {
                     if attempt > 0 {
@@ -1623,7 +1630,12 @@ impl Proxy {
                     failover_reason = Some(reason);
                     self.publish_upstream_health(candidate, false);
                     drop(load);
-                    self.fail_over_from(&mut serving_candidates, attempt, reason == "connect");
+                    self.fail_over_from(
+                        &mut serving_candidates,
+                        failover_tail,
+                        attempt,
+                        reason == "connect",
+                    );
                 }
             }
             attempt += 1;
@@ -2444,9 +2456,13 @@ impl Proxy {
     /// and a bounded attempt budget must not be spent on them. When the
     /// engine refused the connection outright, every upstream sharing its URL
     /// (its other DP ranks) is marked down as well.
+    ///
+    /// The last `tail` candidates are a failover tail (an exclusive lane's
+    /// members) and stay behind every routed candidate whatever their node.
     fn fail_over_from(
         &self,
         candidates: &mut [(usize, usize)],
+        tail: usize,
         failed: usize,
         engine_unreachable: bool,
     ) {
@@ -2460,8 +2476,10 @@ impl Proxy {
             }
         }
         let node = config.upstream_node(upstream);
-        candidates[failed + 1..]
-            .sort_by_key(|(candidate, _)| config.upstream_node(*candidate) == node);
+        let same_node = |(candidate, _): &(usize, usize)| config.upstream_node(*candidate) == node;
+        let tail_start = (candidates.len() - tail).max(failed + 1);
+        candidates[failed + 1..tail_start].sort_by_key(same_node);
+        candidates[tail_start..].sort_by_key(same_node);
     }
 
     fn upstream_label(&self, upstream: usize) -> String {
@@ -5313,6 +5331,56 @@ mod tests {
             [1, 1]
         );
         assert!((long_prompt_short_count(&proxy, &urls[0], "excluded") - 1.0).abs() < f64::EPSILON);
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn failover_tries_every_protected_replica_before_the_lane() {
+        let calls = [0, 1, 2].map(|_| Arc::new(AtomicUsize::new(0)));
+        let mut urls = Vec::new();
+        let mut tasks = Vec::new();
+        for (status, calls) in [
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::OK,
+            StatusCode::OK,
+        ]
+        .iter()
+        .zip(&calls)
+        {
+            let (url, task) = start_upstream(counting_upstream(*status, Arc::clone(calls))).await;
+            urls.push(url);
+            tasks.push(task);
+        }
+        // The lane is on another node, so node-aware failover would prefer
+        // it over the protected replica sharing the failed one's node.
+        urls[2].set_host(Some("localhost")).unwrap();
+        let joined = urls.iter().map(Url::as_str).collect::<Vec<_>>().join(",");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_MODELS" => Some("glm-5.3-flash,glm-5.3-flash,glm-5.3-flash".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_BYTES" => Some("4096".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_UPSTREAMS" => Some("-,-,lane".to_owned()),
+            "RJ_ROUTE_LONG_PROMPT_SHORT" => Some("exclusive".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        for salt in 0..6 {
+            // A 503 marks the replica down; restore it so every request
+            // starts from both protected replicas.
+            proxy.inner.router.set_healthy(0, true);
+            assert_eq!(
+                served_upstream(&proxy, "glm-5.3-flash", salt, 256).await,
+                "1"
+            );
+        }
+        assert!(
+            calls[0].load(Ordering::Relaxed) > 0,
+            "the failing replica was tried"
+        );
+        assert_eq!(calls[2].load(Ordering::Relaxed), 0, "the lane stayed idle");
         for task in tasks {
             task.abort();
         }

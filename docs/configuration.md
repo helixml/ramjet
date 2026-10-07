@@ -250,10 +250,13 @@ slow replica did: the same 64-developer agent swarm completed 231 turns/min
 with `shared` and 148 with `exclusive`. It suits a fleet where one lane sits
 beside several protected replicas.
 
-Exclusion protects latency, not availability. If every protected replica fails
-during dispatch, an excluded request fails over to the serving lane members,
-and if none of the model's non-lane replicas is serving, short requests route
-as usual. Models whose replicas are all lane members, or include none, are
+Exclusion protects latency, not availability. When every protected replica
+fails during dispatch (a 502 or 503, or a transport error, before any response
+is accepted), an excluded request fails over to the serving lane members, which
+are always tried last. The lane members count towards `RJ_ROUTE_MAX_ATTEMPTS`,
+so a cap no larger than the number of protected replicas never reaches them. If
+none of the model's non-lane replicas is serving, short requests route as
+usual. Models whose replicas are all lane members, or include none, are
 unaffected. `ramjet_route_long_prompt_short_total{upstream,outcome}` counts
 short requests under an exclusive lane against their first selected upstream,
 as `excluded` or `excluded_fallback`, so the long-prompt series keeps its
