@@ -6,6 +6,7 @@ import os
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 import route_journal_archive as archive
 
@@ -162,11 +163,14 @@ class RouteJournalArchiveTest(unittest.TestCase):
         ]
         archive.store_collection(connection, self.metadata, records, records[-1][0], moment)
         connection.close()
-        result = archive.maintain(
-            argparse.Namespace(
-                state_dir=str(self.state), day="2026-09-02", retention_days=30
+        # maintain() prunes against the wall clock; pin it to the archived day so
+        # the fixture does not age out of the 30-day retention window.
+        with mock.patch.object(archive, "utc_now", return_value=moment + dt.timedelta(hours=1)):
+            result = archive.maintain(
+                argparse.Namespace(
+                    state_dir=str(self.state), day="2026-09-02", retention_days=30
+                )
             )
-        )
         self.assertEqual(len(result["containers"]), 1)
         segment = self.state / result["containers"][0]["segment"]
         self.assertEqual(segment.stat().st_mode & 0o777, 0o600)
