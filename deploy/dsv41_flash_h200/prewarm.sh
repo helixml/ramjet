@@ -3,6 +3,8 @@
 # parallel sequential reads before `docker compose up`. The last two shards hold
 # the Engram tables, which the replicas copy straight into shared memory, so
 # warming them as well only adds memory pressure.
+# For the tp8 profile. With the default host-Engram replicas, start from a
+# clean page cache instead (README, Memory).
 set -euo pipefail
 dir=${1:-${MODEL_DIR:-${DS_H200_ROOT:-$HOME}/models/deepseek-ai/DeepSeek-V4.1-Flash-2cba9e42}}
 streams=${2:-32}

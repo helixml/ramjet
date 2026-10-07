@@ -17,13 +17,13 @@ deployment.
 # host, once per boot: let the shared-memory Engram table use huge pages
 echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
 docker pull lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
-./prewarm.sh                                   # page-cache the weights
+sync && echo 1 | sudo tee /proc/sys/vm/drop_caches   # see "Memory" below
 docker compose up -d                           # 2x TP4 + ramjet, ~15 min to serve
 python3 validate-compose.py
 ```
 
-`MODEL_DIR` and `CACHE_ROOT` default below `$HOME`; the scripts use
-`DS_H200_ROOT` (default `$HOME`) for `models/` and `results/`. Keep the
+`MODEL_DIR` and `CACHE_ROOT` default below `DS_H200_ROOT` (default
+`$HOME`), as do the scripts' `models/` and `results/`. Keep the
 per-replica JIT caches on persistent disk.
 
 ## Measured
@@ -56,23 +56,32 @@ In the order they mattered:
   power-of-two scale is exact in BF16, so dequantizing once at load and using
   cuBLAS is lossless. One stream: 234 to 392 tok/s (TP8).
 - **DSpark** (`DS_SPEC_ARGS`, block 5, set `" "` to disable): about 3x one
-  stream's decode speed. It needs `DS_CONTEXT_LENGTH=262144` on H200; at the
-  native 1M the verify graphs OOM in capture (a 12GB `req_to_token` gather in
-  the decode indexer).
+  stream's decode speed. At these defaults (graph cap 64, memory fraction
+  0.75) it needs `DS_CONTEXT_LENGTH=262144`; at the native 1M the verify
+  graphs OOM in capture (a 12GB `req_to_token` gather in the decode indexer).
+  The 1M lane below fits by lowering both.
 - **W4A8 MoE** (`DS_MOE_PRECISION=fp8`): FP4 experts with FP8 activations,
   +10% decode under load. Hopper has no FP4 tensor cores.
 - **Two TP4 replicas with the Engram tables in host memory**
   (`SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1`): +23% turns/min at 16 developers
   and +59% at 64 over one TP8 engine. The two 101.5GB tables are shared by a
-  replica's ranks, so two replicas cost 378GB of host RAM. With
+  replica's ranks, so two replicas cost 406GB (378GiB) of host RAM. With
   `shmem_enabled=advise` they sit on huge pages (+6% at 16 developers). Leave
   host memory for them: systemd-oomd killed unrelated processes while they
   were built.
 - **Soft NUMA memory binding** (`patches/patch_numa_preferred.py`,
   `SGLANG_NUMA_MEM_PREFERRED=1`). SGLang's NUMA bind confines a rank's memory
-  to one ~110GB node, and the 190GB Engram table is then OOM-killed
+  to one ~110GB node, and the 203GB of Engram tables is then OOM-killed
   (`CONSTRAINT_MEMORY_POLICY`). Turning NUMA off avoids that but loses ~5%;
   the patch keeps the CPU bind and makes memory a preference.
+- **Memory: start from a clean page cache.** The two replicas' Engram
+  tables take ~350GB of shared-memory huge pages, and each replica copies its
+  tables in while the page cache is full of checkpoint. On a host whose cache
+  already held the weights (`prewarm.sh`, or an earlier start), free memory
+  fell to 2GB, the kernel stalled on reclaim and compaction (`/proc/pressure/memory`
+  `full` at 84%), and both replicas sat at "Load weight begin" for 35
+  minutes; dropping the clean page cache let them continue within seconds.
+  `prewarm.sh` is for the `tp8` profile, which keeps Engram in HBM.
 - **A private `/dev/shm` per replica** (no `ipc: host`). SGLang hands its
   tokenizer workers their channels through `/dev/shm/multi_tokenizer_args_<pid>`.
   Two containers sharing the host's `/dev/shm` sometimes drew the same PID,
@@ -105,7 +114,8 @@ and sessions hop. At 64 developers:
 | prefix, `relative` | 263.5 | 91.5% | 83% |
 | `marginal` + prefix single-flight | 263.6 | 92.0% | 87% |
 
-Use `relative` beyond two replicas. A replica that answers `/health` but
+This A/B ran before the soft NUMA patch, so its absolute numbers sit ~5%
+below the table above. Use `relative` beyond two replicas. A replica that answers `/health` but
 cannot generate is caught by `RJ_UPSTREAM_RANK_PROBE=all` (ramjet after
 v0.7.0).
 
@@ -124,14 +134,21 @@ docker compose up -d
 It recalled needles in 463k- and 835k-token prompts (74s and 207s). It
 decodes more slowly under concurrency (75 vs 189 tok/s per stream at 16),
 and offering it cost 6% of turns/min at 16 developers and ~16% at 64. Keep
-short prompts shared with it (`RJ_ROUTE_LONG_PROMPT_SHORT=shared`, the
-default): `exclusive` measured 148 turns/min at 64 developers against 231.
+short prompts shared with it: `RJ_ROUTE_LONG_PROMPT_SHORT=exclusive`
+(ramjet after v0.7.0; v0.7.0 always shares) measured 148 turns/min at 64
+developers against 231.
+
+The threshold is in request bytes. 1,000,000 bytes is ~250k tokens at ~4
+bytes per token; denser prompts (code, non-ASCII) can reach the 262k replica
+over its limit and get a 400, so lower the threshold if your traffic is
+dense. `/v1/models` is answered by whichever replica ramjet routes it to, so
+clients may see either context length.
 
 ## Rejected, measured
 
 | config | result |
 |---|---|
-| DSpark at the default 1M context | OOM in verify-graph capture |
+| DSpark at the native 1M context, graph cap 64, memory 0.75 | OOM in verify-graph capture |
 | DP8 attention + DSpark | refused without `--enable-dp-lm-head`; with it, hangs after weight load |
 | `--numa-node` with a hard memory bind and host Engram | rank 0 OOM-killed |
 | `--schedule-policy hrrn --chunked-prefill-size 16384` | 260.2 vs 276.2 turns/min at 64 developers, worse TTFT p90 at 16 |
@@ -140,6 +157,6 @@ default): `exclusive` measured 148 turns/min at 64 developers against 231.
 ## Measuring
 
 `swarm-cell.sh` runs one coding-agent swarm through ramjet; keep `--seed`
-fixed and the salt fresh across the arms of one comparison. The remote shell
-used during qualification was zsh, which does not word-split `$var`; keep
-loops in these bash scripts rather than inline.
+fixed and the salt fresh across the arms of one comparison. To put the `tp8`
+engine behind ramjet, stop A and B and set
+`RJ_UPSTREAM=http://dsv41-tp8:8000`.
