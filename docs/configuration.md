@@ -73,7 +73,7 @@ resolving across the rename.
 | `RJ_MACHINEVIEW_UPSTREAM_GPUS` | unset | Optional observation-only dense GPU ownership map, with semicolon-separated sets matching `RJ_UPSTREAM` (for example `0,1,2,3;4,5`). Machine view derives displayed TP size from each set. GPU indices must be unique. |
 | `RJ_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
 | `RJ_UPSTREAM_DP_RANKS` | unset | Dense map of one SGLang data-parallel attention rank (0–255) or `-` per `RJ_UPSTREAM` entry. An upstream with a rank pins every request to it by appending `"routed_dp_rank"` to the JSON body, so each rank of one engine can be listed as its own upstream and chosen by prefix affinity. An engine URL may repeat only with different ranks. Metric labels become `<url>#dp<rank>`. |
-| `RJ_UPSTREAM_RANK_PROBE` | `off` | `on` adds a one-token generation, pinned with `routed_dp_rank`, to each DP-rank upstream's readiness probe. SGLang keeps answering `/health` and `/v1/models` while one rank's scheduler is wedged, so only a generation on that rank detects it. `all` sends the same generation to every upstream, pinning only DP ranks: an engine front end can also stay green while its scheduler never receives a request. A probe timeout is overridden by a real completion on the upstream in the last 30 seconds, so a busy one is not fenced. `http` admission only. |
+| `RJ_UPSTREAM_RANK_PROBE` | `off` | `on` adds a one-token generation, pinned with `routed_dp_rank`, to each DP-rank upstream's readiness probe. SGLang keeps answering `/health` and `/v1/models` while one rank's scheduler is wedged, so only a generation on that rank detects it. `all` sends the same generation to every OpenAI-profile upstream that is not parked, pinning only DP ranks: an engine front end can also stay green while its scheduler never receives a request. It costs one tiny generation per upstream per probe round, visible in engine request counts and latency histograms, and on a DP-attention engine without `RJ_UPSTREAM_DP_RANKS` it reaches only the rank the engine picks. A probe timeout is overridden by a real completion on the upstream in the last 30 seconds, so a busy one is not fenced; an engine that answers the generation with an error, including `429` or `503`, is fenced at once. `http` admission only; with `compatibility` admission no generation is sent. |
 | `RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS` | `20000` | Budget for that generation (1 to 300000). |
 | `RJ_UPSTREAM_CONNECT_TIMEOUT_MS` | `30000` | TCP connect budget per upstream attempt (1 to 300000). Lower it for replicas on other nodes so an unreachable machine fails over quickly. |
 | `RJ_ROUTE_MAX_ATTEMPTS` | unset (every serving replica) | Most candidates one request tries before returning the last failure (1 to 64). Unset keeps trying every serving replica, which grows with the fleet. After a failure, replicas on other nodes are tried before the failed replica's node siblings, and a refused connection marks every upstream sharing that engine URL (its other DP ranks) down. |
@@ -279,7 +279,9 @@ that from turning a busy stack into a total outage:
   completed a real request in the last 30 seconds; the probe failure is still
   counted in `ramjet_upstream_probe_failures_total`, and the suppression in
   `ramjet_upstream_probe_suppressed_total`. A probe the engine *answers* with
-  an error, and any failed request, still fence it immediately.
+  an error, and any failed request, still fence it immediately. The
+  `RJ_UPSTREAM_RANK_PROBE` generation reports its failures as `rank_timeout`,
+  which this rule may suppress, and `rank_http`, which it never does.
 - When no replica is healthy, requests are dispatched anyway rather than shed,
   which is visible in `ramjet_route_fail_open` and
   `ramjet_route_fail_open_dispatches_total`. `/health` and

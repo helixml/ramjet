@@ -57,8 +57,9 @@ pub enum RankProbeScope {
     /// `on`: data-parallel rank upstreams only.
     #[default]
     DpRanks,
-    /// `all`: every upstream; DP ranks are still pinned with `routed_dp_rank`.
-    Every,
+    /// `all`: every OpenAI-profile upstream that is not parked; DP ranks are
+    /// still pinned with `routed_dp_rank`.
+    All,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,9 +78,9 @@ pub struct Config {
     /// to with `routed_dp_rank`, or `None` for a whole engine. Empty when
     /// `RJ_UPSTREAM_DP_RANKS` is unset.
     pub upstream_dp_ranks: Vec<Option<u32>>,
-    /// When set, each DP-rank upstream is also probed with a one-token
-    /// generation pinned to its rank, within this budget. The engine-level
-    /// `/v1/models` probe cannot see one wedged rank.
+    /// When set, upstreams in `upstream_rank_probe_scope` are also probed with
+    /// a one-token generation within this budget, pinned to the rank for a DP
+    /// rank. The `/v1/models` probe cannot see a wedged rank or scheduler.
     pub upstream_rank_probe_timeout_ms: Option<usize>,
     /// Which upstreams that generation probe covers.
     pub upstream_rank_probe_scope: RankProbeScope,
@@ -1010,7 +1011,7 @@ impl Config {
             match get("RJ_UPSTREAM_RANK_PROBE").as_deref().unwrap_or("off") {
                 "off" => (None, RankProbeScope::DpRanks),
                 "on" => (Some(timeout), RankProbeScope::DpRanks),
-                "all" => (Some(timeout), RankProbeScope::Every),
+                "all" => (Some(timeout), RankProbeScope::All),
                 value => {
                     return Err(invalid(
                         "RJ_UPSTREAM_RANK_PROBE",
@@ -3366,7 +3367,7 @@ mod tests {
         let values = HashMap::from([("RJ_UPSTREAM_RANK_PROBE", "all")]);
         let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
         assert_eq!(config.upstream_rank_probe_timeout_ms, Some(20_000));
-        assert_eq!(config.upstream_rank_probe_scope, RankProbeScope::Every);
+        assert_eq!(config.upstream_rank_probe_scope, RankProbeScope::All);
         for (key, value) in [
             ("RJ_UPSTREAM_RANK_PROBE", "yes"),
             ("RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS", "0"),

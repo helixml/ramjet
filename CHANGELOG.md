@@ -9,7 +9,8 @@
   one overwrites the other's `multi_tokenizer_args_<pid>` segment, and that
   replica keeps answering `/health` and `/v1/models` while no request ever
   reaches its scheduler. Only a generation catches it. A recent real
-  completion still overrides a probe timeout.
+  completion still overrides a probe timeout. System One upstreams and parked
+  engines are never sent the generation.
 - Listen addresses are configurable: `RJ_API_ADDR` (default `0.0.0.0:8000`)
   and `RJ_METRICS_ADDR` (default `0.0.0.0:9090`) let deployments whose
   containers share the host network move off ports the host already uses, for
