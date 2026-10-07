@@ -28,7 +28,8 @@ use url::Url;
 
 use crate::{
     config::{
-        Config, DsparkGuardMode, UpstreamAdmissionMode, UpstreamApiProfile, WarmupAdmissionMode,
+        Config, DsparkGuardMode, RankProbeScope, UpstreamAdmissionMode, UpstreamApiProfile,
+        WarmupAdmissionMode,
     },
     dspark_guard::{
         AttestedEngineCoreIncarnation, DsparkCounters, DsparkGuard, IncarnationOutcome,
@@ -3099,14 +3100,28 @@ impl Proxy {
             .set(started.elapsed().as_secs_f64());
     }
 
-    /// One-token generation pinned to this upstream's DP rank, or `None` when
-    /// it answered (or rank probing does not apply). The `SGLang` front end
-    /// serves `/health` and `/v1/models` and keeps answering while one rank's
-    /// scheduler is wedged, so only a generation on that rank can tell. A timeout is reported as `rank_timeout`, which recent real
-    /// completions on the rank override, so a busy rank is never fenced.
+    /// One-token generation, pinned to this upstream's DP rank when it has
+    /// one, or `None` when it answered (or the probe does not apply). The
+    /// `SGLang` front end serves `/health` and `/v1/models` and keeps answering
+    /// while a scheduler is wedged or no longer receives requests, so only a
+    /// generation can tell. A timeout is reported as `rank_timeout`, which
+    /// recent real completions on the upstream override, so a busy one is
+    /// never fenced.
+    ///
+    /// No generation is sent where one cannot answer: a System One upstream
+    /// serves only `/v1/systemone`, and a parked engine hangs on generation
+    /// while it still lists its models.
     async fn rank_probe(&self, upstream: usize, models_body: &Bytes) -> Option<&'static str> {
         let config = &self.inner.config;
-        let rank = config.upstream_dp_rank(upstream)?;
+        let rank = config.upstream_dp_rank(upstream);
+        if rank.is_none() && config.upstream_rank_probe_scope != RankProbeScope::All {
+            return None;
+        }
+        if config.upstream_api_profiles.get(upstream) != Some(&UpstreamApiProfile::OpenAi)
+            || self.park_state(upstream) != ParkState::Awake
+        {
+            return None;
+        }
         let timeout_ms = config.upstream_rank_probe_timeout_ms?;
         if config.upstream_admission_mode == UpstreamAdmissionMode::Compatibility {
             return None;
@@ -3125,13 +3140,15 @@ impl Proxy {
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| "default".to_owned());
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "messages": [{"role": "user", "content": "ok"}],
             "max_tokens": 1,
             "temperature": 0,
-            "routed_dp_rank": rank,
         });
+        if let Some(rank) = rank {
+            body["routed_dp_rank"] = rank.into();
+        }
         let uri = Uri::from_static("/v1/chat/completions");
         let mut request = self
             .inner
@@ -6037,10 +6054,186 @@ mod tests {
             );
         let (url, task) = start_upstream(engine).await;
         let joined = format!("{url},{url}");
+        // `all` must keep pinning DP ranks exactly as `on` does.
+        for scope in ["on", "all"] {
+            let config = Config::from_lookup(|key| match key {
+                "RJ_UPSTREAM" => Some(joined.clone()),
+                "RJ_UPSTREAM_DP_RANKS" => Some("0,1".to_owned()),
+                "RJ_UPSTREAM_RANK_PROBE" => Some(scope.to_owned()),
+                "RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS" => Some("300".to_owned()),
+                _ => None,
+            })
+            .unwrap();
+            let proxy = proxy_for_config(config, Arc::from([]));
+            proxy.probe_round().await;
+            assert!(proxy.inner.router.state(0).unwrap().3, "{scope}");
+            assert!(
+                !proxy.inner.router.state(1).unwrap().3,
+                "{scope}: a rank that cannot generate is fenced although /v1/models answers"
+            );
+
+            // A rank that has just completed real traffic is busy, not wedged.
+            proxy.note_upstream_serving_success(1);
+            proxy.probe_round().await;
+            assert!(proxy.inner.router.state(1).unwrap().3, "{scope}");
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn generation_probe_all_fences_a_replica_that_cannot_generate() {
+        let probes = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let recorded = Arc::clone(&probes);
+        let serving = AxumRouter::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"object":"list","data":[{"id":"glm"}]}"#,
+                    )
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(move |body: Bytes| {
+                    let recorded = Arc::clone(&recorded);
+                    async move {
+                        recorded
+                            .lock()
+                            .push(serde_json::from_slice(&body).unwrap_or_default());
+                        (StatusCode::OK, [("content-type", "application/json")], "{}")
+                    }
+                }),
+            );
+        // Answers /v1/models but never finishes a generation, like a front end
+        // whose scheduler no longer receives its requests.
+        let stuck = AxumRouter::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"object":"list","data":[{"id":"glm"}]}"#,
+                    )
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(|| async {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    StatusCode::OK
+                }),
+            );
+        let (serving_url, serving_task) = start_upstream(serving).await;
+        let (stuck_url, stuck_task) = start_upstream(stuck).await;
+        let joined = format!("{serving_url},{stuck_url}");
+        for (scope, stuck_fenced) in [("on", false), ("all", true)] {
+            let config = Config::from_lookup(|key| match key {
+                "RJ_UPSTREAM" => Some(joined.clone()),
+                "RJ_UPSTREAM_RANK_PROBE" => Some(scope.to_owned()),
+                "RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS" => Some("300".to_owned()),
+                _ => None,
+            })
+            .unwrap();
+            let proxy = proxy_for_config(config, Arc::from([]));
+            proxy.probe_round().await;
+            assert!(proxy.inner.router.state(0).unwrap().3, "{scope}");
+            assert_eq!(
+                !proxy.inner.router.state(1).unwrap().3,
+                stuck_fenced,
+                "{scope}: only `all` probes plain upstreams with a generation"
+            );
+            if stuck_fenced {
+                // Recent real completions still prove liveness.
+                proxy.note_upstream_serving_success(1);
+                proxy.probe_round().await;
+                assert!(proxy.inner.router.state(1).unwrap().3);
+            }
+        }
+        let probes = probes.lock();
+        assert!(
+            !probes.is_empty(),
+            "`all` probes the serving plain upstream"
+        );
+        assert!(
+            probes
+                .iter()
+                .all(|body| body.get("routed_dp_rank").is_none()),
+            "a plain upstream is not pinned to a rank"
+        );
+        drop(probes);
+        serving_task.abort();
+        stuck_task.abort();
+    }
+
+    /// Counts generations and records the model each one asked for.
+    fn generation_counter(
+        models: &'static str,
+    ) -> (AxumRouter, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (counter, names) = (Arc::clone(&calls), Arc::clone(&asked));
+        let router = AxumRouter::new()
+            .route(
+                "/v1/models",
+                get(move || async move {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        models,
+                    )
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(move |body: Bytes| {
+                    let (counter, names) = (Arc::clone(&counter), Arc::clone(&names));
+                    async move {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        let value: serde_json::Value =
+                            serde_json::from_slice(&body).unwrap_or_default();
+                        names
+                            .lock()
+                            .push(value["model"].as_str().unwrap_or_default().to_owned());
+                        (StatusCode::OK, [("content-type", "application/json")], "{}")
+                    }
+                }),
+            );
+        (router, calls, asked)
+    }
+
+    #[tokio::test]
+    async fn generation_probe_all_uses_the_configured_model_and_skips_systemone() {
+        let (openai, openai_calls, openai_models) =
+            generation_counter(r#"{"object":"list","data":[{"id":"other"},{"id":"glm"}]}"#);
+        // A System One server answers its own model schema everywhere and has
+        // no chat-completions endpoint.
+        let systemone_calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&systemone_calls);
+        let systemone = AxumRouter::new().fallback(any(move |request: Request<Body>| {
+            let counter = Arc::clone(&counter);
+            async move {
+                if request.uri().path() == "/v1/chat/completions" {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    r#"{"models":[{"id":"kev-latest"}]}"#,
+                )
+            }
+        }));
+        let (openai_url, openai_task) = start_upstream(openai).await;
+        let (systemone_url, systemone_task) = start_upstream(systemone).await;
+        let joined = format!("{openai_url},{systemone_url}");
         let config = Config::from_lookup(|key| match key {
             "RJ_UPSTREAM" => Some(joined.clone()),
-            "RJ_UPSTREAM_DP_RANKS" => Some("0,1".to_owned()),
-            "RJ_UPSTREAM_RANK_PROBE" => Some("on".to_owned()),
+            "RJ_UPSTREAM_MODELS" => Some("glm,kev-latest".to_owned()),
+            "RJ_UPSTREAM_APIS" => Some("openai,systemone".to_owned()),
+            "RJ_UPSTREAM_RANK_PROBE" => Some("all".to_owned()),
             "RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS" => Some("300".to_owned()),
             _ => None,
         })
@@ -6049,15 +6242,59 @@ mod tests {
         proxy.probe_round().await;
         assert!(proxy.inner.router.state(0).unwrap().3);
         assert!(
-            !proxy.inner.router.state(1).unwrap().3,
-            "a rank that cannot generate is fenced although /v1/models answers"
+            proxy.inner.router.state(1).unwrap().3,
+            "System One stays healthy"
         );
+        assert_eq!(openai_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *openai_models.lock(),
+            ["glm"],
+            "the configured model, not the first advertised one"
+        );
+        assert_eq!(
+            systemone_calls.load(Ordering::Relaxed),
+            0,
+            "no chat completion is sent to a System One upstream"
+        );
+        openai_task.abort();
+        systemone_task.abort();
+    }
 
-        // A rank that has just completed real traffic is busy, not wedged.
-        proxy.note_upstream_serving_success(1);
+    #[tokio::test]
+    async fn generation_probe_all_skips_a_parked_engine() {
+        let (first, first_calls, _) =
+            generation_counter(r#"{"object":"list","data":[{"id":"glm"}]}"#);
+        let (second, second_calls, _) =
+            generation_counter(r#"{"object":"list","data":[{"id":"glm"}]}"#);
+        let (a, task_a) = start_upstream(first).await;
+        let (b, task_b) = start_upstream(second).await;
+        let joined = format!("{a},{b}");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_IDLE_DRAIN_MODE" => Some("drain".to_owned()),
+            "RJ_IDLE_DRAIN_IDLE_AFTER_SECONDS" | "RJ_IDLE_DRAIN_COOLDOWN_SECONDS" => {
+                Some("60".to_owned())
+            }
+            "RJ_IDLE_DRAIN_GRACE_SECONDS" => Some("1".to_owned()),
+            "RJ_UPSTREAM_RANK_PROBE" => Some("all".to_owned()),
+            "RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS" => Some("300".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        {
+            let state = proxy.inner.idle_drain.as_ref().expect("policy enabled");
+            *state.park.lock() = vec![ParkState::Parked, ParkState::Awake];
+        }
         proxy.probe_round().await;
-        assert!(proxy.inner.router.state(1).unwrap().3);
-        task.abort();
+        assert_eq!(
+            first_calls.load(Ordering::Relaxed),
+            0,
+            "a parked engine hangs on generation, so it is not probed with one"
+        );
+        assert_eq!(second_calls.load(Ordering::Relaxed), 1);
+        task_a.abort();
+        task_b.abort();
     }
 
     #[tokio::test]

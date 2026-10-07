@@ -85,6 +85,13 @@ its readiness probe. A timeout fences only that rank's upstream, unless the
 rank completed real traffic in the last 30 seconds, since a busy rank queues
 the probe behind real work.
 
+A whole replica can stop serving the same way. Two SGLang containers sharing
+the host's `/dev/shm` (`--ipc host`) can draw the same main-process PID, and
+the second then overwrites the first's tokenizer-args segment: the first keeps
+answering readiness probes while no request reaches its scheduler.
+`RJ_UPSTREAM_RANK_PROBE=all` sends the generation to plain replicas too, and
+giving each engine its own `/dev/shm` removes the cause.
+
 ## Recommended settings
 
 ```yaml
@@ -92,7 +99,7 @@ RJ_TOPOLOGY_FILE: /etc/ramjet/topology.json
 RJ_ROUTE_AFFINITY_BASIS: relative
 RJ_ROUTE_MAX_ATTEMPTS: "3"
 RJ_UPSTREAM_CONNECT_TIMEOUT_MS: "2000"
-RJ_UPSTREAM_RANK_PROBE: "on"      # with dp_ranks
+RJ_UPSTREAM_RANK_PROBE: "on"      # with dp_ranks; "all" to cover plain replicas too
 RJ_UPSTREAM_TOKEN: ${ENGINE_BEARER}
 ```
 
