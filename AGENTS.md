@@ -68,6 +68,26 @@ Python and Compose beside one Rust lane instead. Check both `df -h /tmp` and tar
 size before a cold build. Clean only build artifacts created by this project;
 unrelated `/tmp` worktrees and caches belong to other active tasks.
 
+### Worktree hygiene
+
+Clear merged worktrees before creating a new one and after your PR merges:
+
+```bash
+bench/prune_merged_worktrees.sh           # dry run: what would go, and why the rest stays
+bench/prune_merged_worktrees.sh --apply
+```
+
+It removes a worktree only when its branch is merged into `origin/main` (or GitHub has a
+merged PR for it — squash merges leave no ancestor link), it has no uncommitted or untracked
+changes, and none of its commits are missing from the remote. Detached HEADs and T3 Code
+worktrees (`~/.t3/worktrees`) are never touched. Worktrees you keep: delete their `target/`
+when idle (~10 GB each). Create worktrees as `~/worktrees/ramjet-<topic>` on the home disk —
+not under `~/.cache` or `/tmp`, where they are forgotten.
+
+On 2026-09-25 the shared disk reached 98% and Hydra refused to start any sandbox (it needs
+2% free): ~85 abandoned worktrees under `~/.cache/mini-dynamo-worktrees` held 167 GB and
+per-worktree targets another ~100 GB.
+
 ### Fast image build and transfer
 
 Compile on the development machine in the pinned Bookworm builder, not on the
