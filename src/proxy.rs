@@ -28,9 +28,10 @@ use url::Url;
 
 use crate::{
     config::{
-        Config, DsparkGuardMode, RankProbeScope, UpstreamAdmissionMode, UpstreamApiProfile,
-        WarmupAdmissionMode,
+        ApiProfile, Config, DsparkGuardMode, RankProbeScope, UpstreamAdmissionMode,
+        UpstreamApiProfile, WarmupAdmissionMode,
     },
+    decision_state::{DecisionStateAffinity, StateRequest},
     dspark_guard::{
         AttestedEngineCoreIncarnation, DsparkCounters, DsparkGuard, IncarnationOutcome,
         MAX_PROMETHEUS_BYTES, Observation, ParseFailure, WindowOutcome, parse_prometheus,
@@ -153,6 +154,7 @@ struct Inner {
     exact_inventories: Arc<[ExactRouteInventory]>,
     journal: RouteJournal,
     session_affinity: SessionAffinity,
+    decision_state_affinity: DecisionStateAffinity,
     prefix_single_flight: PrefixSingleFlight,
     tokenizer: TokenizerObserver,
     warmup_admission: Option<WarmupAdmission>,
@@ -888,6 +890,10 @@ impl Proxy {
     ) -> anyhow::Result<Self> {
         let journal = RouteJournal::new(config.route_journal);
         let session_affinity = SessionAffinity::new(&config, Arc::clone(&metrics));
+        let decision_state_affinity = DecisionStateAffinity::new(
+            config.api_profile == ApiProfile::Solomon,
+            config.decision_state_affinity_capacity,
+        );
         let tokenizer = TokenizerObserver::with_exact_inventories(
             &config,
             client.clone(),
@@ -902,6 +908,7 @@ impl Proxy {
             exact_inventories,
             journal,
             session_affinity,
+            decision_state_affinity,
             tokenizer,
         )
     }
@@ -915,6 +922,7 @@ impl Proxy {
         exact_inventories: Arc<[ExactRouteInventory]>,
         journal: RouteJournal,
         session_affinity: SessionAffinity,
+        decision_state_affinity: DecisionStateAffinity,
         tokenizer: TokenizerObserver,
     ) -> anyhow::Result<Self> {
         let prefix_single_flight = PrefixSingleFlight::new(PrefixSingleFlightConfig {
@@ -1002,6 +1010,7 @@ impl Proxy {
                 exact_inventories,
                 journal,
                 session_affinity,
+                decision_state_affinity,
                 prefix_single_flight,
                 tokenizer,
                 warmup_admission,
@@ -1305,6 +1314,10 @@ impl Proxy {
                 "request body too large or unreadable",
             );
         };
+        let state_request =
+            self.inner
+                .decision_state_affinity
+                .request(&parts.method, parts.uri.path(), &raw_body);
         let prepare_tokenizer_body = self.inner.tokenizer.wants_payload(endpoint, raw_body.len());
         if capture_shadow_soak && (!prepare_tokenizer_body || endpoint != Endpoint::Chat) {
             return json_error(
@@ -1463,6 +1476,13 @@ impl Proxy {
             .inner
             .prefix_single_flight
             .route(&fingerprints, &mut decision);
+        // State ownership is stronger than speculative-profile, exact-prefix,
+        // and concurrent-prefix preferences. Apply it last so none of those
+        // optional routing layers can move a saved-state request away from the
+        // only replica known to own it.
+        self.inner
+            .decision_state_affinity
+            .route(state_request, &mut decision);
         self.inner
             .metrics
             .route_prefix_single_flight
@@ -1607,6 +1627,17 @@ impl Proxy {
                     drop(load);
                     self.fail_over_from(&mut serving_candidates, failover_tail, attempt, false);
                 }
+                Ok(response)
+                    if response.status() == StatusCode::NOT_FOUND
+                        && state_request.is_some_and(StateRequest::is_reuse)
+                        && attempt + 1 < serving_candidates.len() =>
+                {
+                    self.inner
+                        .decision_state_affinity
+                        .forget_not_found(state_request, candidate);
+                    self.record_upstream_request(candidate, response.status());
+                    drop(load);
+                }
                 Ok(response) => {
                     if attempt > 0 {
                         let from = serving_candidates[0].0;
@@ -1732,6 +1763,7 @@ impl Proxy {
                     exact_route_snapshot,
                     decision,
                     pending_shadow_source,
+                    state_request,
                     request_load_units,
                     decode_load_units,
                     load_guard,
@@ -1764,6 +1796,7 @@ impl Proxy {
         exact_route_snapshot: Option<ExactRouteSnapshot>,
         decision: Decision,
         pending_shadow_source: Option<crate::shadow_soak::ShadowSoakSource>,
+        state_request: Option<StateRequest>,
         request_load_units: usize,
         decode_load_units: usize,
         mut load_guard: RoutedLoad,
@@ -1851,6 +1884,13 @@ impl Proxy {
             } else if !parse_buffer.is_empty() {
                 usage.feed_json(&parse_buffer);
             }
+            if status.is_success() && !streaming {
+                self.inner.decision_state_affinity.learn_response(
+                    state_request,
+                    upstream,
+                    &parse_buffer,
+                );
+            }
             self.record_request(endpoint_label, status, streaming, started.elapsed());
             self.inner
                 .metrics
@@ -1864,7 +1904,7 @@ impl Proxy {
                     .with_label_values(&[endpoint_label])
                     .observe(ttft.as_secs_f64());
             }
-            if status == StatusCode::OK && endpoint != Endpoint::Other {
+            if status == StatusCode::OK && endpoint.is_generation() {
                 self.record_usage(
                     endpoint_label,
                     upstream,
@@ -3057,7 +3097,7 @@ impl Proxy {
                 .set(0.0);
             self.inner.tokenizer.invalidate_admission(upstream);
         }
-        let uri = Uri::from_static("/v1/models");
+        let uri = Uri::from_static(self.inner.config.api_profile.health_path());
         let url = upstream_url(&self.inner.config.upstreams[upstream], &uri);
         let mut request = self.inner.client.get(url).timeout(Duration::from_secs(5));
         if let Some(token) = &self.inner.config.upstream_token {
@@ -3090,6 +3130,15 @@ impl Proxy {
             reason = failure;
         }
         if let Some(models_body) = models_body {
+            if self.inner.config.api_profile == ApiProfile::Solomon {
+                self.mark_solomon_probe(upstream, &models_body);
+                self.inner
+                    .metrics
+                    .upstream_probe_time
+                    .with_label_values(&[&label])
+                    .set(started.elapsed().as_secs_f64());
+                return;
+            }
             if let Some(expected) = self.inner.config.upstream_models.get(upstream) {
                 let advertised = match self.inner.config.upstream_api_profiles[upstream] {
                     UpstreamApiProfile::OpenAi => advertised_model(&models_body, expected),
@@ -3218,6 +3267,16 @@ impl Proxy {
             Err(error) if error.is_timeout() => Some("rank_timeout"),
             Err(error) => Some(upstream_error_reason(&error)),
         }
+    }
+
+    fn mark_solomon_probe(&self, upstream: usize, body: &[u8]) {
+        let healthy = solomon_health_contract_matches(body);
+        self.mark_probe(
+            upstream,
+            healthy,
+            if healthy { "" } else { "contract_mismatch" },
+        );
+        self.inner.tokenizer.invalidate_attestation(upstream);
     }
 
     fn mark_probe(&self, upstream: usize, healthy: bool, reason: &str) {
@@ -3475,6 +3534,18 @@ fn upstream_url(base: &Url, uri: &Uri) -> Url {
     url.set_path(&format!("{base_path}{}", uri.path()));
     url.set_query(uri.query());
     url
+}
+
+fn solomon_health_contract_matches(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("contract")
+                .and_then(serde_json::Value::as_str)
+                .map(|contract| contract == "solomon-v1")
+        })
+        .unwrap_or(false)
 }
 
 fn filtered_headers(source: &HeaderMap) -> HeaderMap {
@@ -3849,6 +3920,21 @@ mod tests {
         proxy_for_config(config, Arc::from([]))
     }
 
+    fn solomon_proxy(upstreams: &[Url]) -> Proxy {
+        let joined = upstreams
+            .iter()
+            .map(Url::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_API_PROFILE" => Some("solomon".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        proxy_for_config(config, Arc::from([]))
+    }
+
     fn assert_model_outcome(proxy: &Proxy, model: &str, outcome: &str) {
         let value = proxy
             .inner
@@ -3857,6 +3943,79 @@ mod tests {
             .with_label_values(&[model, outcome])
             .get();
         assert!((value - 1.0).abs() < f64::EPSILON);
+    }
+
+    fn solomon_upstream(
+        state_id: &'static str,
+        state_exists: Arc<AtomicBool>,
+        health_calls: Arc<AtomicUsize>,
+        model_calls: Arc<AtomicUsize>,
+        decide_calls: Arc<AtomicUsize>,
+    ) -> AxumRouter {
+        AxumRouter::new().fallback(any(move |request: Request<Body>| {
+            let state_exists = Arc::clone(&state_exists);
+            let health_calls = Arc::clone(&health_calls);
+            let model_calls = Arc::clone(&model_calls);
+            let decide_calls = Arc::clone(&decide_calls);
+            async move {
+                let path = request.uri().path().to_owned();
+                if request.method() == Method::GET && path == "/health" {
+                    health_calls.fetch_add(1, Ordering::Relaxed);
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"contract":"solomon-v1"}"#))
+                        .unwrap();
+                }
+                if request.method() == Method::GET && path == "/v1/models" {
+                    model_calls.fetch_add(1, Ordering::Relaxed);
+                    return Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Body::empty())
+                        .unwrap();
+                }
+                if request.method() == Method::POST && path == "/states" {
+                    state_exists.store(true, Ordering::Relaxed);
+                    return Response::builder()
+                        .status(StatusCode::CREATED)
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"state_id":"{state_id}"}}"#)))
+                        .unwrap();
+                }
+                if request.method() == Method::POST && path == "/v1/decide" {
+                    decide_calls.fetch_add(1, Ordering::Relaxed);
+                    let body = to_bytes(request.into_body(), 1 << 20).await.unwrap();
+                    let requested = serde_json::from_slice::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("state_id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        });
+                    if state_exists.load(Ordering::Relaxed)
+                        && requested.as_deref() == Some(state_id)
+                    {
+                        return Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/json")
+                            .body(Body::from(format!(
+                                r#"{{"state_id":"{state_id}","answers":{{}}}}"#
+                            )))
+                            .unwrap();
+                    }
+                    return Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"error":"state not found"}"#))
+                        .unwrap();
+                }
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Body::empty())
+                    .unwrap()
+            }
+        }))
     }
 
     fn proxy_for_config(config: Config, inventories: Arc<[SharedFencedInventory]>) -> Proxy {
@@ -4613,6 +4772,10 @@ mod tests {
         );
         let journal = RouteJournal::new(config.route_journal);
         let session_affinity = SessionAffinity::new(&config, Arc::clone(&metrics));
+        let decision_state_affinity = DecisionStateAffinity::new(
+            config.api_profile == ApiProfile::Solomon,
+            config.decision_state_affinity_capacity,
+        );
         Proxy::from_parts(
             config,
             client,
@@ -4621,6 +4784,7 @@ mod tests {
             Arc::from([]),
             journal,
             session_affinity,
+            decision_state_affinity,
             tokenizer,
         )
         .unwrap()
@@ -4961,6 +5125,15 @@ mod tests {
             upstream_url(&base, &uri).as_str(),
             "http://engine:8000/prefix/v1/chat/completions?x=1"
         );
+    }
+
+    #[test]
+    fn solomon_health_requires_the_published_contract() {
+        assert!(solomon_health_contract_matches(
+            br#"{"contract":"solomon-v1","readout":"four_collapsed"}"#
+        ));
+        assert!(!solomon_health_contract_matches(br#"{"contract":"other"}"#));
+        assert!(!solomon_health_contract_matches(b"not-json"));
     }
 
     #[test]
@@ -6660,6 +6833,133 @@ mod tests {
         for task in tasks {
             task.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn solomon_state_creation_pins_later_decisions_to_its_replica() {
+        let exists_a = Arc::new(AtomicBool::new(false));
+        let exists_b = Arc::new(AtomicBool::new(false));
+        let decide_a = Arc::new(AtomicUsize::new(0));
+        let decide_b = Arc::new(AtomicUsize::new(0));
+        let (url_a, task_a) = start_upstream(solomon_upstream(
+            "state-a",
+            Arc::clone(&exists_a),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::clone(&decide_a),
+        ))
+        .await;
+        let (url_b, task_b) = start_upstream(solomon_upstream(
+            "state-b",
+            Arc::clone(&exists_b),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::clone(&decide_b),
+        ))
+        .await;
+        let proxy = solomon_proxy(&[url_a, url_b]);
+
+        let create = Request::builder()
+            .method(Method::POST)
+            .uri("/states")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"state":"document"}"#))
+            .unwrap();
+        let response = proxy.serve(create).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let owner = response.headers()["x-ramjet-upstream"].clone();
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let state_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["state_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let decide = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/decide")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"state_id":"{state_id}","questions":{{}}}}"#
+            )))
+            .unwrap();
+        let response = proxy.serve(decide).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-ramjet-upstream"], owner);
+        let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(
+            decide_a.load(Ordering::Relaxed) + decide_b.load(Ordering::Relaxed),
+            1
+        );
+
+        task_a.abort();
+        task_b.abort();
+    }
+
+    #[tokio::test]
+    async fn solomon_unknown_state_recovers_on_404_and_learns_the_owner() {
+        let decide_a = Arc::new(AtomicUsize::new(0));
+        let decide_b = Arc::new(AtomicUsize::new(0));
+        let (url_a, task_a) = start_upstream(solomon_upstream(
+            "state-a",
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::clone(&decide_a),
+        ))
+        .await;
+        let (url_b, task_b) = start_upstream(solomon_upstream(
+            "state-b",
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::clone(&decide_b),
+        ))
+        .await;
+        let proxy = solomon_proxy(&[url_a, url_b]);
+        let body = br#"{"state_id":"state-a","questions":{}}"#;
+        let fingerprints = proxy.router().fingerprints(body);
+        proxy.router().observe(1, &fingerprints);
+
+        for _ in 0..2 {
+            let decide = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/decide")
+                .header("content-type", "application/json")
+                .body(Body::from(body.as_slice()))
+                .unwrap();
+            let response = proxy.serve(decide).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-ramjet-upstream"], "0");
+            let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        }
+        assert_eq!(decide_a.load(Ordering::Relaxed), 2);
+        assert_eq!(decide_b.load(Ordering::Relaxed), 1);
+
+        task_a.abort();
+        task_b.abort();
+    }
+
+    #[tokio::test]
+    async fn solomon_profile_probes_health_instead_of_openai_models() {
+        let health_calls = Arc::new(AtomicUsize::new(0));
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        let (url, task) = start_upstream(solomon_upstream(
+            "state-a",
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&health_calls),
+            Arc::clone(&model_calls),
+            Arc::new(AtomicUsize::new(0)),
+        ))
+        .await;
+        let proxy = solomon_proxy(&[url]);
+        proxy.publish_upstream_health(0, false);
+        proxy.probe(0).await;
+
+        assert_eq!(health_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(model_calls.load(Ordering::Relaxed), 0);
+        assert!(proxy.router().state(0).unwrap().3);
+
+        task.abort();
     }
 
     #[tokio::test]

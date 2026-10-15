@@ -1,5 +1,212 @@
 # node06 experiment journal
 
+## 2026-10-15 — Basalt scale-out shape: 2x2 (two instances on four GPUs)
+
+Follow-up to the entry below, answering whether two Basalt instances (the
+only way past its 2-GPU cap) make sense as a shape. `glm53-unc-fp8` was
+stopped 06:52:38Z and restarted 07:01:08Z (8.5-minute window using GPUs 0-1
+and 2-3); the second instance mirrored the first exactly
+(`/prod/basalt/experiment/basalt_config.b.json`, port 8071, `--gpus
+device=2,3`, absolute model path). Both loaded in parallel, ready after
+352.1/352.2 s (disk-bound, ~506 MB/s shared), 45.0 + 20.8 GiB per instance;
+host memory stayed comfortable (107/134 GB used with both running). The LB
+was never recreated and b/c served throughout.
+
+Paired single-stream cells (both instances ran the identical salted sequence
+simultaneously, salt `ab1015a`, guards `ab-basalt2x-a1/b1`):
+
+| cell | instance A (0-1) | instance B (2-3) | pair aggregate |
+| --- | ---: | ---: | ---: |
+| 16k cold | 3.14 s / 169.5 | 3.27 s / 211.5 | 381.0 |
+| 62k cold | 12.41 s / 189.4 | 12.48 s / 198.5 | 387.9 |
+| 125k cold | 25.07 s / 183.6 | 25.21 s / 194.1 | 377.7 |
+| 187k cold | 38.58 s / 181.9 | 38.73 s / 195.2 | 377.1 |
+
+TTFT at every size was 1.5-4% above the solo run (prefill ~5.0k vs ~5.1k
+tok/s), and decode held at 169-212 tok/s per instance, within the solo range:
+two long-generation users aggregate ~377-388 tok/s across four GPUs. The
+persistent ~10% A-below-B decode gap is unexplained (identical configs,
+symmetric GPUs; A's GPU0 ran ~2C warmer and at lower sampled power) and is
+recorded as an observation, not a finding.
+
+Paired c2 each (4 streams box-wide; guards `ab-basalt2x-a2/b2`): A 140.5
+aggregate (204.6/234.1 per stream), B 133.7 (227.6/214.6), box 274.1 tok/s
+at 1.9k prompts - above the single instance's queued c4 (170.8) because each
+instance only interleaves two streams. The 2x2 shape partially offsets
+Basalt's concurrency weakness without any batching.
+
+Verdict: the 2x2 shape behaves exactly as the per-engine data predicted -
+aggregate is the sum of two independent single-stream engines, with no
+cross-instance interference at p1 or c2 and no new host-memory or power
+problems. It does not change the 2026-10-14 decision: two slots box-wide, no
+KV events, no batch scaling, so still not a fleet engine; it is a viable
+shape only for a niche that wants two very fast long-generation streams on
+four GPUs at IQ3_S quality. unc came back healthy at 07:22Z; at 07:23:03Z all
+three upstreams read 1 and a direct `glm-5.3-flash-uncensored` completion
+succeeded. Evidence: `/prod/basalt/experiment/evidence/basalt2x-*.txt`,
+guards `ab-basalt2x-*` in `/prod/basalt/guard/`.
+
+## 2026-10-14 (evening) — Matched 2-GPU comparison: Basalt IQ3_S vs Qwen3.8-Flash-Next NVFP4 vLLM TP2 (std and MTP3)
+
+The operator asked what a fairer comparison against Basalt would be and to
+run it. Basalt serves a 3.75-bit IQ3_S pack (86,932,948,662 bytes, ~47% of
+the 185.5 GB FP8 checkpoint), so the nearest normal-stack quantization is
+NVIDIA's NVFP4 release; exact parity is impossible because vLLM has no
+k-quant kernels. Basalt caps at two GPUs, so both engines were compared on
+two GPUs (Basalt GPUs 0-1 as before; vLLM TP2 on GPUs 2-3). `glm53-unc-fp8`
+was stopped for the window (21:42:30Z) and restarted at 22:21:01Z; the shared
+`ds4-loadbalancer` was never recreated or single-homed and `glm53sm120-b/c`
+kept serving throughout; `glm53-unc-fp8` reloaded in about 23 minutes, all
+three upstreams read 1 at 22:50:48Z, and a direct `glm-5.3-flash-uncensored`
+completion succeeded at 22:51:03Z. The production Qwen stack (`qwen38_flash_next`,
+Swift NVFP4 TP4 pair) was not touched; the comparison checkpoint is
+`nvidia/Qwen3.8-Flash-Next-NVFP4` at revision
+fc694b54fb0174e0913e6adf86691ef85a4ead47 (`modelopt_mixed` auto-detected,
+TP2, 8 GB KV cache -> 500,199 tokens, 1.91x concurrency at 262K).
+
+Every cell came from one salted streaming client
+(`/prod/basalt/experiment/perf_match.py`, salt `ab1014a`, temperature 0), so
+all long cells are true cold prefills. Basalt used its existing config with
+`parallel 1`. vLLM ran twice: the production image
+sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93
+(standard, no speculation) and the Sep-16 nightly
+sha256:f1491cb3abc84aca4e319c2b3f3f23644f0d9e19fdb9012c80818d3f30e5a0a0 with
+MTP3 (`method=mtp, num_speculative_tokens=3, index_share_for_mtp_iteration`).
+All four argv variants passed the image-native
+`_check_feature_supported()` preflight on a CPU platform before any GPU use.
+Load times: Basalt 364 s (cold), vLLM std 520 s and MTP3 540 s; peaks 74.9 /
+77.3 GiB per GPU, no OOM; Basalt stayed at 45.0 + 20.8 GiB (GPU0/1) with all
+experts VRAM-resident. All request phases passed their `node06_gpu_guard.py`
+runs (`ab-basalt-p1-*`, `ab-qwen-tp2-std-*`, `ab-qwen-tp2-mtp3-*`,
+`ab-basalt-cancel-p1-*`, `ab-basalt-p8-*` under `/prod/basalt/guard/`); max
+intake 39-40C, max GPU 58C, power caps unchanged (450/600 W).
+
+| cell (2 GPUs each) | Basalt IQ3_S p1 | NVFP4 std TP2 | NVFP4 MTP3 TP2 |
+| --- | ---: | ---: | ---: |
+| 1k, cold TTFT / decode | 0.73 s / 197.9 | 0.61 s / 75.8 | 0.46 s / 130.0 |
+| 1k, prefix-reuse decode | 228.7 | 75.8 | 130.0 |
+| 16k cold | 3.10 s / 201.5 | 2.07 s / 75.5 | 2.12 s / 148.3 |
+| 62k cold | 11.85 s / 197.4 | 5.30 s / 75.6 | 5.44 s / 134.2 |
+| 125k cold | 24.27 s / 190.2 | 10.93 s / 75.4 | 11.13 s / 132.4 |
+| 187k cold | 37.07 s / 189.2 | 16.54 s / 75.7 | 16.90 s / 153.8 |
+| c4 aggregate | 170.8 (queued) | 227.7 (batched) | 231.1 (batched) |
+| c4 per-stream decode | 214.8-228.8 | 65.9-66.0 | 73.6-123.1 |
+| c4 worst TTFT | 2.44 s | 0.32 s | 1.02 s |
+
+Basalt's cold prefill is ~5.0-5.3k tok/s at every size (187K: 5.05k), 2.2-3.4x
+slower than NVFP4 TP2 (11.1-11.8k), while its single-stream decode is 2.5-3x
+the standard NVFP4 and 1.4x MTP3's. vLLM's TTFT wins at every measured
+length. MTP3 reproduced the 2026-09-16 TP4 finding at TP2: mean acceptance
+length 2.49-2.78 of 4 maximum, per-position acceptance 0.73-0.83 / 0.40-0.55
+/ 0.32-0.40 (avg draft acceptance 50-59%); +71% at c1 over standard but flat
+aggregate at c4 (231.1 vs 227.7) and a worse c4 TTFT tail (1.02 s vs 0.32 s).
+Speculation pays single-stream, not in batch.
+
+Basalt concurrency is strictly negative. With `parallel 8` (8 slots x 32,768
+tokens; 419 s reload), c8 took 8.84 s wall at 115.8 tok/s aggregate with
+client TTFTs 0.73-8.13 s and per-stream decode 68-180: the slots interleave
+rather than batch, about 3.0 GB crossed PCIe during the run (expert traffic),
+and c4 at p8 returned 118.2 aggregate, below the p1-queued 170.8. A 16k long
+cell at p8 still passed (3.07 s / 206.7). The disconnect probe passed: after
+a mid-generation client disconnect the slot returned to idle 0.257 s later
+and three follow-up requests ran normally. Contract probes answered /health
+200, /v1/models, /props, /slots, and a rich /metrics (slot states, per-request
+draft counters, expert-cache stats, hardware temps/power) - more observable
+than vLLM's, but still no KV-event stream or prefix identity for the LB to
+route on.
+
+Verdict: on equal GPU budgets Basalt is a single-user long-generation engine
+that wins decode and loses prefill, batching, and TTFT. Its `parallel` knob
+trades per-slot context (262144/N) and lowers aggregate throughput, so it
+cannot absorb fleet concurrency, and it exposes no placement signal. Nothing
+here changes the earlier decision: not promoted, not wired; kept as the 2-GPU
+single-stream reference. The TP2 renders and preflight hooks
+(`docker-compose.nvfp4-tp2-{std,mtp3}.yaml`, `candidate-argv-*.json`,
+`nvfp4_args_preflight.py`) remain under `/prod/basalt/experiment/` with cell
+outputs in `evidence/` and guard journals in `/prod/basalt/guard/`.
+
+Correction to the entry below: its 190k row (20.63 s, ~9.2k tok/s) reused the
+125k cell's cached prefix from Basalt's conversation cache. The salted cold
+cell above (37.07 s at 187,312 prompt tokens, 5.05k tok/s) is the correct
+190k-class number.
+
+## 2026-10-14 — Basalt (Strata fork) first look on GPUs 0-1: Qwen3.8-Flash-Next IQ3_S
+
+[Basalt](https://github.com/jesdga95/basalt) is a local C++/CUDA inference
+engine for Qwen3.8-Flash-Next on Blackwell (sm_120): dense weights on one GPU,
+an expert tier optionally on a second GPU (`--peer-device`), and the rest in
+system RAM or the file. The operator asked for a performance check on the four
+GPUs then held by `glm53-unc-fp8`. Basalt uses at most two GPUs, so the test
+took GPUs 0-1. The uncensored GLM container was stopped for the window
+(19:39:22Z) and restarted at 20:02:21Z; the shared `ds4-loadbalancer` was never
+recreated or single-homed, `glm53sm120-b/c` kept serving, and `glm-5.3-flash-uncensored`
+was unavailable through the LB for the ~24-minute stop plus its SGLang reload.
+
+Sources: repository `92d9e2f30807ca8bdd65355a01286c76e15f9436`, pack
+`Qwen3.8-FN-GSQ-RCO-IQ3_S.basalt` (86,932,948,662 bytes; PPL 2.387, KLD mean
+0.177 against the Q8_0 reference, self-distilled MTP drafter). It was built
+inside the existing `ramjet/glm53-sm120` image (CUDA 13.0.88, cmake 3.31,
+g++ 13.3): 248 targets in about three minutes, no network fetch, binary at
+`/prod/basalt/src/bin/basalt`. Serve config (`/prod/basalt/basalt_config.json`):
+GPU 0,1; `expert-cache 12288`; `peer-exclusive`; `spec 7`; `kv int8`;
+`resident-experts`; `max-context 262144`; `parallel 1`.
+
+The first attempt with `expert-cache auto` failed hard. On 96GB cards the auto
+sizing saw 85.76 GiB free and sized the primary cache to all 24,576 experts, so
+the peer found nothing and the engine exited 1 with `peer experts: no room or no
+expert left for the peer` after a 405 s load (`logs/engine-fail-v1.log`). An
+explicit slot budget plus `--peer-exclusive` fixed it: the engine expanded
+12,288 to 16,030 primary slots (30.47 GiB) and filled the peer with 8,546
+experts (16.37 GiB) — 24,576/24,576 experts in VRAM, 0 in RAM, 0 in the file,
+56,155 MiB VRAM free after load. Startup took 170.3 s (dense plus both tiers);
+expert pre-fill 62.9 s at 520 MB/s; peer fill 56.2 s. KV cache: 3.9 GiB int8
+for 262,144 solo tokens plus 0.3 GiB draft K/V. Decode expert-cache hit rate was
+100.0%, with 2-8% of routed experts read over PCIe.
+
+Single stream, temperature 0, streaming client, 64-256 output tokens:
+
+| cell | prompt tokens | TTFT | prefill | decode |
+| --- | ---: | ---: | ---: | ---: |
+| 1k filler, first (cold) | 1,002 | 0.78 s | — | 189.7 tok/s |
+| 1k filler, prefix reused | 1,002 | 0.05 s | — | 220.6 / 227.6 tok/s |
+| 16k filler | 15,652 | 3.07 s | ~5.2k tok/s | 199.7 tok/s |
+| 62k filler | 62,462 | 11.88 s | ~5.3k tok/s | 198.5 tok/s |
+| 125k filler | 124,882 | 24.25 s | ~5.2k tok/s | 244.6 tok/s |
+| 190k filler | 190,522 | 20.63 s | ~9.2k tok/s (reused prefix) | 192.5 tok/s |
+| c4, 1,952-token prompts, 128 out | — | — | — | 165 tok/s aggregate (queued; `parallel 1`) |
+
+Draft acceptance was 68-71% (133/189 at 1k, 70/99 at 62k). The 190k cell beat
+the 125k cell because Basalt's conversation cache retained the 125k solo
+prefix; the salted re-run in the entry above measured that cell cold at
+37.07 s (5.05k tok/s), so the cold prefill rate is ~5.0-5.3k tok/s from 16k
+through 190k, not the 9.2k this cell suggests. The 1k "prefix reused" rows
+come from the same conversation cache; only the first row is a cold prefill
+at that size.
+
+Same client against the two GLM-5.3 TP2 engines that stayed in production: c1
+decode 152.0-160.1 tok/s (medians 155.9 and 157.3), TTFT 0.20-0.23 s at 1k,
+c4 aggregate 338.7 / 247.5 tok/s (SGLang batches the four). For context, the
+box's earlier Qwen3.8-Flash-Next vLLM TP4 reference was 172.7 tok/s at c1
+(2026-08-26 entry). Basalt's 190-245 tok/s single stream sits above both, but
+it is a single-request engine serving an IQ3_S-quality pack (KLD 0.177 vs the
+Q8_0 reference), not an FP8 checkpoint, and nothing here was exercised through
+the LB; the numbers are not comparable to fleet aggregate throughput.
+
+Both request phases ran under `node06_gpu_guard.py` and passed (journals
+`basalt-perf-20261013T1955Z.jsonl`, `basalt-depth-20261013T2010Z.jsonl`): max
+intake 40C, max GPU 55C, max total power 636 W across eight GPUs; GPU0 peaked at
+221 W of its 450 W cap. The shared LB and the running GLM engines were never
+recreated. `glm53-unc-fp8` returned healthy at 20:25:19Z (306 GB checkpoint
+reload, about 23 minutes); the LB then reported `ramjet_upstream_up=1` for all
+three upstreams and a direct `glm-5.3-flash-uncensored` completion succeeded.
+Evidence lives on node06 under `/prod/basalt/` (`logs/`, `guard/`,
+`basalt_config.json`, sources under `src/`, pack under `models/`).
+
+Not promoted and not proposed for integration: Basalt serves a different model
+family with its own conversion and serving tooling, exposes no KV-event or
+prefix-cache interface the router could use, and caps at `--parallel 8`. Kept as
+a reference point for single-stream speed on this hardware.
+
 ## 2026-10-07 — v0.8.0 released: model aliases formalized, LB swapped to a published digest
 
 **Why.** Production had served the locally built `node06-qwen-alias-20261003`
@@ -324,6 +531,106 @@ no throughput change was measurable past the capacity cliff.
 with a fail-closed validator. For node06: set `RJ_ROUTE_AFFINITY_BASIS=marginal`
 after a journal replay, and check its SGLang GLM replicas for single-tokenizer
 saturation and generating `/health`.
+
+## 2026-09-27 — Swift reasoning-task performance against the prior Qwen A
+
+The [Swift NVFP4 model card](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4)
+claims faster completed reasoning tasks through fewer thinking tokens. The
+2026-09-26 fixed 256-token decode benchmark measured per-token throughput and
+could not test that claim. This follow-up measured answer time, actual
+`usage.completion_tokens_details.reasoning_tokens`, and answer correctness on
+two AIME 2026 problems. The pinned source is `MathArena/aime_2026` revision
+`d2de22f3c656b4f56cf8981212186377d1e23bc3`; the two-question corpus has
+SHA-256 `3b2a7a24a6b0597c2e160fabd8a49d829c3925f70f34609b15d99fd4c3ee45a9`.
+
+Both engines served the unchanged `qwen3.8-flash-next` ID through the same
+vLLM image on GPUs 0–3, with 450 W power caps left on. Each request used
+`reasoning_effort=xhigh`, temperature 0, top-p 1, seed 7, a 32,768-token cap,
+and a direct loopback endpoint. Swift ran from the deployed NVFP4 checkpoint;
+the earlier NVIDIA NVFP4 checkpoint was temporarily recreated from the exact
+rollback Compose. The baseline was warmed with problem 12 before its timed
+pair. Every listed answer finished normally and matched the numerical key.
+
+| AIME 2026 problem | Prior Qwen A: time / thinking tokens | Swift 1.5: time / thinking tokens | Swift time gain |
+| --- | ---: | ---: | ---: |
+| 10 | 408.572 s / 30,232 | 394.734 s / 29,333 | 1.04× |
+| 12 | 257.095 s / 18,689 | 81.520 s / 5,507 | 3.15× |
+| **Two-task total** | **665.667 s / 48,921** | **476.254 s / 34,840** | **1.40×** |
+
+Swift used 28.8% fewer thinking tokens across the pair. The benefit varied:
+about 3.0% fewer on problem 10 and 70.5% fewer on problem 12. One separate
+Swift pilot on problem 15 hit a 16,000-token cap without an answer; it is
+retained as a capped outcome, not counted as completed-task speed. The selected
+pair is small and was chosen after pilots, so it does not reproduce the
+publisher's BF16, temperature-1, many-question claim of 1.8× overall speed or
+establish a population-level speedup. The baseline container's timed JIT log
+was not retained across its recreate, so its first measured problem may
+include first-use compilation; problem 12 followed an exact-problem warmup.
+
+Every request-generating phase ran under `node06_gpu_guard.py`; the selected
+Swift pilots, baseline warmup and measurement, and post-restore smoke passed
+their guards. The capped pilot exited nonzero for its truncated answer. The
+baseline measurement reached at most 40°C intake and 63°C
+GPU temperature, with peak power below 38% of the 450 W cap. The common
+deployment lock was held, the shared LB and GLM containers were never
+recreated, and Swift was restored automatically afterward. Final state:
+4/4 LB health, pinned Swift revision running with zero restarts, 450 W caps
+still active, and 5/5 guarded agent/tool cases passed through the LB. Owner-only
+evidence is under
+`/home/luke/inference/qwen38_flash_next/.experiments/20260926T2100Z-swift15-reasoning/`.
+
+## 2026-09-26 — Swift 1.5 Qwen3.8-Flash-Next canary and Qwen A rollout
+
+The operator confirmed rights under the Swift and Qwen licenses and selected
+Qwen on GPUs 0–3 for a maintenance interruption. GLM B/C, KEV, and the shared
+`ds4-loadbalancer` remained running; the LB was never recreated or single-homed.
+The tested checkpoint is `ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4` at exact
+revision `3ff0520224f264a2d0ac4ab56ece8f2f13aadb38`. The 98-file selected
+payload totals 186,458,010,084 bytes and passed the pinned full-file manifest
+verification (SHA-256 `de956cabfc92ef5cd382e2557d03aa22d25fb57be3fe9048ed844d6863800287`).
+The engine image remained `sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93`.
+An offline ModelOpt parser and exact candidate argument preflight passed before
+the first GPU mutation. All windows held `/run/lock/ramjet-node06-deployment.lock`,
+used owner-only evidence, and automatically restored NVIDIA Qwen A on failure.
+
+The isolated canary used GPUs 0–3, direct loopback port 8043, and the unchanged
+client model ID `qwen3.8-flash-next`. Agent/tool cases passed 5/5; seven
+session/context turns passed, including synthetic 32K and 128K recall; the
+image smoke test passed. The admitted Swift shape uses standard decoding,
+16 GB GPU KV cache per rank (1,191,078 tokens reported), 16 sequences, and
+4,096 batched tokens at a 262K maximum context. The prior NVIDIA A recipe had
+40,190,174,004 bytes KV, 64 sequences, and an 8,192-token batch cap; the
+smaller Swift limits are an explicit capacity tradeoff.
+
+| Direct 256-token code workload | NVIDIA A baseline | Swift canary |
+| --- | ---: | ---: |
+| c1, 3/3 requests | 74.5 output tok/s | 74.8 output tok/s |
+| c8, 24/24 requests | 469.3 output tok/s | 474.5 output tok/s |
+
+The first two Swift c8 attempts measured 475.5 and 475.6 output tok/s but had
+first-use Triton JIT warnings inside their timed intervals. The admitted final
+run explicitly warmed the identical c8 workload under a thermal guard, then
+measured a separate 24/24-request interval with reconciled native counters,
+249.9 ms p95 TTFT, and no JIT warning in its exact timestamp window. The final
+guard passed with maximum 40°C intake, 56°C GPU temperature, and 29.51% of the
+450 W GPU power limit. GPUs 0–3 were already capped at 450 W (600 W default);
+the largest observed draw was about 133 W per GPU, so the cap was left enabled
+throughout testing and after deployment. These fixed-length throughput values
+alone do not test the publisher's reasoning-token claim; the matched
+completed-task follow-up is recorded above.
+
+After the baseline returned to 4/4 health, canonical Compose SHA-256
+`9f81085ccaf2b385d32a58ae12aaf6fdfe2e7991b831fe6c6dca193dfbc7054e`
+recreated only `qwen38flashnext-a` with Swift. Production direct health, model
+mount/revision, and 5/5 guarded agent/tool cases passed. The direct endpoint
+and shared LB both advertise `qwen3.8-flash-next`, and LB health returned to
+4/4. A separate guarded 5/5 agent/tool run through that LB passed. GLM B/C
+and LB container identities did not change; Qwen A restart count
+is zero. The original NVIDIA Compose is retained as an owner-only rollback
+backup at `/home/luke/inference/qwen38_flash_next/.experiments/20260926T1930Z-swift15/baseline-compose-backup.yaml`.
+The canary, guarded journals, and production smoke evidence are under that
+directory; the clean c8 interval is under sibling
+`20260926T2021Z-swift15-c8-final`.
 
 ## 2026-09-26 — GLM snapshot ROI: retention beyond the GPU would recover 0.44% of prompt tokens
 
@@ -825,6 +1132,88 @@ recovers it on its own. The rewritten `qwen38_escape_*` and
 `qwen38_steering_{capture,eval}` and `qwen38_cyber_steering_sweep`
 campaigns carry a DEPRECATED-PATTERN header and must not be revived as-is.
 
+## 2026-09-16 — Qwen3.8 NVFP4 nightly and MTP3: throughput win fails the latency promotion gate
+
+The production NVIDIA NVFP4 Qwen engine was compared with vLLM main nightly
+commit `af1c01499b289be555c475669ba50a88e96d846e`, immutable amd64 image
+`sha256:f1491cb3abc84aca4e319c2b3f3f23644f0d9e19fdb9012c80818d3f30e5a0a0`.
+That candidate contains the upstream Qwen block-FP8 MTP fix.  A GPU-free
+parser preflight first proved the exact TP4/modelopt/KV/MTP argument shape.
+The live experiment then kept production Qwen A unchanged on GPUs 0-3 while
+each isolated control/candidate used GPUs 4-7.  GLM was restored after the
+campaign rather than co-resident with the canary.
+
+Promotion was declared before measurement: nightly standard decoding needed
+at least +5% c8 throughput; MTP3 needed at least +10% versus current and +5%
+versus nightly at c8.  No measured throughput cell could regress more than 3%
+and no TTFT p95 cell could regress more than 10%.  Every arm also had to pass
+the five-case agent/tool corpus, exact native-counter reconciliation, clean
+logs, and thermal/container gates.
+
+| concurrency | current tok/s | nightly tok/s | nightly+MTP3 tok/s | current TTFT p95 | nightly TTFT p95 | MTP3 TTFT p95 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 76.5 | 76.8 | 143.2 | 52.9 ms | 55.5 ms | 51.6 ms |
+| 8 | 470.8 | 477.0 | 773.5 | 172.6 ms | 171.6 ms | 390.8 ms |
+| 16 | 842.6 | 840.8 | 1,196.1 | 229.8 ms | 233.1 ms | 256.7 ms |
+
+Nightly standard was flat (+0.4%, +1.3%, -0.2% throughput) and missed its
+promotion floor.  MTP3 delivered real gains (+87.2%, +64.3%, +42.0%) with
+54.1-54.6% strict acceptance in the code cells, but it increased c8 TTFT p95
+by 126.4% and c16 by 11.7%.  It therefore failed the predeclared latency gate;
+the gate was not moved after seeing the result.  All 225 measured code requests
+and all 15 agent cases completed, native standard/MTP counters reconciled, and
+there were no restarts, OOMs, fatal log markers, or thermal excursions.  Peak
+intake was 44C.
+
+Verdict: retain the current production image
+`sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93`
+with standard decoding.  MTP3 is a useful throughput profile only if a future
+policy explicitly accepts the c8 latency tradeoff; it is not a drop-in
+production improvement under the current gate.
+
+Authoritative evidence is owner-only on node06 under
+`/home/luke/inference/qwen38_flash_next/.experiments/20260916T1550Z-nightly-mtp3-r3/`.
+The earlier base and r2 directories are harness history, not comparisons: the
+base attempt failed the guard-runtime admission; r2 proved the five agent
+cases and one partial c1 control, then failed closed because its wrapper used
+the wrong native-counter environment name.  r3 corrected that wrapper and is
+the only decision-bearing run.
+
+## 2026-09-16 — GLM-5.3 fixed MTP 5/1/6 loses to the adaptive production policy
+
+The production GLM-5.3-Flash SM120 pair was tested against the fixed
+`num_speculative_tokens=5`, `speculative_num_steps=1`,
+`speculative_eagle_topk=6` recipe.  This was the fixed point selected most
+often by the serving adaptive controller, so the experiment asked whether
+removing its control overhead would improve the same workload.  It did not.
+
+Both arms used the exact production image
+`sha256:024a988fd0c0e15d80e382073c05657b2d57f52611c324599508cdb62b9debb8`,
+model revision `ee0989a944b0e213589191d7fca63af825a0741e`, TP2 topology, and
+matched direct-engine code generation at 256 output tokens with three measured
+repetitions per cell.
+Native request, generation-token, accepted-draft, and proposed-draft counters
+reconciled exactly in all six cells; there were no failed requests, restarts,
+OOMs, or fatal log markers.
+
+| concurrency | adaptive tok/s | fixed tok/s | fixed delta | adaptive TTFT p95 | fixed TTFT p95 |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 151.4 | 133.8 | -11.6% | 106.8 ms | 114.0 ms |
+| 4 | 402.2 | 333.7 | -17.0% | 314.5 ms | 271.1 ms |
+| 8 | 362.9 | 314.7 | -13.3% | 3,004.5 ms | 3,489.7 ms |
+
+The lower c4 TTFT does not offset a 17.0% throughput loss, and fixed mode also
+worsened c8 tail latency by 16.1%.  The candidate was rejected and the
+adaptive 5/1/6 controller remains deployed on both GLM replicas.  Final LB
+health returned to 3/3 and intake air peaked at 44C, below the 50C abort gate.
+
+Authoritative evidence is owner-only on node06 under
+`/home/luke/inference/glm53_flash_sm120/.experiments/20260916T1425Z-fixed-mtp-5-1-6-r8/`.
+Earlier r1-r7 directories are harness-admission history, not performance
+measurements: they failed closed on expected-count, network-removal, shell
+strict-mode, namespace-stall, stale-network, and unsupported Compose-create
+preflights before a trustworthy comparison existed.
+
 ## 2026-09-12 — GLM SM120 6K prefill admitted; 8K rejected; vLLM still blocked
 
 Question: can the isolated GLM-5.3-Flash engine B improve cold prefill,
@@ -1151,6 +1540,122 @@ what decides whether ramjet's affinity routing is worth anything for this
 model; and agent-protocol correctness, where the sibling SGLang recipe already
 caught this model family violating a nullable tool-argument contract. The
 checkpoint has not been downloaded to node06.
+
+## 2026-09-09 — SM120 NVFP4 linear-kernel selection is a no-op for this checkpoint
+
+vLLM published v0.29.0 images on 2026-09-09 and, separately, merged
+vllm-project/vllm#55170 on 2026-09-08. That PR is a one-line reorder of
+`_POSSIBLE_NVFP4_KERNELS[CUDA]` demoting the weight-only
+`FlashInferCuteDslNvFp4W4A16LinearKernel` below the W4A4 kernels, because on
+SM120/121 the `auto` walk otherwise takes the weight-only kernel even for a
+W4A4-capable checkpoint. Upstream measured +23.8% output tok/s and 36% lower
+TTFT on a dense Qwen3.8-27B-NVFP4 on an RTX PRO 6000 Blackwell — the same board
+class as node06. The pinned runtime `0.28.1rc1.dev472+gd9105ea80` was confirmed
+to carry the pre-fix order, and `--linear-backend` already exists in it, so the
+hypothesis was testable as a launcher flag with no image change.
+
+It measured as an exact no-op, and the reason is structural rather than
+statistical. The checkpoint quantizes **only MoE expert weights** to NVFP4:
+`config_groups.group_0` targets exactly
+`model.language_model.layers.*.mlp.experts`, while `self_attn*`, `linear_attn*`,
+`mlp.shared_expert*`, `mlp.gate`, `hyper_connection*`, `lm_head`,
+`embed_tokens`, and `visual*` are all in the checkpoint's `ignore` list. There
+are no NVFP4 dense linear layers for `--linear-backend` to select a kernel for.
+The NVFP4 work runs entirely through the MoE backend, which is chosen by the
+separate `moe_backend` setting and already resolves under `auto` to the W4A4
+`FLASHINFER_CUTLASS` kernel. We were on the fast path before the experiment.
+
+Engine B was measured direct on `:8041` at 256 output tokens, three measured
+repetitions per cell, fresh synthetic namespace per cell, each cell under its
+own `node06_gpu_guard.py` journal. Production stayed on A throughout; B's
+restart was an LB-only fenced roll with an unconditional rollback trap.
+
+| cell | auto agg tok/s | cutlass agg tok/s | delta | auto TTFT med | cutlass TTFT med |
+|---:|---:|---:|---:|---:|---:|
+| c1 | 75.1 | 74.9 | -0.3% | 111.8 ms | 115.7 ms |
+| c8 | 471.9 | 470.0 | -0.4% | 236.2 ms | 238.5 ms |
+| c16 | 827.4 | 832.5 | +0.6% | 346.4 ms | 349.5 ms |
+
+All 75 requests per arm completed, native speculative/generation counters
+reconciled exactly in all six cells, and B recorded zero restarts and no OOM.
+The `auto` arm also reproduces the 2026-09-08 scout (75.1/471.9/827.4 against
+76.3/475.0/839.3), so the baseline is stable run to run.
+
+Two limitations are worth stating rather than hiding. The workload is
+decode-weighted with a 135-token prompt, whereas upstream's win was a
+prefill-heavy 32K-cached-prefix/2K-ISL cell; a prefill-heavy cell was not run
+because the checkpoint inspection had already shown there is no dense NVFP4
+linear layer to accelerate in either regime. And this says nothing about the
+dense Qwen3.8-27B-NVFP4 checkpoint, where #55170 should still apply.
+
+The Compose tunable added for the test was removed again rather than retained
+at its losing default, so the canonical file is byte-identical to before
+(`b618c4238f86e8aa1b17278a6b9bb792bd2bc06931df1956767b246ee5698889`) and node06
+was restored to it. Evidence is owner-only on node06 under
+`/home/luke/inference/qwen38_flash_next/.experiments/20260909T0700Z-linear-backend-ab/`.
+
+A related upstream note for the migration: v0.29.0 is **not** an upgrade from
+our pin. It is cut from a release branch that is diverged from the pinned main
+revision — 14 commits ahead, 300 behind — and contains neither #55170, nor
+#55643 (NVFP4 fused SiLU+mul scale allocation and global-scale direction), nor
+#54890 (FP8 QSA indexer for Flash-Next). A newer main nightly, not v0.29.0, is
+the forward move if one is wanted; #55643 is a correctness fix and would need
+the full candidate gate.
+
+## 2026-09-08 — NVIDIA Qwen3.8-Flash-Next NVFP4 guarded c1/c8/c16 scout
+
+The pinned `nvidia/Qwen3.8-Flash-Next-NVFP4` revision
+`fc694b54fb0174e0913e6adf86691ef85a4ead47` was tested as the isolated engine
+B canary against the serving FP8+MTP3 engine A. Production remained
+single-homed on A (`/health`: one active/healthy serving replica, B healthy but
+inactive). Before performance work, B passed the five-case deterministic agent
+smoke 5/5, including typed and parallel tool calls, DSML parsing, and reasoning
+history, with no protocol failures.
+
+The scout used matched direct-engine code generation, 256 output tokens, three
+measured repetitions, and one warmup at each of c1/c8/c16. A and B ran
+concurrently under the common deployment lock and a fresh
+`node06_gpu_guard.py` journal per cell. Native engine request and generation
+token deltas reconciled exactly in all six measurements, so the active A
+control was not contaminated by unrelated production work during the measured
+windows. All 150 measured requests completed, neither container restarted or
+OOMed, and the benchmark intervals contained no JIT or fatal-runtime marker.
+
+| concurrency | FP8+MTP3 A tok/s | NVFP4 B tok/s | B vs A | A TTFT p95 | B TTFT p95 |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 150.2 | 76.3 | -49.2% | 165.6 ms | 52.2 ms |
+| 8 | 697.7 | 475.0 | -31.9% | 284.8 ms | 188.7 ms |
+| 16 | 1,152.9 | 839.3 | -27.2% | 1,881.8 ms | 275.0 ms |
+
+NVFP4 used materially less device memory: A stayed at 96,919 MiB per GPU
+(94.65 GiB), while B's worst observed peak was 73,977 MiB per GPU (72.24 GiB)
+at c16, a 22.40 GiB or 23.7% reduction per GPU. This is not NVIDIA's advertised
+60% reduction in total serving memory. Both engines explicitly reserve
+40,190,174,004 bytes for KV, but B exposes 2,991,794 KV tokens versus A's
+2,667,258, a 12.2% increase. The fixed 40.19GB allocation leaves B's additional
+free VRAM unused rather than converting all checkpoint savings into KV.
+
+Host memory moved the other direction. Anonymous cgroup memory was essentially
+equal (A 16.96 GiB, B 16.92 GiB), but B retained 50.86 GiB of file cache and
+reported a 41.79 GiB Docker working set versus A's 19.29 GiB. B's total cgroup
+charge was 68.20 GiB, including 26.41 GiB inactive/reclaimable file cache; the
+host still reported about 51 GiB available. This is not PLE CPU offload, but it
+is a host-headroom cost of the current loader/runtime and must be counted.
+
+All guards passed; chassis intake remained 44C and the highest GPU temperature
+was 63C. Final LB and engine health was unchanged, both engines retained zero
+restarts/OOMs, and B remained isolated. The practical result is negative for a
+drop-in promotion: B gives lower TTFT and 12.2% more KV tokens at the current
+allocation, but loses 27-49% aggregate decode throughput at the requested
+concurrencies. This comparison is deliberately the live serving choice, not a
+quantization-only experiment: A has MTP3 and B does not, so the throughput and
+part of the memory delta cannot be attributed to FP8 versus NVFP4 alone.
+
+Evidence is owner-only on node06 under
+`/home/luke/inference/qwen38_flash_next/.experiments/20260908T065938Z-nvidia-nvfp4-ab/`.
+The first smoke wrapper attempt sent no requests and failed only because its
+staged `engine_metrics.py` dependency was absent; the fresh r2 smoke and all
+three performance journals passed.
 
 ## 2026-09-07 — time-decayed prefix affinity calibrated to the eviction horizon (local foundation, not deployed)
 
@@ -11122,6 +11627,141 @@ reload. The live rollback file is
 `/etc/caddy/Caddyfile.pre-canonical-v1-20260827T142817Z`; evidence is under
 `/home/luke/inference/glm53_flash/.experiments/20260827T142817Z-canonical-v1`.
 
+## 2026-09-14 — dealignai GLM-5.3-Flash abliterated NVFP4 canary: loader-compatible, constructor OOM on TP2; not deployable at the current topology
+
+Goal: roll the community uncensored checkpoint
+`dealignai/GLM-5.3-Flash-ABLITERATED-NVFP4` at
+`a180a2fa56285c745fa322f3887dcdd994e18f62` onto one live GLM TP2 replica
+(`glm53sm120-c`, GPUs 6-7), peer `glm53sm120-b` serving throughout, the shared
+`ds4-loadbalancer` never touched.
+
+### Offline qualification (GPU-free, before any mutation)
+
+- The checkpoint is arch `glm5_next`, 321.3B nominal params, 121 safetensors
+  plus `model-input-scales.safetensors`; `quantization_config.quant_algo`
+  is `NVFP4` with `group_size` 16 and a 32-entry `ignore` list (attention,
+  indexer, dense/shared MLP, embeddings, vision stay BF16). The official
+  image's own `ModelOptMixedPrecisionConfig.from_config` rejects it
+  ("only supports MIXED_PRECISION checkpoints"); `ModelOptFp4Config` accepts
+  it with `is_w4a16=False` (FP4-activation path).
+- Download: 194,665,046,744 bytes across 132 files via `hf download` in a
+  detached 29-minute unit at roughly 90-150 MiB/s; Xet disabling was not
+  required. Verification: 120/120 index shards present, per-file sizes
+  byte-exact against the Hub file manifest, aggregate safetensors bytes equal
+  the Hub total exactly, no partials, `eh_proj` present. Only
+  `.gitattributes` was not fetched.
+- The live one-file Compose
+  (`/home/luke/inference/glm53_flash_sm120/docker-compose.yaml`) was
+  parameterized in place — `${GLM53_QUANTIZATION:-modelopt_mixed}` plus
+  model repository/revision label variables — with the untouched defaults
+  proven render-identical (`validate-compose.py` green, no-env render
+  byte-identical, pre-edit backup at `/root/glm53-compose.pre-abliterated.bak`,
+  post-edit SHA-256 `27d639485967c24c2dba5e8e577decbf399b6f7d492fd872b35ade95dec3bdf9`).
+  The candidate render delta is exactly the quant flag, two identity labels,
+  and the model mount source. This parameterization is retained on the box.
+
+### Attempted canary rolls (each: guard child + deployment lock + automatic baseline rollback)
+
+- r1 aborted pre-mutation: the campaign authority pinned a 38-character
+  baseline model revision (typo). Fail-closed; nothing was touched.
+- r2 rolled: the candidate exited ~60 seconds into load. The rollback restored
+  the baseline but the crashed container's log was lost during recreate.
+  Baseline reload readiness: about 16 minutes.
+- r3 rolled with log preservation added to the rollback trap. Reproduced
+  exit 137 with the captured cause: `torch.OutOfMemoryError` inside
+  `Glm5NextMoE` construction (`ModelOptNvFp4FusedMoEMethod.create_weights`):
+  93.43 GiB PyTorch-allocated on a 94.97 GiB card before KV allocation had
+  even begun. Crash 68 seconds after `up`. The SM12x patch that "prepares
+  W4A16 weights without retaining a checkpoint-layout copy" is gated on the
+  `is_w4a16` + E4M3-K32 contract, so the plain NVFP4/A4 checkpoint cannot use
+  it, and its constructor footprint exceeds the card at TP2.
+
+Thermals: intake 43C admission, GPU pair 50-57C during the short candidate
+load windows; guard journals are under
+`/home/luke/inference/glm53_flash_sm120/.experiments/abliterated-a180a2fa/`.
+Final state after every attempt: LB 3/3 upstream, baseline direct probe on
+`glm53sm120-c:8063` passed, LB and Qwen container identities unchanged,
+deployment lock released.
+
+### Verdict
+
+The abliterated weights are architecture- and size-compatible with this
+stack but **not servable at TP2 with this checkpoint's quantization recipe**.
+Steady-state bytes fit (~82 GiB/rank) yet the unpatched A4 constructor peak
+does not. Options, none executed: (a) a maintenance-window TP4 candidate
+with an isolated throwaway project (both GLM replicas down during load);
+(b) offline requant of the abliterated weights to the W4A16/E4M3-K32 recipe
+the patched loader already handles; (c) wait for a K32-A16 abliterated
+publication. The FP8 sibling (328 GB) fits neither TP2 nor TP4 and stays out.
+Do not retry at TP2 by shrinking `--mem-fraction-static` or KV flags: the OOM
+precedes KV sizing entirely.
+
+## 2026-10-02 — qwen38flashnext-a paused, uncensored GLM-5.3-Flash FP8 (orcarouter) deployed on GPUs 0-3, LB re-wired for per-model pools
+
+Requested operation: route qwen-next calls to the standing GLM TP2 replicas
+while the uncensored FP8 fine-tune deployed, then give the uncensored replica
+its own model name. Executed end-to-end on node06.
+
+**Window phase.** Before any engine moved, the LB (ramjet
+`ghcr.io/helixml/ramjet@sha256:53047a816c8a…`, the release/v0.6.2 multi-model
+line) was recreated into a 2-upstream glm-only pool with `RJ_UPSTREAM_MODELS`
+unset: the pool served every requested model name and SGLang echoes the
+caller's model field, so `qwen3.8-flash-next` callers kept their model id and
+`glm-5.3-flash` callers were unaffected (verified by live 200s for both names
+with `x-ramjet-upstream` 0/1). kev-small dropped from the upstream list (one
+request in six days; container still running on GPU 3).
+SGLang accepts and echoes any model name — no engine aliasing was needed.
+
+**FP8 deployment.** orcarouter/GLM-5.3-Flash-Uncensored-FP8 at revision
+`0480f690f80e8f4c4ee63edd10dcbea8b7d9e31b` (328 GB, 72 files byte-verified
+against the Hub manifest; repo is gated — auto-gate accepted, token staged
+0600 and mounted read-only, never in argv). New single-file deployment
+`/home/luke/inference/glm53-unc-fp8/`, campaign image
+`ramjet/glm53-sm120@sha256:899fe8eb0f56…`, TP4 on GPUs 0-3
+(`qwen38flashnext-a` stopped under the deployment lock after the cutover),
+fresh cache dir `/prod/engine-cache-sglang-glm53-unc-fp8`,
+`--mem-fraction-static=0.90` (kev-small holds 4.3 GiB on GPU 3),
+`--hicache-size=2`, no speculative decoding, served as
+`glm-5.3-flash-uncensored` on `127.0.0.1:8064`.
+
+One fork bug surfaced: with a static `quant_method=fp8` checkpoint,
+`--moe-runner-backend=flashinfer_cutlass` crashed all four TP ranks in the
+flashinfer autotune warmup (`fp8.py:2622`, `self.runner.runner_backend` on
+None — the W4A16/modelopt_mixed path never hits it). `auto` resolves to the
+triton fused-MoE fp8_w8a8 path and works; there is no tuned kernel config for
+E=288 on this GPU (default config, sub-optimal — tunable later via
+sglang's fused_moe_triton tuning script). Cold start was ~25 min (fresh JIT
+caches); the rename recreate with warm caches took ~20 min.
+
+**Steady state.** LB v3: three upstreams with explicit per-name ownership —
+`RJ_UPSTREAM_MODELS=glm-5.3-flash,glm-5.3-flash,glm-5.3-flash-uncensored`
+(b, c stock W4A16; fp8 uncensored), `openai`×3, lane `--,lane,-` (inert,
+BYTES=0). One compose mistake cost a no-downtime fix: the external network
+was declared but not assigned to the service, so the container sat only on
+its project default; `docker network connect` attached it live and the file
+was corrected. Verified: 3/3 warm healthy, aggregated /v1/models lists both
+names, `glm-5.3-flash` routes to upstream 0/1 and `glm-5.3-flash-uncensored`
+to upstream 2 only, `qwen3.8-flash-next` returns clean 404
+"model not found for API profile". FP8 smoke: 17×23→391 correct, reasoning
+present, structured `tool_calls` with string args intact (glm47 parser).
+
+**Rollback.** Stopped rollback containers:
+`ds4-loadbalancer-rollback-20261002t223339z` (2-upstream window config),
+`ds4-loadbalancer-rollback-20261002t194631z` (4-upstream release config);
+`qwen38flashnext-a` stopped but intact (docker start + re-adding its
+upstream/models lines restores the pre-window fleet). The 0.6.2 LB enforces
+exactly one model ID per upstream entry and URL-keyed upstream metrics, so a
+physical replica cannot carry two names.
+
+### Verdict
+
+Operational. Production serves `glm-5.3-flash` on the two TP2 replicas with
+full prior capacity, the uncensored FP8 fine-tune is selectable as
+`glm-5.3-flash-uncensored` on a dedicated TP4 replica, and nothing
+cross-routes between the pools. Follow-ups: tuned triton MoE config for
+E=288/fp8_w8a8 on SM120, optional EAGLE/MTP enablement for the FP8 replica,
+and retiring the qwen-name alias wherever Helix callers still send it.
+
 ## 2026-10-03 — persistent Qwen-name alias to stock GLM-5.3-Flash
 
 User requested restoring `qwen3.8-flash-next` routing to stock GLM-5.3-Flash,
@@ -11172,3 +11812,142 @@ validator, and rendered configuration under
 Restore the baseline configuration and original container together under the
 same deployment lock. Qwen engines remain stopped; this is a persistent
 compatibility alias, not a Qwen engine restart.
+
+## 2026-10-03 — uncensored FP8 replica: tuned Triton fused-MoE configs (E=288, fp8_w8a8, SM120) plus adaptive EAGLE MTP
+
+Executed both performance follow-ups from the 2026-10-02 uncensored-FP8
+deployment against the live `glm53-unc-fp8` TP4 replica (GPUs 0-3, port
+8064). The LB and the stock W4A16 replicas were never touched; only the
+engine container was recreated, twice, from its single canonical Compose
+file under `/run/lock/ramjet-node06-deployment.lock`. The concurrent LB
+qwen-alias deployment (above, 08:16) was already complete and unaffected.
+
+### Method
+
+- **Baseline** (guarded, fresh salt, native SGLang counter reconciliation
+  via `sglang:{num_requests,prompt_tokens,generation_tokens}_total`):
+  decode cells c1/c4/c8/c16 × 128 tokens plus ~7.5K-token prefill cells,
+  scripts `scout_decode.py`/`scout_prefill.py`/`run_cells.sh` under
+  `/home/luke/inference/glm53-unc-fp8/.experiments/moetune-r1/`.
+- **Tuning**: the image's
+  `benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton_sep.py` was
+  driven by a custom in-process runner (`tune_moe.py`, ray stubbed) with
+  synthetic uniform topk ids, E=288, shard_intermediate_size=1024 (N=512 at
+  TP4), hidden 4096, topk 8, fp8_w8a8 block [128,128], bf16 activations.
+  Four long-lived lanes (one per GPU 0-3, CUDA_VISIBLE_DEVICES-reordered so
+  each lane's ordinal 0 is its target GPU) tuned 13 batch sizes
+  (1,2,4,8,16,32,64,128,256,512,1024,4096,6144) over a pruned space
+  (M by size regime; N∈{32,64,128}; K∈{64,128}; warps 4/8; stages 3,4 plus
+  hand-picked 2/5 corners; groups {1,16}), ~112-174 configs per size. All
+  runs under `node06_gpu_guard.py` (intake 40C, all runs passed or
+  completed with post-run telemetry-unavailable flags only).
+- **Two blockers were found and worked around**; both matter for any future
+  rerun:
+  1. `tuning_fused_moe_triton_sep.benchmark_config` TMA variants leak one
+     full expert-weight copy per call: sglang
+     `sglang/kernels/ops/moe/fused_moe_triton_kernels._B_DESC_CACHE` is an
+     LRU keyed by **data_ptr**, and every call allocates fresh w1/w2, so the
+     cache pins 0.56-1.7 GiB per config and OOMs within ~15 configs. The
+     runner clears the cache after every config. (Latent production hazard:
+     the same LRU can pin up to 64 stale B tensors in any serving process
+     whose MoE B tensors get reallocated; worth an upstream fix that keys
+     by (shape, dtype, block) or holds weak refs.)
+  2. Rapid container start/teardown (one process per size) starved the
+     guard's NVML sampling (`termination_telemetry_unavailable`); long-lived
+     per-GPU lanes fixed it. `expandable_segments:True` in the tuner also
+     starved NVML and was removed.
+- **Install**: tuned JSONs live in
+  `/home/luke/inference/glm53-unc-fp8/moe-configs/configs/triton_3_7_1/`
+  (both the up `E=288,N=512,...fp8_w8a8,block_shape=[128, 128].json` and the
+  `_down.json` with per-batch `USE_TMA` decisions), mounted read-only at
+  `/opt/moe-configs` with `SGLANG_MOE_CONFIG_DIR=/opt/moe-configs`. Render
+  delta was exactly the env entry plus the bind mount. All four TP ranks
+  logged "Using MoE kernel config from /opt/moe-configs/..." after the
+  recreate. Warm restart-to-healthy: ~21 min both times.
+
+### Results (all cells fully reconciled; variance-checked with repeats)
+
+Tuned MoE only (vs baseline): decode c1 per-stream 89.1→94.0 tok/s (+5%),
+c4 ~flat, c8 +3% aggregate with TTFT p95 −5..−11%, c16 +4%; prefill TTFT
+flat-to-slightly-better (c4 5256→~5204 ms median over 3 runs; a single
+5.7 s reading in the first A/B pass was an outlier). Modest, as expected —
+MoE is only a fraction of a TP4 decode step.
+
+Tuned MoE **plus adaptive EAGLE MTP** (5 steps, top-k 1, 6 draft tokens,
+`/etc/glm53-adaptive/adaptive.json`, identical to the stock replicas; the
+orcarouter FP8 checkpoint carries the layer-45 nextn/MTP weights including
+its own FP8 MoE, so no draft model is needed):
+
+| cell | baseline | final (MoE+MTP) | delta |
+|---|---:|---:|---:|
+| c1 per-stream decode tok/s | 89.1 | 170.5 | +91% |
+| c4 per-stream | 62.7 | 103-118 | +65..88% |
+| c8 per-stream | 64.7 | 94-101 | +45..56% |
+| c16 per-stream | 60.0 | 83.7 | +40% |
+| c4 aggregate tok/s | 226.8 | 346-383 | +52..68% |
+| c8 aggregate | 230.5 | 276-335 | +20..45% |
+| c8 TTFT p95 ms | 2386 | 1756-2629 | −10..−26% |
+| prefill c1 TTFT ms (7.5K) | 1345 | 1862 | +38% (worse) |
+| prefill c4 TTFT ms | 5256 | 6439 | +23% (worse) |
+
+Native accept length 2.9-3.9 / rate 0.47-0.71 across the bench cells.
+Post-prefill decode is much faster (332 vs 115 tok/s at c1), so total
+prefill wall time degrades far less than TTFT. Correctness smoke passed:
+deterministic bounded text, one typed `add` tool call with exact integer
+arguments, reasoning intact, usage reconciled. Mamba state usage at
+4 running requests is 12/28 slots.
+
+### Verdict
+
+**Promoted.** The canonical
+`/home/luke/inference/glm53-unc-fp8/docker-compose.yaml` now carries
+`SGLANG_MOE_CONFIG_DIR`, the read-only tuned-config mount, and the six
+EAGLE speculative flags. Decode throughput on the uncensored pool roughly
+improved 1.4-1.9x per stream at the qualified concurrencies; the long-prefill
+TTFT cost is the same trade the stock GLM pool already accepts. Follow-ups:
+the `_B_DESC_CACHE` data_ptr-keyed LRU should be fixed upstream; prefill TTFT
+under MTP could be revisited with a smaller fixed-draft profile (3/1/4) if
+long-prompt latency matters for uncensored callers; `max-running-requests=4`
+remains the standing cap. Artifacts: configs, partials, tuner/merge/runner
+scripts, thermal journals, cell JSONLs, and pre-mutation Compose backups under
+`/home/luke/inference/glm53-unc-fp8/.experiments/moetune-r1/` (462 MiB shared
+triton compile cache retained for future retunes). Rollback: restore
+`compose.pre-mtp.bak` (MoE-tuned, MTP-off) or the original pre-MoE render and
+recreate under the same lock.
+
+## 2026-10-07 — kev-small removed from GPU 3; uncensored FP8 replica raised to the full 500k-token KV pool
+
+Helix agent sessions pinned to `glm-5.3-flash-uncensored` began failing with
+`Input length (252200 tokens) exceeds the maximum allowed length (249146
+tokens)`. Diagnosis: SGLang sized the replica's KV pool to `max_total_num_tokens
+= 249,152` (half the requested `--max-total-tokens=500000`) because
+`mem-fraction-static=0.90` left no room after the FP8 weights, mamba state
+cache, and kev-small's 4.3 GiB co-residency on GPU 3; `max_req_input_len` =
+pool − 6 (EAGLE draft reserve) = 249,146. The stock `glm53sm120-b/c` replicas
+(W4A16, `mem-fraction-static=0.99`) report `max_req_input_len=499,962`, so only
+uncensored sessions hit the cap.
+
+kev-small had been idle since it left the LB upstream list (2026-10-02): only
+its own healthcheck requests in 48h of logs, and its only network peer was the
+LB, which no longer routes `kev-latest`. It was stopped and removed, and the
+service deleted from `/home/luke/inference/qwen38_glm53_kev/docker-compose.yaml`
+(LB service definition byte-identical; the vestigial `kev-engine` attachment
+stays on the running LB until its next deliberate recreate). Backups:
+`docker-compose.yaml.bak-20261007` beside both files.
+
+`glm53-unc-fp8` was then recreated with `--mem-fraction-static=0.93` under
+`/run/lock/ramjet-node06-deployment.lock` (LB untouched, ~21 min model load).
+Result: KV pool 499,968 tokens (3.38 GB + 0.31 GB per rank, hit the
+`max-total-tokens` cap), `max_req_input_len = 499,962`, GPUs 0-3 uniform at
+88.4/97.9 GiB used (~9.5 GiB free each). LB re-admitted all three upstreams
+after warmup.
+
+Verification: a 256,020-prompt-token completion through the LB
+(`glm-5.3-flash-uncensored`, fresh salt, 37.5s) returned HTTP 200 — above the
+old 249,146 cap that rejected the 252,200-token session. The uncensored pool
+now has the same input ceiling as the stock pool. Follow-up: unc-model
+requests 503 during any future unc recreate while warmup enforce gates the
+sole uncensored upstream; the vestigial `kev-engine` LB attachment and
+`ramjet_kev_systemone` network can be cleaned at the next LB recreate.
+Rollback: restore the `.bak-20261007` files, `docker compose up -d` kev-small
+needs its `KEV_IMAGE` re-supplied from the protected env.

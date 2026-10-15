@@ -10,7 +10,7 @@ MANIFEST = ROOT / "compat" / "qwen38-flash-next-r134.json"
 
 
 class QwenFlashNextDocumentationTests(unittest.TestCase):
-    def test_readme_matches_admitted_exact_route_authority(self):
+    def test_readme_matches_swift_runtime_authority(self):
         readme = README.read_text()
         compose = COMPOSE.read_text()
         compose_sha = hashlib.sha256(COMPOSE.read_bytes()).hexdigest()
@@ -19,14 +19,21 @@ class QwenFlashNextDocumentationTests(unittest.TestCase):
         for expected in (
             "rust-962b7b2",
             "fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673",
+            "ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4",
+            "3ff0520224f264a2d0ac4ab56ece8f2f13aadb38",
+            "de956cabfc92ef5cd382e2557d03aa22d25fb57be3fe9048ed844d6863800287",
+            "client-facing model ID remains `qwen3.8-flash-next`",
+            "nvidia/Qwen3.8-Flash-Next-NVFP4",
+            "fc694b54fb0174e0913e6adf86691ef85a4ead47",
+            "5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93",
+            "rust-0c7c7bc",
+            "f9215991a15a2d5ea223c84bfc4a2f7af423b0a3d4868423543c5d8a5315615f",
             compose_sha,
             manifest_sha,
-            "Qwen exact placement is admitted and live",
-            "publish live KV",
-            "events on port 5557 and bounded replay on port 5558",
-            "defaults `RJ_EXACT_ROUTE_CANARY_BPS` to the qualified",
-            "full cohort of `10000`",
-            "A missing key fails during Compose rendering",
+            "exact placement stays off",
+            "old FP8 authority must never be reused",
+            "fixes the cohort",
+            "keeps `RJ_EXACT_ROUTE_MODE=off`",
             "POST /api/adaptive/rollback",
             "Retry rollback",
         ):
@@ -35,12 +42,13 @@ class QwenFlashNextDocumentationTests(unittest.TestCase):
 
         for expected in (
             "RJ_TOKENIZER_MODE: local-shadow",
-            "RJ_EXACT_ROUTE_MODE: placement",
-            "RJ_EXACT_ROUTE_CANARY_BPS: ${RJ_EXACT_ROUTE_CANARY_BPS:-10000}",
-            "RJ_EXACT_ROUTE_CANARY_KEY: ${RJ_EXACT_ROUTE_CANARY_KEY:?",
-            "RJ_KV_EVENT_MODE: shadow",
+            "RJ_EXACT_ROUTE_MODE: ${RJ_EXACT_ROUTE_MODE:-off}",
+            'RJ_EXACT_ROUTE_CANARY_BPS: "0"',
+            "RJ_KV_EVENT_MODE: ${RJ_KV_EVENT_MODE:-shadow}",
             "endpoint\":\"tcp://*:5557",
             "replay_endpoint\":\"tcp://*:5558",
+            "--quantization=modelopt",
+            "--trust-remote-code",
         ):
             with self.subTest(compose=expected):
                 self.assertIn(expected, compose)

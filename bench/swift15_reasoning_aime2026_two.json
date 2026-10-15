@@ -1,0 +1,23 @@
+{
+  "dataset": "MathArena/aime_2026",
+  "revision": "d2de22f3c656b4f56cf8981212186377d1e23bc3",
+  "split": "train",
+  "problem_indices": [
+    12,
+    27
+  ],
+  "cases": [
+    {
+      "question_id": "aime2026-12",
+      "category": "math",
+      "question": "Triangle $\\triangle ABC$ lies in plane $\\mathcal P$ with $AB = 6, AC = 4,$ and $\\angle BAC = 90^\\circ.$ Let $D$ be the reflection across $\\overline{BC}$ of the centroid of $\\triangle ABC. {}$ Four spheres, all on the same side of $\\mathcal P,$ have radii $1, 2, 3,$ and $r$ and are tangent to $\\mathcal P$ at points $A, B, C,$ and $D,$ respectively. The four spheres are also each tangent to a second plane $\\mathcal T$ and are all on the same side of $\\mathcal T.$ The value of $r$ can be written as $\\tfrac mn,$ where $m$ and $n$ are relatively prime positive integers. Find $m+n.$",
+      "answer": 161
+    },
+    {
+      "question_id": "aime2026-27",
+      "category": "math",
+      "question": "Consider a tetrahedron with two isosceles triangle faces with side lengths $5\\sqrt{10}, 5\\sqrt{10},$ and $10$ and two isosceles triangle faces with side lengths $5\\sqrt{10}, 5\\sqrt{10},$ and $18.$ The four vertices of the tetrahedron lie on a sphere with center $S,$ and the four faces of the tetrahedron are tangent to a sphere with center $R.$ The distance $RS$ can be written as $\\tfrac{m}{n},$ where $m$ and $n$ are relatively prime positive integers. Find $m + n.$",
+      "answer": 223
+    }
+  ]
+}

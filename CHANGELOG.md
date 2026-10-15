@@ -181,6 +181,10 @@
 
 ### Routing and operations
 
+- Added an opt-in `solomon` API profile for Jev-style structured-decision
+  services: `/health` contract probing, first-class state/decision endpoint
+  labels, bounded privacy-safe state-to-replica affinity, and 404 owner
+  discovery after load-balancer restarts.
 - Added default-off time-decayed prefix affinity
   (`RJ_ROUTE_AFFINITY_HORIZON_MODE=observe|enforce`). Served fingerprint
   blocks older than a replica's estimated eviction horizon earn no routing

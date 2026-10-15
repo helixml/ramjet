@@ -141,7 +141,12 @@ impl OutputLimitObservation {
         unit_tokens: usize,
         max_units: usize,
     ) -> usize {
-        if unit_tokens == 0 || endpoint == Endpoint::Other {
+        if unit_tokens == 0
+            || matches!(
+                endpoint,
+                Endpoint::Other | Endpoint::States | Endpoint::Decisions
+            )
+        {
             return 1;
         }
         assert!(max_units > 0, "decode load cap must be positive");
@@ -162,7 +167,10 @@ impl OutputLimitObservation {
     /// the standard profile above that boundary. Missing or malformed limits
     /// conservatively prefer the standard profile.
     pub(crate) fn speculation_preference(self, endpoint: Endpoint) -> SpeculationPreference {
-        if endpoint == Endpoint::Other {
+        if matches!(
+            endpoint,
+            Endpoint::Other | Endpoint::States | Endpoint::Decisions
+        ) {
             return SpeculationPreference::Neutral;
         }
         match self.effective_bucket {

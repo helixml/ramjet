@@ -18,16 +18,16 @@
       "engines": [
         {
           "upstream": 0,
-          "label": "A · MTP3",
+          "label": "A · standard",
           "container": "qwen38flashnext-a",
-          "image": "sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3",
+          "image": "sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93",
           "gpus": [0, 1, 2, 3]
         },
         {
           "upstream": 1,
           "label": "B · standard",
           "container": "qwen38flashnext-b",
-          "image": "sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3",
+          "image": "sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93",
           "gpus": [4, 5, 6, 7]
         }
       ]
@@ -35,13 +35,13 @@
     {
       "id": "unified-tp8",
       "label": "Afterburner",
-      "description": "One MTP3 TP8 engine spanning all GPUs for burst latency.",
+      "description": "One standard-decoding TP8 engine spanning all GPUs for burst latency.",
       "engines": [
         {
           "upstream": 2,
-          "label": "Aero · MTP3",
+          "label": "Aero · standard",
           "container": "qwen38flashnext-tp8",
-          "image": "sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3",
+          "image": "sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93",
           "gpus": [0, 1, 2, 3, 4, 5, 6, 7]
         }
       ]

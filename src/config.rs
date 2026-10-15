@@ -42,6 +42,7 @@ const MIN_DSPARK_QUARANTINE_CONSECUTIVE_WINDOWS: usize = 3;
 const MIN_DSPARK_QUARANTINE_PROPOSED_TOKENS: usize = 256;
 const MAX_DSPARK_GUARD_EXPECTED_POSITIONS: usize = 16;
 const MAX_PREFIX_SINGLE_FLIGHT_CAPACITY: usize = 100_000;
+const MAX_DECISION_STATE_AFFINITY_CAPACITY: usize = 1_000_000;
 /// A week is far beyond any measured eviction horizon; the bound keeps the
 /// millisecond age arithmetic clear of overflow.
 const MAX_AFFINITY_HORIZON_SECONDS: u64 = 7 * 24 * 60 * 60;
@@ -104,6 +105,8 @@ pub struct Config {
     /// declares them. Operator-chosen names, unlike hosts, are safe to publish
     /// on `/health`.
     pub upstream_nodes: Option<Vec<String>>,
+    pub api_profile: ApiProfile,
+    pub decision_state_affinity_capacity: usize,
     pub upstream_admission_mode: UpstreamAdmissionMode,
     pub upstream_admission_timeout_ms: usize,
     /// How long an idle pooled upstream connection may be reused. It must stay
@@ -215,6 +218,30 @@ pub struct Config {
     /// Address the metrics listener binds. Defaults to `0.0.0.0:9090` and is
     /// overridden by `RJ_METRICS_ADDR` for hosts where those ports are taken.
     pub metrics_addr: SocketAddr,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApiProfile {
+    OpenAi,
+    Solomon,
+}
+
+impl ApiProfile {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Solomon => "solomon",
+        }
+    }
+
+    #[must_use]
+    pub const fn health_path(self) -> &'static str {
+        match self {
+            Self::OpenAi => "/v1/models",
+            Self::Solomon => "/health",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -765,6 +792,23 @@ impl Config {
             }
         };
         let upstream_token = get("RJ_UPSTREAM_TOKEN").filter(|value| !value.is_empty());
+        let api_profile = match get("RJ_API_PROFILE").as_deref().unwrap_or("openai") {
+            "openai" => ApiProfile::OpenAi,
+            "solomon" => ApiProfile::Solomon,
+            value => {
+                return Err(invalid(
+                    "RJ_API_PROFILE",
+                    value.to_owned(),
+                    "openai or solomon",
+                ));
+            }
+        };
+        let decision_state_affinity_capacity = bounded_positive(
+            &mut get,
+            "RJ_DECISION_STATE_AFFINITY_CAPACITY",
+            100_000,
+            MAX_DECISION_STATE_AFFINITY_CAPACITY,
+        )?;
 
         let route_alpha = parse(
             &mut get,
@@ -909,6 +953,15 @@ impl Config {
             &exact_route,
             &serving_runtime,
         )?;
+        if api_profile == ApiProfile::Solomon
+            && upstream_admission_mode != UpstreamAdmissionMode::Http
+        {
+            return Err(invalid(
+                "RJ_UPSTREAM_ADMISSION_MODE",
+                "compatibility".to_owned(),
+                "http when RJ_API_PROFILE=solomon",
+            ));
+        }
         let upstream_warmup_mode = match get("RJ_UPSTREAM_WARMUP_MODE").as_deref().unwrap_or("off")
         {
             "off" => WarmupAdmissionMode::Off,
@@ -1090,6 +1143,8 @@ impl Config {
             upstream_dp_ranks,
             upstream_rank_probe_timeout_ms,
             upstream_rank_probe_scope,
+            api_profile,
+            decision_state_affinity_capacity,
             upstream_admission_mode,
             upstream_warmup_mode,
             upstream_warmup_consecutive_successes,
@@ -3583,6 +3638,8 @@ mod tests {
     fn defaults_match_go_contract() {
         let config = Config::from_lookup(|_| None).unwrap();
         assert_eq!(config.upstreams[0].as_str(), "http://ds4-flash:8000/");
+        assert_eq!(config.api_profile, ApiProfile::OpenAi);
+        assert_eq!(config.decision_state_affinity_capacity, 100_000);
         assert_eq!(config.upstream_admission_mode, UpstreamAdmissionMode::Http);
         assert_eq!(config.upstream_admission_timeout_ms, 5_000);
         assert_eq!(config.upstream_pool_idle_timeout_ms, 4_000);
@@ -3675,6 +3732,28 @@ mod tests {
         assert_eq!(config.snapshot_route_attempt_timeout_ms, 30_000);
         assert_eq!(config.snapshot_route_reconnect_min_ms, 250);
         assert_eq!(config.snapshot_route_reconnect_max_ms, 5_000);
+    }
+
+    #[test]
+    fn solomon_profile_selects_structured_decision_contract() {
+        let config =
+            Config::from_lookup(|key| (key == "RJ_API_PROFILE").then(|| "solomon".to_owned()))
+                .unwrap();
+        assert_eq!(config.api_profile, ApiProfile::Solomon);
+        assert_eq!(config.api_profile.health_path(), "/health");
+
+        let error = Config::from_lookup(|key| match key {
+            "RJ_API_PROFILE" => Some("jev".to_owned()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                key: "RJ_API_PROFILE",
+                ..
+            }
+        ));
     }
 
     #[test]

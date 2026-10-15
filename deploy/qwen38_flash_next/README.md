@@ -1,24 +1,52 @@
 # Qwen3.8-Flash-Next deployment
 
-This directory is the canonical one-file deployment for the official
-`Qwen/Qwen3.8-Flash-Next-FP8` checkpoint on node06. It defines two NUMA-local
+## Current node06 production (2026-09-26)
+
+Qwen A on GPUs 0–3 serves the verified
+[`ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4)
+checkpoint at revision `3ff0520224f264a2d0ac4ab56ece8f2f13aadb38`.
+The client-facing model ID remains `qwen3.8-flash-next`. The checkpoint
+manifest is `swift15-model-manifest.json` (verified manifest SHA-256
+`de956cabfc92ef5cd382e2557d03aa22d25fb57be3fe9048ed844d6863800287`).
+The canonical `docker-compose.yaml` has SHA-256
+`1471faed18de14356202ad25fbb3a339777ac44687e5232ce3f11e5d812296c2`
+and pins these weights and the existing vLLM image. Its admitted Qwen A shape
+is TP4, 16 GB KV cache per rank, 16 sequences,
+4,096 batched tokens, and 262,144 maximum model tokens.
+
+The live shared stack is `/home/luke/inference/qwen38_glm53_kev/docker-compose.yaml`.
+Its unchanged `ds4-loadbalancer` serves Qwen A alongside GLM B/C and KEV; the
+second Qwen engine is stopped. The Swift rollout recreated only Qwen A from
+this directory's canonical Compose. The shared LB has tokenizer and exact
+placement modes off, and remained running throughout the rollout. The guarded
+qualification, rollback, and matched reasoning-task comparison are in
+`EXPERIMENTS.md` under 2026-09-26 and 2026-09-27.
+
+## Historical NVIDIA deployment record
+
+This directory is the canonical one-file deployment for NVIDIA's
+`nvidia/Qwen3.8-Flash-Next-NVFP4` checkpoint on node06. It defines two NUMA-local
 TP4 engines, one default-stopped TP8 adaptive candidate, and the ramjet load
 balancer/controller. Do not add Compose overlays.
 
 The checkpoint and image are immutable inputs:
 
-- model revision: `bcd9f01ddc9cff2316eb84281bebcd5b058bddce`
-- model payload: 185,502,232,570 bytes across 131 safetensors shards
-- linux/amd64 vLLM image: `sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
+- model revision: `fc694b54fb0174e0913e6adf86691ef85a4ead47`
+- model payload: 132,734,506,847 bytes, including 132,680,249,378 bytes across 11 safetensors shards
+- verified model manifest SHA-256: `ee0f8ddac78ae1e7383cee373c7f53ff1b8308712a71add77a60f07bf160b315`
+- linux/amd64 vLLM image: `sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93`
+- vLLM runtime: `0.28.1rc1.dev472+gd9105ea80`, build revision `d9105ea8001e0a6d77a96327d17515bb5791fb36`
+- earlier official FP8 checkpoint: `bcd9f01ddc9cff2316eb84281bebcd5b058bddce`, 185,502,232,570 bytes across 131 safetensors shards, served by `sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
 - released ramjet Compose default: `v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673` (deployed and verified on the node06 `qwen38_glm53_kev` shared stack on 2026-10-07; see EXPERIMENTS.md)
-- node06-qualified live ramjet image: `v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673` (previous: locally built alias image `sha256:8197c573270f33ed32e1a81947763e3a5fa8ec7b6ceddd269b5459c9ef205151` from 2026-10-03, then `rust-962b7b2@sha256:53047a816c8ae1dbade7e27b86d2e3eda40cfeaa48826ae06bf2ac1d35a27cc6`, the v0.6.2 long-prompt lane build)
-- exact-route manifest: `compat/qwen38-flash-next-r134.json`, SHA-256 `a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67`
+- node06-qualified live ramjet image: `v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673` (previous: locally built alias image `sha256:8197c573270f33ed32e1a81947763e3a5fa8ec7b6ceddd269b5459c9ef205151` from 2026-10-03, then the Swift-transition build `rust-0c7c7bc@sha256:f9215991a15a2d5ea223c84bfc4a2f7af423b0a3d4868423543c5d8a5315615f`, then `rust-962b7b2@sha256:53047a816c8ae1dbade7e27b86d2e3eda40cfeaa48826ae06bf2ac1d35a27cc6`, the v0.6.2 long-prompt lane build)
+- exact-route manifest (retired; retained for evidence only): `compat/qwen38-flash-next-r134.json`, SHA-256 `a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67`
 
-The day-zero vLLM image config labels its source/build revision as `unknown`.
-The digest makes the bytes immutable, but it does not supply source provenance;
-the recorded runtime/package capture, correctness, and performance qualification
-establish this deployment without inventing missing image-source provenance.
-Do not turn the recipe page into an authority claim.
+The pinned NVIDIA revision contains the corrected `FP8_PB_WO` MTP metadata.
+Standard decoding is nevertheless the only admitted profile because the
+corresponding vLLM MTP change is not in the pinned runtime. Both engines use
+ModelOpt quantization, and exact placement stays off because the retained
+compatibility manifest binds the retired FP8 engine image. Tokenizer shadowing
+and KV-event shadow observation remain enabled; neither can select placement.
 
 The recipe's Inferact NVFP4 alternative was also checked at immutable revision
 `103a7608316173ca6edd49929544244de7ffda70`. Its complete max-seqs-16,
@@ -30,22 +58,19 @@ queue. It is rejected as a deployment recipe. This is not a weight-only claim:
 the candidate intentionally qualified the upstream recipe as published. See
 the 2026-08-28 NVFP4 entry in `EXPERIMENTS.md`.
 
-Production now uses both TP4 engines: MTP3 engine A on GPUs 0-3 and standard
-decoding engine B on GPUs 4-7. The load balancer is owned by this Compose project
-and reports 2/2 HTTP admission. HTTP admission describes engine readiness; the
-independent exact-route lane is enabled for the full valid-session cohort.
-Both engines independently passed direct identity, deterministic agent/tool,
-code-decode, prefix-cache, long-context, and multimodal gates before pair
-admission. The temporary canary controller was removed after promotion so an
-obsolete action cannot silently restore the retired baseline.
+Production uses two byte-identical standard-decoding TP4 engines: A on GPUs 0-3
+and B on GPUs 4-7. The load balancer is owned by this Compose project and uses
+ordinary prefix-affinity routing with HTTP admission. A future exact-route
+campaign needs a newly generated runtime manifest plus fresh live/replay event
+qualification; the old FP8 authority must never be reused for these weights.
 
 ## Adaptive topology controller
 
 Ramjet owns the two named serving shapes in `adaptive-config.json`:
 
-- **Twin Cruise** — the qualified MTP3/standard TP4 pair, the initial and
+- **Twin Cruise** — the standard/standard TP4 pair, the initial and
   rollback profile for sustained throughput and cache locality;
-- **Afterburner** — one MTP3 TP8 process spanning GPUs 0–7, intended for a
+- **Afterburner** — one standard-decoding TP8 process spanning GPUs 0–7, intended for a
   short burst-latency qualification before any automatic promotion.
 
 The TP8 service is behind Compose profile `adaptive`. Deployment must run
@@ -115,15 +140,13 @@ memory admission becomes available. Every request-generating cell runs under
 
 ## Day-zero option review
 
-The vLLM recipe updated on 2026-08-26 exposes three weight variants: Inferact
-NVFP4 (130 GB stated minimum), official FP8 (265 GB), and official BF16
-(423 GB). The initial candidate deliberately uses the official FP8 weights:
-TP4 is validated by the recipe and four 96 GB GPUs provide enough aggregate
-capacity while avoiding an unqualified community quantization change. The
-recipe's supported single-node strategies are TP, tensor+expert parallel
-(TEP), and data+expert parallel (DEP). This deployment starts with TEP4; DEP
-requires PLE CPU offload and therefore is not admissible with node06's present
-host-memory headroom.
+The original 2026-08-26 deployment deliberately chose official FP8 over the
+then-available Inferact NVFP4 recipe. NVIDIA subsequently published this
+independent ModelOpt NVFP4 checkpoint with complete immutable weights and an
+upstream vLLM serving contract. The old Inferact result above remains useful
+historical evidence, but it is not evidence about NVIDIA's checkpoint. This
+deployment retains TEP4; DEP requires PLE CPU offload and is not admissible
+with node06's present host-memory headroom.
 
 The cache-related controls are distinct:
 
@@ -147,8 +170,8 @@ activation and auto-sized KV down to 4.48 GiB. The canonical command therefore
 pins the engine-recommended 40,190,174,004-byte allocation; guarded load must
 still prove that the explicit allocation survives the admitted batch limits.
 
-The other recipe features are tool calling and reasoning (enabled), MTP3
-speculative decoding (enabled after the non-speculative baseline passed), text-only
+The other recipe features are tool calling and reasoning (enabled), MTP
+speculative decoding (deferred until its runtime support is merged and independently qualified), text-only
 mode (rejected for the multimodal production target), and static YaRN to one
 million tokens (deferred until native 262K behavior is qualified). The official
 recipe uses 256 sequences and 90% GPU utilization. The first RTX PRO candidate
@@ -157,7 +180,11 @@ An attempted 85% boot measured -0.27 GiB available for KV blocks after warmup
 and correctly failed before serving. Each scheduler limit is raised
 independently only after observed cache and memory telemetry shows room.
 
-## Qualified TP4 pair
+## Retired FP8 qualification record
+
+The measurements in this section describe the previous official FP8 pair and
+are retained as rollback/comparison evidence. They are not capacity or
+performance claims for the NVIDIA NVFP4 deployment.
 
 Both active engines are healthy with restart count zero. Engine A retains MTP3
 and reports a 2,667,258-token GPU KV pool, enough for 10.17 native 262K
@@ -206,7 +233,8 @@ the first full matrix. The five-case agent gate, 4/4 deep-context corpus, and a
 This flag is retained as a measured low/mid-batch improvement, not as a fix for
 the MTP3 c32 crossover.
 
-Qwen exact placement is admitted and live. Ramjet uses the dedicated
+Under the retired FP8 deployment, Qwen exact placement was admitted and live.
+Ramjet used the dedicated
 `qwen3.8-flash-next` renderer, SHA-pinned `tokenizer.json` and
 `tokenizer_config.json`, and the committed
 `compat/qwen38-flash-next-r134.json` manifest. Both engines publish live KV
@@ -215,8 +243,8 @@ to be connected, replayed, trusted, and hybrid-cache placement-ready before
 their inventories may influence routing. Unknown or unlearned cache-group
 kinds fence placement without affecting approximate serving.
 
-Runtime attestation follows adaptive serving membership: the parked TP8
-candidate is probed and remains fenced, but it cannot revoke exact placement
+Runtime attestation followed adaptive serving membership: the parked TP8
+candidate was probed and remained fenced, but it could not revoke exact placement
 for the active TP4 pair. Every topology transition first clears exact-route
 authority, changes the router membership, and then admits only the new active
 set. The Compose replay envelope is the qualified 8,192 batches with a
@@ -239,14 +267,13 @@ failure, event disconnect, invalid replay, or insufficient exact gain preserves
 the approximate route. This is a fail-closed routing optimization, not a new
 serving-health dependency.
 
-The checked-in Compose defaults `RJ_EXACT_ROUTE_CANARY_BPS` to the qualified
-full cohort of `10000` and requires the independent canary key from node06's
-protected mode-0600 `.env`. A missing key fails during Compose rendering
-instead of silently disabling placement. Never commit or print that key. An
-explicit `RJ_EXACT_ROUTE_CANARY_BPS=0` remains the instant behavior rollback.
+The retired Compose defaulted `RJ_EXACT_ROUTE_CANARY_BPS` to the qualified full
+cohort of `10000` and required the independent canary key from node06's
+protected mode-0600 `.env`. The NVIDIA NVFP4 Compose instead fixes the cohort
+to zero and keeps `RJ_EXACT_ROUTE_MODE=off` until new runtime authority exists.
 
-This default-on boundary covers every serving improvement qualified for this
-deployment: phase-aware and bounded decode load, mixed MTP3/standard profile
+That historical default-on boundary covered every serving improvement qualified
+for the FP8 deployment: phase-aware and bounded decode load, mixed MTP3/standard profile
 routing, prefix single-flight, passive warmup enforcement, local Qwen
 tokenization, live/replay KV inventory, and exact placement. Three other
 settings remain deliberately non-enforcing: projected-load scoring did not
@@ -280,18 +307,21 @@ prefix hits while regressing returning-probe TTFT by 15%, blocker TTFT p95 by
 qualified value.
 
 The checked-in Compose default follows the repository-wide released-image
-policy. It is v0.7.0, which was released after CI and has not been qualified
-on node06; the node06-qualified image is still the v0.6.2 build
-`rust-962b7b2` above, so pass it as an explicit `LB_IMAGE` until v0.7.0 is
-qualified. Emergency candidate
+policy. It is v0.8.0, which was released after CI and deployed and verified on
+the node06 `qwen38_glm53_kev` shared stack on 2026-10-07 (see
+`EXPERIMENTS.md`). Emergency candidate
 or rollback renders must carry an explicit immutable `LB_IMAGE` override on
 every `docker compose` invocation, including cleanup traps; ordinary
 production renders use the released default. The canonical Compose SHA-256 is
-`f4d4ed79437af1661e479d29a95a83bd5ce09d576575a0a9dde3150c3799f85a`; the file
-last admitted on node06, with the v0.6.2 default, was
+`1471faed18de14356202ad25fbb3a339777ac44687e5232ce3f11e5d812296c2`; the
+Swift-transition render with the `rust-0c7c7bc` default was
+`9f81085ccaf2b385d32a58ae12aaf6fdfe2e7991b831fe6c6dca193dfbc7054e`; the
+previous released-default render was
+`f4d4ed79437af1661e479d29a95a83bd5ce09d576575a0a9dde3150c3799f85a`, and the
+file last admitted on node06 with the v0.6.2 default was
 `a4e00f81ab1a2ec8b67fb5c64349e216383cbc1feced84965f959b300ecfef0c`;
 the adaptive policy SHA-256 is
-`39bbd0f4ca311ae431f7cbf6e9230510c0ce1beaea0e9fe9ee58dd57bd6c6b8a`.
+`af677195c8f81e3a656f483fcaa387c718813bb5adc4e92a263dd49e29cf3fa5`.
 
 The load balancer joins both the Flash serving network and the existing
 `qwen38_27b_default` bridge. The latter is observation-only: node06's host
@@ -300,16 +330,47 @@ serving healthy while silently losing machine telemetry. It can be retired
 only after the host agent is deliberately rebound and the replacement URL is
 qualified from inside the final load-balancer container.
 
-## Checkpoint revision currency (checked 2026-08-27)
+## Checkpoint revision currency (checked 2026-09-07)
 
-`Qwen/Qwen3.8-Flash-Next-FP8` mutable `main` has moved past our pin
-`bcd9f01ddc9cff2316eb84281bebcd5b058bddce` to
-`970c569adaca6b35532111fd6b27351b2baefe50`. The delta is `README.md` only;
-`config.json`, `chat_template.jinja`, `generation_config.json`, both tokenizer
-files, and all 131 safetensors shards are byte-identical across the two
-revisions. Our pin is therefore still the latest substantive revision and no
-re-download or re-qualification is warranted. Re-check the revision tree, not
-just the `lastModified` timestamp, before concluding that a Hub change matters.
+The NVIDIA repository's mutable `main` resolved to the pinned revision
+`fc694b54fb0174e0913e6adf86691ef85a4ead47` during staging. That revision fixes
+the MTP serving metadata from the earlier `fab0aec` tree, so the older revision
+must not be substituted even though most weight bytes are unchanged. Production
+uses the full immutable revision and the checked model manifest; a future Hub
+update requires a fresh tree diff and verifier run rather than resolving
+`main` during container startup.
+
+## SM120 NVFP4 linear-kernel selection — measured, rejected (2026-09-09)
+
+vllm-project/vllm#55170 (merged 2026-09-08) reorders
+`_POSSIBLE_NVFP4_KERNELS[CUDA]`, demoting the weight-only
+`FlashInferCuteDslNvFp4W4A16LinearKernel` below the W4A4 kernels. Before it,
+`auto` takes the weight-only kernel on SM120/121 for a W4A4-capable checkpoint.
+The pinned runtime `0.28.1rc1.dev472+gd9105ea80` has the pre-fix order, which
+was confirmed live on the box. Upstream measured +23.8% output tok/s and 36%
+lower TTFT from `--linear-backend=flashinfer_cutlass` on a *dense*
+Qwen3.8-27B-NVFP4.
+
+**It does not transfer to this deployment, and no flag should be set.** The
+checkpoint quantizes only MoE expert weights to NVFP4: `config_groups.group_0`
+targets exactly `model.language_model.layers.*.mlp.experts`, and every dense
+linear layer — `self_attn*`, `linear_attn*`, `mlp.shared_expert*`, `mlp.gate`,
+`hyper_connection*`, `lm_head`, `embed_tokens`, `visual*` — is in the
+checkpoint's `ignore` list. There are therefore no NVFP4 dense linear layers
+for `--linear-backend` to act on. The NVFP4 work all runs through the MoE
+backend, chosen by the separate `moe_backend` setting, which already resolves
+to the W4A4 `FLASHINFER_CUTLASS` kernel under `auto`:
+
+```
+[nvfp4.py:304] Using 'FLASHINFER_CUTLASS' NvFp4 MoE backend out of potential
+backends: ['FLASHINFER_TRTLLM', 'FLASHINFER_CUTEDSL', ...]
+```
+
+A guarded direct-engine A/B on engine B measured the predicted no-op: aggregate
+throughput moved -0.3%/-0.4%/+0.6% at c1/c8/c16 with all cells reconciling
+natively. See the 2026-09-09 entry in `EXPERIMENTS.md`. The tunable was removed
+again rather than retained, so the canonical Compose keeps no dead knob; a
+future *dense* NVFP4 checkpoint would need this evaluated afresh.
 
 ## Upstream recipe delta (vLLM recipes, 2026-08-27)
 

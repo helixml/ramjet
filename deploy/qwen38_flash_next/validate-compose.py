@@ -13,12 +13,18 @@ from typing import Any
 HERE = pathlib.Path(__file__).resolve().parent
 COMPOSE = HERE / "docker-compose.yaml"
 ADAPTIVE_CONFIG = HERE / "adaptive-config.json"
-MODEL_REPOSITORY = "Qwen/Qwen3.8-Flash-Next-FP8"
-MODEL_REVISION = "bcd9f01ddc9cff2316eb84281bebcd5b058bddce"
-MODEL_SOURCE = "/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c"
+MODEL_REPOSITORY = "ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4"
+MODEL_REVISION = "3ff0520224f264a2d0ac4ab56ece8f2f13aadb38"
+MODEL_SOURCE = (
+    "/prod/models/ukisai/"
+    "Swift-1.5-Qwen3.8-Flash-Next-NVFP4-3ff0520224f264a2d0ac4ab56ece8f2f13aadb38"
+)
 ENGINE_IMAGE = (
     "vllm/vllm-openai@sha256:"
-    "0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3"
+    "5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93"
+)
+ENGINE_IMAGE_ID = (
+    "sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93"
 )
 LB_IMAGE = (
     "ghcr.io/helixml/ramjet:v0.8.0@sha256:"
@@ -37,15 +43,15 @@ ROUTING_SHAPE = {
     "RJ_ROUTE_DECODE_LOAD_UNIT_TOKENS": "256",
     "RJ_ROUTE_DECODE_MAX_LOAD_UNITS": "4",
     "RJ_ROUTE_PROJECTED_LOAD": "false",
-    "RJ_ROUTE_SPECULATION_MODE": "prefer",
-    "RJ_ROUTE_SPECULATION_PROFILES": "mtp,standard,mtp",
+    "RJ_ROUTE_SPECULATION_MODE": "off",
+    "RJ_ROUTE_SPECULATION_PROFILES": "standard,standard,standard",
     "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE": "prefer",
     "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MIN_BLOCKS": "8",
     "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_CAPACITY": "1024",
     "RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MAX_LOAD_DELTA": "1",
     "RJ_ROUTE_AFFINITY_HORIZON_MODE": "observe",
     "RJ_ROUTE_AFFINITY_HORIZON_SOURCE": "fill",
-    "RJ_ROUTE_KV_CAPACITY_TOKENS": "2667258,3033380,-",
+    "RJ_ROUTE_KV_CAPACITY_TOKENS": "-,-,-",
     "RJ_UPSTREAM_WARMUP_MODE": "enforce",
     "RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES": "3",
     "RJ_UPSTREAM_WARMUP_STABLE_SECONDS": "30",
@@ -55,7 +61,7 @@ ENGINE_SHAPE = {
         "cpuset": "0-11,24-35",
         "gpus": ["0", "1", "2", "3"],
         "port": "8040",
-        "profile": "mtp",
+        "profile": "standard",
         "adaptive_profile": "split-tp4",
         "upstream": "0",
         "tp": "4",
@@ -73,7 +79,7 @@ ENGINE_SHAPE = {
         "cpuset": "0-47",
         "gpus": [str(index) for index in range(8)],
         "port": "8042",
-        "profile": "mtp",
+        "profile": "standard",
         "adaptive_profile": "unified-tp8",
         "upstream": "2",
         "tp": "8",
@@ -82,14 +88,16 @@ ENGINE_SHAPE = {
 REQUIRED_ARGUMENTS = {
     "/workspace/model",
     "--served-model-name=qwen3.8-flash-next",
-    "--revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce",
-    "--tokenizer-revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce",
+    "--revision=3ff0520224f264a2d0ac4ab56ece8f2f13aadb38",
+    "--tokenizer-revision=3ff0520224f264a2d0ac4ab56ece8f2f13aadb38",
     "--enable-expert-parallel",
     "--gpu-memory-utilization=0.90",
-    "--kv-cache-memory=40190174004",
+    "--kv-cache-memory=16000000000",
     "--max-model-len=262144",
-    "--max-num-seqs=64",
-    "--max-num-batched-tokens=8192",
+    "--max-num-seqs=16",
+    "--max-num-batched-tokens=4096",
+    "--quantization=modelopt",
+    "--trust-remote-code",
     '--kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq",'
     '"endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558",'
     '"buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}',
@@ -261,16 +269,16 @@ def validate(document: dict[str, Any]) -> None:
     exact_shape = {
         "RJ_TOKENIZER_MODE": "local-shadow",
         "RJ_TOKENIZER_PATH": "/models/qwen38-flash-next/tokenizer.json",
-        "RJ_TOKENIZER_SHA256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+        "RJ_TOKENIZER_SHA256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
         "RJ_CHAT_TEMPLATE_PATH": "/models/qwen38-flash-next/tokenizer_config.json",
-        "RJ_CHAT_TEMPLATE_SHA256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
-        "RJ_EXACT_ROUTE_MODE": "placement",
+        "RJ_CHAT_TEMPLATE_SHA256": "66e427c470fe580fe8c7b5725d857af23d8417e37fae62667ec698306a19987b",
+        "RJ_EXACT_ROUTE_MODE": "off",
         "RJ_EXACT_ROUTE_MANIFEST_PATH": "/compat/qwen38-flash-next-r134.json",
         "RJ_EXACT_ROUTE_MANIFEST_SHA256": "a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67",
         "RJ_EXACT_ROUTE_MIN_GAIN_TOKENS": "8192",
         "RJ_EXACT_ROUTE_MAX_LOAD_DELTA": "0",
-        "RJ_EXACT_ROUTE_CANARY_BPS": "10000",
-        "RJ_EXACT_ROUTE_CANARY_KEY": EXACT_CANARY_KEY,
+        "RJ_EXACT_ROUTE_CANARY_BPS": "0",
+        "RJ_EXACT_ROUTE_CANARY_KEY": "",
         "RJ_KV_EVENT_MODE": "shadow",
         "RJ_KV_EVENT_LIVE_ENDPOINTS": "tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557,tcp://qwen38flashnext-tp8:5557",
         "RJ_KV_EVENT_REPLAY_ENDPOINTS": "tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558,tcp://qwen38flashnext-tp8:5558",
@@ -325,12 +333,17 @@ def validate(document: dict[str, Any]) -> None:
     if set(profile_engines) != {"split-tp4", "unified-tp8"}:
         fail("adaptive profile set changed")
     configured = {
-        engine["container"]: (str(engine["upstream"]), [str(gpu) for gpu in engine["gpus"]])
+        engine["container"]: (
+            str(engine["upstream"]),
+            [str(gpu) for gpu in engine["gpus"]],
+            engine.get("image"),
+        )
         for engines in profile_engines.values()
         for engine in engines
     }
     expected_configured = {
-        name: (shape["upstream"], shape["gpus"]) for name, shape in ENGINE_SHAPE.items()
+        name: (shape["upstream"], shape["gpus"], ENGINE_IMAGE_ID)
+        for name, shape in ENGINE_SHAPE.items()
     }
     if configured != expected_configured:
         fail("adaptive config no longer matches Compose engine authority")
@@ -353,8 +366,8 @@ def main() -> int:
         print(str(error))
         return 1
     print(
-        "Qwen3.8-Flash-Next Compose validation passed: adaptive TP4-pair/TP8 "
-        "profiles with pinned controller and live/replay KV-event authority"
+        "Qwen3.8-Flash-Next Compose validation passed: pinned Swift 1.5 NVFP4 "
+        "standard-decoding TP4-pair/TP8 profiles with placement disabled"
     )
     return 0
 

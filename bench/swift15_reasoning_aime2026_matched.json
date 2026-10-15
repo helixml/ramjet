@@ -1,0 +1,23 @@
+{
+  "dataset": "MathArena/aime_2026",
+  "revision": "d2de22f3c656b4f56cf8981212186377d1e23bc3",
+  "split": "train",
+  "problem_indices": [
+    10,
+    12
+  ],
+  "cases": [
+    {
+      "question_id": "aime2026-10",
+      "category": "math",
+      "question": "Let $\\triangle ABC$ have side lengths $AB = 13, BC = 14,$ and $CA = 15.$ Triangle $\\triangle A'B'C'$ is obtained by rotating $\\triangle ABC$ about its circumcenter so that ${}\\overline{AC}$ is perpendicular $\\overline{BC},$ with $A'$ and $B$ not on the same side of line $B'C'.$ Find the integer closest to the area of hexagon $AA'CC'BB'.$",
+      "answer": 156
+    },
+    {
+      "question_id": "aime2026-12",
+      "category": "math",
+      "question": "Triangle $\\triangle ABC$ lies in plane $\\mathcal P$ with $AB = 6, AC = 4,$ and $\\angle BAC = 90^\\circ.$ Let $D$ be the reflection across $\\overline{BC}$ of the centroid of $\\triangle ABC. {}$ Four spheres, all on the same side of $\\mathcal P,$ have radii $1, 2, 3,$ and $r$ and are tangent to $\\mathcal P$ at points $A, B, C,$ and $D,$ respectively. The four spheres are also each tangent to a second plane $\\mathcal T$ and are all on the same side of $\\mathcal T.$ The value of $r$ can be written as $\\tfrac mn,$ where $m$ and $n$ are relatively prime positive integers. Find $m+n.$",
+      "answer": 161
+    }
+  ]
+}
