@@ -73,12 +73,9 @@ resolving across the rename.
 | `RJ_MACHINEVIEW_UPSTREAM_GPUS` | unset | Optional observation-only dense GPU ownership map, with semicolon-separated sets matching `RJ_UPSTREAM` (for example `0,1,2,3;4,5`). Machine view derives displayed TP size from each set. GPU indices must be unique. |
 | `RJ_MODEL_ALIASES` | unset | Comma-separated `alias=canonical-model` pairs, e.g. `qwen3.8-flash-next=glm-5.3-flash`. Rewrites the request before preparation and routing, including streaming requests; responses retain the canonical model name. Targets must occur in `RJ_UPSTREAM_MODELS`; alias chains, duplicate aliases, and canonical-name collisions fail startup. Discovery includes aliases only when their canonical model is available. |
 | `RJ_UPSTREAM_TOKEN` | unset | Bearer token used for upstream requests and probes. |
-| `RJ_UPSTREAM_DP_RANKS` | unset | Dense map of one SGLang data-parallel attention rank (0–255) or `-` per `RJ_UPSTREAM` entry. An upstream with a rank pins every request to it by appending `"routed_dp_rank"` to the JSON body, so each rank of one engine can be listed as its own upstream and chosen by prefix affinity. An engine URL may repeat only with different ranks. Metric labels become `<url>#dp<rank>`. |
-| `RJ_UPSTREAM_RANK_PROBE` | `off` | `on` adds a one-token generation, pinned with `routed_dp_rank`, to each DP-rank upstream's readiness probe. SGLang keeps answering `/health` and `/v1/models` while one rank's scheduler is wedged, so only a generation on that rank detects it. `all` sends the same generation to every OpenAI-profile upstream that is not parked, pinning only DP ranks: an engine front end can also stay green while its scheduler never receives a request. It costs one tiny generation per upstream per probe round, visible in engine request counts and latency histograms, and on a DP-attention engine without `RJ_UPSTREAM_DP_RANKS` it reaches only the rank the engine picks. A probe timeout is overridden by a real completion on the upstream in the last 30 seconds, so a busy one is not fenced; an engine that answers the generation with an error, including `429` or `503`, is fenced at once. `http` admission only; with `compatibility` admission no generation is sent. |
-| `RJ_UPSTREAM_RANK_PROBE_TIMEOUT_MS` | `20000` | Budget for that generation (1 to 300000). |
-| `RJ_UPSTREAM_CONNECT_TIMEOUT_MS` | `30000` | TCP connect budget per upstream attempt (1 to 300000). Lower it for replicas on other nodes so an unreachable machine fails over quickly. |
-| `RJ_ROUTE_MAX_ATTEMPTS` | unset (every serving replica) | Most candidates one request tries before returning the last failure (1 to 64). Unset keeps trying every serving replica, which grows with the fleet. After a failure, replicas on other nodes are tried before the failed replica's node siblings, and a refused connection marks every upstream sharing that engine URL (its other DP ranks) down. |
 | `RJ_UPSTREAM_POOL_IDLE_TIMEOUT_MS` | `4000` | How long an idle pooled upstream connection may be reused (1 to 300000). Keep it below the engines' HTTP keep-alive: vLLM and SGLang both close idle connections after 5 seconds, and a request written onto a socket the server is closing fails as `protocol`, fails over, and marks a healthy replica down until its next probe. |
+| `RJ_API_PROFILE` | `openai` | Upstream HTTP contract: `openai` probes `/v1/models`; `solomon` probes `/health`, requires `contract: solomon-v1`, and enables reusable decision-state affinity. |
+| `RJ_DECISION_STATE_AFFINITY_CAPACITY` | `100000` | Maximum learned opaque state-to-replica bindings for the `solomon` profile. Raw state IDs are never retained. |
 | `RJ_UPSTREAM_WARMUP_MODE` | `off` | `off`, observation-only `shadow`, or `enforce` passive admission for a replica recovering from observed health loss. HTTP admission only. |
 | `RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES` | `3` | Successful existing readiness probes required after recovery before passive warmup admits the replica. |
 | `RJ_UPSTREAM_WARMUP_STABLE_SECONDS` | `30` | Minimum healthy interval from the first successful recovery probe to admission. |
@@ -269,8 +266,46 @@ reliability state, inflight work, load units, and index size. It returns `200 ok
 serve. Successful proxied responses include `X-Ramjet-Upstream` with an
 opaque replica ordinal.
 
-Passive warmup sends no synthetic inference requests. It reuses the existing
-`/v1/models` readiness result after a replica has first been observed unhealthy.
+### Structured decision models (Solomon / Jev style)
+
+[Solomon](https://huggingface.co/DoccyHealth/Solomon) is a structured
+document-decision service rather than an OpenAI chat server. It exposes
+`POST /states`, `POST /v1/decide`, and
+`POST /states/<state_id>/decide`, and reports readiness at `GET /health`. Use
+the explicit profile so ramjet probes and routes that contract correctly:
+
+```yaml
+environment:
+  RJ_API_PROFILE: solomon
+  RJ_UPSTREAM: http://solomon-a:8767,http://solomon-b:8767
+  # Optional; this bounds learned affinity, not the upstream document store.
+  RJ_DECISION_STATE_AFFINITY_CAPACITY: 100000
+```
+
+The profile preserves request and response bodies. After a replica creates or
+successfully serves a state, ramjet keeps a capacity-bounded SHA-256 digest of
+the opaque `state_id` mapped to that replica; it never retains or exports the
+raw identifier. Later decisions prefer the learned owner while respecting
+ordinary health and drain fences. If ramjet has restarted and no longer knows
+the owner, a 404 from one healthy replica is treated as replica-local state
+absence and the request is tried on the next healthy replica. A successful
+response relearns the owner, so subsequent calls go directly there.
+
+Only recognized saved-state decision requests get the 404 discovery behavior.
+State creation is never retried merely because an upstream returns 404, and
+ordinary OpenAI traffic is unchanged. The affinity table is process-local; the
+bounded discovery path is what makes existing upstream states reachable after
+a ramjet restart. `RJ_UPSTREAM_ADMISSION_MODE=compatibility` remains an
+OpenAI/vLLM identity path and is not available with the Solomon profile.
+
+This profile targets Solomon's published `solomon-v1` HTTP contract. It is
+"Jev style" in the product sense—parallel, deterministic structured decisions
+instead of generated strings—but it does not claim wire compatibility with the
+commercial Jev API.
+
+Passive warmup sends no synthetic inference requests. It reuses the configured
+readiness result (`/v1/models` for `openai`, `/health` for `solomon`) after a
+replica has first been observed unhealthy.
 `shadow` publishes the counterfactual readiness without fencing. `enforce`
 requires both the configured consecutive-success count and stable interval;
 the peer continues serving in the meantime. Reachability remains visible in

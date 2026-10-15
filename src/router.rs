@@ -225,6 +225,38 @@ impl Decision {
         true
     }
 
+    /// Promote a state-owning upstream without bypassing the router's serving
+    /// health decision. Stateful decision services cannot execute a saved
+    /// document branch on an arbitrary replica, so this authority is stronger
+    /// than ordinary prefix affinity once the owner has been observed.
+    pub(crate) fn prefer_upstream(&mut self, upstream: usize) -> bool {
+        let Some(candidate_position) = self
+            .candidates
+            .iter()
+            .position(|candidate| *candidate == upstream)
+        else {
+            return false;
+        };
+        let Some(state_position) = self
+            .candidate_state
+            .iter()
+            .position(|state| state.index == upstream && state.healthy)
+        else {
+            return false;
+        };
+        self.candidates.swap(0, candidate_position);
+        self.candidate_state.swap(0, state_position);
+        for (rank, state) in self.candidate_state.iter_mut().enumerate() {
+            state.rank = rank;
+        }
+        let selected = &self.candidate_state[0];
+        self.overlap_blocks = selected.overlap_blocks;
+        self.affinity_blocks = selected.affinity_blocks;
+        self.load_units = selected.request_load_units;
+        self.outcome = Outcome::StateAffinity;
+        true
+    }
+
     /// Preserve a bounded decode reservation after any exact-prefix
     /// recomputation has adjusted candidate-specific prefill work.
     pub(crate) fn apply_request_load_floor(&mut self, load_floor: usize) {
@@ -250,6 +282,7 @@ pub enum Outcome {
     RoundRobin,
     Single,
     Exact,
+    StateAffinity,
 }
 
 impl Outcome {
@@ -261,6 +294,7 @@ impl Outcome {
             Self::RoundRobin => "rr",
             Self::Single => "single",
             Self::Exact => "exact",
+            Self::StateAffinity => "state",
         }
     }
 }

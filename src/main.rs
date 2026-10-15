@@ -203,6 +203,8 @@ fn log_startup(config: &Config) {
         api_addr = %config.api_addr,
         metrics_addr = %config.metrics_addr,
         multi_model = !config.upstream_models.is_empty(),
+        api_profile = config.api_profile.label(),
+        decision_state_affinity_capacity = config.decision_state_affinity_capacity,
         upstream_admission_mode = ?config.upstream_admission_mode,
         upstream_admission_timeout_ms = config.upstream_admission_timeout_ms,
         upstream_warmup_mode = ?config.upstream_warmup_mode,

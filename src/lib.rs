@@ -12,6 +12,7 @@ pub mod companion_runtime;
 pub mod companion_service;
 pub mod compat;
 pub mod config;
+mod decision_state;
 pub mod digest_index;
 pub mod dspark_guard;
 pub mod dspark_guard_store;

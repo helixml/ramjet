@@ -9,6 +9,8 @@ pub enum Endpoint {
     Responses,
     Completions,
     SystemOne,
+    States,
+    Decisions,
     Other,
 }
 
@@ -21,14 +23,28 @@ impl Endpoint {
             Self::Responses => "responses",
             Self::Completions => "completions",
             Self::SystemOne => "systemone",
+            Self::States => "states",
+            Self::Decisions => "decisions",
             Self::Other => "other",
         }
+    }
+
+    #[must_use]
+    pub const fn is_generation(self) -> bool {
+        matches!(
+            self,
+            Self::Chat | Self::Messages | Self::Responses | Self::Completions | Self::SystemOne
+        )
     }
 }
 
 #[must_use]
 pub fn endpoint(path: &str) -> Endpoint {
-    if path.starts_with("/v1/chat/completions") {
+    if path == "/states" || path == "/states/" {
+        Endpoint::States
+    } else if path == "/v1/decide" || path == "/v1/decide/" || state_decide_id(path).is_some() {
+        Endpoint::Decisions
+    } else if path.starts_with("/v1/chat/completions") {
         Endpoint::Chat
     } else if path.starts_with("/v1/messages") {
         Endpoint::Messages
@@ -41,6 +57,16 @@ pub fn endpoint(path: &str) -> Endpoint {
     } else {
         Endpoint::Other
     }
+}
+
+/// Extract the opaque identifier from Solomon's state-scoped decision route.
+///
+/// The identifier remains opaque here; the state-affinity layer validates and
+/// hashes it before retaining anything.
+#[must_use]
+pub(crate) fn state_decide_id(path: &str) -> Option<&str> {
+    let middle = path.strip_prefix("/states/")?.strip_suffix("/decide")?;
+    (!middle.is_empty() && !middle.contains('/')).then_some(middle)
 }
 
 #[must_use]
@@ -239,5 +265,14 @@ mod tests {
             serde_json::from_slice(&shrink_advertised_context(body, 131_072)).unwrap();
         assert_eq!(value["data"][0]["max_model_len"], 262_144);
         assert_eq!(value["data"][0]["nested"]["context_length"], 262_144);
+    }
+
+    #[test]
+    fn classifies_structured_decision_routes_exactly() {
+        assert_eq!(endpoint("/states"), Endpoint::States);
+        assert_eq!(endpoint("/v1/decide"), Endpoint::Decisions);
+        assert_eq!(endpoint("/states/abc/decide"), Endpoint::Decisions);
+        assert_eq!(endpoint("/states/abc/decide/extra"), Endpoint::Other);
+        assert_eq!(endpoint("/states-and-more"), Endpoint::Other);
     }
 }

@@ -127,7 +127,7 @@ impl SessionAffinity {
         session: OpaqueSession<'_>,
         decision: &Decision,
     ) -> Option<SessionAffinityObservation> {
-        if self.mode == SessionAffinityMode::Off || endpoint == Endpoint::Other {
+        if self.mode == SessionAffinityMode::Off || !endpoint.is_generation() {
             return None;
         }
         let observation = match session {
