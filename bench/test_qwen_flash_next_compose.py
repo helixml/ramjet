@@ -47,10 +47,10 @@ class QwenFlashNextComposeTests(unittest.TestCase):
     def test_unqualified_speculation_fails(self):
         changed = copy.deepcopy(self.document)
         command = changed["services"]["qwen38flashnext-a"]["command"]
-        command[command.index(
+        command.append(
             '--speculative-config={"method":"mtp","num_speculative_tokens":3,'
             '"index_share_for_mtp_iteration":true}'
-        )] = '--speculative-config={"method":"mtp","num_speculative_tokens":4}'
+        )
         with self.assertRaisesRegex(validator.ValidationError, "admitted profile"):
             validator.validate(changed)
 
@@ -93,23 +93,23 @@ class QwenFlashNextComposeTests(unittest.TestCase):
         with self.assertRaisesRegex(validator.ValidationError, "output budget"):
             validator.validate(changed)
 
-    def test_exact_placement_defaults_to_the_qualified_full_cohort(self):
+    def test_exact_placement_stays_disabled_for_the_new_runtime(self):
+        changed = copy.deepcopy(self.document)
+        changed["services"]["ds4-loadbalancer"]["environment"][
+            "RJ_EXACT_ROUTE_MODE"
+        ] = "placement"
+        with self.assertRaisesRegex(validator.ValidationError, "exact routing authority"):
+            validator.validate(changed)
+
+    def test_exact_placement_cohort_stays_zero(self):
         changed = copy.deepcopy(self.document)
         changed["services"]["ds4-loadbalancer"]["environment"][
             "RJ_EXACT_ROUTE_CANARY_BPS"
-        ] = "0"
+        ] = "1"
         with self.assertRaisesRegex(validator.ValidationError, "exact routing authority"):
             validator.validate(changed)
 
-    def test_exact_placement_requires_the_independent_key(self):
-        changed = copy.deepcopy(self.document)
-        changed["services"]["ds4-loadbalancer"]["environment"][
-            "RJ_EXACT_ROUTE_CANARY_KEY"
-        ] = ""
-        with self.assertRaisesRegex(validator.ValidationError, "exact routing authority"):
-            validator.validate(changed)
-
-    def test_compose_render_without_the_exact_key_fails_closed(self):
+    def test_compose_render_does_not_require_an_inert_exact_key(self):
         environment = os.environ.copy()
         environment.pop("RJ_EXACT_ROUTE_CANARY_KEY", None)
         environment["RJ_UI_AUTH_TOKEN"] = "test-ui-authority-not-a-real-secret"
@@ -127,8 +127,7 @@ class QwenFlashNextComposeTests(unittest.TestCase):
             text=True,
             env=environment,
         )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("set RJ_EXACT_ROUTE_CANARY_KEY", completed.stderr)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_engine_kv_event_publisher_is_required(self):
         changed = copy.deepcopy(self.document)

@@ -7,8 +7,8 @@ import os
 import pathlib
 
 
-SOURCE_SHA256 = "f4d4ed79437af1661e479d29a95a83bd5ce09d576575a0a9dde3150c3799f85a"
-OUTPUT_SHA256 = "0ff9817ba6409248b0bebb49b815ef33f9bfb00b11c0006ffb573dfaeee25c4d"
+SOURCE_SHA256 = "1471faed18de14356202ad25fbb3a339777ac44687e5232ce3f11e5d812296c2"
+OUTPUT_SHA256 = "7fe719115579d732eb179bb29ca24207287fbe68de792244f94659c699639ab5"
 REVISION = "103a7608316173ca6edd49929544244de7ffda70"
 
 
@@ -52,14 +52,14 @@ def render(source):
     )
     text = replace_exact(
         text,
-        "${RJ_ROUTE_SPECULATION_PROFILES:-mtp,standard,mtp}",
-        "${RJ_ROUTE_SPECULATION_PROFILES:-mtp,standard}",
+        "${RJ_ROUTE_SPECULATION_PROFILES:-standard,standard,standard}",
+        "${RJ_ROUTE_SPECULATION_PROFILES:-standard,standard}",
     )
     text = replace_exact(text, ",tcp://qwen38flashnext-tp8:5557", "")
     text = replace_exact(text, ",tcp://qwen38flashnext-tp8:5558", "")
     replacements = (
         (
-            "# Qwen3.8-Flash-Next-FP8 on 8x RTX PRO 6000 Blackwell (SM120): two NUMA-local",
+            "# Swift 1.5 Qwen3.8-Flash-Next NVFP4 on 8x RTX PRO 6000 Blackwell (SM120): two NUMA-local",
             "# Inferact Qwen3.8-Flash-Next-NVFP4 on 8x RTX PRO 6000 Blackwell (SM120):",
         ),
         (
@@ -71,27 +71,27 @@ def render(source):
             "# do not add an overlay. Start only the explicitly named canary engine.",
         ),
         (
-            "image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3}",
+            "image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93}",
             "image: vllm/vllm-openai@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3",
         ),
         (
-            "ai.ramjet.model.repository: Qwen/Qwen3.8-Flash-Next-FP8",
+            "ai.ramjet.model.repository: ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4",
             "ai.ramjet.model.repository: Inferact/Qwen3.8-Flash-Next-NVFP4",
         ),
         (
-            "ai.ramjet.model.revision: bcd9f01ddc9cff2316eb84281bebcd5b058bddce",
+            "ai.ramjet.model.revision: 3ff0520224f264a2d0ac4ab56ece8f2f13aadb38",
             f"ai.ramjet.model.revision: {REVISION}",
         ),
         (
-            "${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}:/workspace/model:ro",
+            "${MODEL_DIR:-/prod/models/ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4-3ff0520224f264a2d0ac4ab56ece8f2f13aadb38}:/workspace/model:ro",
             "/prod/models/Inferact/Qwen3.8-Flash-Next-NVFP4-103a76083161:/workspace/model:ro",
         ),
         (
-            "${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}/tokenizer.json",
+            "${MODEL_DIR:-/prod/models/ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4-3ff0520224f264a2d0ac4ab56ece8f2f13aadb38}/tokenizer.json",
             "/prod/models/Inferact/Qwen3.8-Flash-Next-NVFP4-103a76083161/tokenizer.json",
         ),
         (
-            "${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}/tokenizer_config.json",
+            "${MODEL_DIR:-/prod/models/ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4-3ff0520224f264a2d0ac4ab56ece8f2f13aadb38}/tokenizer_config.json",
             "/prod/models/Inferact/Qwen3.8-Flash-Next-NVFP4-103a76083161/tokenizer_config.json",
         ),
         (
@@ -100,42 +100,31 @@ def render(source):
             2,
         ),
         (
-            "--revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce",
+            "--revision=3ff0520224f264a2d0ac4ab56ece8f2f13aadb38",
             f"--revision={REVISION}",
             2,
         ),
         (
-            "--tokenizer-revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce",
+            "--tokenizer-revision=3ff0520224f264a2d0ac4ab56ece8f2f13aadb38",
             f"--tokenizer-revision={REVISION}",
             2,
         ),
         ("--gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}", "--gpu-memory-utilization=0.95", 2),
         ("--max-model-len=${MAX_MODEL_LEN:-262144}", "--max-model-len=262144", 2),
-        ("--max-num-seqs=${MAX_NUM_SEQS:-64}", "--max-num-seqs=16", 2),
-        ("--max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}", "--max-num-batched-tokens=8192", 2),
-        ("      - --kv-cache-memory=${KV_CACHE_MEMORY:-40190174004}\n", "", 2),
+        ("--max-num-seqs=${MAX_NUM_SEQS:-16}", "--max-num-seqs=16", 2),
+        ("--max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-4096}", "--max-num-batched-tokens=8192", 2),
+        ("      - --kv-cache-memory=${KV_CACHE_MEMORY:-16000000000}\n", "", 2),
         (
-            '      - --speculative-config={"method":"mtp","num_speculative_tokens":3,"index_share_for_mtp_iteration":true}\n',
+            # The rejected recipe's qualified argv predates the Swift engine
+            # flags; keep the artifact's historical argument shape.
+            "      - --quantization=modelopt\n      - --trust-remote-code\n",
             "",
-        ),
-        (
-            "      RJ_ROUTE_SPECULATION_MODE: ${RJ_ROUTE_SPECULATION_MODE:-prefer}\n"
-            "      RJ_ROUTE_SPECULATION_PROFILES: ${RJ_ROUTE_SPECULATION_PROFILES:-mtp,standard}\n",
-            "      RJ_ROUTE_SPECULATION_MODE: ${RJ_ROUTE_SPECULATION_MODE:-off}\n"
-            "      RJ_ROUTE_SPECULATION_PROFILES: ${RJ_ROUTE_SPECULATION_PROFILES:-standard,standard}\n",
+            2,
         ),
         ("      RJ_TOKENIZER_MODE: local-shadow\n", "      RJ_TOKENIZER_MODE: \"off\"\n"),
-        ("      RJ_EXACT_ROUTE_MODE: placement\n", "      RJ_EXACT_ROUTE_MODE: \"off\"\n"),
         (
-            "      # Exact placement passed the 1%, 10%, and 100% live rollout gates. Keep\n"
-            "      # the qualified full cohort as the deployment default and require its\n"
-            "      # independent key from the protected mode-0600 .env. An explicit zero\n"
-            "      # remains the instant behavior rollback.\n"
-            "      RJ_EXACT_ROUTE_CANARY_BPS: ${RJ_EXACT_ROUTE_CANARY_BPS:-10000}\n"
-            "      RJ_EXACT_ROUTE_CANARY_KEY: ${RJ_EXACT_ROUTE_CANARY_KEY:?set RJ_EXACT_ROUTE_CANARY_KEY in protected mode-0600 .env}\n",
-            "      # This rejected alternate recipe has no qualified exact authority.\n"
-            "      RJ_EXACT_ROUTE_CANARY_BPS: \"0\"\n"
-            "      RJ_EXACT_ROUTE_CANARY_KEY: \"\"\n",
+            "      RJ_EXACT_ROUTE_MODE: ${RJ_EXACT_ROUTE_MODE:-off}\n",
+            "      RJ_EXACT_ROUTE_MODE: \"off\"\n",
         ),
         (
             "      - --max-num-batched-tokens=8192\n",
@@ -147,7 +136,9 @@ def render(source):
             # for the horizon model; keep the policy off with an honest pair.
             "      RJ_ROUTE_AFFINITY_HORIZON_MODE: ${RJ_ROUTE_AFFINITY_HORIZON_MODE:-observe}\n"
             "      RJ_ROUTE_AFFINITY_HORIZON_SOURCE: ${RJ_ROUTE_AFFINITY_HORIZON_SOURCE:-fill}\n"
-            "      RJ_ROUTE_KV_CAPACITY_TOKENS: ${RJ_ROUTE_KV_CAPACITY_TOKENS:-2667258,3033380,-}\n",
+            "      # Repin from live cache_config_info after both new engine incarnations\n"
+            "      # are qualified; stale FP8 capacities are not authority for this runtime.\n"
+            "      RJ_ROUTE_KV_CAPACITY_TOKENS: ${RJ_ROUTE_KV_CAPACITY_TOKENS:--,-,-}\n",
             "      RJ_ROUTE_AFFINITY_HORIZON_MODE: ${RJ_ROUTE_AFFINITY_HORIZON_MODE:-off}\n"
             "      RJ_ROUTE_AFFINITY_HORIZON_SOURCE: ${RJ_ROUTE_AFFINITY_HORIZON_SOURCE:-fill}\n"
             "      RJ_ROUTE_KV_CAPACITY_TOKENS: ${RJ_ROUTE_KV_CAPACITY_TOKENS:--,-}\n",

@@ -1,15 +1,15 @@
 # Canonical source: helixml/ramjet/deploy/qwen38_flash_next/docker-compose.yaml
 #
-# Qwen3.8-Flash-Next-FP8 on 8x RTX PRO 6000 Blackwell (SM120): two NUMA-local
+# Swift 1.5 Qwen3.8-Flash-Next NVFP4 on 8x RTX PRO 6000 Blackwell (SM120): two NUMA-local
 # TP4 vLLM engines behind ramjet. This is the whole deployment; do not add an
 # overlay. During qualification, start only the explicitly named canary engine.
 
 x-vllm-labels: &vllm-labels
-  ai.ramjet.model.repository: Qwen/Qwen3.8-Flash-Next-FP8
-  ai.ramjet.model.revision: bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+  ai.ramjet.model.repository: ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4
+  ai.ramjet.model.revision: 3ff0520224f264a2d0ac4ab56ece8f2f13aadb38
 
 x-vllm-engine: &vllm-engine
-  image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3}
+  image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93}
   labels: *vllm-labels
   entrypoint: ["vllm", "serve"]
   restart: ${ENGINE_RESTART_POLICY:-unless-stopped}
@@ -21,8 +21,8 @@ x-vllm-engine: &vllm-engine
     stack: 67108864
     nofile: {soft: 1048576, hard: 1048576}
   volumes:
-    - ${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}:/workspace/model:ro
-    - ${VLLM_CACHE_DIR:-/prod/engine-cache-vllm-qwen38flashnext}:/root/.cache
+    - ${MODEL_DIR:-/prod/models/ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4-3ff0520224f264a2d0ac4ab56ece8f2f13aadb38}:/workspace/model:ro
+    - ${VLLM_CACHE_DIR:-/prod/engine-cache-vllm-swift15}:/root/.cache
   environment:
     CUDA_DEVICE_ORDER: PCI_BUS_ID
     CUDA_VISIBLE_DEVICES: "0,1,2,3"
@@ -47,8 +47,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /run/lock/ramjet-node06-deployment.lock:/run/lock/ramjet-node06-deployment.lock
       - ${ADAPTIVE_CONFIG_PATH:-./adaptive-config.json}:/etc/ramjet/adaptive-config.json:ro
-      - ${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}/tokenizer.json:/models/qwen38-flash-next/tokenizer.json:ro
-      - ${MODEL_DIR:-/prod/models/Qwen/Qwen3.8-Flash-Next-FP8-bcd9f01ddc9c}/tokenizer_config.json:/models/qwen38-flash-next/tokenizer_config.json:ro
+      - ${MODEL_DIR:-/prod/models/ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4-3ff0520224f264a2d0ac4ab56ece8f2f13aadb38}/tokenizer.json:/models/qwen38-flash-next/tokenizer.json:ro
+      - ${MODEL_DIR:-/prod/models/ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4-3ff0520224f264a2d0ac4ab56ece8f2f13aadb38}/tokenizer_config.json:/models/qwen38-flash-next/tokenizer_config.json:ro
     # The host telemetry agent is intentionally bound only to the established
     # node06 bridge gateway. Retain that observation-only path when Compose
     # ownership moves from the old Qwen stack to this deployment.
@@ -80,10 +80,10 @@ services:
       # Default-off candidate: qualify warm long-prefix placement against
       # stale-locality and MTP throughput guards before enabling it.
       RJ_ROUTE_PROJECTED_LOAD: ${RJ_ROUTE_PROJECTED_LOAD:-false}
-      # A retains the qualified MTP3 profile; B is the standard long-output
-      # profile. Profile preference is only the final routing score tie-break.
-      RJ_ROUTE_SPECULATION_MODE: ${RJ_ROUTE_SPECULATION_MODE:-prefer}
-      RJ_ROUTE_SPECULATION_PROFILES: ${RJ_ROUTE_SPECULATION_PROFILES:-mtp,standard,mtp}
+      # Swift's MTP path is not qualified on this Blackwell runtime. Keep
+      # every profile on standard decoding until separately measured.
+      RJ_ROUTE_SPECULATION_MODE: ${RJ_ROUTE_SPECULATION_MODE:-off}
+      RJ_ROUTE_SPECULATION_PROFILES: ${RJ_ROUTE_SPECULATION_PROFILES:-standard,standard,standard}
       # Coalesce concurrent cold requests with at least 16KiB of common prefix.
       # The bounded table and load delta both fail open to ordinary routing.
       RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE: ${RJ_ROUTE_PREFIX_SINGLE_FLIGHT_MODE:-prefer}
@@ -96,25 +96,26 @@ services:
       # A/B incarnations; the TP8 profile has not run, so it is unknown (`-`).
       RJ_ROUTE_AFFINITY_HORIZON_MODE: ${RJ_ROUTE_AFFINITY_HORIZON_MODE:-observe}
       RJ_ROUTE_AFFINITY_HORIZON_SOURCE: ${RJ_ROUTE_AFFINITY_HORIZON_SOURCE:-fill}
-      RJ_ROUTE_KV_CAPACITY_TOKENS: ${RJ_ROUTE_KV_CAPACITY_TOKENS:-2667258,3033380,-}
+      # Repin from live cache_config_info after both new engine incarnations
+      # are qualified; stale FP8 capacities are not authority for this runtime.
+      RJ_ROUTE_KV_CAPACITY_TOKENS: ${RJ_ROUTE_KV_CAPACITY_TOKENS:--,-,-}
       RJ_ROUTE_JOURNAL: ${RJ_ROUTE_JOURNAL:-true}
       RJ_TOKENIZER_MODE: local-shadow
       RJ_TOKENIZER_PROFILE: qwen3.8-flash-next
       RJ_TOKENIZER_PATH: /models/qwen38-flash-next/tokenizer.json
-      RJ_TOKENIZER_SHA256: 0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3
+      RJ_TOKENIZER_SHA256: 06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523
       RJ_CHAT_TEMPLATE_PATH: /models/qwen38-flash-next/tokenizer_config.json
-      RJ_CHAT_TEMPLATE_SHA256: b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27
-      RJ_EXACT_ROUTE_MODE: placement
+      RJ_CHAT_TEMPLATE_SHA256: 66e427c470fe580fe8c7b5725d857af23d8417e37fae62667ec698306a19987b
+      # Swift tokenizer artifacts are pinned above. The compatibility manifest
+      # binds the retired engine image; keep placement off until new runtime
+      # and live/replay evidence qualify both Swift engines.
+      RJ_EXACT_ROUTE_MODE: ${RJ_EXACT_ROUTE_MODE:-off}
       RJ_EXACT_ROUTE_MANIFEST_PATH: /compat/qwen38-flash-next-r134.json
       RJ_EXACT_ROUTE_MANIFEST_SHA256: a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67
       RJ_EXACT_ROUTE_MIN_GAIN_TOKENS: ${RJ_EXACT_ROUTE_MIN_GAIN_TOKENS:-8192}
       RJ_EXACT_ROUTE_MAX_LOAD_DELTA: ${RJ_EXACT_ROUTE_MAX_LOAD_DELTA:-0}
-      # Exact placement passed the 1%, 10%, and 100% live rollout gates. Keep
-      # the qualified full cohort as the deployment default and require its
-      # independent key from the protected mode-0600 .env. An explicit zero
-      # remains the instant behavior rollback.
-      RJ_EXACT_ROUTE_CANARY_BPS: ${RJ_EXACT_ROUTE_CANARY_BPS:-10000}
-      RJ_EXACT_ROUTE_CANARY_KEY: ${RJ_EXACT_ROUTE_CANARY_KEY:?set RJ_EXACT_ROUTE_CANARY_KEY in protected mode-0600 .env}
+      RJ_EXACT_ROUTE_CANARY_BPS: "0"
+      RJ_EXACT_ROUTE_CANARY_KEY: ""
       RJ_UPSTREAM_ADMISSION_MODE: http
       # After a replica has failed readiness, require three successful probes
       # spanning 30 seconds before it can rejoin placement. No synthetic probe
@@ -122,9 +123,9 @@ services:
       RJ_UPSTREAM_WARMUP_MODE: ${RJ_UPSTREAM_WARMUP_MODE:-enforce}
       RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES: ${RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES:-3}
       RJ_UPSTREAM_WARMUP_STABLE_SECONDS: ${RJ_UPSTREAM_WARMUP_STABLE_SECONDS:-30}
-      RJ_KV_EVENT_MODE: shadow
-      RJ_KV_EVENT_LIVE_ENDPOINTS: tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557,tcp://qwen38flashnext-tp8:5557
-      RJ_KV_EVENT_REPLAY_ENDPOINTS: tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558,tcp://qwen38flashnext-tp8:5558
+      RJ_KV_EVENT_MODE: ${RJ_KV_EVENT_MODE:-shadow}
+      RJ_KV_EVENT_LIVE_ENDPOINTS: ${RJ_KV_EVENT_LIVE_ENDPOINTS:-tcp://qwen38flashnext-a:5557,tcp://qwen38flashnext-b:5557,tcp://qwen38flashnext-tp8:5557}
+      RJ_KV_EVENT_REPLAY_ENDPOINTS: ${RJ_KV_EVENT_REPLAY_ENDPOINTS:-tcp://qwen38flashnext-a:5558,tcp://qwen38flashnext-b:5558,tcp://qwen38flashnext-tp8:5558}
       # Match the qualified recovery envelope used by the 10K-step engine
       # publishers. Older generations remain fenced instead of being trusted.
       RJ_KV_EVENT_REPLAY_LIMIT: ${RJ_KV_EVENT_REPLAY_LIMIT:-8192}
@@ -157,21 +158,22 @@ services:
         reservations:
           devices:
             - {driver: nvidia, device_ids: ["0", "1", "2", "3"], capabilities: [gpu]}
-    command: &vllm-command-mtp
+    command: &vllm-command-standard
       - /workspace/model
       - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-flash-next}
-      - --revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
-      - --tokenizer-revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+      - --revision=3ff0520224f264a2d0ac4ab56ece8f2f13aadb38
+      - --tokenizer-revision=3ff0520224f264a2d0ac4ab56ece8f2f13aadb38
       - --host=0.0.0.0
       - --port=8000
       - --tensor-parallel-size=4
       - --enable-expert-parallel
       - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
-      - --kv-cache-memory=${KV_CACHE_MEMORY:-40190174004}
+      - --kv-cache-memory=${KV_CACHE_MEMORY:-16000000000}
       - --max-model-len=${MAX_MODEL_LEN:-262144}
-      - --max-num-seqs=${MAX_NUM_SEQS:-64}
-      - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}
-      - --speculative-config={"method":"mtp","num_speculative_tokens":3,"index_share_for_mtp_iteration":true}
+      - --max-num-seqs=${MAX_NUM_SEQS:-16}
+      - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-4096}
+      - --quantization=modelopt
+      - --trust-remote-code
       - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
@@ -194,22 +196,24 @@ services:
         reservations:
           devices:
             - {driver: nvidia, device_ids: ["4", "5", "6", "7"], capabilities: [gpu]}
-    # Standard decoding is the qualified long-output counterpart to A's MTP3
-    # profile. Keep every other serving argument byte-identical.
+    # Both TP4 engines use the same standard-decoding profile for the first
+    # NVIDIA NVFP4 deployment.
     command:
       - /workspace/model
       - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-flash-next}
-      - --revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
-      - --tokenizer-revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+      - --revision=3ff0520224f264a2d0ac4ab56ece8f2f13aadb38
+      - --tokenizer-revision=3ff0520224f264a2d0ac4ab56ece8f2f13aadb38
       - --host=0.0.0.0
       - --port=8000
       - --tensor-parallel-size=4
       - --enable-expert-parallel
       - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
-      - --kv-cache-memory=${KV_CACHE_MEMORY:-40190174004}
+      - --kv-cache-memory=${KV_CACHE_MEMORY:-16000000000}
       - --max-model-len=${MAX_MODEL_LEN:-262144}
-      - --max-num-seqs=${MAX_NUM_SEQS:-64}
-      - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}
+      - --max-num-seqs=${MAX_NUM_SEQS:-16}
+      - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-4096}
+      - --quantization=modelopt
+      - --trust-remote-code
       - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
@@ -245,18 +249,19 @@ services:
     command:
       - /workspace/model
       - --served-model-name=${SERVED_MODEL_NAME:-qwen3.8-flash-next}
-      - --revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
-      - --tokenizer-revision=bcd9f01ddc9cff2316eb84281bebcd5b058bddce
+      - --revision=3ff0520224f264a2d0ac4ab56ece8f2f13aadb38
+      - --tokenizer-revision=3ff0520224f264a2d0ac4ab56ece8f2f13aadb38
       - --host=0.0.0.0
       - --port=8000
       - --tensor-parallel-size=8
       - --enable-expert-parallel
       - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
-      - --kv-cache-memory=${KV_CACHE_MEMORY:-40190174004}
+      - --kv-cache-memory=${KV_CACHE_MEMORY:-16000000000}
       - --max-model-len=${MAX_MODEL_LEN:-262144}
-      - --max-num-seqs=${MAX_NUM_SEQS:-64}
-      - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-8192}
-      - --speculative-config={"method":"mtp","num_speculative_tokens":3,"index_share_for_mtp_iteration":true}
+      - --max-num-seqs=${MAX_NUM_SEQS:-16}
+      - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-4096}
+      - --quantization=modelopt
+      - --trust-remote-code
       - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"hwm":100000,"max_queue_size":100000,"topic":""}
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
