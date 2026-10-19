@@ -104,7 +104,9 @@ VPN opens http://100.89.187.17:8007/ui/ directly.
 Engine scraping needs no configuration — it reuses the configured
 `RJ_UPSTREAM` list and reads vLLM (`vllm:*`) names, falling back to the SGLang
 (`sglang:*`) equivalents: `num_running_reqs`, `num_queue_reqs`, `token_usage`
-for KV cache, and the generation/prompt token counters. Without the agent the serving charts still work; the
+for KV cache, and the generation/prompt token counters. SGLang scheduler
+gauges are counted once per scheduler (`tp_rank`/`pp_rank` 0): running and
+waiting are summed across DP ranks, KV cache is their mean. Without the agent the serving charts still work; the
 machine/GPU sections show their empty states.
 
 ## Host agent
@@ -131,8 +133,9 @@ one it used in `serving.cache_hit_source`:
   responses this proxy actually served.
 - `engine_prefix_cache` — summed `vllm:prefix_cache_hits_total` over summed
   `vllm:prefix_cache_queries_total` across the scraped engines. SGLang has no
-  hit counter, so its hits are `sglang:prompt_tokens_total` minus
-  `sglang:uncached_prompt_tokens_histogram_sum`, over the prompt tokens.
+  hit counter, so its hits are `sglang:cached_tokens_total` (or, on versions
+  without it, `sglang:prompt_tokens_total` minus
+  `sglang:uncached_prompt_tokens_histogram_sum`) over the prompt tokens.
 
 The fallback exists because an engine that never populates
 `prompt_tokens_details.cached_tokens` leaves every cache outcome `unknown` and

@@ -652,6 +652,35 @@ pub fn metric_first_of(map: &MetricMap, names: &[&str]) -> Option<f64> {
     names.iter().find_map(|name| metric_sum(map, name))
 }
 
+/// Values of an `sglang:*` scheduler gauge, one per scheduler. The engine labels these with
+/// `tp_rank` and `pp_rank`; DP-attention engines emit one series per DP rank, and an engine run
+/// with metrics on every scheduler repeats the same value on each TP/PP rank. Keeping rank 0 of
+/// those counts each scheduler once.
+fn sglang_scheduler_values(map: &MetricMap, name: &str) -> Option<Vec<f64>> {
+    let values: Vec<f64> = map
+        .get(name)?
+        .iter()
+        .filter(|(labels, _)| {
+            labels
+                .iter()
+                .all(|(key, value)| !matches!(key.as_str(), "tp_rank" | "pp_rank") || value == "0")
+        })
+        .map(|(_, value)| *value)
+        .collect();
+    (!values.is_empty()).then_some(values)
+}
+
+/// Total of an `sglang:*` scheduler gauge across DP ranks, such as running requests.
+fn sglang_scheduler_sum(map: &MetricMap, name: &str) -> Option<f64> {
+    sglang_scheduler_values(map, name).map(|values| values.iter().sum())
+}
+
+/// Mean of an `sglang:*` scheduler fraction across DP ranks, such as KV-cache usage.
+fn sglang_scheduler_mean(map: &MetricMap, name: &str) -> Option<f64> {
+    sglang_scheduler_values(map, name)
+        .map(|values| values.iter().sum::<f64>() / values.len() as f64)
+}
+
 /// Sums a metric per value of one label, preserving first-seen order.
 #[must_use]
 pub fn metric_by_label(map: &MetricMap, name: &str, label: &str) -> Vec<(String, f64)> {
@@ -1385,8 +1414,8 @@ pub struct EngineScrape {
 }
 
 /// Folds one engine's scraped metrics into an engine sample. `vllm:*` names are read first,
-/// then their `sglang:*` equivalents; for those, prefix hits are prompt tokens minus uncached
-/// prompt tokens.
+/// then their `sglang:*` equivalents. Those engines have no prefix-hit counter: hits are their
+/// cached prompt tokens, or prompt tokens minus uncached ones where that counter is absent.
 pub fn build_engine_sample(
     map: &MetricMap,
     endpoint: &str,
@@ -1411,12 +1440,15 @@ pub fn build_engine_sample(
         metric_sum(map, "vllm:prefix_cache_hits_total"),
         metric_sum(map, "vllm:prefix_cache_queries_total"),
     ) {
-        (None, None) => match (
-            metric_sum(map, "sglang:prompt_tokens_total"),
-            metric_sum(map, "sglang:uncached_prompt_tokens_histogram_sum"),
-        ) {
-            (Some(prompt), Some(uncached)) => (Some((prompt - uncached).max(0.0)), Some(prompt)),
-            _ => (None, None),
+        (None, None) => match metric_sum(map, "sglang:prompt_tokens_total") {
+            Some(prompt) => {
+                let cached = metric_sum(map, "sglang:cached_tokens_total").or_else(|| {
+                    metric_sum(map, "sglang:uncached_prompt_tokens_histogram_sum")
+                        .map(|uncached| (prompt - uncached).max(0.0))
+                });
+                (cached, cached.map(|_| prompt))
+            }
+            None => (None, None),
         },
         vllm => vllm,
     };
@@ -1432,21 +1464,17 @@ pub fn build_engine_sample(
     };
     let kv_cache_pct = metric_first_of(
         map,
-        &[
-            "vllm:gpu_cache_usage_perc",
-            "vllm:kv_cache_usage_perc",
-            "sglang:token_usage",
-        ],
+        &["vllm:gpu_cache_usage_perc", "vllm:kv_cache_usage_perc"],
     )
+    .or_else(|| sglang_scheduler_mean(map, "sglang:token_usage"))
     .map(|fraction| (fraction * 100.0).clamp(0.0, 100.0));
     EngineScrape {
         sample: EngineSample {
             endpoint: endpoint.to_owned(),
-            running: metric_first_of(
-                map,
-                &["vllm:num_requests_running", "sglang:num_running_reqs"],
-            ),
-            waiting: metric_first_of(map, &["vllm:num_requests_waiting", "sglang:num_queue_reqs"]),
+            running: metric_sum(map, "vllm:num_requests_running")
+                .or_else(|| sglang_scheduler_sum(map, "sglang:num_running_reqs")),
+            waiting: metric_sum(map, "vllm:num_requests_waiting")
+                .or_else(|| sglang_scheduler_sum(map, "sglang:num_queue_reqs")),
             kv_cache_pct,
             gen_tps,
             prompt_tps,
@@ -2894,6 +2922,40 @@ mod tests {
         assert_eq!(sample.gen_tps, Some(100.0));
         assert_eq!(sample.prompt_tps, Some(2000.0));
         assert_eq!(sample.prefix_hit_pct, Some(80.0));
+    }
+
+    #[test]
+    fn build_engine_sample_counts_each_sglang_scheduler_once() {
+        let mut rates = RateTracker::default();
+        let first = parse_prometheus_text(
+            "sglang:prompt_tokens_total 1000\n\
+             sglang:cached_tokens_total{cache_source=\"device\"} 500\n\
+             sglang:cached_tokens_total{cache_source=\"host\"} 100\n\
+             sglang:uncached_prompt_tokens_histogram_sum 999\n",
+        );
+        build_engine_sample(&first, "http://s:30000", 1_000, &mut rates);
+        // Two DP ranks, each also repeated on TP rank 1 (metrics on every scheduler).
+        let second = parse_prometheus_text(
+            "sglang:num_running_reqs{dp_rank=\"0\",tp_rank=\"0\",pp_rank=\"0\"} 3\n\
+             sglang:num_running_reqs{dp_rank=\"0\",tp_rank=\"1\",pp_rank=\"0\"} 3\n\
+             sglang:num_running_reqs{dp_rank=\"1\",tp_rank=\"0\",pp_rank=\"0\"} 5\n\
+             sglang:num_running_reqs{dp_rank=\"1\",tp_rank=\"1\",pp_rank=\"0\"} 5\n\
+             sglang:num_queue_reqs{dp_rank=\"0\",tp_rank=\"0\"} 1\n\
+             sglang:num_queue_reqs{dp_rank=\"1\",tp_rank=\"0\"} 2\n\
+             sglang:token_usage{dp_rank=\"0\",tp_rank=\"0\"} 0.6\n\
+             sglang:token_usage{dp_rank=\"0\",tp_rank=\"1\"} 0.6\n\
+             sglang:token_usage{dp_rank=\"1\",tp_rank=\"0\"} 0.8\n\
+             sglang:prompt_tokens_total 11000\n\
+             sglang:cached_tokens_total{cache_source=\"device\"} 8500\n\
+             sglang:cached_tokens_total{cache_source=\"host\"} 600\n\
+             sglang:uncached_prompt_tokens_histogram_sum 999\n",
+        );
+        let sample = build_engine_sample(&second, "http://s:30000", 6_000, &mut rates).sample;
+        assert_eq!(sample.running, Some(8.0));
+        assert_eq!(sample.waiting, Some(3.0));
+        assert_eq!(sample.kv_cache_pct, Some(70.0));
+        // Cached tokens win over the uncached histogram: (9100 - 600) / (11000 - 1000).
+        assert_eq!(sample.prefix_hit_pct, Some(85.0));
     }
 
     #[test]
