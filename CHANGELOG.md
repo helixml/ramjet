@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.9.0 — 2026-10-19
+
+- Machine view reads SGLang engines. Engine cards, token rates and the
+  engine prefix-cache fallback previously understood only `vllm:*` names, so
+  behind SGLang (for example `deploy/dsv41_flash_h200`) running/waiting
+  requests and KV cache showed as empty. `sglang:*` equivalents are now read
+  when the vLLM names are absent: `num_running_reqs`, `num_queue_reqs`,
+  `token_usage`, and the generation/prompt token counters. Scheduler gauges
+  count each scheduler once (`tp_rank`/`pp_rank` 0): running and waiting are
+  summed across DP ranks and KV cache is their mean. Prefix hits come from
+  `sglang:cached_tokens_total`, or prompt minus uncached prompt tokens on
+  versions without it (#318).
+- `RJ_API_PROFILE=solomon`, an opt-in API profile for Jev-style
+  structured-decision services: `/health` contract probing, first-class
+  state/decision endpoint labels excluded from generation accounting,
+  output-limit observation and session affinity, bounded privacy-safe
+  state-to-replica affinity (`RJ_DECISION_STATE_AFFINITY_CAPACITY`), and 404
+  owner discovery after load-balancer restarts (#317). Its entry had been
+  merged under 0.6.0; it first ships in this release.
+- `deploy/qwen38_flash_next` serves the Swift 1.5 Qwen3.8-Flash-Next NVFP4
+  checkpoint (#317).
+
 ## 0.8.0 — 2026-10-07
 
 - `RJ_MODEL_ALIASES=alias=canonical,...` rewrites request model names to
@@ -181,10 +203,6 @@
 
 ### Routing and operations
 
-- Added an opt-in `solomon` API profile for Jev-style structured-decision
-  services: `/health` contract probing, first-class state/decision endpoint
-  labels, bounded privacy-safe state-to-replica affinity, and 404 owner
-  discovery after load-balancer restarts.
 - Added default-off time-decayed prefix affinity
   (`RJ_ROUTE_AFFINITY_HORIZON_MODE=observe|enforce`). Served fingerprint
   blocks older than a replica's estimated eviction horizon earn no routing
