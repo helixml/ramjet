@@ -1384,20 +1384,45 @@ pub struct EngineScrape {
     pub prefix_queries_per_second: Option<f64>,
 }
 
-/// Folds one engine's scraped vLLM metrics into an engine sample.
+/// Folds one engine's scraped metrics into an engine sample. `vllm:*` names are read first,
+/// then their `sglang:*` equivalents; for those, prefix hits are prompt tokens minus uncached
+/// prompt tokens.
 pub fn build_engine_sample(
     map: &MetricMap,
     endpoint: &str,
     t_ms: u64,
     rates: &mut RateTracker,
 ) -> EngineScrape {
-    let gen_tps = metric_sum(map, "vllm:generation_tokens_total")
-        .and_then(|value| rates.rate(&format!("engine.{endpoint}.generation"), t_ms, value));
-    let prompt_tps = metric_sum(map, "vllm:prompt_tokens_total")
+    let gen_tps = metric_first_of(
+        map,
+        &[
+            "vllm:generation_tokens_total",
+            "sglang:generation_tokens_total",
+        ],
+    )
+    .and_then(|value| rates.rate(&format!("engine.{endpoint}.generation"), t_ms, value));
+    let prompt_total = metric_first_of(
+        map,
+        &["vllm:prompt_tokens_total", "sglang:prompt_tokens_total"],
+    );
+    let prompt_tps = prompt_total
         .and_then(|value| rates.rate(&format!("engine.{endpoint}.prompt"), t_ms, value));
-    let hits = metric_sum(map, "vllm:prefix_cache_hits_total")
+    let (hits_total, queries_total) = match (
+        metric_sum(map, "vllm:prefix_cache_hits_total"),
+        metric_sum(map, "vllm:prefix_cache_queries_total"),
+    ) {
+        (None, None) => match (
+            metric_sum(map, "sglang:prompt_tokens_total"),
+            metric_sum(map, "sglang:uncached_prompt_tokens_histogram_sum"),
+        ) {
+            (Some(prompt), Some(uncached)) => (Some((prompt - uncached).max(0.0)), Some(prompt)),
+            _ => (None, None),
+        },
+        vllm => vllm,
+    };
+    let hits = hits_total
         .and_then(|value| rates.rate(&format!("engine.{endpoint}.prefix_hits"), t_ms, value));
-    let queries = metric_sum(map, "vllm:prefix_cache_queries_total")
+    let queries = queries_total
         .and_then(|value| rates.rate(&format!("engine.{endpoint}.prefix_queries"), t_ms, value));
     let prefix_hit_pct = match (hits, queries) {
         (Some(hits), Some(queries)) if queries > 0.0 => {
@@ -1407,14 +1432,21 @@ pub fn build_engine_sample(
     };
     let kv_cache_pct = metric_first_of(
         map,
-        &["vllm:gpu_cache_usage_perc", "vllm:kv_cache_usage_perc"],
+        &[
+            "vllm:gpu_cache_usage_perc",
+            "vllm:kv_cache_usage_perc",
+            "sglang:token_usage",
+        ],
     )
     .map(|fraction| (fraction * 100.0).clamp(0.0, 100.0));
     EngineScrape {
         sample: EngineSample {
             endpoint: endpoint.to_owned(),
-            running: metric_sum(map, "vllm:num_requests_running"),
-            waiting: metric_sum(map, "vllm:num_requests_waiting"),
+            running: metric_first_of(
+                map,
+                &["vllm:num_requests_running", "sglang:num_running_reqs"],
+            ),
+            waiting: metric_first_of(map, &["vllm:num_requests_waiting", "sglang:num_queue_reqs"]),
             kv_cache_pct,
             gen_tps,
             prompt_tps,
@@ -2840,6 +2872,28 @@ mod tests {
         assert_eq!(by_model["glm"].completion, Some(20.0));
         assert_eq!(by_model["glm"].cached, None);
         assert_eq!(by_model["glm"].requests, Some(1.0));
+    }
+
+    #[test]
+    fn build_engine_sample_reads_sglang_metrics() {
+        let mut rates = RateTracker::default();
+        let first = parse_prometheus_text(
+            "sglang:generation_tokens_total 100\nsglang:prompt_tokens_total 1000\n\
+             sglang:uncached_prompt_tokens_histogram_sum 400\n",
+        );
+        build_engine_sample(&first, "http://s:30000", 1_000, &mut rates);
+        let second = parse_prometheus_text(
+            "sglang:num_running_reqs 3\nsglang:num_queue_reqs 1\nsglang:token_usage 0.25\n\
+             sglang:generation_tokens_total 600\nsglang:prompt_tokens_total 11000\n\
+             sglang:uncached_prompt_tokens_histogram_sum 2400\n",
+        );
+        let sample = build_engine_sample(&second, "http://s:30000", 6_000, &mut rates).sample;
+        assert_eq!(sample.running, Some(3.0));
+        assert_eq!(sample.waiting, Some(1.0));
+        assert_eq!(sample.kv_cache_pct, Some(25.0));
+        assert_eq!(sample.gen_tps, Some(100.0));
+        assert_eq!(sample.prompt_tps, Some(2000.0));
+        assert_eq!(sample.prefix_hit_pct, Some(80.0));
     }
 
     #[test]

@@ -20,7 +20,7 @@ bench/machineview_agent.py   host agent (loopback): /proc, statvfs, RAPL, nvidia
         ▼
 ramjet LB               samples every RJ_MACHINEVIEW_INTERVAL_MS:
   src/machineview.rs           - its own Prometheus registry (ramjet_*)
-        │                      - each upstream's /metrics (vllm:*)
+        │                      - each upstream's /metrics (vllm:* or sglang:*)
         │                      - the agent (host + GPUs + energy)
         │                    stores a bounded in-memory ring plus a long
         │                    hourly token history (optionally persisted),
@@ -101,8 +101,10 @@ VPN opens http://100.89.187.17:8007/ui/ directly.
 | `RJ_MACHINEVIEW_UPSTREAM_GPUS` | unset | dense semicolon-separated GPU sets matching `RJ_UPSTREAM`, for example `0,1,2,3;4,5`; the UI derives each engine's TP size from its set |
 | `RJ_UI_AUTH_TOKEN` | unset | Dedicated 32–256-byte dashboard/control token. Protects machine-view and adaptive APIs with a signed 30-day HttpOnly session cookie. |
 
-Engine (`vllm:*`) scraping needs no configuration — it reuses the configured
-`RJ_UPSTREAM` list. Without the agent the serving charts still work; the
+Engine scraping needs no configuration — it reuses the configured
+`RJ_UPSTREAM` list and reads vLLM (`vllm:*`) names, falling back to the SGLang
+(`sglang:*`) equivalents: `num_running_reqs`, `num_queue_reqs`, `token_usage`
+for KV cache, and the generation/prompt token counters. Without the agent the serving charts still work; the
 machine/GPU sections show their empty states.
 
 ## Host agent
@@ -128,7 +130,9 @@ one it used in `serving.cache_hit_source`:
   `ramjet_prompt_tokens_total`. Authoritative, because it is measured on the
   responses this proxy actually served.
 - `engine_prefix_cache` — summed `vllm:prefix_cache_hits_total` over summed
-  `vllm:prefix_cache_queries_total` across the scraped engines.
+  `vllm:prefix_cache_queries_total` across the scraped engines. SGLang has no
+  hit counter, so its hits are `sglang:prompt_tokens_total` minus
+  `sglang:uncached_prompt_tokens_histogram_sum`, over the prompt tokens.
 
 The fallback exists because an engine that never populates
 `prompt_tokens_details.cached_tokens` leaves every cache outcome `unknown` and
