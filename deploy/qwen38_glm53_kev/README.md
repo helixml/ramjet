@@ -19,6 +19,22 @@ per-token usage store live in root-owned mode-0700 `/var/lib/ramjet-api`.
 Manage tokens from the dashboard (`http://100.89.187.17:8007/ui/#tokens`) or
 `POST /api/tokens` with the UI token; contract in `docs/api-tokens.md`.
 
+Recreate the LB in place (hold the deployment lock; the container belongs to
+the project created by the 2026-10-03 alias rollout, and the protected values
+come from the Qwen directory's `.env`):
+
+```bash
+cd /home/luke/inference/qwen38_glm53_kev
+flock --nonblock /run/lock/ramjet-node06-deployment.lock \
+  docker compose -p qwen_alias_release_20261003t081601z \
+    --env-file /home/luke/inference/qwen38_flash_next/.env \
+    -f docker-compose.yaml up -d --no-deps ds4-loadbalancer
+```
+
+Without `-p` Compose derives project `qwen38_glm53_kev` and fails on the
+existing container name instead of recreating it. Rollback evidence and the
+2026-10-20 rollout are in `EXPERIMENTS.md`.
+
 ## Original rollout (2026-09)
 
 This deployment kept one Ramjet instance in front of four upstreams:

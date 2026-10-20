@@ -4,8 +4,10 @@ name: qwen38_glm53_kev
 # list, and its 4.3 GiB co-residency capped glm53-unc-fp8's KV pool at half
 # the requested 500k tokens. The kev-engine network stays attached to the LB.
 #
-# node06's copy carries the LB image digest and the two protected tokens as
-# literals (there is no .env in that directory); everything else must match.
+# node06's copy is identical except that it pins the LB image literally. Its
+# protected values come from ../qwen38_flash_next/.env, and the running
+# container belongs to Compose project qwen_alias_release_20261003t081601z;
+# see README.md for the exact recreate command.
 services:
   ds4-loadbalancer:
     image: ${LB_IMAGE:?set LB_IMAGE to an immutable tag@sha256 reference}
@@ -32,13 +34,11 @@ services:
       RJ_MODEL_ALIASES: qwen3.8-flash-next=glm-5.3-flash
       RJ_UPSTREAM_MODELS: glm-5.3-flash,glm-5.3-flash,glm-5.3-flash-uncensored
       RJ_UPSTREAM_APIS: openai,openai,openai
-      # Also the client master token: the same bearer Caddy used to check, so
-      # no client changes when Ramjet takes over authentication.
       RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:?set VLLM_API_KEY in protected mode-0600 .env}
       RJ_UI_AUTH_TOKEN: ${RJ_UI_AUTH_TOKEN:?set RJ_UI_AUTH_TOKEN in protected mode-0600 .env}
-      # Ramjet is the API authority: the master token or a minted rjk_* token,
-      # anything else is answered 401 here. The engines do not check keys, so
-      # never set this off while Caddy passes requests through unchecked.
+      # Ramjet is the API authority: the master token (RJ_UPSTREAM_TOKEN, the
+      # same bearer Caddy used to check) or a minted rjk_* token. The engines
+      # do not check keys, so never run this off behind a pass-through Caddy.
       RJ_API_TOKENS_MODE: ${RJ_API_TOKENS_MODE:-on}
       RJ_API_STATE_DIR: /var/lib/ramjet-api
       RJ_ADVERTISE_CTX_MARGIN: "8192"
