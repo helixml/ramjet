@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- Minted client API tokens. `RJ_API_TOKENS_MODE=on` makes ramjet
+  authenticate every proxied request: the master token (`RJ_UPSTREAM_TOKEN`)
+  keeps working, and `rjk_*` tokens minted from the dashboard (name,
+  description, optional expiry, revoke, delete) are exchanged for the master
+  bearer before dispatch, so engines never see them. Only `SHA-256(secret)` is
+  stored, in `RJ_API_STATE_DIR/api-tokens.json` (up to 10,000 tokens).
+  Default `off` forwards exactly as before.
+- Per-principal usage accounting, on by default: every request is recorded
+  per token/master/anonymous and per model in minute (24h) and hour (90d)
+  buckets with token counts, cache hit ratio and outcomes, TTFT, duration,
+  decode-speed and TPOT histograms, errors, disconnects, upstream split, and
+  finish reasons, plus the last 100,000 content-free request records. Stored
+  in SQLite (`RJ_API_STATE_DIR/usage.sqlite3`) behind an in-memory delta map
+  flushed every 10 s, so memory does not grow with history or token count; a
+  measured 100 always-active tokens over 90 days uses +24 MiB RSS. Served at
+  `/api/usage/{meta,series,requests}` (top-K groups plus an exact `__other`)
+  and as `ramjet_principal_{requests,tokens}_total`; the dashboard gains
+  Tokens, per-token detail, and Usage views (per minute/hour/local day,
+  grouped by token or model). See `docs/api-tokens.md`.
+- `RJ_UI_AUTH_TOKEN` may now be presented as `Authorization: Bearer` to the
+  protected dashboard APIs, for scripting.
+
 ## 0.9.0 — 2026-10-19
 
 - Machine view reads SGLang engines. Engine cards, token rates and the

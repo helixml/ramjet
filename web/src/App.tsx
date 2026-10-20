@@ -13,6 +13,9 @@ import { ServingTopology } from "@/components/ServingTopology"
 import { LoginScreen } from "@/components/LoginScreen"
 import { Meter } from "@/components/Meter"
 import { TabBar, useTabs, type TabDef } from "@/components/Tabs"
+import { TokenDetail } from "@/components/TokenDetail"
+import { TokensTab } from "@/components/TokensTab"
+import { UsageTab } from "@/components/UsageTab"
 import {
   Card,
   CardContent,
@@ -115,7 +118,12 @@ const TABS: TabDef[] = [
   { id: "serving", label: "Serving" },
   { id: "gpus", label: "GPUs" },
   { id: "system", label: "System" },
+  { id: "usage", label: "Usage" },
+  { id: "tokens", label: "Tokens" },
 ]
+
+/** Tabs that read the accounting API rather than the machine-view sampler. */
+const ACCOUNTING_TABS = new Set(["usage", "tokens"])
 
 /** Days of hourly history requested; the LB clamps to its own retention. */
 const HISTORY_DAYS = 30
@@ -208,9 +216,17 @@ function ModelTokenUsageCard({
   )
 }
 
-function Dashboard({ onLogout }: { onLogout?: () => void }) {
+function Dashboard({
+  onLogout,
+  onSessionExpired,
+}: {
+  onLogout?: () => void
+  onSessionExpired: () => void
+}) {
   const [rangeSeconds, setRangeSeconds] = useState(3600)
-  const { active: tab, select: selectTab } = useTabs(TABS, "overview")
+  const { active: tab, sub: tabSub, select: selectTab } = useTabs(TABS, "overview")
+  const [usageToken, setUsageToken] = useState("")
+  const accountingTab = ACCOUNTING_TABS.has(tab)
   const { summary, series, error, mock } = useDashboardData(rangeSeconds)
   const { tokens, error: tokensError } = useTokenHistory(HISTORY_DAYS)
   const live = useLiveStream()
@@ -699,7 +715,10 @@ function Dashboard({ onLogout }: { onLogout?: () => void }) {
         onLogout={onLogout}
       />
 
-      {/* The one filter row — everything below renders against this slice. */}
+      {/* The one filter row — everything below renders against this slice.
+          The accounting tabs carry their own, so the machine-view range
+          picker and live tiles stay with the tabs they drive. */}
+      {accountingTab ? null : (
       <div className="flex flex-wrap items-center justify-between gap-2">
         <RangePicker value={rangeSeconds} onChange={setRangeSeconds} />
         {error ? (
@@ -714,7 +733,9 @@ function Dashboard({ onLogout }: { onLogout?: () => void }) {
           </span>
         )}
       </div>
+      )}
 
+      {accountingTab ? null : (
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-9">
         <StatTile
           label="Gen tok/s"
@@ -797,6 +818,7 @@ function Dashboard({ onLogout }: { onLogout?: () => void }) {
           loading={loading}
         />
       </div>
+      )}
 
       <TabBar tabs={TABS} active={tab} onSelect={selectTab} />
 
@@ -869,6 +891,30 @@ function Dashboard({ onLogout }: { onLogout?: () => void }) {
         </div>
       ) : null}
 
+      {tab === "usage" ? (
+        <UsageTab
+          tokenFilter={usageToken}
+          onTokenFilter={setUsageToken}
+          onUnauthorized={onSessionExpired}
+        />
+      ) : null}
+
+      {tab === "tokens" && tabSub ? (
+        // `#tokens/<principal>`: one token (or master / anonymous / rejected /
+        // a deleted id) in detail. Keyed so a different id starts fresh.
+        <TokenDetail
+          key={tabSub}
+          id={tabSub}
+          onUnauthorized={onSessionExpired}
+          onOpenUsage={(token) => {
+            setUsageToken(token)
+            selectTab("usage")
+          }}
+        />
+      ) : null}
+
+      {tab === "tokens" && !tabSub ? <TokensTab onUnauthorized={onSessionExpired} /> : null}
+
       <footer className="text-faint-foreground pb-4 pt-2 text-[11px]">
         Metrics are sampled and stored locally by the ramjet load balancer —
         no Prometheus or Grafana required.
@@ -908,6 +954,7 @@ export default function App() {
       onLogout={isMockMode() ? undefined : () => {
         void logoutUi().finally(() => setAuthenticated(false))
       }}
+      onSessionExpired={() => setAuthenticated(false)}
     />
   )
 }

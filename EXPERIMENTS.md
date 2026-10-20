@@ -1,5 +1,62 @@
 # node06 experiment journal
 
+## 2026-10-20 — Ramjet owns API auth on node06; per-token usage store sizing
+
+**What shipped.** PR #320 (`ghcr.io/helixml/ramjet:rust-api-tokens-c55b7cb`,
+image ID `sha256:2347132201db73d0b3b00ebe48019e2b48f4319d0268e3692bcf67f570dfda4e`,
+built locally and streamed to node06; 38.3 s build, 9.7 s transfer) adds
+minted `rjk_*` API tokens and per-principal usage accounting. On node06 the
+live LB (project `qwen_alias_release_20261003t081601z`, file
+`/home/luke/inference/qwen38_glm53_kev/docker-compose.yaml`, previously
+v0.8.0 `@sha256:fe432bbc…`) now runs `RJ_API_TOKENS_MODE=on` with
+`/var/lib/ramjet-api`. Caddy no longer checks the bearer (helixml/infra#85).
+The engine bearer (`RJ_UPSTREAM_TOKEN`) is the same value as Caddy's
+`BUNKER_API_KEY` (compared by hash only), so it is the master token and no
+client changed.
+
+**Why staged.** A keyless chat sent directly to `127.0.0.1:8006` returned
+200: the GLM engines check no key, and Caddy had been the only gate. A canary
+LB (separate project, private state dirs, :18006) passed the auth matrix
+against the real engines first: keyless 401, master Bearer and `x-api-key`
+200, wrong key 401, minted 200, revoked 401, management without UI token
+401, `qwen3.8-flash-next` alias 200.
+
+| step (UTC) | change | result |
+| --- | --- | --- |
+| 10:56 | new image, tokens `off` (attribution only) | healthy 12.4 s after recreate; render diff = image + 2 env + 1 mount |
+| 10:56-11:06 | observation | 245 requests, all `master`, 0 `anonymous`, 0 4xx/5xx; probe green |
+| 11:07:23 | tokens `on` | healthy 12.3 s; LB direct keyless 401, master 200; public 200 |
+| 11:07:44 | Caddy `@goodkey` removed, `caddy validate`, graceful reload | public: master 200, `x-api-key` 200, minted 200, keyless 401, wrong 401, retired path 404, `/health` 404 |
+| +5 min | real traffic | 98 requests, 0 4xx, 0 5xx, TTFT p50 1.45 s, cache hit 96.9% (response usage) |
+
+Each LB recreate cost ~9 s of refused/reset connections at Caddy
+(11:07:14-11:07:23 for the second; one in-flight chat stream was cut). No
+Caddy errors after the switch. Rollback: restore
+`docker-compose.yaml.bak-20261020T105552Z-pre-api-tokens` and
+`/etc/caddy/Caddyfile.pre-ramjet-auth-20261020T110744Z`, then recreate the LB
+with `-p qwen_alias_release_20261003t081601z --env-file
+../qwen38_flash_next/.env` and reload Caddy. Never restore the old Caddy-less
+gate order: Ramjet tokens `off` behind the new Caddyfile is an open API.
+
+**Usage store sizing** (GPU-free, `examples/usage_ledger_scale.rs`; every
+token active every hour of 90 days and every minute of the last day):
+
+| active tokens | JSON v1 RAM | JSON v1 file/min | SQLite v2 RAM | 30d by-token |
+| ---: | ---: | ---: | ---: | ---: |
+| 10 | +51 MiB | 19 MiB | — | — |
+| 100 | +438 MiB | 172 MiB | +24 MiB | 46-81 ms |
+| 1000 | +5.1 GiB | 1.7 GiB | +7-25 MiB | 2.0 s → 179 ms (covering index) |
+
+Columnar comparison on randomized realistic data, 31 days: SQLite 33 / 352
+MiB (100 / 1000 tokens, ~440 B/row incl. keys and index); zstd rows inside
+SQLite ≈2× smaller; Parquet zstd-3 5.4 / 58 MiB (~74 B/row, ~6×). Request log
+~413 vs 56 B/row (1M req/day: ~394 vs ~54 MiB/day). 30-day by-token over 1000
+tokens: SQLite 95 ms, DuckDB over Parquet 3.7 ms. A first synthetic run that
+sent identical requests claimed 133×; that was the data, not the format.
+Arrow + Parquet cost ~9 MB of binary and ~48 s of cold dependency build.
+Verdict: SQLite ships now; a Parquet cold tier for closed days is the
+follow-up. Iceberg is not worth a catalog for one local writer.
+
 ## 2026-10-15 — Basalt scale-out shape: 2x2 (two instances on four GPUs)
 
 Follow-up to the entry below, answering whether two Basalt instances (the

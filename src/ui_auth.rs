@@ -88,7 +88,8 @@ impl UiAuth {
     }
 
     /// Adds the session gate to API routes. Static UI assets stay public so
-    /// the browser can render the login screen.
+    /// the browser can render the login screen. Scripts may present the UI
+    /// token itself as `Authorization: Bearer` instead of a session cookie.
     pub fn protect(&self, router: Router) -> Router {
         router.route_layer(middleware::from_fn_with_state(
             self.clone(),
@@ -107,6 +108,18 @@ impl UiAuth {
             return false;
         };
         self.valid_session_value(cookie, now)
+    }
+
+    fn valid_bearer(&self, headers: &HeaderMap) -> bool {
+        let mut values = headers.get_all(header::AUTHORIZATION).iter();
+        let presented = values
+            .next()
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        values.next().is_none()
+            && presented.is_some_and(|presented| {
+                constant_time_equal(self.token.as_ref(), presented.as_bytes())
+            })
     }
 
     fn valid_session_value(&self, value: &str, now: u64) -> bool {
@@ -172,7 +185,7 @@ async fn require_session(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if auth.valid_session(&headers, unix_seconds()) {
+    if auth.valid_session(&headers, unix_seconds()) || auth.valid_bearer(&headers) {
         next.run(request).await
     } else {
         (
@@ -212,7 +225,7 @@ fn unix_seconds() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -222,7 +235,7 @@ fn hex(bytes: &[u8]) -> String {
     encoded
 }
 
-fn constant_time_equal(expected: &[u8], actual: &[u8]) -> bool {
+pub(crate) fn constant_time_equal(expected: &[u8], actual: &[u8]) -> bool {
     let mut difference = expected.len() ^ actual.len();
     for index in 0..expected.len().max(actual.len()) {
         difference |= usize::from(
@@ -269,6 +282,28 @@ mod tests {
             HeaderValue::from_static("theme=dark; ramjet_ui_session=signed.value"),
         );
         assert_eq!(cookie(&headers, COOKIE_NAME), Some("signed.value"));
+    }
+
+    #[test]
+    fn bearer_must_be_the_single_exact_ui_token() {
+        let authority = auth();
+        let mut headers = HeaderMap::new();
+        assert!(!authority.valid_bearer(&headers));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer a-very-long-dedicated-ui-token-123456789"),
+        );
+        assert!(authority.valid_bearer(&headers));
+        headers.append(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer a-very-long-dedicated-ui-token-123456789"),
+        );
+        assert!(!authority.valid_bearer(&headers));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer a-very-long-dedicated-ui-token-12345678"),
+        );
+        assert!(!authority.valid_bearer(&headers));
     }
 
     #[test]

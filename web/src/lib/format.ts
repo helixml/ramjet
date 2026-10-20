@@ -31,6 +31,9 @@ export function fmtNum(value: number | null | undefined, digits = 0): string {
 export function fmtCount(value: number | null | undefined, digits = 0): string {
   if (value == null || !Number.isFinite(value)) return "—"
   const abs = Math.abs(value)
+  if (abs >= 1_000_000_000) {
+    return `${(value / 1_000_000_000).toFixed(abs >= 10_000_000_000 ? 0 : 1)}B`
+  }
   if (abs >= 1_000_000) {
     return `${(value / 1_000_000).toFixed(abs >= 10_000_000 ? 0 : 1)}M`
   }
@@ -103,4 +106,40 @@ export function endpointLabel(endpoint: string, index: number): string {
   } catch {
     return `engine ${letter}`
   }
+}
+
+/** "3h ago", "in 5d", "just now" — compact relative time against `now`. */
+export function fmtRelative(t: number | null | undefined, now: number = Date.now()): string {
+  if (t == null || !Number.isFinite(t)) return "—"
+  const delta = t - now
+  const abs = Math.abs(delta)
+  if (abs < 45_000) return delta < 0 ? "just now" : "in <1m"
+  const units: Array<[number, string]> = [
+    [365 * 86_400_000, "y"],
+    [30 * 86_400_000, "mo"],
+    [86_400_000, "d"],
+    [3_600_000, "h"],
+    [60_000, "m"],
+  ]
+  for (const [size, label] of units) {
+    if (abs >= size) {
+      const n = Math.round(abs / size)
+      return delta < 0 ? `${n}${label} ago` : `in ${n}${label}`
+    }
+  }
+  return delta < 0 ? "just now" : "soon"
+}
+
+/** Absolute local date and time, for tooltips next to a relative time. */
+export function fmtDateTime(t: number | null | undefined): string {
+  if (t == null || !Number.isFinite(t)) return "—"
+  return new Date(t).toLocaleString("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  })
 }

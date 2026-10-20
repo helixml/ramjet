@@ -1111,6 +1111,12 @@ source profile retained by a failed/interrupted transition journal. The UI
 always shows whether a configured edge requires downtime and its operator
 estimate before enabling the action.
 
+With `RJ_UI_AUTH_TOKEN` configured, `/api/usage/*` and `/api/tokens*` sit
+behind the same session (or a `Bearer` UI token, for scripts). Minted client
+API tokens and per-token usage accounting (`RJ_API_TOKENS_MODE`,
+`RJ_API_STATE_DIR`, `RJ_USAGE_*`) are documented in
+[api-tokens.md](api-tokens.md).
+
 The controller appends schema-v1 JSON Lines to `audit_path`. The file and its
 parent must be owner-only (0600 and a non-group/world-writable directory). It
 records controller starts, mode changes, transition requests and outcomes,

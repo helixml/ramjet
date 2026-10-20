@@ -1,52 +1,14 @@
 name: qwen38_glm53_kev
 
+# kev-small (0.8B, GPU 3) removed 2026-10-07: idle since it left the upstream
+# list, and its 4.3 GiB co-residency capped glm53-unc-fp8's KV pool at half
+# the requested 500k tokens. The kev-engine network stays attached to the LB.
+#
+# node06's copy is identical except that it pins the LB image literally. Its
+# protected values come from ../qwen38_flash_next/.env, and the running
+# container belongs to Compose project qwen_alias_release_20261003t081601z;
+# see README.md for the exact recreate command.
 services:
-  kev-small:
-    image: ${KEV_IMAGE:?set KEV_IMAGE to an immutable tag@sha256 reference}
-    container_name: kev-small
-    restart: unless-stopped
-    networks:
-      - kev-engine
-    user: "1000:1000"
-    read_only: true
-    tmpfs:
-      - /tmp:size=2g,mode=0700,uid=1000,gid=1000
-    volumes:
-      - ${KEV_HF_CACHE:-/prod/kev-systemone/hf}:/hf
-    environment:
-      HF_HOME: /hf
-      HF_HUB_DISABLE_PROGRESS_BARS: "1"
-      HF_HUB_OFFLINE: "1"
-      TOKENIZERS_PARALLELISM: "false"
-      TRANSFORMERS_OFFLINE: "1"
-      TRITON_CACHE_DIR: /hf/triton
-      KEV_HOST: 0.0.0.0
-      KEV_DTYPE: bf16
-      KEV_PREFIX_CACHE: "4"
-      KEV_PREFIX_MIN_TOKENS: "384"
-    command:
-      - --run
-      - jaredpalmer/kev-0.8b@54f4f8777356cd5bbbb6c6919c657f26e6f2f6d8
-      - --port
-      - "8009"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["3"]
-              capabilities: [gpu]
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8009/v1/models', timeout=2)); assert d['models'][0]['id']=='kev-latest'"
-      interval: 5s
-      timeout: 3s
-      retries: 60
-      start_period: 30s
-
   ds4-loadbalancer:
     image: ${LB_IMAGE:?set LB_IMAGE to an immutable tag@sha256 reference}
     container_name: ${LB_CONTAINER_NAME:-ds4-loadbalancer}
@@ -57,17 +19,28 @@ services:
       - "100.89.187.17:${LB_TAILSCALE_METRICS_PORT:-8007}:9090"
     volumes:
       - /var/lib/ramjet-machineview:/machineview
+      # Minted API token hashes and the per-token usage store
+      # (docs/api-tokens.md). Root-owned mode 0700 on the host.
+      - /var/lib/ramjet-api:/var/lib/ramjet-api
     networks:
       - qwen-engine
       - glm-engine
       - machineview-host
       - kev-engine
     environment:
-      RJ_UPSTREAM: http://qwen38flashnext-a:8000,http://glm53sm120-b:8000,http://glm53sm120-c:8000,http://kev-small:8009
-      RJ_UPSTREAM_MODELS: qwen3.8-flash-next,glm-5.3-flash,glm-5.3-flash,kev-latest
-      RJ_UPSTREAM_APIS: openai,openai,openai,systemone
+      # Stock and uncensored GLM retain distinct model ownership.
+      RJ_UPSTREAM: http://glm53sm120-b:8000,http://glm53sm120-c:8000,http://glm53-unc-fp8:8000
+      # Qwen compatibility alias stays on the stock GLM pool.
+      RJ_MODEL_ALIASES: qwen3.8-flash-next=glm-5.3-flash
+      RJ_UPSTREAM_MODELS: glm-5.3-flash,glm-5.3-flash,glm-5.3-flash-uncensored
+      RJ_UPSTREAM_APIS: openai,openai,openai
       RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:?set VLLM_API_KEY in protected mode-0600 .env}
       RJ_UI_AUTH_TOKEN: ${RJ_UI_AUTH_TOKEN:?set RJ_UI_AUTH_TOKEN in protected mode-0600 .env}
+      # Ramjet is the API authority: the master token (RJ_UPSTREAM_TOKEN, the
+      # same bearer Caddy used to check) or a minted rjk_* token. The engines
+      # do not check keys, so never run this off behind a pass-through Caddy.
+      RJ_API_TOKENS_MODE: ${RJ_API_TOKENS_MODE:-on}
+      RJ_API_STATE_DIR: /var/lib/ramjet-api
       RJ_ADVERTISE_CTX_MARGIN: "8192"
       RJ_MAX_TOKENS_STRIP: "0"
       RJ_AFFINITY: prefix
@@ -92,7 +65,7 @@ services:
       # other session on c. The per-path snapshot cap already stops one long
       # prompt from evicting other sessions, so ordinary routing wins.
       RJ_ROUTE_LONG_PROMPT_BYTES: "${RJ_ROUTE_LONG_PROMPT_BYTES:-0}"
-      RJ_ROUTE_LONG_PROMPT_UPSTREAMS: "${RJ_ROUTE_LONG_PROMPT_UPSTREAMS:--,-,lane,-}"
+      RJ_ROUTE_LONG_PROMPT_UPSTREAMS: "${RJ_ROUTE_LONG_PROMPT_UPSTREAMS:--,lane,-}"
       RJ_ROUTE_JOURNAL: "true"
       RJ_TOKENIZER_MODE: "off"
       RJ_EXACT_ROUTE_MODE: "off"

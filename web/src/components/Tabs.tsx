@@ -6,26 +6,47 @@ export interface TabDef {
   label: string
 }
 
-/** Underline tabs, synced to the URL hash so a refresh keeps the view. */
+/** Splits `#tab/rest` into the tab id and an optional sub-route. */
+function parseHash(): { tab: string; sub: string } {
+  const hash = window.location.hash.slice(1)
+  const slash = hash.indexOf("/")
+  if (slash < 0) return { tab: hash, sub: "" }
+  let sub = hash.slice(slash + 1)
+  try {
+    sub = decodeURIComponent(sub)
+  } catch {
+    // Keep the raw text for a malformed escape.
+  }
+  return { tab: hash.slice(0, slash), sub }
+}
+
+/**
+ * Underline tabs, synced to the URL hash so a refresh keeps the view. A tab
+ * may carry a sub-route (`#tokens/<id>`), which plain links can set; the
+ * browser's back button then walks those like any other navigation.
+ */
 export function useTabs(tabs: TabDef[], fallback: string) {
-  const [active, setActive] = useState<string>(() => {
-    const hash = window.location.hash.slice(1)
-    return tabs.some((tab) => tab.id === hash) ? hash : fallback
+  const [state, setState] = useState<{ active: string; sub: string }>(() => {
+    const { tab, sub } = parseHash()
+    return tabs.some((candidate) => candidate.id === tab)
+      ? { active: tab, sub }
+      : { active: fallback, sub: "" }
   })
   useEffect(() => {
     const onHashChange = () => {
-      const hash = window.location.hash.slice(1)
-      if (tabs.some((tab) => tab.id === hash)) setActive(hash)
+      const { tab, sub } = parseHash()
+      if (tabs.some((candidate) => candidate.id === tab)) setState({ active: tab, sub })
+      else if (tab === "") setState({ active: fallback, sub: "" })
     }
     window.addEventListener("hashchange", onHashChange)
     return () => window.removeEventListener("hashchange", onHashChange)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   const select = (id: string) => {
-    setActive(id)
+    setState({ active: id, sub: "" })
     history.replaceState(null, "", id === fallback ? "#" : `#${id}`)
   }
-  return { active, select }
+  return { active: state.active, sub: state.sub, select }
 }
 
 export function TabBar({
