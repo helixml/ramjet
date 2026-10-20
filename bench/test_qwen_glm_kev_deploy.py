@@ -51,8 +51,8 @@ class QwenGlmKevDeployTests(unittest.TestCase):
             ("RJ_ROUTE_LONG_PROMPT_BYTES", None),
             ("RJ_ROUTE_LONG_PROMPT_BYTES", "600k"),
             ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", None),
-            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,lane"),
-            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,-,-"),
+            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,lane"),
+            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,-"),
             ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,-,lane"),
         ):
             changed = copy.deepcopy(self.document)
@@ -69,16 +69,28 @@ class QwenGlmKevDeployTests(unittest.TestCase):
         ] = "0"
         self.validator.validate(rolled_back)
 
-    def test_kev_is_private_pinned_and_gpu_confined(self):
-        kev = self.document["services"]["kev-small"]
-        self.assertEqual(set(kev["networks"]), {"kev-engine"})
-        self.assertEqual(kev["environment"]["KEV_HOST"], "0.0.0.0")
-        self.assertEqual(kev["environment"]["HF_HUB_OFFLINE"], "1")
-        self.assertEqual(
-            kev["deploy"]["resources"]["reservations"]["devices"][0]["device_ids"],
-            ["3"],
-        )
-        self.assertNotIn("ports", kev)
+    def test_ramjet_is_the_api_authority_with_persistent_state(self):
+        for key, value in (
+            ("RJ_API_TOKENS_MODE", "off"),
+            ("RJ_API_TOKENS_MODE", None),
+            ("RJ_API_STATE_DIR", "/tmp"),
+        ):
+            changed = copy.deepcopy(self.document)
+            environment = changed["services"]["ds4-loadbalancer"]["environment"]
+            if value is None:
+                environment.pop(key)
+            else:
+                environment[key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                self.validator.validate(changed)
+        changed = copy.deepcopy(self.document)
+        changed["services"]["ds4-loadbalancer"]["volumes"] = [
+            volume
+            for volume in changed["services"]["ds4-loadbalancer"]["volumes"]
+            if volume.get("target") != "/var/lib/ramjet-api"
+        ]
+        with self.assertRaises(ValueError):
+            self.validator.validate(changed)
 
     def test_rollout_preserves_exact_lb_and_warms_before_canary(self):
         script = DEPLOY / "node06-rollout.sh"

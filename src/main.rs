@@ -10,6 +10,7 @@ use axum::{
 };
 use prometheus::{Encoder, Registry, TextEncoder};
 use ramjet::{
+    accounting::{self, Accounting},
     adaptive::Adaptive,
     config::Config,
     kv_consumer::KvEventConsumers,
@@ -67,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
                 .map(ramjet::exact_route_inventory::ExactRouteInventory::direct)
                 .collect()
         };
-    let proxy = Proxy::new_with_exact_inventories(
+    let mut proxy = Proxy::new_with_exact_inventories(
         config.clone(),
         client.clone(),
         metrics.clone(),
@@ -75,7 +76,28 @@ async fn main() -> anyhow::Result<()> {
         exact_inventories,
     )
     .context("initialize ramjet proxy")?;
+    let accounting_settings =
+        accounting::Settings::from_env().context("invalid API token configuration")?;
+    let accounting = Arc::new(
+        Accounting::new(
+            &accounting_settings,
+            config.upstream_token.as_deref(),
+            config
+                .upstreams
+                .iter()
+                .map(|upstream| upstream.as_str().trim_end_matches('/').to_owned())
+                .collect(),
+            Some(&registry),
+        )
+        .context("initialize API token accounting")?,
+    );
+    proxy.install_accounting(Arc::clone(&accounting))?;
     let ui_auth = UiAuth::from_env().context("invalid UI authentication configuration")?;
+    if accounting.tokens_enabled() {
+        ui_auth
+            .as_ref()
+            .context("RJ_API_TOKENS_MODE=on requires RJ_UI_AUTH_TOKEN to manage tokens")?;
+    }
     let adaptive = Adaptive::from_env(
         proxy.clone(),
         metrics.requests.clone(),
@@ -133,6 +155,15 @@ async fn main() -> anyhow::Result<()> {
             .expect("adaptive UI authority checked above");
         metrics_api = metrics_api.merge(auth.protect(controller.router()));
     }
+    // Usage names tokens, so it shares the dashboard's gate when one exists.
+    // Token management is only mounted behind it.
+    metrics_api = if let Some(auth) = &ui_auth {
+        metrics_api
+            .merge(auth.protect(accounting.usage_router()))
+            .merge(auth.protect(accounting.tokens_router()))
+    } else {
+        metrics_api.merge(accounting.usage_router())
+    };
     let api_listener = TcpListener::bind(config.api_addr)
         .await
         .context("bind API listener")?;
@@ -141,6 +172,12 @@ async fn main() -> anyhow::Result<()> {
         .context("bind metrics listener")?;
 
     log_startup(&config);
+    tracing::info!(
+        api_tokens = accounting.tokens_enabled(),
+        usage_persisted = accounting_settings.state_dir.is_some(),
+        usage_retention_days = accounting_settings.ledger.hour_retention_days,
+        "API token accounting configured"
+    );
 
     let probe = tokio::spawn(proxy.clone().probe_loop());
     let dspark_guard = tokio::spawn(proxy.clone().dspark_guard_loop());
@@ -148,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
     let adaptive_task = adaptive
         .clone()
         .map(|controller| tokio::spawn(controller.run()));
+    let mut accounting_task = tokio::spawn(Arc::clone(&accounting).run(shutdown_tx.subscribe()));
     let mut api_shutdown = shutdown_tx.subscribe();
     let mut metrics_shutdown = shutdown_tx.subscribe();
     let api_server = axum::serve(api_listener, api).with_graceful_shutdown(async move {
@@ -190,6 +228,13 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(view) = machineview {
         view.shutdown().await;
+    }
+    if tokio::time::timeout(Duration::from_secs(10), &mut accounting_task)
+        .await
+        .is_err()
+    {
+        tracing::warn!("usage accounting final flush timed out");
+        accounting_task.abort();
     }
     kv_consumers.shutdown().await;
     snapshot_consumers.shutdown().await;

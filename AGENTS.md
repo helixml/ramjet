@@ -188,6 +188,36 @@ loopback host agent. The UI bundle is built in the Dockerfile's `ui` stage
 edit re-runs npm but must not invalidate the Rust build layer. See
 `web/README.md` for the full contract.
 
+For minted API tokens and per-principal usage (`src/api_tokens.rs`,
+`src/usage_ledger.rs`, `src/accounting.rs`, the dashboard Tokens/Usage tabs),
+the loop is GPU-free:
+
+```bash
+cargo test --locked api_tokens
+cargo test --locked usage_ledger
+cargo test --locked accounting
+cargo test --locked proxy::tests::minted_tokens
+cd web && npm run build           # then /ui/?mock=1 for both tabs
+```
+
+Keep four invariants. Engines never see a minted token: the exchange removes
+both `Authorization` and `x-api-key` before inserting the master bearer.
+Shadow-soak capture authority is evaluated against the presented credential,
+before the exchange, so a minted token can never acquire it. Accounting never
+blocks serving: an unopenable `usage.sqlite3` degrades to an in-memory store
+and a failed flush keeps its deltas for the next attempt, while a corrupt
+`api-tokens.json` fails startup closed rather than silently dropping
+credentials. The request path touches only the in-memory delta map; keep
+SQLite I/O on the flush task and `spawn_blocking` readers, with lock order
+`db` then `state`. Records are content-free and model labels stay capped at 32.
+On node06 the live LB belongs to `deploy/qwen38_glm53_kev` (GLM-5.3), which
+runs tokens `on` with `/var/lib/ramjet-api`: Ramjet, not Caddy, checks the
+bearer, and the GLM engines check nothing, so never run that LB with tokens
+`off` behind the pass-through Caddy. `deploy/qwen38_flash_next` does not mount
+the state directory yet; adding it changes SHA-256-pinned Compose bytes, so do
+it with a rollout that repins its README record and
+`bench/qwen38_nvfp4_compose.py`. Contract in `docs/api-tokens.md`.
+
 For compact-index work, keep the fast GPU-free correctness/performance loop
 separate from node06:
 

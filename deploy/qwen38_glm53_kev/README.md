@@ -1,6 +1,27 @@
-# Qwen + GLM + Kev System One on node06
+# GLM-5.3 on node06 (the `qwen38_glm53_kev` project)
 
-This deployment keeps one Ramjet instance in front of four upstreams:
+**Current shape (2026-10-20).** This Compose project owns only Ramjet, in
+front of three OpenAI-profile upstreams: two stock GLM-5.3-Flash replicas
+(`glm53sm120-b`, `glm53sm120-c`) and the uncensored GLM (`glm53-unc-fp8`).
+`qwen3.8-flash-next` is a model alias for the stock GLM pool. Kev-small was
+removed on 2026-10-07 and the Qwen engine no longer serves here; the history
+below describes the original four-upstream rollout.
+
+## API authentication lives in Ramjet
+
+`RJ_API_TOKENS_MODE=on`: Ramjet answers `401` itself unless a request carries
+the master token (the same bearer clients always sent; it is also
+`RJ_UPSTREAM_TOKEN`) or a minted `rjk_*` token, which it exchanges for the
+master bearer before dispatch. Caddy no longer checks the bearer; it only
+proxies `/v1/*`. The GLM engines do not check keys, so Ramjet must never run
+with tokens `off` while Caddy passes requests through. Token hashes and the
+per-token usage store live in root-owned mode-0700 `/var/lib/ramjet-api`.
+Manage tokens from the dashboard (`http://100.89.187.17:8007/ui/#tokens`) or
+`POST /api/tokens` with the UI token; contract in `docs/api-tokens.md`.
+
+## Original rollout (2026-09)
+
+This deployment kept one Ramjet instance in front of four upstreams:
 
 - Qwen3.8-Flash-Next TP4 on GPUs 0-3 (`openai`).
 - Two GLM-5.3-Flash TP2 replicas on GPUs 4-7 (`openai`).

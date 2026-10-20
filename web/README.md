@@ -109,6 +109,48 @@ gauges are counted once per scheduler (`tp_rank`/`pp_rank` 0): running and
 waiting are summed across DP ranks, KV cache is their mean. Without the agent the serving charts still work; the
 machine/GPU sections show their empty states.
 
+## Tokens & usage
+
+Two tabs read the LB's API-token and per-principal accounting API; the
+contract (routes, field names, configuration) is
+[`docs/api-tokens.md`](../docs/api-tokens.md).
+
+- **Tokens** lists minted tokens (searchable by name, description, or
+  `rjk_` prefix, filterable by status, 50 per page, so ten thousand stay
+  responsive) with expiry, last use, and 24 h requests / tokens / cache hit
+  from one `limit=500` series request. A token outside the 500 busiest shows
+  `—` (unknown), not `0`, whenever the server folded the rest into
+  `__other`. A new token's secret is shown exactly once. If `/api/tokens` is
+  absent or reports `enabled: false`, the tab explains that
+  `RJ_API_TOKENS_MODE=on` and `RJ_API_STATE_DIR` are needed; usage is still
+  accounted and the Usage tab keeps working.
+- **Token detail** (`#tokens/<id>`, also for `master`, `anonymous`,
+  `rejected`, and deleted ids) shows the token's metadata and actions,
+  KPI tiles, usage over time by model, TTFT / decode / duration percentiles,
+  errors, upstream split, finish reasons, a per-model breakdown, and its own
+  recent requests. Click a token row, a principal in the Usage breakdown, or
+  one in any recent-requests table to get there.
+- **Usage** charts every accounting bucket (minute / hour / day, day buckets
+  aligned to the browser's local midnight via `tz_offset_min`), grouped by
+  token, model, or nothing, with a searchable principal picker and a model
+  filter. Token grouping asks for `limit=7`, so the seven busiest principals
+  plus the server's exact `__other` group fill the eight colors; `other`
+  quantiles are real, not client estimates. Sparse server points are
+  densified client-side: a missing bucket is zero requests, while its
+  quantiles and ratios stay absent rather than zero.
+
+Recent-requests tables poll their newest page every 5 s and page backwards
+with `before_ms`; loading an older page pauses the live head (a moving head
+and fixed older pages cannot be stitched without gaps), and resuming drops
+the older pages. Series colors are derived from the group key itself, so
+minting a token or changing a filter never repaints the others. Bucket charts
+plot one mark per bucket on a category axis (`src/components/BucketChart.tsx`);
+past 360 buckets a stacked bar is drawn as a stepped area instead. `?mock=1`
+serves a deterministic synthetic fleet of 60 tokens
+(`src/lib/accountingMock.ts`) that implements `limit`, `group_count`,
+`__other`, and `before_ms` like the backend; token create/edit/revoke/delete
+mutate it in memory.
+
 ## Host agent
 
 Stdlib-only, loopback-only by default, read-only:

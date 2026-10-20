@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the node06 Qwen/GLM/Kev TypeSafe deployment."""
+"""Validate the node06 GLM deployment owned by the qwen38_glm53_kev project."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 COMPOSE = ROOT / "docker-compose.yaml"
 RAMJET_IMAGE = "ghcr.io/helixml/ramjet:systemone-test@sha256:" + "a" * 64
-KEV_IMAGE = "ghcr.io/helixml/ramjet-kev:0.8b-test@sha256:" + "b" * 64
 IMMUTABLE_IMAGE = re.compile(r"^[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$")
 
 
@@ -27,7 +26,6 @@ def render() -> dict:
     environment.update(
         {
             "LB_IMAGE": environment.get("LB_IMAGE", RAMJET_IMAGE),
-            "KEV_IMAGE": environment.get("KEV_IMAGE", KEV_IMAGE),
             "VLLM_API_KEY": "validator-upstream-token",
             "RJ_UI_AUTH_TOKEN": "validator-ui-token",
         }
@@ -62,55 +60,23 @@ def validate(document: dict) -> None:
     if document.get("name") != "qwen38_glm53_kev":
         fail("unexpected Compose project name")
     services = document.get("services", {})
-    if set(services) != {"ds4-loadbalancer", "kev-small"}:
-        fail("deployment must own exactly Ramjet and Kev-small")
-
-    kev = services["kev-small"]
-    if not IMMUTABLE_IMAGE.fullmatch(kev.get("image", "")):
-        fail("Kev image must be an immutable tag@sha256 reference")
-    if set(kev.get("networks", {})) != {"kev-engine"}:
-        fail("Kev must join only the private System One network")
-    if kev.get("read_only") is not True or kev.get("user") != "1000:1000":
-        fail("Kev must use the read-only non-root runtime")
-    if kev.get("command") != [
-        "--run",
-        "jaredpalmer/kev-0.8b@54f4f8777356cd5bbbb6c6919c657f26e6f2f6d8",
-        "--port",
-        "8009",
-    ]:
-        fail("Kev model, revision, or port drift")
-    devices = kev["deploy"]["resources"]["reservations"]["devices"]
-    if len(devices) != 1 or devices[0].get("device_ids") != ["3"]:
-        fail("Kev-small must be confined to physical GPU 3")
-    if set(kev.get("environment", {})) != {
-        "HF_HOME",
-        "HF_HUB_DISABLE_PROGRESS_BARS",
-        "HF_HUB_OFFLINE",
-        "KEV_DTYPE",
-        "KEV_HOST",
-        "KEV_PREFIX_CACHE",
-        "KEV_PREFIX_MIN_TOKENS",
-        "TOKENIZERS_PARALLELISM",
-        "TRANSFORMERS_OFFLINE",
-        "TRITON_CACHE_DIR",
-    }:
-        fail("unexpected Kev runtime environment")
+    if set(services) != {"ds4-loadbalancer"}:
+        fail("deployment must own exactly Ramjet (kev-small was removed 2026-10-07)")
 
     lb = services["ds4-loadbalancer"]
     if not IMMUTABLE_IMAGE.fullmatch(lb.get("image", "")):
         fail("Ramjet image must be an immutable tag@sha256 reference")
     environment = lb.get("environment", {})
     expected = {
-        "RJ_UPSTREAM": "http://qwen38flashnext-a:8000,http://glm53sm120-b:8000,http://glm53sm120-c:8000,http://kev-small:8009",
-        "RJ_UPSTREAM_MODELS": "qwen3.8-flash-next,glm-5.3-flash,glm-5.3-flash,kev-latest",
-        "RJ_UPSTREAM_APIS": "openai,openai,openai,systemone",
+        "RJ_UPSTREAM": "http://glm53sm120-b:8000,http://glm53sm120-c:8000,http://glm53-unc-fp8:8000",
+        "RJ_UPSTREAM_MODELS": "glm-5.3-flash,glm-5.3-flash,glm-5.3-flash-uncensored",
+        "RJ_UPSTREAM_APIS": "openai,openai,openai",
+        "RJ_MODEL_ALIASES": "qwen3.8-flash-next=glm-5.3-flash",
     }
     for key, value in expected.items():
         if environment.get(key) != value:
             fail(f"{key} must be {value!r}")
     validate_long_prompt_lane(environment)
-    if "RJ_MACHINEVIEW_UPSTREAM_GPUS" in environment:
-        fail("exclusive machine-view GPU ownership cannot describe co-located Kev")
     for key in (
         "RJ_TOKENIZER_MODE",
         "RJ_EXACT_ROUTE_MODE",
@@ -124,6 +90,23 @@ def validate(document: dict) -> None:
         fail("protected upstream token did not render")
     if environment.get("RJ_UI_AUTH_TOKEN") != "validator-ui-token":
         fail("protected UI token did not render")
+    # Caddy no longer checks the bearer and the engines never did, so Ramjet
+    # must stay the authority.
+    if environment.get("RJ_API_TOKENS_MODE") != "on":
+        fail("Ramjet must authenticate API requests (RJ_API_TOKENS_MODE=on)")
+    if environment.get("RJ_API_STATE_DIR") != "/var/lib/ramjet-api":
+        fail("API token/usage state directory changed")
+    api_state = [
+        volume
+        for volume in lb.get("volumes", [])
+        if volume.get("target") == "/var/lib/ramjet-api"
+    ]
+    if (
+        len(api_state) != 1
+        or api_state[0].get("source") != "/var/lib/ramjet-api"
+        or api_state[0].get("read_only")
+    ):
+        fail("API token/usage state must be one writable /var/lib/ramjet-api mount")
     if set(lb.get("networks", {})) != {
         "qwen-engine",
         "glm-engine",
@@ -149,9 +132,9 @@ def main() -> int:
     try:
         validate(render())
     except (OSError, subprocess.CalledProcessError, json.JSONDecodeError, ValueError) as error:
-        print(f"qwen/glm/kev compose validation failed: {error}", file=sys.stderr)
+        print(f"glm compose validation failed: {error}", file=sys.stderr)
         return 1
-    print("qwen/glm/kev compose validation: ok")
+    print("glm compose validation: ok")
     return 0
 
 

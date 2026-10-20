@@ -27,6 +27,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 
 use crate::{
+    accounting::{Accounting, Admission, Outcome, RequestAccount},
     config::{
         ApiProfile, Config, DsparkGuardMode, RankProbeScope, UpstreamAdmissionMode,
         UpstreamApiProfile, WarmupAdmissionMode,
@@ -181,6 +182,8 @@ struct Inner {
     /// Whether the last routing decision had to fail open. Only used to publish
     /// and log the transition once instead of once per request.
     failing_open: AtomicBool,
+    /// Ingress authentication and per-principal usage accounting.
+    accounting: Arc<Accounting>,
 }
 
 /// Timestamp of the most recent completed response from one upstream, on the
@@ -913,7 +916,7 @@ impl Proxy {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn from_parts(
         config: Config,
         client: reqwest::Client,
@@ -1001,6 +1004,14 @@ impl Proxy {
             .collect::<Vec<_>>()
             .into();
         let upstream_count = config.upstreams.len();
+        let accounting = Arc::new(Accounting::passive(
+            config.upstream_token.as_deref(),
+            config
+                .upstreams
+                .iter()
+                .map(|upstream| upstream.as_str().trim_end_matches('/').to_owned())
+                .collect(),
+        ));
         Ok(Self {
             inner: Arc::new(Inner {
                 config,
@@ -1022,8 +1033,22 @@ impl Proxy {
                 origin: Instant::now(),
                 upstream_liveness,
                 failing_open: AtomicBool::new(false),
+                accounting,
             }),
         })
+    }
+
+    /// Replaces the default attribution-only accounting. Must be called
+    /// before the proxy is cloned into any server or background task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the proxy has already been shared.
+    pub fn install_accounting(&mut self, accounting: Arc<Accounting>) -> anyhow::Result<()> {
+        Arc::get_mut(&mut self.inner)
+            .context("accounting must be installed before the proxy is shared")?
+            .accounting = accounting;
+        Ok(())
     }
 
     #[must_use]
@@ -1283,12 +1308,33 @@ impl Proxy {
     #[allow(clippy::too_many_lines)]
     async fn serve(&self, request: Request<Body>) -> Response<Body> {
         let started = Instant::now();
-        let (parts, inbound_body) = request.into_parts();
+        let (mut parts, inbound_body) = request.into_parts();
         if parts.uri.path() == "/v1/mini-dynamo/identity"
             || parts.uri.path().starts_with("/v1/mini-dynamo/identity/")
         {
             return text_error(StatusCode::NOT_FOUND, "not found");
         }
+        let endpoint = shims::endpoint(parts.uri.path());
+        let endpoint_label = endpoint.label();
+        let accounting = Arc::clone(&self.inner.accounting);
+        let (principal, exchange) = match accounting.authenticate(&parts.headers) {
+            Admission::Allow {
+                principal,
+                exchange,
+            } => (principal, exchange),
+            Admission::Reject { reason } => {
+                accounting.finish(
+                    &RequestAccount::new(
+                        Arc::from(crate::accounting::PRINCIPAL_REJECTED),
+                        endpoint_label,
+                    ),
+                    &Outcome::local(StatusCode::UNAUTHORIZED, "auth_rejected", started.elapsed()),
+                );
+                return Accounting::rejection(reason);
+            }
+        };
+        // Evaluated against the presented credential, before any exchange:
+        // a minted token must never acquire the master's capture authority.
         let capture_shadow_soak = match shadow_soak_capture_requested(
             &parts.headers,
             self.inner.config.upstream_token.as_deref(),
@@ -1299,16 +1345,31 @@ impl Proxy {
         if capture_shadow_soak && !self.inner.tokenizer.shadow_soak_status().enabled {
             return text_error(StatusCode::NOT_FOUND, "not found");
         }
+        if exchange {
+            accounting.exchange_credentials(&mut parts.headers);
+        }
+        let mut account = RequestAccount::new(principal, endpoint_label);
         let request_id = journal_request_id(&parts.headers);
         let opaque_session = opaque_session_id(&parts.headers);
-        let endpoint = shims::endpoint(parts.uri.path());
-        let endpoint_label = endpoint.label();
         if !self.inner.config.upstream_models.is_empty()
             && is_models_request(&parts.method, &parts.uri)
         {
-            return self.serve_models_aggregated(endpoint_label, started).await;
+            let response = self.serve_models_aggregated(endpoint_label, started).await;
+            accounting.finish(
+                &account,
+                &Outcome::local(response.status(), "complete", started.elapsed()),
+            );
+            return response;
         }
         let Ok(raw_body) = to_bytes(inbound_body, MAX_REQUEST_BODY).await else {
+            accounting.finish(
+                &account,
+                &Outcome::local(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request_too_large",
+                    started.elapsed(),
+                ),
+            );
             return json_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request body too large or unreadable",
@@ -1337,6 +1398,9 @@ impl Proxy {
             prepare_tokenizer_body,
             &self.inner.config.model_aliases,
         );
+        if let RequestedModel::Named(model) = &prepared.requested_model {
+            account.model = Some(model.clone());
+        }
         let output_limit = prepared.output_limit;
         let decode_load_units = output_limit.decode_load_units(
             endpoint,
@@ -1378,6 +1442,14 @@ impl Proxy {
                         StatusCode::BAD_REQUEST,
                         started.elapsed(),
                     );
+                    accounting.finish(
+                        &account,
+                        &Outcome::local(
+                            StatusCode::BAD_REQUEST,
+                            "model_required",
+                            started.elapsed(),
+                        ),
+                    );
                     return json_error(
                         StatusCode::BAD_REQUEST,
                         "a valid model is required for this deployment",
@@ -1402,6 +1474,10 @@ impl Proxy {
                 "model_not_found",
                 StatusCode::NOT_FOUND,
                 started.elapsed(),
+            );
+            accounting.finish(
+                &account,
+                &Outcome::local(StatusCode::NOT_FOUND, "model_not_found", started.elapsed()),
             );
             return json_error(StatusCode::NOT_FOUND, "model not found for API profile");
         }
@@ -1489,6 +1565,8 @@ impl Proxy {
             .with_label_values(&[prefix_single_flight.mode, prefix_single_flight.outcome])
             .inc();
         let body = Bytes::from(prepared.body);
+        account.request_bytes = body.len();
+        account.route_outcome = Some(decision.outcome.label());
         self.inner
             .metrics
             .request_bytes
@@ -1682,6 +1760,10 @@ impl Proxy {
             };
             self.record_model_request_outcome(configured_model, "upstream_error");
             self.record_error(endpoint_label, reason, status, started.elapsed());
+            accounting.finish(
+                &account,
+                &Outcome::local(status, "upstream_error", started.elapsed()),
+            );
             self.inner.journal.finish(
                 journal_sequence,
                 request_id.as_deref(),
@@ -1714,7 +1796,7 @@ impl Proxy {
         let pre_route_tokens = pre_route_tokens.map(|tokens| tokens.tokens);
         let is_models = is_models_request(&parts.method, &parts.uri) && status == StatusCode::OK;
         if is_models {
-            return self
+            let response = self
                 .serve_models(
                     endpoint_label,
                     upstream,
@@ -1728,6 +1810,14 @@ impl Proxy {
                     started,
                 )
                 .await;
+            accounting.finish(
+                &account,
+                &Outcome {
+                    upstream: Some(upstream),
+                    ..Outcome::local(response.status(), "complete", started.elapsed())
+                },
+            );
+            return response;
         }
 
         let streaming = response
@@ -1772,6 +1862,7 @@ impl Proxy {
                     journal_sequence,
                     request_id,
                     started,
+                    account,
                 )
                 .await;
         });
@@ -1805,6 +1896,7 @@ impl Proxy {
         journal_sequence: Option<u64>,
         request_id: Option<String>,
         started: Instant,
+        account: RequestAccount,
     ) {
         let endpoint_label = endpoint.label();
         let mut usage = Accumulator::default();
@@ -1934,6 +2026,19 @@ impl Proxy {
             }
         }
         self.record_upstream_request(upstream, status);
+        self.inner.accounting.finish(
+            &account,
+            &Outcome {
+                status,
+                result,
+                upstream: Some(upstream),
+                stream: streaming,
+                usage: Some(&usage),
+                first_token,
+                elapsed: started.elapsed(),
+                response_bytes: bytes_out,
+            },
+        );
         let outcome = match result {
             "client_disconnect" => "client_disconnect",
             "upstream_read_error" => "upstream_error",
@@ -4936,6 +5041,143 @@ mod tests {
         }
         assert_eq!(requests.load(Ordering::Relaxed), 0);
         task.abort();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn minted_tokens_are_exchanged_for_the_master_bearer_and_accounted() {
+        let seen = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+        let observed = Arc::clone(&seen);
+        let upstream = AxumRouter::new().fallback(any(move |headers: HeaderMap| {
+            let observed = Arc::clone(&observed);
+            async move {
+                observed.lock().push(
+                    headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToOwned::to_owned),
+                );
+                assert!(headers.get("x-api-key").is_none());
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":80}}}"#,
+                    ))
+                    .unwrap()
+            }
+        }));
+        let (url, task) = start_upstream(upstream).await;
+        let mut proxy = proxy_for_with_token(&[url], "engine-master");
+        let mut nonce = [0_u8; 8];
+        getrandom::fill(&mut nonce).unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("rj-proxy-acct-{}", crate::ui_auth::hex(&nonce)));
+        std::fs::create_dir(&dir).unwrap();
+        let settings = crate::accounting::Settings::from_lookup(|key| match key {
+            "RJ_API_TOKENS_MODE" => Some("on".to_owned()),
+            "RJ_API_STATE_DIR" => Some(dir.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let accounting =
+            Arc::new(Accounting::new(&settings, Some("engine-master"), Vec::new(), None).unwrap());
+        proxy.install_accounting(Arc::clone(&accounting)).unwrap();
+        let router = accounting.tokens_router();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let admin = listener.local_addr().unwrap();
+        let admin_task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let created: Value = serde_json::from_str(
+            &reqwest::Client::new()
+                .post(format!("http://{admin}/api/tokens"))
+                .header("content-type", "application/json")
+                .body(r#"{"name":"fleet"}"#)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let id = created["token"]["id"].as_str().unwrap().to_owned();
+        let secret = created["secret"].as_str().unwrap().to_owned();
+
+        let send = |credential: Option<(&'static str, String)>| {
+            let mut builder = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json");
+            if let Some((name, value)) = credential {
+                builder = builder.header(name, value);
+            }
+            builder
+                .body(Body::from(
+                    r#"{"model":"qwen","messages":[{"role":"user","content":"hello"}]}"#,
+                ))
+                .unwrap()
+        };
+        for credential in [
+            ("authorization", format!("Bearer {secret}")),
+            ("x-api-key", secret.clone()),
+            ("authorization", "Bearer engine-master".to_owned()),
+        ] {
+            let response = proxy.serve(send(Some(credential))).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        }
+        for credential in [
+            None,
+            Some(("authorization", "Bearer wrong".to_owned())),
+            Some((
+                "authorization",
+                format!("Bearer {}0", &secret[..secret.len() - 1]),
+            )),
+        ] {
+            let response = proxy.serve(send(credential)).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(
+            *seen.lock(),
+            vec![Some("Bearer engine-master".to_owned()); 3],
+            "engines only ever see the master bearer"
+        );
+
+        let series = accounting
+            .ledger()
+            .series(
+                &crate::usage_ledger::SeriesQuery {
+                    granularity: crate::usage_ledger::Granularity::Minute,
+                    ..crate::usage_ledger::SeriesQuery::default()
+                },
+                crate::usage_ledger::unix_ms(),
+            )
+            .unwrap();
+        let totals = series
+            .totals
+            .iter()
+            .map(|total| (total.key.as_str(), total.stats.requests))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(totals.get(id.as_str()), Some(&2));
+        assert_eq!(totals.get("master"), Some(&1));
+        assert_eq!(totals.get("rejected"), Some(&3));
+        let token_stats = &series
+            .totals
+            .iter()
+            .find(|total| total.key == id)
+            .unwrap()
+            .stats;
+        assert_eq!(token_stats.prompt_tokens, 200);
+        assert_eq!(token_stats.cached_tokens, 160);
+        assert_eq!(token_stats.cache_hit_ratio, Some(0.8));
+        let recent = accounting
+            .ledger()
+            .recent(&crate::usage_ledger::RecentQuery::default())
+            .unwrap();
+        assert_eq!(recent[recent.len() - 1].model, "qwen");
+        assert_eq!(recent[0].result, "auth_rejected");
+        admin_task.abort();
+        task.abort();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
