@@ -1,0 +1,114 @@
+# Canonical source: helixml/ramjet/deploy/domyn_edge_4090/docker-compose.yaml
+#
+# Domyn Edge SFT (domyn/Domyn-Edge-SFT, 4B dense, Apache-2.0) on one desktop
+# GeForce RTX 4090 (24 GB, SM89), behind ramjet.
+#
+# THIS IS THE WHOLE DEPLOYMENT. One file, no overlays:
+#
+#     docker compose build            # vLLM + Domyn Edge PR overlay (no compile)
+#     docker compose up -d
+#
+# With one GPU there is nothing to route, so ramjet is here for the operator
+# surface: per-client API tokens (mint/revoke in the dashboard), per-token and
+# per-model usage (requests, tokens, cache hits, TTFT, decode speed), the
+# machine view at http://127.0.0.1:9090/ui/, Prometheus /metrics, health, and
+# upstream cancellation when a client disconnects. Add a second GPU and the
+# same file becomes a routed fleet by extending RJ_UPSTREAM.
+#
+# Measured 2026-10-21 on this desktop (EXPERIMENTS.md):
+#
+#   * FP8 weights (4.3 GiB) + fp8 KV leave a ~270-290k-token KV pool, so one
+#     full 256k-context request fits on a consumer GPU.
+#   * The 4090 also drives the desktop: 0.80 is the highest utilisation that
+#     survived speculative-decoding warm-up beside the compositor (0.90 OOMed).
+#     On a headless card, raise DOMYN_GPU_UTIL to 0.90.
+#   * Suffix speculative decoding: 927 tok/s single-stream on code edits (8.1x
+#     the 114 tok/s baseline), 2.1-2.5x at 64-128 concurrent, neutral on
+#     single-stream prose and -14% on prose at 32 concurrent.
+#   * Thinking off by default: every case in our agent protocol suite passed;
+#     with thinking on, parallel tool calls and multi-turn recall regressed.
+
+services:
+  domyn-edge:
+    build:
+      context: ../domyn_edge
+      dockerfile: Dockerfile.vllm
+      args:
+        SUFFIX: "1"
+    image: ${DOMYN_ENGINE_IMAGE:-local/vllm-domyn-edge:pr62544-0916-suffix}
+    container_name: domyn-edge
+    restart: unless-stopped
+    ipc: host
+    shm_size: 8g
+    volumes:
+      - ${DOMYN_MODEL_DIR:?set DOMYN_MODEL_DIR to the downloaded Domyn-Edge-SFT directory}:/models/domyn-edge:ro
+      - ${DOMYN_CACHE_DIR:-./cache}:/root/.cache
+    environment:
+      VLLM_API_KEY: ${DOMYN_API_KEY:?set DOMYN_API_KEY (engine bearer; ramjet holds it)}
+      DOMYN_SPEC_METHOD: ${DOMYN_SPEC_METHOD:-suffix}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        case "$$DOMYN_SPEC_METHOD" in
+        suffix) set -- --speculative-config '{"method":"suffix","num_speculative_tokens":16}' ;;
+        ngram) set -- --speculative-config '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_min":2,"prompt_lookup_max":4}' ;;
+        off) set -- ;;
+        *) echo "DOMYN_SPEC_METHOD must be suffix, ngram or off" >&2; exit 64 ;;
+        esac;
+        exec vllm serve /models/domyn-edge
+        --served-model-name domyn-edge
+        --trust-remote-code
+        --dtype bfloat16
+        --max-model-len ${DOMYN_MAX_MODEL_LEN:-262144}
+        --quantization fp8
+        --kv-cache-dtype fp8
+        --gpu-memory-utilization ${DOMYN_GPU_UTIL:-0.80}
+        --reasoning-parser qwen3
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+        --default-chat-template-kwargs '{"enable_thinking": false}'
+        --enable-prompt-tokens-details
+        --host 0.0.0.0 --port 8000
+        "$$@"
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["${DOMYN_GPU:-0}"], capabilities: [gpu]}]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 600s
+    networks: [domyn]
+
+  ramjet:
+    # API tokens and per-token usage are not in a tagged release yet, so there
+    # is no released default to pin. Set LB_IMAGE explicitly; qualified with
+    # ghcr.io/helixml/ramjet:rust-f5b7f09@sha256:8a06f192bd13dce3baba429da2fd9a67a6f222760d0794ea996af90e4884e739
+    image: ${LB_IMAGE:?set LB_IMAGE to an immutable ramjet tag@sha256 reference (see README)}
+    container_name: domyn-ramjet
+    restart: unless-stopped
+    ports:
+      - "${LB_BIND:-127.0.0.1}:${LB_API_PORT:-8000}:8000"   # OpenAI + Anthropic Messages API
+      - "127.0.0.1:${LB_METRICS_PORT:-9090}:9090"           # /metrics and the /ui/ dashboard
+    volumes:
+      - ${RAMJET_STATE_DIR:-./ramjet-state}:/var/lib/ramjet-api
+    environment:
+      RJ_UPSTREAM: http://domyn-edge:8000
+      RJ_UPSTREAM_MODELS: domyn-edge
+      RJ_UPSTREAM_TOKEN: ${DOMYN_API_KEY}
+      RJ_MACHINEVIEW_UPSTREAM_GPUS: ${DOMYN_GPU:-0}
+      RJ_API_TOKENS_MODE: ${RJ_API_TOKENS_MODE:-on}
+      RJ_API_STATE_DIR: /var/lib/ramjet-api
+      RJ_UI_AUTH_TOKEN: ${RJ_UI_AUTH_TOKEN:?set RJ_UI_AUTH_TOKEN (32-256 bytes) for the dashboard}
+      RJ_UPSTREAM_WARMUP_MODE: enforce
+      # Optional host/GPU telemetry for the dashboard: run
+      # bench/machineview_agent.py on the host and point this at it.
+      RJ_MACHINEVIEW_AGENT_URL: ${RJ_MACHINEVIEW_AGENT_URL:-}
+    depends_on:
+      domyn-edge: {condition: service_healthy}
+    networks: [domyn]
+
+networks:
+  domyn: {}

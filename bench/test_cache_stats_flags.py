@@ -45,6 +45,8 @@ DEPLOYMENTS = {
     "dsv41_flash_h200": "sglang",
     "glm53_h200": "sglang",
     "glm53_flash_nvidia": "vllm",
+    "domyn_edge": "vllm",
+    "domyn_edge_4090": "vllm",
     # qwen38_glm53_kev owns only Ramjet since Kev-small was removed on
     # 2026-10-07; its GLM engines are registered under glm53_flash_sm120.
 }
