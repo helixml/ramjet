@@ -152,6 +152,30 @@ logged suffix speculation and a 1,685,290-token KV pool. Keyless 401, master
 replica, and response usage reported 3,008 cached tokens from the third
 turn.
 
+**v3: `relative` vs `marginal` affinity basis** (same conditions as v2,
+another stop of `glm53-unc-fp8` with operator approval; order: 96-developer
+relative, 96-developer marginal, 32-developer relative; guard runs
+`d16b42bb…` first, all passed). Ramjet's configuration docs recommend
+`relative` beyond two replicas per model; v1/v2 had measured only
+`marginal` at four.
+
+| developers | basis | turns/min | output tok/s | agent TTFT p50 / p90 / p99 (s) | turns with TTFT ≤ 2 s | engine prefix hit | stickiness |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 96 | **relative** | **225.9** | **1,008** | **0.99 / 2.87 / 7.32** | **80.6%** | **92.1%** | **0.92** |
+| 96 | marginal (same-window replication) | 203.9 | 917 | 1.28 / 4.28 / 7.62 | 66.7% | 89.9% | 0.80 |
+| 32 | **relative** | **156.3** | **697** | **0.78 / 2.18 / 5.13** | **87.9%** | **93.8%** | **0.97** |
+| 32 | marginal (v2) | 133.8 | 599 | 1.02 / 4.57 / 8.59 | 74.9% | 90.3% | 0.78 |
+
+`relative` gave +11% turns/min over the back-to-back `marginal` replication
+at 96 developers (+17% at 32 against v2 `marginal`). TTFT p90 fell by a third
+and stickiness rose from 0.80 to 0.92. Against nginx `least_conn` (v2),
+`relative` is +53% at 96 developers and +61% at 32. Route decisions were
+2,208 overlap / 12 load / 2 rr (relative, 96) and 2,024 / 11 / 2 (marginal,
+96). Zero failures and preemptions. The `marginal` replication (203.9) sat
+between v1 (220.8) and v2 (193.2), so the run-to-run spread for one arm is
+about ±7%; the `relative` margin exceeds it at both loads. `deploy/domyn_edge`
+now defaults to `relative`.
+
 **Cache accounting needs `--enable-prompt-tokens-details`.** Without it vLLM
 omits `prompt_tokens_details.cached_tokens` from response usage. Ramjet's
 per-token cache-hit columns then read 0% (the dashboard Usage tab showed
@@ -179,7 +203,7 @@ script instead. The second run, told to verify by import, took 7 turns and
 `deploy/domyn_edge_4090` (one desktop GPU): FP8 weights and KV, thinking off
 by default, suffix decoding by default for coding-agent traffic
 (`DOMYN_SPEC_METHOD=off` for prose/chat), ramjet prefix routing with the
-marginal basis. Raw files: node06
+relative basis (v3; marginal before it). Raw files: node06
 `/prod/tmp/domyn-swarm/work/exp/{agentmatrix,sft-spec*,fleet}` and
 `/prod/engine-cache-vllm-domyn/bench/`; desktop `~/models/domyn/exp/`.
 

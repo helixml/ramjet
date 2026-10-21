@@ -141,7 +141,9 @@ services:
       RJ_API_STATE_DIR: /var/lib/ramjet-api
       RJ_UI_AUTH_TOKEN: ${RJ_UI_AUTH_TOKEN:?set RJ_UI_AUTH_TOKEN (32-256 bytes) for the dashboard}
       RJ_AFFINITY: prefix
-      RJ_ROUTE_AFFINITY_BASIS: ${RJ_ROUTE_AFFINITY_BASIS:-marginal}
+      # relative beat marginal back to back at 96 agents: 225.9 vs 203.9
+      # turns/min, TTFT p90 2.9 vs 4.3 s, 92% vs 80% same-replica turns.
+      RJ_ROUTE_AFFINITY_BASIS: ${RJ_ROUTE_AFFINITY_BASIS:-relative}
       RJ_UPSTREAM_WARMUP_MODE: enforce
       # Optional host/GPU telemetry for the dashboard: run
       # bench/machineview_agent.py on the host and point this at it.
