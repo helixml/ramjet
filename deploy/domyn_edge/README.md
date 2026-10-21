@@ -63,7 +63,7 @@ them (CHANGELOG "Unreleased" → minted API tokens) when it is published.
 | `DOMYN_SPEC_METHOD` | `suffix` | `off` for chat/prose-heavy traffic. Suffix decoding gives 2-5x on code edits (8x single-stream on the 4090) but costs ~30% on open-ended prose on the RTX PRO 6000, because vLLM disables async scheduling with suffix/ngram speculation. `ngram` is the dependency-free alternative (3.3x single-stream on code). |
 | `DOMYN_GPU_UTIL` | `0.92` / `0.80` (4090) | Raise to 0.90 on a headless 4090. On a display GPU 0.90 OOMs during speculative warm-up. |
 | `DOMYN_MAX_MODEL_LEN` | `262144` | Beyond 256k quality degrades (RULER 74.5 at 256k, 60.8 at 512k for the base model). |
-| `RJ_ROUTE_AFFINITY_BASIS` | `marginal` | `absolute` scores raw prefix overlap; `marginal` scores overlap above the least-warm peer, which keeps sessions sticky when every replica already holds the shared system prompt (agent fleet: 221 vs 168 turns/min). |
+| `RJ_ROUTE_AFFINITY_BASIS` | `relative` | `absolute` scores raw prefix overlap, so a system prompt every replica holds makes them all look equally warm (agent fleet: 168 vs 221 turns/min for `marginal`). `marginal` scores overlap above the least-warm replica; `relative` scores each replica against the warmest one. At four replicas `relative` won back to back: 225.9 vs 203.9 turns/min, TTFT p90 2.9 vs 4.3 s. |
 | `RJ_API_TOKENS_MODE` | `on` | `off` only behind another authenticating proxy; the engines check only the master key. |
 
 ## Why these defaults
@@ -75,7 +75,7 @@ them (CHANGELOG "Unreleased" → minted API tokens) when it is published.
 | thinking off | protocol suite 100% vs 80-86%; 27-40 vs 87-179 completion tokens per task |
 | suffix decoding | code edits: 165→876 tok/s single-stream (RTX PRO 6000), 114→927 (4090); prose: -20 to -31% (RTX PRO 6000) |
 | `--enable-prompt-tokens-details` | without it vLLM omits cached tokens from response usage, so ramjet's per-token cache hits and Anthropic clients' `cache_read_input_tokens` read 0 |
-| ramjet prefix routing (vs nginx `least_conn`) | domyn-swarm document-QA batch 1.46x faster (cache hits 36%→66%); coding-agent fleet +31% turns/min at 96 developers and +38% at 32, median TTFT -44% / -54% |
+| ramjet prefix routing (vs nginx `least_conn`) | domyn-swarm document-QA batch 1.46x faster (cache hits 36%→66%); coding-agent fleet +31% turns/min at 96 developers and +38% at 32 with `marginal` (median TTFT -44% / -54%); `relative` adds another +11% over `marginal` |
 
 ## Caveats
 
