@@ -513,13 +513,22 @@ def bounded_finish_reason_counts(records):
     return counts
 
 
-def apply_request_policy(case, reasoning_effort=None, max_output_tokens=None):
-    """Apply an explicit benchmark policy without mutating the corpus."""
+def apply_request_policy(case, reasoning_effort=None, max_output_tokens=None, thinking=None):
+    """Apply an explicit benchmark policy without mutating the corpus.
+
+    `thinking` sets the chat template's `enable_thinking` switch. Qwen3-family
+    templates (Qwen3, Domyn Edge) gate reasoning on it and ignore
+    `reasoning_effort`, so the effort knob alone cannot turn their thinking off.
+    """
     selected = copy.deepcopy(case)
     if reasoning_effort is not None:
         selected["request"]["reasoning_effort"] = reasoning_effort
     if max_output_tokens is not None:
         selected["request"]["max_tokens"] = max_output_tokens
+    if thinking is not None:
+        kwargs = dict(selected["request"].get("chat_template_kwargs") or {})
+        kwargs["enable_thinking"] = thinking == "on"
+        selected["request"]["chat_template_kwargs"] = kwargs
     return selected
 
 
@@ -847,6 +856,7 @@ def command_run(args):
             add_prefix(build_context(case, args.salt), args.prefix_kib, args.salt),
             args.reasoning_effort,
             args.max_output_tokens,
+            args.thinking,
         )
         for case in cases
     ]
@@ -931,6 +941,7 @@ def command_run(args):
         "sampling": sampling,
         "reasoning_effort_override": args.reasoning_effort,
         "max_output_tokens_override": args.max_output_tokens,
+        "thinking_override": args.thinking,
         "concurrency": args.concurrency,
         "repetitions": args.repetitions,
         "warmup": args.warmup,
@@ -1025,6 +1036,11 @@ def parser():
     run.add_argument("--seed", type=int, default=7)
     run.add_argument("--reasoning-effort", choices=REASONING_EFFORTS)
     run.add_argument("--max-output-tokens", type=int)
+    run.add_argument(
+        "--thinking",
+        choices=("on", "off"),
+        help="set chat_template_kwargs.enable_thinking (Qwen3-family templates)",
+    )
     run.add_argument(
         "--report-protocol-failures",
         action="store_true",

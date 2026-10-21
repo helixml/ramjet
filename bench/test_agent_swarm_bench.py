@@ -6,6 +6,7 @@ import http.server
 import json
 import random
 import threading
+import time
 import unittest
 
 import agent_swarm_bench as swarm
@@ -47,6 +48,25 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         ]
         for event in events:
             self.wfile.write(b"data: " + json.dumps(event).encode() + b"\n\n")
+        self.wfile.write(b"data: [DONE]\n\n")
+
+
+class SlowThinkingEngine(http.server.BaseHTTPRequestHandler):
+    """Streams vLLM's renamed `reasoning` field first, content much later."""
+
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.write(b'data: {"choices": [{"delta": {"reasoning": "hmm"}}]}\n\n')
+        self.wfile.flush()
+        time.sleep(0.4)
+        self.wfile.write(b'data: {"choices": [{"delta": {"content": "done"}}]}\n\n')
+        self.wfile.write(b'data: {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 2}}\n\n')
         self.wfile.write(b"data: [DONE]\n\n")
 
 
@@ -97,6 +117,18 @@ class SwarmTests(unittest.TestCase):
     def setUp(self):
         FakeEngine.seen = []
         FakeEngine.requests = []
+
+    def test_first_token_counts_the_renamed_reasoning_field(self):
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SlowThinkingEngine)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            client = swarm.Client(f"http://127.0.0.1:{server.server_address[1]}", None, 10)
+            result = client.chat({"model": "m", "messages": [], "stream": True})
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertLess(result["ttft"], 0.3)
+        self.assertGreaterEqual(result["e2e"], 0.4)
 
     def test_filler_is_deterministic_and_sized_by_calibration(self):
         filler = swarm.Filler(words_per_token=0.5)

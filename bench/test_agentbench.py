@@ -121,6 +121,22 @@ class AgentBenchTest(unittest.TestCase):
         self.assertEqual(overridden["request"]["max_tokens"], 256)
         self.assertEqual(fixture, original)
 
+    def test_thinking_policy_sets_template_switch_and_keeps_other_kwargs(self):
+        fixture = case()
+        fixture["request"]["chat_template_kwargs"] = {"add_vision_id": False}
+        original = json.loads(json.dumps(fixture))
+
+        off = apply_request_policy(fixture, thinking="off")
+        on = apply_request_policy(fixture, thinking="on")
+
+        self.assertEqual(
+            off["request"]["chat_template_kwargs"],
+            {"add_vision_id": False, "enable_thinking": False},
+        )
+        self.assertTrue(on["request"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertNotIn("enable_thinking", apply_request_policy(fixture)["request"]["chat_template_kwargs"])
+        self.assertEqual(fixture, original)
+
     def test_finish_reason_summary_has_fixed_cardinality(self):
         self.assertEqual(
             bounded_finish_reason_counts(
