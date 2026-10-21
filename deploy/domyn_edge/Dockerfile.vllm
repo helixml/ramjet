@@ -1,0 +1,35 @@
+# vLLM with Domyn Edge support (DomynEdgeForCausalLM), built without compiling.
+#
+# Stock vLLM cannot load domyn/Domyn-Edge-{Base,SFT}. Support is pending in
+# vllm-project/vllm#62544; that PR is pure Python (one model file, one config
+# file, three registry lines), so this image copies those files at an
+# immutable PR commit onto a vLLM nightly and checks that they import.
+#
+#   docker build -f deploy/domyn_edge/Dockerfile.vllm -t local/vllm-domyn-edge:pr62544-0916 .
+#   docker build -f deploy/domyn_edge/Dockerfile.vllm --build-arg SUFFIX=1 \
+#     -t local/vllm-domyn-edge:pr62544-0916-suffix .   # adds arctic-inference
+#
+# Qualified on 2026-10-21 (EXPERIMENTS.md) with the base below on RTX PRO 6000
+# Blackwell (SM120, driver 595) and RTX 4090 (SM89, driver 580). The base is
+# CUDA 13.0 and needs driver >= 580. Drop this file once a vLLM release ships
+# the model natively.
+ARG BASE=vllm/vllm-openai@sha256:f1491cb3abc84aca4e319c2b3f3f23644f0d9e19fdb9012c80818d3f30e5a0a0
+FROM ${BASE}
+ARG PR_COMMIT=9bffd0cb4c33b4fb11276bfe31d9453025930023
+ARG MODEL_SHA256=b736aabda7cf1698d3ee816af7120db47c3dafd0a17eb3919d52a44d270b5071
+ARG CONFIG_SHA256=dc810eb44e3ec069f0c5a4594f0919b6b538faa032e62d208c455392b3a41f96
+ARG SUFFIX=0
+ADD https://raw.githubusercontent.com/albertoveneri/vllm/${PR_COMMIT}/vllm/model_executor/models/domyn_edge.py /tmp/domyn_model.py
+ADD https://raw.githubusercontent.com/albertoveneri/vllm/${PR_COMMIT}/vllm/transformers_utils/configs/domyn_edge.py /tmp/domyn_config.py
+RUN set -eux; \
+  echo "${MODEL_SHA256}  /tmp/domyn_model.py" | sha256sum -c -; \
+  echo "${CONFIG_SHA256}  /tmp/domyn_config.py" | sha256sum -c -; \
+  V=$(python3 -c "import vllm,os;print(os.path.dirname(vllm.__file__))"); \
+  cp /tmp/domyn_model.py $V/model_executor/models/domyn_edge.py; \
+  cp /tmp/domyn_config.py $V/transformers_utils/configs/domyn_edge.py; \
+  sed -i 's|^\(\s*\)"Ernie4_5ForCausalLM": ("ernie45", "Ernie4_5ForCausalLM"),|\1"DomynEdgeForCausalLM": ("domyn_edge", "DomynEdgeForCausalLM"),\n&|' $V/model_executor/models/registry.py; \
+  sed -i 's|^\(\s*\)deepseek_v32="DeepseekV3Config",|&\n\1domynedge="DomynEdgeConfig",|' $V/transformers_utils/config.py; \
+  sed -i 's|^\(\s*\)"EAGLEConfig": "vllm.transformers_utils.configs.eagle",|\1"DomynEdgeConfig": "vllm.transformers_utils.configs.domyn_edge",\n&|; s|^\(\s*\)"EAGLEConfig",$|\1"DomynEdgeConfig",\n&|' $V/transformers_utils/configs/__init__.py; \
+  python3 -c "from vllm.transformers_utils.configs import DomynEdgeConfig; from vllm.model_executor.models.registry import ModelRegistry; assert 'DomynEdgeForCausalLM' in ModelRegistry.get_supported_archs(); import vllm.model_executor.models.domyn_edge"; \
+  if [ "$SUFFIX" = 1 ]; then pip install --no-cache-dir --no-deps arctic-inference \
+    && python3 -c "from arctic_inference.suffix_decoding import SuffixDecodingCache"; fi

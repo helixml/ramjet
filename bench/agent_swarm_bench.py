@@ -111,7 +111,13 @@ class Client:
                     usage = event["usage"]
                 for choice in event.get("choices") or []:
                     delta = choice.get("delta") or {}
-                    if first is None and (delta.get("content") or delta.get("reasoning_content")):
+                    # vLLM renamed the streamed reasoning field from
+                    # `reasoning_content` to `reasoning`; count either, or a
+                    # thinking model's TTFT silently becomes "time until it
+                    # stopped thinking".
+                    if first is None and (
+                        delta.get("content") or delta.get("reasoning_content") or delta.get("reasoning")
+                    ):
                         first = time.perf_counter()
                     if delta.get("content"):
                         content.append(delta["content"])

@@ -1,0 +1,157 @@
+# Canonical source: helixml/ramjet/deploy/domyn_edge/docker-compose.yaml
+#
+# Domyn Edge SFT (domyn/Domyn-Edge-SFT, 4B dense, Apache-2.0) on four RTX PRO
+# 6000 Blackwell GPUs: four single-GPU vLLM replicas behind ramjet.
+#
+# THIS IS THE WHOLE DEPLOYMENT. One file, no overlays:
+#
+#     docker compose build            # vLLM + Domyn Edge PR overlay (no compile, ~1 min)
+#     docker compose up -d
+#     curl -s localhost:8000/v1/models -H "Authorization: Bearer $DOMYN_API_KEY"
+#
+# Every tunable has a ${VAR:-default} form; change a default here when a
+# measurement says so and record it in EXPERIMENTS.md.
+#
+# Why this shape (measured 2026-10-21 on node06, EXPERIMENTS.md):
+#
+#   * One replica per GPU. A 4B model fits one GPU with a 1.7M-token KV pool;
+#     splitting it with TP only adds communication. Four replicas give four
+#     private prefix caches, which is why the router matters.
+#   * --quantization fp8 --kv-cache-dtype fp8: 2.2x the BF16 default on this
+#     GPU (cuBLAS BF16 peaks at ~270 TFLOPS on SM120, FP8 at ~544) for +1.2%
+#     held-out perplexity. fp8 KV selects FlashInfer automatically.
+#   * Thinking off by default (--default-chat-template-kwargs). With thinking
+#     on, Domyn missed parallel tool calls and multi-turn recall in our agent
+#     protocol suite; with it off every case passed and tasks used 3-5x fewer
+#     tokens. Callers can still send chat_template_kwargs.enable_thinking=true.
+#   * Suffix speculative decoding (DOMYN_SPEC_METHOD=suffix): 2-5x on code-edit
+#     output, which copies its context, but about -30% on open-ended prose,
+#     because vLLM disables async scheduling for suffix/ngram speculation. Keep
+#     it for coding-agent fleets; set DOMYN_SPEC_METHOD=off for chat/prose.
+#   * ramjet prefix routing: same session -> same replica, so its prefix stays
+#     cached; live load still overrides affinity before a replica becomes a
+#     hotspot.
+#
+# The Domyn architecture is not in a vLLM release yet (vllm-project/vllm#62544);
+# Dockerfile.vllm adds the PR's Python files to a pinned nightly. Weights:
+# `hf download domyn/Domyn-Edge-SFT --local-dir $DOMYN_MODEL_DIR` (15.7 GB, FP32
+# on disk; loaded as BF16 then quantized to FP8 at load time).
+
+x-domyn-engine: &domyn-engine
+  build:
+    context: .
+    dockerfile: Dockerfile.vllm
+    args:
+      SUFFIX: "1"
+  image: ${DOMYN_ENGINE_IMAGE:-local/vllm-domyn-edge:pr62544-0916-suffix}
+  restart: unless-stopped
+  ipc: host
+  shm_size: 16g
+  volumes:
+    - ${DOMYN_MODEL_DIR:?set DOMYN_MODEL_DIR to the downloaded Domyn-Edge-SFT directory}:/models/domyn-edge:ro
+    - ${DOMYN_CACHE_DIR:-./cache}:/root/.cache
+  environment:
+    VLLM_API_KEY: ${DOMYN_API_KEY:?set DOMYN_API_KEY (engine bearer; ramjet holds it)}
+    DOMYN_SPEC_METHOD: ${DOMYN_SPEC_METHOD:-suffix}
+  entrypoint: ["/bin/sh", "-c"]
+  command:
+    - >-
+      case "$$DOMYN_SPEC_METHOD" in
+      suffix) set -- --speculative-config '{"method":"suffix","num_speculative_tokens":16}' ;;
+      ngram) set -- --speculative-config '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_min":2,"prompt_lookup_max":4}' ;;
+      off) set -- ;;
+      *) echo "DOMYN_SPEC_METHOD must be suffix, ngram or off" >&2; exit 64 ;;
+      esac;
+      exec vllm serve /models/domyn-edge
+      --served-model-name domyn-edge
+      --trust-remote-code
+      --dtype bfloat16
+      --max-model-len ${DOMYN_MAX_MODEL_LEN:-262144}
+      --quantization fp8
+      --kv-cache-dtype fp8
+      --gpu-memory-utilization ${DOMYN_GPU_UTIL:-0.92}
+      --reasoning-parser qwen3
+      --enable-auto-tool-choice
+      --tool-call-parser qwen3_coder
+      --default-chat-template-kwargs '{"enable_thinking": false}'
+      --enable-prompt-tokens-details
+      --host 0.0.0.0 --port 8000
+      "$$@"
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health >/dev/null || exit 1"]
+    interval: 15s
+    timeout: 5s
+    retries: 3
+    start_period: 600s
+  networks: [domyn]
+
+services:
+  domyn-edge-0:
+    <<: *domyn-engine
+    container_name: domyn-edge-0
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["${DOMYN_GPU_0:-0}"], capabilities: [gpu]}]
+
+  domyn-edge-1:
+    <<: *domyn-engine
+    container_name: domyn-edge-1
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["${DOMYN_GPU_1:-1}"], capabilities: [gpu]}]
+
+  domyn-edge-2:
+    <<: *domyn-engine
+    container_name: domyn-edge-2
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["${DOMYN_GPU_2:-2}"], capabilities: [gpu]}]
+
+  domyn-edge-3:
+    <<: *domyn-engine
+    container_name: domyn-edge-3
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["${DOMYN_GPU_3:-3}"], capabilities: [gpu]}]
+
+  ramjet:
+    # API tokens and per-token usage are not in a tagged release yet, so there
+    # is no released default to pin. Set LB_IMAGE explicitly; qualified with
+    # ghcr.io/helixml/ramjet:rust-f5b7f09@sha256:8a06f192bd13dce3baba429da2fd9a67a6f222760d0794ea996af90e4884e739
+    image: ${LB_IMAGE:?set LB_IMAGE to an immutable ramjet tag@sha256 reference (see README)}
+    container_name: domyn-ramjet
+    restart: unless-stopped
+    ports:
+      - "${LB_BIND:-127.0.0.1}:${LB_API_PORT:-8000}:8000"   # OpenAI + Anthropic Messages API
+      - "127.0.0.1:${LB_METRICS_PORT:-9090}:9090"           # /metrics and the /ui/ dashboard
+    volumes:
+      - ${RAMJET_STATE_DIR:-./ramjet-state}:/var/lib/ramjet-api
+    environment:
+      RJ_UPSTREAM: http://domyn-edge-0:8000,http://domyn-edge-1:8000,http://domyn-edge-2:8000,http://domyn-edge-3:8000
+      RJ_UPSTREAM_MODELS: domyn-edge,domyn-edge,domyn-edge,domyn-edge
+      RJ_UPSTREAM_TOKEN: ${DOMYN_API_KEY}
+      RJ_MACHINEVIEW_UPSTREAM_GPUS: ${DOMYN_GPU_0:-0};${DOMYN_GPU_1:-1};${DOMYN_GPU_2:-2};${DOMYN_GPU_3:-3}
+      # Clients authenticate to ramjet with the master token or a minted rjk_*
+      # token (dashboard Tokens tab); engines only ever see the master token.
+      RJ_API_TOKENS_MODE: ${RJ_API_TOKENS_MODE:-on}
+      RJ_API_STATE_DIR: /var/lib/ramjet-api
+      RJ_UI_AUTH_TOKEN: ${RJ_UI_AUTH_TOKEN:?set RJ_UI_AUTH_TOKEN (32-256 bytes) for the dashboard}
+      RJ_AFFINITY: prefix
+      RJ_ROUTE_AFFINITY_BASIS: ${RJ_ROUTE_AFFINITY_BASIS:-marginal}
+      RJ_UPSTREAM_WARMUP_MODE: enforce
+      # Optional host/GPU telemetry for the dashboard: run
+      # bench/machineview_agent.py on the host and point this at it.
+      RJ_MACHINEVIEW_AGENT_URL: ${RJ_MACHINEVIEW_AGENT_URL:-}
+    depends_on:
+      domyn-edge-0: {condition: service_healthy}
+      domyn-edge-1: {condition: service_healthy}
+      domyn-edge-2: {condition: service_healthy}
+      domyn-edge-3: {condition: service_healthy}
+    networks: [domyn]
+
+networks:
+  domyn: {}

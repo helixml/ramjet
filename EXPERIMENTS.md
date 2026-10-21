@@ -1,5 +1,279 @@
 # node06 experiment journal
 
+## 2026-10-21 (afternoon) — Domyn Edge SFT: agent protocol, thinking, speculative decoding, routing, and an RTX 4090
+
+**Shape.** `domyn/Domyn-Edge-SFT` (same 4B architecture as the base model
+below; chat template opens every assistant turn with `<think>`; tool calls in
+Qwen3-Coder XML). The checkpoint is FP32 on disk (15.7 GB) and loaded with
+`--dtype bfloat16`. Engine images:
+`local/vllm-domyn-edge:pr62544-0916` and the same image plus
+`arctic-inference` 0.3.0 for suffix decoding (`-suffix`), both now
+reproducible from `deploy/domyn_edge/Dockerfile.vllm`, which pins the PR at
+commit `9bffd0cb` with SHA-256-checked files. Parsers:
+`--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser
+qwen3_coder`. Every node06 engine is TP1 on one RTX PRO 6000 (SM120) with
+`--quantization fp8 --kv-cache-dtype fp8` (1.71M-token KV pool). The desktop
+engine is one RTX 4090 (SM89, driver 580.159, 24 GB, which also drives the
+display) at `--gpu-memory-utilization 0.80` (266-292k-token KV pool, so one
+256k request fits). GPUs 0-3 on node06 came from stopping `glm53-unc-fp8`
+again with the operator's approval.
+
+**Agent protocol** (`bench/agentbench.py`, all three committed corpora,
+through an experiment ramjet in front of four replicas). The corpus output
+caps (96-256 tokens) were sized for DeepSeek at `reasoning_effort=low`, so
+this run added an `agentbench.py --thinking on|off` policy that sets
+`chat_template_kwargs.enable_thinking`.
+
+| mode | v1 | v2_sessions | v2_deep_context | completion tokens/task | request p50 |
+| --- | --- | --- | --- | --- | --- |
+| thinking off, corpus caps, deterministic | 100% | 100% | 100% | 27-38 | 171-380 ms |
+| thinking off, cap 1024, sampled ×3 | 100% | 100% | 100% | 28-41 | 177-507 ms |
+| thinking on, cap 4096, deterministic | 80% | 85.7% | 100% | 87-152 | 626-1,441 ms |
+| thinking on, cap 4096, sampled ×3 | 80% | 85.7% | 100% | 110-179 | 394-1,487 ms |
+
+With thinking on, the failures are real model misses: one tool call where
+`parallel-required-stream` needs two, and missing facts in
+`session-multiturn-recall`. Hence `--default-chat-template-kwargs
+'{"enable_thinking": false}'` in both Compose files.
+
+**Trap:** vLLM maps any request `reasoning_effort` other than `none` to
+`enable_thinking=true`, which overrides that server default; only explicit
+`chat_template_kwargs` beats it. On the 4090 with the default and
+agentbench's `reasoning_effort=low`, the suite fell to 57-100% valid at
+66-146 tokens/task. With `--reasoning-effort none` all six cells
+(deterministic plus sampled ×3) returned to 100% valid, at 28-38 tokens/task
+and 48-76 ms p50 for short tasks. Agent harnesses must send
+`reasoning_effort: none` or omit it. Ramjet deliberately does not rewrite it.
+
+**Speculative decoding** (`vllm bench serve` through `openai-chat`,
+temperature 0, natural EOS, four node06 engines in parallel, one per GPU,
+under the thermal guard; runs `2eb69afd…`, `433af9f7…`, `9423d580…`).
+Code-edit prompts are real 100-160-line excerpts of this repository's
+`src/*.rs` with an edit instruction whose answer copies most of the input,
+with disjoint prompt slices per cell. Prose prompts are open-ended 500-word
+essays (English, Italian, French, German, Spanish) with nothing to copy.
+Output tok/s; TTFT p50/p99 in ms. Warm engines unless noted.
+
+| node06, one GPU | none | ngram k=5 | ngram_gpu k=5 | suffix k=16 | suffix k=32 |
+| --- | --- | --- | --- | --- | --- |
+| code-edit c1 | 165 (55/76) | 548 (55/75) | 511 (58/78) | **876 (55/88), accept len 8.7** | — |
+| code-edit c8 (cold) | 1,068 | 2,351 | 2,231 | **3,054** | — |
+| code-edit c32 (cold) | 2,919 | 5,769 | 5,525 | **6,158** | — |
+| code-edit c64 | 4,046 (494/1,685) | 7,282 | — | **8,089 (402/1,818)** | 8,336 |
+| code-edit c128 | 5,211 (1,052/3,349) | 8,597 | — | **8,767 (839/3,849)** | 8,505 |
+| prose c1 | **167 (22/27)** | 130 | — | 134 (23/33) | 102 (27/11,758) |
+| prose c32 | **4,186 (102/153)** | 2,647 | — | 2,875 (49/181) | 898 (56/25,728) |
+
+Speculation costs ~25-30% per step on prose even at acceptance length
+1.2-1.4, because vLLM logs `Async scheduling not supported with suffix-based
+speculative decoding and will be disabled` and falls back to the older model
+runner. Tuning `suffix_decoding_min_token_prob` (0.3/0.5),
+`suffix_decoding_max_spec_factor` (0.5) and the cap (8) did not remove it:
+prose c32 stayed at 2,612-2,876 against 4,157 without speculation, in the
+same round. The first suffix cell on a cold engine took 41 s and 38 s for its
+first requests (129 tok/s); repeated warm it gave 876 tok/s.
+
+| RTX 4090 (sequential) | none | ngram k=5 | ngram_gpu k=5 | suffix k=16 |
+| --- | --- | --- | --- | --- |
+| code-edit c1 | 114 (63 ms TTFT p50) | 412 | 418 | **927** |
+| code-edit c8 | 688 | 2,077 | 1,882 | **2,871** |
+| code-edit c32 | 1,857 | 3,791 | 3,764 | **4,907** |
+| code-edit c64 | 2,641 (409 ms) | — | — | **6,641 (208 ms)** |
+| code-edit c128 | 3,206 (2,570 ms) | — | — | **6,601 (1,929 ms)** |
+| prose c1 | 119 | — | — | 120 |
+| prose c32 | **2,693** | — | — | 2,307 |
+
+At 0.90 utilisation the 4090 died with OOM: first on a code-edit request,
+with the display compositor holding ~1.8-2.5 GB, then during spec warm-up.
+0.85 survived plain decoding; 0.80 survived speculation.
+
+**Routing an agent fleet** (`bench/agent_swarm_bench.py`, seed
+`swarm-domyn-v1`, fresh salt per arm, 96 developers, 120 s warm-up plus
+480 s measured, four replicas without speculation, engines restarted
+between arms). Each arm ran under its own thermal guard. nginx arms add
+`x-ramjet-upstream: $upstream_addr` so stickiness is measurable. The cache
+column is engine-native: vLLM response usage omits cached tokens without
+`--enable-prompt-tokens-details`.
+
+**v1, 96 developers. TTFT columns invalid.** `agent_swarm_bench.py` sends
+`reasoning_effort: low` by default, which turned thinking on (the trap
+above). The bench also counted only `content`/`reasoning_content` deltas,
+while this vLLM streams thinking as `reasoning`, so "TTFT" here is time to
+the first content token after thinking ended; TPOT read 0 for every request.
+Output lengths are forced (`min_tokens` plus `ignore_eos`), so GPU work and
+the throughput ranking are unaffected. The bench now counts `reasoning` too
+(regression test added); v2 below is the authoritative latency.
+
+| arm | turns/min | output tok/s | agent TTFT p50 / p90 / p99 (s) | engine prefix hit | session stickiness | requests per replica |
+| --- | --- | --- | --- | --- | --- | --- |
+| nginx round-robin | 136.2 | 598 | 21.1 / 91.6 / 191.5 | 78.9% | 0.26 | 233 / 233 / 233 / 233 |
+| nginx `least_conn` (domyn-swarm default) | 160.1 | 702 | 19.5 / 72.2 / 173.2 | 80.1% | 0.36 | 250-305 |
+| ramjet prefix, absolute basis | 168.3 | 744 | 17.2 / 74.2 / 166.9 | 83.8% | 0.50 | 247-304 |
+| **ramjet prefix, marginal basis** | **220.8** | **976** | **12.6 / 57.8 / 136.0** | **90.3%** | **0.80** | 330-421 |
+
+Ramjet route decisions: marginal 2,117 overlap / 13 load / 3 rr; absolute
+1,753 / 12 / 2. Zero failed requests and zero preemptions in every arm. By
+context bucket, marginal kept TTFT p50 at 14.8 s for 64-128k prompts against
+25.8 s (`least_conn`) and 32.4 s (round-robin). Marginal is +38% turns/min
+over domyn-swarm's `least_conn` and +62% over round-robin. The absolute basis
+gained only 5%: the harness system prompt alone fills the affinity cap on
+every replica, so session history becomes a tie-break (the same failure #294
+fixed on GLM-5.3).
+
+**v2 (authoritative):** `--reasoning-effort none`, fixed bench, same seed,
+fresh salts, engines restarted per arm, each arm guarded. Order: 96-developer
+marginal, `least_conn`, round-robin, then 32-developer `least_conn`,
+marginal (reversed to expose drift). Guard runs `527f7f38…` (first) through
+the 32-developer marginal cell; all passed.
+
+| developers | arm | turns/min | output tok/s | agent TTFT p50 / p90 / p99 (s) | turns with TTFT ≤ 2 s | e2e p50 (s) | engine prefix hit | stickiness |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 96 | nginx round-robin | 107.2 | 448 | 2.44 / 18.37 / 69.43 | 44.2% | 18.7 | 75.8% | 0.23 |
+| 96 | nginx `least_conn` | 147.9 | 623 | 2.41 / 7.31 / 12.27 | 43.0% | 21.5 | 78.2% | 0.34 |
+| 96 | **ramjet marginal** | **193.2** | **854** | **1.34 / 4.69 / 11.02** | **64.8%** | **14.9** | **88.3%** | **0.76** |
+| 32 | nginx `least_conn` | 96.9 | 429 | 2.23 / 7.54 / 13.64 | 45.0% | 10.7 | 81.2% | 0.40 |
+| 32 | **ramjet marginal** | **133.8** | **599** | **1.02 / 4.57 / 8.59** | **74.9%** | **7.4** | **90.3%** | **0.78** |
+
+Ramjet marginal vs domyn-swarm's nginx `least_conn`: +31% turns/min at 96
+developers and +38% at 32, with median TTFT -44% and -54%. Against
+round-robin at 96: +80% turns/min, and TTFT p90 4.7 s against 18.4 s. Zero
+failures and zero preemptions in every cell. v1 and v2 differ in absolute
+turns/min (marginal 220.8 vs 193.2, `least_conn` 160.1 vs 147.9) but agree on
+the ordering and the ramjet margin (+38% vs +31% at 96). Every arm was
+affected, so we report the spread instead of choosing a run. The
+32-developer pass was first started with the unfixed bench and stopped after
+one cell; that cell is discarded.
+
+**Four-replica Compose file, end to end on node06** (GPUs 0-3, after the
+A/B): `docker compose build && up -d` from the committed file reached a
+healthy LB in 374 s (cold build plus four first-start compiles). Each engine
+logged suffix speculation and a 1,685,290-token KV pool. Keyless 401, master
+200. Four turns sharing a ~3k-token system prompt all routed to the same
+replica, and response usage reported 3,008 cached tokens from the third
+turn.
+
+**Cache accounting needs `--enable-prompt-tokens-details`.** Without it vLLM
+omits `prompt_tokens_details.cached_tokens` from response usage. Ramjet's
+per-token cache-hit columns then read 0% (the dashboard Usage tab showed
+"236K cached" only after the flag), and Anthropic clients see
+`cache_read_input_tokens: 0`. With the flag, a Claude Code session on the
+4090 reported 236,096 of 236,327 input tokens as cache reads. Both Compose
+files now set it.
+
+**Ramjet on one GPU** (the 4090 Compose file, `rust-f5b7f09`, tokens on):
+keyless 401, master 200, wrong key 401, minted `rjk_*` 200. OpenAI
+chat/tools via the minted token returned two parallel tool calls in 0.30 s.
+The Anthropic Messages API with `x-api-key` (vLLM serves `/v1/messages`;
+ramjet passes it through) returned a `tool_use` block in 0.08 s. Per-token
+usage appeared under `/api/usage/series` within one 10 s flush. A 160-request
+code-edit run at 16 concurrent through ramjet with the minted token gave
+4,271 tok/s at 87 ms median TTFT. Claude Code (2.1.302, headless,
+`ANTHROPIC_BASE_URL` pointing at ramjet with a minted token, model
+`domyn-edge`) fixed two planted bugs in a small Python module. The first run
+took 10 turns and 33 s (483k input tokens, about 48k per turn); it could not
+run pytest (not installed, installs not allowed) and wrote a manual test
+script instead. The second run, told to verify by import, took 7 turns and
+26 s. Both fixes were correct for odd and even lengths.
+
+**Verdict.** Ship `deploy/domyn_edge` (four replicas, RTX PRO 6000) and
+`deploy/domyn_edge_4090` (one desktop GPU): FP8 weights and KV, thinking off
+by default, suffix decoding by default for coding-agent traffic
+(`DOMYN_SPEC_METHOD=off` for prose/chat), ramjet prefix routing with the
+marginal basis. Raw files: node06
+`/prod/tmp/domyn-swarm/work/exp/{agentmatrix,sft-spec*,fleet}` and
+`/prod/engine-cache-vllm-domyn/bench/`; desktop `~/models/domyn/exp/`.
+
+## 2026-10-21 — Domyn Edge 4B (base) bring-up on node06 GPUs 0-3, domyn-swarm batch jobs, FP8 and routing
+
+**Shape.** `domyn/Domyn-Edge-Base` (released 2026-10-20; 3.93B dense, BF16,
+Apache-2.0, no chat template). It has 36 layers: 24 sliding-window layers
+(1024 window, head dim 64, RoPE) and 12 full-attention layers (head dim 256,
+NoPE), with 32 query and 8 KV heads. Trained to 1M context; 256k recommended.
+The engine is vLLM nightly `0.29.1rc1.dev187+gaf1c01499` (torch 2.13.0+cu130,
+local image `f1491cb3abc8`) plus vllm-project/vllm PR #62544 (open, branch
+updated 2026-10-19). The PR's two new files and three registry lines are
+layered into `local/vllm-domyn-edge:pr62544-0916` with no compile; build 4.2 s.
+Each engine is TP1 on one RTX PRO 6000 Blackwell (SM120), driver 595.84,
+`--max-model-len 262144`. GPUs 0-3 came from stopping `glm53-unc-fp8`
+(`glm-5.3-flash-uncensored`, compose sha256 `cd5eda80…`) at the operator's
+request. The production LB was not touched.
+
+**Bring-up.** Weights 7.32 GiB, load 16 s (5 s warm). The first start spent
+199 s in compile and graph capture; later starts captured graphs in 5-9 s from
+the shared cache. The hybrid allocator stores KV only for the full-attention
+layers: about 98 KB/token in BF16, giving an 824k-token pool per GPU (1.64M
+with fp8 KV). Greedy smoke outputs are correct (Paris, 17×23=391, Italian
+capitals).
+
+**Single-GPU scout** (`vllm bench serve`, random 2200 in / 256 out with
+`--ignore-eos` and no prefix reuse; four engines in parallel, one per GPU;
+guarded runs `bc23a4f9…` and `b5a49ebc…`). Total tok/s includes prompt tokens.
+
+| config | c64 total tok/s | c64 out tok/s | c64 TTFT p50/p99 | c64 TPOT p50 | c256 total tok/s | c256 TTFT p50/p99 | c256 TPOT p50 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| BF16, FA2 (default) | 12,925 | 1,347 | 1.20/4.84 s | 42.9 ms | 12,210 | 1.48/23.1 s | 197 ms |
+| BF16, FlashInfer | 14,495 | 1,511 | 1.16/4.78 s | 38.3 ms | 16,486 | 1.05/19.6 s | 145 ms |
+| BF16, Triton | 13,587 | 1,416 | 1.37/6.22 s | 40.0 ms | 15,683 | 1.14/21.9 s | 152 ms |
+| fp8 KV (auto-selects FlashInfer) | 17,000 | 1,772 | 1.23/4.96 s | 31.3 ms | 20,083 | 0.99/19.5 s | 118 ms |
+| fp8 KV, Triton | 15,984 | 1,666 | 1.31/6.14 s | 33.1 ms | 19,337 | 1.39/20.7 s | 121 ms |
+| **FP8 weights + fp8 KV** | **22,523** | **2,348** | **0.93/3.46 s** | **23.7 ms** | **26,528** | **0.90/13.3 s** | **89 ms** |
+| same + `--max-num-batched-tokens 16384` | 22,723 | 2,368 | 1.56/3.49 s | 21.0 ms | 26,685 | 1.67/12.7 s | 86 ms |
+
+The BF16 default barely scales past c64. A torch profile at c128 split time
+about 50% GEMM (cuBLAS chooses `cutlass_80_tensorop_bf16` kernels on SM120)
+and 45% FA2 (varlen prefill plus split-KV decode). A GEMM microbenchmark on
+this GPU peaks at ~270 TFLOPS in BF16 and 544 TFLOPS in FP8. That is why
+online FP8 weights help a prefill-heavy batch so much. The 16k prefill chunk
+adds nothing and nearly doubles TTFT p50, so it was rejected. Cache-hit share
+is ~0% by construction in all of these cells (random prompts).
+
+**Quality** (prompt-token perplexity from `prompt_logprobs`, held-out 2026 text
+from this repository: EXPERIMENTS.md plus CLAUDE.md).
+
+| config | ppl, 24×~2.6k-token chunks | ppl, 3×~38k-token chunks |
+| --- | --- | --- |
+| BF16 | 16.604 | 10.324 |
+| fp8 KV | 16.671 (+0.4%) | 10.371 (+0.5%) |
+| FP8 weights + fp8 KV | 16.808 (+1.2%) | 10.457 (+1.3%) |
+
+**domyn-swarm** (DomynAI/domyn-swarm v0.34.0, commit `2b313606`). Its `up`
+backends are Slurm and DGX Cloud Lepton only, so node06 cannot launch a swarm.
+The job runner it submits (`python -m domyn_swarm.jobs.cli.run --endpoint …`)
+does run against any OpenAI endpoint. The built-in `CompletionJob` covers a
+base model; its example `completion.parquet` actually contains a `messages`
+column. On one BF16 GPU, 2,000 rows with 8 shared ~1.5k-token prefixes
+completed in 194.7 s at c64 (10.3 rows/s, ~2.6k out tok/s, 89% engine-native
+cache hit).
+
+**Four replicas: domyn-swarm's nginx `least_conn` vs ramjet prefix affinity.**
+All four engines ran FP8 weights + fp8 KV. Both LBs were experiment-only
+containers on loopback: nginx mirroring `lb_supervisor.py` on :8095, ramjet
+`rust-api-tokens-c55b7cb` with `RJ_AFFINITY=prefix` on :8096. The job was a
+domyn-swarm `CompletionJob` at max concurrency 256 over 400 documents ×
+~8,000 tokens × 10 questions (4,000 shuffled rows, 128 out, `ignore_eos`), with
+a fresh salt per arm. The ~3.2M-token document working set exceeds one
+replica's KV pool (1.7M) but fits the fleet's (6.8M). Guarded runs
+`f1609041…` and `b031206d…`.
+
+| LB | wall | rows/s | out tok/s | engine-native cache hit | per-engine prompt tokens |
+| --- | --- | --- | --- | --- | --- |
+| nginx `least_conn` (domyn-swarm default) | 304.0 s | 13.16 | 1,684 | 36.1% | 7.79-8.31M |
+| ramjet prefix | **208.5 s** | **19.18** | **2,455** | **66.4%** | 7.88-8.13M |
+
+Ramjet finished 1.46× faster. The ideal hit rate is 90% (one cold read per
+document); ramjet's routing split was 2,922 overlap, 1,031 load, and 48 rr
+decisions. domyn-swarm reports no per-request latency, so TTFT was not
+recorded for the replica cells.
+
+**Verdict.** For Domyn Edge batch work on RTX PRO 6000: TP1 per GPU, with
+`--quantization fp8 --kv-cache-dtype fp8` (FlashInfer, chosen automatically),
+at the default 8192 chunk. That gives 2.2× the BF16 default for +1.2-1.3%
+perplexity. Put replicas behind ramjet prefix routing, not round-robin or
+least-connections. Still open: the PR is unmerged; the base model has no chat
+template (use `Domyn-Edge-SFT` for chat); and no accuracy eval beyond
+perplexity was run. Raw per-cell logs, parquet outputs, and thermal journals
+are on node06 under `/prod/tmp/domyn-swarm/work/exp/`.
+
 ## 2026-10-20 — Ramjet owns API auth on node06; per-token usage store sizing
 
 **What shipped.** PR #320 (`ghcr.io/helixml/ramjet:rust-api-tokens-c55b7cb`,
