@@ -1,0 +1,12 @@
+# Derived from the qualified SwiGLU-clamp serving image (image ID
+# sha256:899fe8eb0f563b6654125f7b1c3ac7ad497e5c2e02256b30dc8fd7059e957a64).
+# Build only on a host where that tag resolves to that exact ID.
+FROM ramjet/glm53-sm120:swiglu-clamp-r1
+
+COPY patch-pcie-ipc-chunked.py /tmp/patch-pcie-ipc-chunked.py
+RUN python3 /tmp/patch-pcie-ipc-chunked.py \
+    && rm -f /tmp/patch-pcie-ipc-chunked.py
+
+LABEL org.opencontainers.image.title="SGLang GLM-5.3 SM120 nullable parser + SwiGLU clamp + chunked PCIe IPC all-reduce" \
+      org.opencontainers.image.base.name="ramjet/glm53-sm120:swiglu-clamp-r1" \
+      org.opencontainers.image.source="https://github.com/helixml/ramjet"

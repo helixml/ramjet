@@ -4,7 +4,7 @@
 name: glm53_flash_sm120
 
 x-glm-engine: &glm-engine
-  image: ${SGLANG_IMAGE:-sha256:899fe8eb0f563b6654125f7b1c3ac7ad497e5c2e02256b30dc8fd7059e957a64}
+  image: ${SGLANG_IMAGE:-sha256:faec1edf65b6a614b38309d3894da102f2cb41cf06d0e939476c79c21ca88c97}
   pull_policy: never
   labels:
     ai.ramjet.model.repository: ${GLM53_MODEL_REPOSITORY:-ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO}
@@ -15,6 +15,7 @@ x-glm-engine: &glm-engine
     ai.ramjet.runtime.base-digest: sha256:ec4243f940a179a27fea21895077efd47cd050501f99a1d2a5fecf7df2e7be71
     ai.ramjet.runtime.glm47-parser-sha256: 8ed76f9da2aa782b3e9374d00687186624fd383e98acf9ba0d6ac9759e1425d7
     ai.ramjet.runtime.swiglu-clamp-patch-sha256: b6bf7c99f3094c927100c0c933daa63a80ef9cffab44092f3199e2134dbfc0b9
+    ai.ramjet.runtime.pcie-ipc-chunked-patch-sha256: 91c4721f27d34dc153935ca61768fbe34c2256335aa940a25442caf5ab11d71b
   entrypoint: ["sglang"]
   restart: "no"
   init: true
@@ -37,6 +38,17 @@ x-glm-engine: &glm-engine
     CUBLAS_WORKSPACE_CONFIG: ":4096:2:16:8"
     SGLANG_ENABLE_PCIE_IPC_ALLREDUCE: "1"
     SGLANG_PCIE_IPC_MAX_NUMEL: "786432"
+    # Tune the IPC kernels at startup (cached under /root/.cache) and serve
+    # prefill-sized all-reduces as 192-row chunks through the same workspace
+    # instead of NCCL, which uses host-memory SHM between these GPUs.
+    SGLANG_PCIE_IPC_TUNE: "1"
+    SGLANG_PCIE_IPC_CHUNKED: "1"
+    # SGLang sets NCCL_CUMEM_ENABLE=0 unless it is already set. Then NCCL's SHM
+    # buffers are /dev/shm pages placed at first touch, and with node memory
+    # full of page cache they land on the remote NUMA node (all-reduce ~2.5x
+    # slower). cuMem places them on the GPU's node. Still used for the decode
+    # logits all-gather and any collective the IPC path does not take.
+    NCCL_CUMEM_ENABLE: "1"
     SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION: "1"
     SGLANG_LM_HEAD_FP8: "1"
     TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor

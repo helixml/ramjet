@@ -1,0 +1,110 @@
+# Isolated v0.6.1 candidate of glm53sm120-b (never attached to the LB).
+# Upstream v0.6.1 TP2 launcher flags plus production's capacity settings
+# (500k pool, 6144-token chunks, HiCache 4 GB, mamba states per path 2).
+name: ${KEXP_PROJECT:-glm53_kexp_v061}
+
+services:
+  glm53-kexp:
+    image: ${KEXP_IMAGE:-ghcr.io/ormandj/sglang-glm53-flash-sm120:v0.6.1}
+    pull_policy: never
+    container_name: ${KEXP_NAME:-glm53-kexp}
+    entrypoint: ["/bin/bash", "/opt/kexp/entry.sh"]
+    restart: "no"
+    init: true
+    ipc: host
+    shm_size: 64gb
+    stop_grace_period: 120s
+    cpuset: "${KEXP_CPUSET:-0-11,24-35}"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile: {soft: 1048576, hard: 1048576}
+    environment:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "0,1"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION: "0"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      SGLANG_DRAFT_LM_HEAD_FP8: "1"
+      SGLANG_PREFILL_MBO: "0"
+      TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+      TILELANG_CACHE_DIR: /root/.cache/tilelang
+      TRITON_CACHE_DIR: /root/.cache/triton
+      SGLANG_KDA_EXTEND_BLOCK_TOKENS: "2048"
+      SGLANG_BCG_RAGGED_SHAPES: "1"
+      SGLANG_BCG_RAGGED_MAX_BS: "1"
+      SGLANG_BCG_SEPARATE_CAPTURE_SESSIONS: "1"
+      SGLANG_TORCH_PROFILER_DIR: /kexp/profiles
+      KEXP_APPLY_CHUNK_PATCH: ${KEXP_APPLY_CHUNK_PATCH:-0}
+      SGLANG_PCIE_IPC_CHUNKED: ${KEXP_PCIE_IPC_CHUNKED:-0}
+      NCCL_DEBUG: ${KEXP_NCCL_DEBUG:-WARN}
+      KEXP_AR_DIAG: ${KEXP_AR_DIAG:-0}
+      # SGLang sets 0 unless the variable is already present; 1 makes NCCL
+      # allocate its SHM transport buffers with cuMem on the GPU's NUMA node.
+      NCCL_CUMEM_ENABLE: ${KEXP_NCCL_CUMEM:-0}
+      PYTHONPATH: ${KEXP_PYTHONPATH:-}
+      NCCL_DEBUG_SUBSYS: ${KEXP_NCCL_DEBUG_SUBSYS:-INIT}
+    command:
+      - serve
+      - --model-path=/models/glm53-flash-w4a16-e4m3-k32
+      - --served-model-name=glm-5.3-flash
+      - --tp=2
+      - --enable-multimodal
+      - --warmups=serving_coverage
+      - --image-processor-backend=torchvision
+      - --mm-preprocessing-device=cpu
+      - --quantization=modelopt_mixed
+      - --moe-runner-backend=flashinfer_cutlass
+      - --disable-shared-experts-fusion
+      - --disable-custom-all-reduce
+      - --attention-backend=dsa
+      - --linear-attn-backend=triton
+      - --context-length=524288
+      - --max-total-tokens=500000
+      - --kv-cache-dtype=fp8_e4m3
+      - --mem-fraction-static=0.99
+      - --chunked-prefill-size=${KEXP_CHUNK:-6144}
+      - --max-prefill-tokens=${KEXP_CHUNK:-6144}
+      - --max-running-requests=4
+      - --max-mamba-cache-size=28
+      - --mamba-ssm-dtype=bfloat16
+      - --mamba-max-states-per-path=2
+      - ${KEXP_HICACHE_FLAG:---enable-hierarchical-cache}
+      - --hicache-size=4
+      - --cuda-graph-backend-prefill=breakable
+      - --cuda-graph-bs-prefill
+      - "64"
+      - "128"
+      - --cuda-graph-backend-decode=full
+      - --cuda-graph-bs-decode
+      - "1"
+      - "2"
+      - "3"
+      - "4"
+      - --dsa-prefill-backend=flashinfer_sparse_mla
+      - --dsa-decode-backend=flashinfer_sparse_mla
+      - --speculative-algorithm=EAGLE
+      - --speculative-num-steps=3
+      - --speculative-eagle-topk=1
+      - --speculative-num-draft-tokens=4
+      - --reasoning-parser=glm45
+      - --tool-call-parser=glm47
+      - --enable-metrics
+      - --enable-cache-report
+      - --host=0.0.0.0
+      - --port=8000
+    ports:
+      - "127.0.0.1:${KEXP_PORT:-8065}:8000"
+    volumes:
+      - /prod/models/ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO-ee0989a944b0:/models/glm53-flash-w4a16-e4m3-k32:ro
+      - ${KEXP_CACHE:-/prod/engine-cache-sglang-glm53-kexp-v90}:/root/.cache
+      - ./entry.sh:/opt/kexp/entry.sh:ro
+      - ./diag:/opt/kexp/diag:ro
+      - ./patch-pcie-ipc-chunked-v061.py:/opt/kexp/patch-pcie-ipc-chunked-v061.py:ro
+      - ../profiles:/kexp/profiles
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["${KEXP_GPU_A:-0}", "${KEXP_GPU_B:-1}"], capabilities: [gpu]}

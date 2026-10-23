@@ -1,0 +1,103 @@
+--- a/sglang/srt/layers/quantization/fp8_utils.py
++++ b/sglang/srt/layers/quantization/fp8_utils.py
+@@ -105,6 +105,8 @@
+ _FORCE_CK_W8A8: bool = False
+ 
+ 
++from sglang.srt.layers.quantization import w8a16_tilelang as _w8a16_tl
++
+ def set_force_ck_w8a8(enabled: bool = True) -> None:
+     global _FORCE_CK_W8A8
+     _FORCE_CK_W8A8 = enabled
+@@ -977,6 +979,33 @@
+     input: torch.Tensor,
+     weight: torch.Tensor,
+     block_size: List[int],
++    weight_scale: torch.Tensor,
++    input_scale: Optional[torch.Tensor] = None,
++    bias: Optional[torch.Tensor] = None,
++) -> torch.Tensor:
++    if input_scale is None and _w8a16_tl.supports(input, weight, weight_scale, block_size):
++        # FP8 weight-only checkpoints at decode M: BF16 activations, split-K.
++        out = _w8a16_tl.w8a16_block_fp8_linear(input, weight, weight_scale, bias)
++        _w8a16_tl.maybe_check(
++            out,
++            input,
++            weight,
++            weight_scale,
++            lambda: _cutlass_w8a8_block_fp8_linear(
++                input, weight, block_size, weight_scale, input_scale=None, bias=bias
++            ),
++        )
++        return out
++
++    return _cutlass_w8a8_block_fp8_linear(
++        input, weight, block_size, weight_scale, input_scale, bias
++    )
++
++
++def _cutlass_w8a8_block_fp8_linear(
++    input: torch.Tensor,
++    weight: torch.Tensor,
++    block_size: List[int],
+     weight_scale: torch.Tensor,
+     input_scale: Optional[torch.Tensor] = None,
+     bias: Optional[torch.Tensor] = None,
+--- a/sglang/srt/models/deepseek_v2.py
++++ b/sglang/srt/models/deepseek_v2.py
+@@ -236,6 +236,8 @@
+     linear_with_fused_a_gemm,
+ )
+ 
++from sglang.srt.layers.quantization import w8a16_tilelang as _w8a16_tl
++
+ logger = logging.getLogger(__name__)
+ 
+ # One-time SGLANG_OPT_MOE_QUANT_ONCE engagement log (see _moe_quant_once_enabled).
+@@ -1477,20 +1479,36 @@
+         pre_quant_input: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+     ):
+         if (hidden_states.shape[0] > 0) and (self.num_fused_shared_experts == 0):
+-            if pre_quant_input is not None:
+-                # SGLANG_OPT_MOE_QUANT_ONCE: (q, s) rows may be padded to a
+-                # multiple of 4; the padded rows flow through the MLP (all ops
+-                # are row-local) and are sliced off here.
+-                out = self.shared_experts(
+-                    hidden_states, gateup_pre_quant=pre_quant_input
+-                )
+-                return out[: hidden_states.shape[0]]
+-            return self.shared_experts(
+-                hidden_states, gemm_output_zero_allocator=gemm_output_zero_allocator
++            if (
++                self.alt_stream is not None
++                and torch.cuda.current_stream() == self.alt_stream
++            ):
++                # Overlapped with the routed experts: keep the GEMMs narrow
++                # (CUTLASS's N/128 CTAs) so they soak up spare bandwidth
++                # instead of taking SMs from the MoE kernel on the critical path.
++                with _w8a16_tl.disabled():
++                    return self._forward_shared_experts_impl(
++                        hidden_states, gemm_output_zero_allocator, pre_quant_input
++                    )
++            return self._forward_shared_experts_impl(
++                hidden_states, gemm_output_zero_allocator, pre_quant_input
+             )
+         else:
+             return None
+ 
++    def _forward_shared_experts_impl(
++        self, hidden_states, gemm_output_zero_allocator, pre_quant_input
++    ):
++        if pre_quant_input is not None:
++            # SGLANG_OPT_MOE_QUANT_ONCE: (q, s) rows may be padded to a
++            # multiple of 4; the padded rows flow through the MLP (all ops
++            # are row-local) and are sliced off here.
++            out = self.shared_experts(hidden_states, gateup_pre_quant=pre_quant_input)
++            return out[: hidden_states.shape[0]]
++        return self.shared_experts(
++            hidden_states, gemm_output_zero_allocator=gemm_output_zero_allocator
++        )
++
+     def _moe_quant_once_enabled(self) -> bool:
+         """SGLANG_OPT_MOE_QUANT_ONCE: quantize the (dp-gathered) MoE input to
+         per-token-group-128 fp8 once per layer and feed both the fused shared
