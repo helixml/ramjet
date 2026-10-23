@@ -17,8 +17,10 @@ Immutable inputs:
   `sha256:024a988fd0c0e15d80e382073c05657b2d57f52611c324599508cdb62b9debb8`.
   Its patched GLM47 parser is
   `8ed76f9da2aa782b3e9374d00687186624fd383e98acf9ba0d6ac9759e1425d7`.
-- Serving image on node06 (`Dockerfile.swiglu-clamp` over the nullable-parser
-  image): `sha256:899fe8eb0f563b6654125f7b1c3ac7ad497e5c2e02256b30dc8fd7059e957a64`.
+- SwiGLU-clamp image on node06 (`Dockerfile.swiglu-clamp` over the
+  nullable-parser image): `sha256:899fe8eb0f563b6654125f7b1c3ac7ad497e5c2e02256b30dc8fd7059e957a64`.
+- Serving image on node06 (`Dockerfile.pcie-ipc-chunked` over the
+  SwiGLU-clamp image): `sha256:faec1edf65b6a614b38309d3894da102f2cb41cf06d0e939476c79c21ca88c97`.
 
 Both replicas use the release's qualified TP2/C4 settings plus the prefix-cache
 settings below, with distinct writable compilation caches. TP4 is not admitted: the
@@ -117,6 +119,46 @@ Full GSM8K (1,319, temperature 0, `reasoning_effort=low`, `bench/gsm8k_check.py`
 96.29% before, 96.44% after, 10 fixed and 8 broken questions, same wall time.
 732 of 1,319 completions changed length, so the clamp is live. The agent
 protocol corpus passes 5/5.
+
+## Chunked PCIe IPC all-reduce
+
+Each TP2 pair meets only at a PCIe host bridge (`nvidia-smi topo`: NODE), above
+NCCL's default `NCCL_P2P_LEVEL`, so NCCL staged every all-reduce through host
+memory (SHM): 24% of prefill GPU time, 2.47 ms per 6,144-token chunk
+all-reduce. SGLang's FlashInfer PCIe IPC all-reduce is peer-to-peer but
+admitted only tensors up to `SGLANG_PCIE_IPC_MAX_NUMEL` (192 tokens) and ran
+untuned. `patch-pcie-ipc-chunked.py` adds `SGLANG_PCIE_IPC_CHUNKED`, which
+serves larger tensors as contiguous 192-row chunks through the same workspace,
+and the Compose file sets `SGLANG_PCIE_IPC_TUNE=1`. The patch fails closed
+unless both files have their reviewed SHA-256. Build it where the SwiGLU-clamp
+tag resolves to its pinned ID:
+
+```bash
+docker build --network=none -f Dockerfile.pcie-ipc-chunked \
+  -t ramjet/glm53-sm120:pcie-ipc-chunked-r1 .
+```
+
+| 6,144 x 4,096 BF16 all-reduce, two ranks | µs |
+| --- | ---: |
+| NCCL default (SHM) | 2,297 |
+| NCCL `P2P_LEVEL=SYS` | 1,837 |
+| FlashInfer IPC, tuned, single call (needs +420 MiB workspace) | 1,580 |
+| **FlashInfer IPC, tuned, 192-row chunks (existing workspace)** | **1,461** |
+
+`NCCL_CUMEM_ENABLE=1` covers what still uses NCCL (the decode logits
+all-gather, fallbacks). SGLang otherwise forces it to 0. NCCL's SHM buffers
+then become `/dev/shm` pages placed at the first collective, after weight
+loading has filled the node with page cache, and `vm.zone_reclaim_mode=0`
+spills them to the remote socket. A 6,144-token all-reduce measured 5.7-6.7
+ms remote against 2.4 ms local, so restarts were a ±27% prefill lottery
+before chunked IPC.
+
+Results are bit-identical to NCCL and need no extra device memory (NCCL P2P
+with 32 channels needed ~1 GB and OOMed at `--mem-fraction-static=0.99`). On
+an isolated replica, cold prefill went from 5,912/5,871/5,843 to
+6,453/6,440/6,384 tok/s at 9k/37k/149k tokens (+9.1-9.7%); decode
+time per iteration was unchanged. The agent protocol corpora pass 5/5, 7/7,
+4/4. See EXPERIMENTS.md 2026-10-22.
 
 ## Prefix-cache capacity
 

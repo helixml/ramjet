@@ -1,5 +1,288 @@
 # node06 experiment journal
 
+## 2026-10-22 (night) — Root cause of "slow v0.6.1": NCCL SHM buffers on the remote NUMA node
+
+The 27% prefill loss blamed on v0.6.1 in the next entry was not v0.6.1. It is
+where NCCL's shared-memory transport buffers land, decided by NUMA memory
+pressure when the engine runs its first collective.
+
+**Mechanism.**
+1. Both SGLang versions set `NCCL_CUMEM_ENABLE=0` for their schedulers
+   (`engine.py`: set to `int(enable_symm_mem)` unless already in the
+   environment). Both NCCL INIT logs show `set by environment to 0`.
+2. With cuMem off, NCCL's SHM transport (the only transport for this pair,
+   which meets at a PCIe host bridge) puts its buffers in `/dev/shm` files,
+   and the kernel places the pages at first touch.
+3. NCCL 2.30 connects transports at the first collective. That comes after
+   the 164 GB of weights have streamed through the page cache.
+4. node06 node 0 holds ~33 GB of file pages. With `vm.zone_reclaim_mode=0`
+   the kernel spills new pages to node 1 instead of reclaiming node 0's cache,
+   and shmem THP is `never`.
+5. GPUs 0-3 hang off node 0, so every all-reduce byte then crosses the
+   socket link.
+
+With cuMem on, NCCL allocates SHM host memory with cuMem on the GPU's NUMA
+node, which removes the dependence.
+
+**Evidence** (6,144 × 4,096 BF16 all-reduce, two ranks):
+
+| setting | NCCL SHM pages | µs |
+| --- | --- | ---: |
+| standalone, default (cuMem on) | none in `/dev/shm` | 2,300-3,080 |
+| standalone, `NCCL_CUMEM_ENABLE=0`, five runs | ~95-100% on node 1 | 5,716-6,736 |
+| standalone, cuMem off + `numactl --membind=0` | 100% node 0 | 2,707-2,995 |
+| v0.4.3 engine (fast run, started after another engine freed node 0) | 100% node 0 | 2,361-2,492 |
+| v0.6.1 engine (slow runs, node 0 full) | — | 5,866-6,653 |
+| v0.6.1 engine, `NCCL_CUMEM_ENABLE=1` | cuMem host | 2,314-2,372 |
+
+Inside the slow engine, a freshly allocated tensor was just as slow as the
+engine's own buffer (`sitecustomize` hook timing both). The ranks entered
+each all-reduce within ~80 µs of each other, and the trace showed no
+overlapping kernels or copies. That ruled out buffer, skew and contention.
+
+Also ruled out: HiCache (off measured 4,561-4,713 tok/s vs on 4,702-4,790),
+the allocator, the call path (both are `c10d::allreduce_` →
+`ProcessGroupNCCL`, `RING`/`SIMPLE`/4 channels), the NCCL library (both load
+pip `nvidia-nccl` 2.30.7), and CPU contention on the cpuset.
+
+**Stock v0.6.1 with `NCCL_CUMEM_ENABLE=1`:** prefill 6,009 / 6,019 / 5,977
+tok/s at 9k/37k/149k. v0.4.3 stock measured 5,912 / 5,871 / 5,843 and
+upstream reports ~6,100. The version difference is noise.
+
+**Promoted `NCCL_CUMEM_ENABLE=1` (2026-10-23, 05:20-05:56Z).** Compose
+SHA-256 `839131d6…` (previous kept as
+`docker-compose.yaml.bak-20261022-pre-cumem`), validator now requires it. NCCL
+still carries the decode logits all-gather (~4 × 48 µs per step) and any
+fallback. Rolled `glm53sm120-b` then `-c` with `node06-engine-rollout.sh`
+while the peer served (both ready, scheduler env verified). On b (live traffic present): agent corpora 5/5, 7/7,
+4/4; decode c1 154.5 tok/s (3.00 tokens/verify); cold 37k prefill 6,519 tok/s.
+
+**Consequences.**
+* Any GLM restart on node06 without the chunked IPC patch gets 2.4 ms or
+  ~6 ms prefill all-reduces depending on node memory at that moment: a ±27%
+  prefill lottery, invisible in config.
+* Production now serves prefill through chunked PCIe IPC (GPU-to-GPU, no host
+  buffer), which is immune. Replica c's NCCL buffers are local (node 1) today.
+* The +9% chunked-IPC gain was measured against a *local* NCCL baseline, so
+  it is the honest floor. Against a remote placement the gain is +44-53%.
+* `NCCL_CUMEM_ENABLE=1` is a cheap guard for whatever still uses NCCL
+  (all-gathers, any fallback). It is not yet set in production.
+
+## 2026-10-22 (evening) — GLM-5.3-Flash TP2: ormandj v0.6.1 vs production v0.4.3, with the chunked PCIe IPC patch
+
+**Shape.** Same isolated replica `glm53-kexp` (GPUs 0-1, `127.0.0.1:8065`,
+GPUs from stopping `glm53-unc-fp8` again, 19:03Z; restarted 19:57Z), same checkpoint
+`ee0989a9`, same client (`bench/glm53_kexp/kbench.py`, guarded, fresh salts,
+cold prefill, 0 cached tokens from response usage). Candidate image
+`ghcr.io/ormandj/sglang-glm53-flash-sm120:v0.6.1` = `sha256:10d3a796…`
+(SGLang nightly 961bcf48, FlashInfer 0.7.2, torch 2.14.1, NCCL 2.30.7), from
+`bench/glm53_kexp/v061/docker-compose.yaml`. It uses upstream's TP2 launcher
+flags (fixed MTP 3/1/4, `SGLANG_DRAFT_LM_HEAD_FP8=1`, `SGLANG_PREFILL_MBO=0`)
+plus production's capacity settings: 500k pool, 6,144-token chunks, HiCache
+4 GB, `--mamba-max-states-per-path=2`. A fresh cache took 26 min to healthy
+cold, 16 min warm. One throwaway warm-up pass preceded each measured run.
+
+| cell | v0.4.3 stock | v0.4.3 + chunked IPC (production) | v0.6.1 stock | v0.6.1 + chunked IPC |
+| --- | ---: | ---: | ---: | ---: |
+| prefill 9.3k tok/s (TTFT) | 5,912 (1.58 s) | 6,453 (1.45 s) | 4,600 (2.03 s) | **6,635 (1.41 s)** |
+| prefill 37k tok/s | 5,871 | 6,440 | 4,327 | **6,544** |
+| prefill 149k tok/s (TTFT) | 5,843 (25.5 s) | 6,384 (23.3 s) | 4,264 (34.9 s) | **6,509 (22.9 s)** |
+| decode c1 aggregate tok/s, per-request median | 146.0, 150.1 | 153.4, 154.7 | 154.1, 157.1 | 150.9, 149.8 |
+| decode c1 ms/iteration (tokens/verify) | 18.93 (2.84) | 19.01 (3.02) | 18.28 (2.92) | 18.26 (2.84) |
+| decode c4 aggregate tok/s, TTFT p50 | 318.5, 133 ms | 320.4, 136 ms | 322.8, 134 ms | 320.7, 141 ms |
+
+Spec configs differ (v0.4.3 adaptive 5/1/6, v0.6.1 fixed 3/1/4), so compare
+decode on aggregate tok/s: all four are level within noise. The production
+column includes the decode-neutral W8A16 kernel. Agent protocol gate on
+v0.6.1 + patch: v1 5/5 (including `typed-required-stream`, the streamed
+`["string","null"]` schema our nullable-parser patch was written for), v2_sessions 7/7,
+v2_deep_context 4/4. Our parser patch no longer applies to v0.6.1's rewritten
+`glm47_moe_detector.py`, and these cases pass without it.
+
+**Why stock v0.6.1 prefill measured 27% slower here** (superseded: see the
+NUMA root-cause entry above; the cause is NCCL SHM buffer placement, not v0.6.1). In its prefill profile, NCCL
+all-reduce takes 6.87 ms per 50 MB call (46% of GPU time) against 2.47 ms in
+v0.4.3. MoE (7.4 ms/layer), sparse MLA (8.9 ms) and FP8 GEMMs are unchanged.
+In isolation both images' NCCL measures the same: 2.30 vs 2.32 ms, SHM
+transport. Inside the v0.6.1 engine, NCCL SHM slows about 3×. Likely, but not
+yet isolated: v0.6 HiCache also writes the index and recurrent-state tiers to
+host memory, and those D2H copies compete with SHM's host staging. Upstream
+measures TP2 with HiCache off (6,085-6,160 tok/s at 32k-128k). With the
+chunked IPC patch (`bench/glm53_kexp/v061/patch-pcie-ipc-chunked-v061.py`,
+ported to upstream's `PcieIpcCommunicator`, TP2-only, flag-gated) each
+all-reduce is 32 × 48.2 µs ≈ 1.54 ms, so the P2P path does not suffer the
+contention. v0.6.1 autotunes the IPC kernels itself (1-192 rows), so only the
+chunking is needed.
+
+**Verdict.** v0.6.1 + patch beats production by +1.7-2.8% prefill with level
+decode. Both columns use the placement-independent IPC path, so this
+comparison stands. The "+44-53% on v0.6.1" and "27% loss for upstream users"
+readings are withdrawn. That loss came from NCCL SHM buffers on the remote
+NUMA node (see the root-cause entry above). It affects any SGLang version on a
+host where NCCL uses SHM under node memory pressure, and
+`NCCL_CUMEM_ENABLE=1` avoids it. Not promoted; a production move would need a
+derived image (v0.6.1 + port), compose changes (fixed MTP, draft-only FP8 LM
+head, `-v90` cache dirs) and a rolling restart.
+
+## 2026-10-22 — GLM-5.3-Flash TP2 (SM120) kernel work: profile, TileLang W8A16 GEMM, chunked tuned PCIe IPC all-reduce
+
+**Shape.** `ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO` @ `ee0989a9`,
+SGLang image `sha256:899fe8eb…` (ormandj v0.4.3), TP2 on two RTX PRO 6000
+Blackwell Server Edition (SM120, 188 SMs, 128 MB L2), exactly the
+`glm53sm120-b` argv and environment, EAGLE adaptive 5/1/6. Experiment replica
+`glm53-kexp` on GPUs 0-1 (`127.0.0.1:8065`, own Compose project and network,
+never attached to the LB), from `bench/glm53_kexp/docker-compose.yaml`; its
+`entry.sh` applies `bench/glm53_kexp/sglang-patches/` (unified diffs plus the
+new kernel module) to `/opt/sglang-source/python` before `sglang serve`. GPUs 0-3 came from stopping
+`glm53-unc-fp8` with the operator's OK (14:11Z). Kernel work ran in a separate
+dev container on GPUs 2-3. `glm53sm120-b/c` and the shared LB were not touched.
+Startup to healthy: ~16.5 min per restart (weights from ZFS plus graph capture).
+
+**Client.** `bench/glm53_kexp/kbench.py`, direct to the engine, under
+`node06_gpu_guard.py`. Decode: 8 fixed coding prompts, temperature 0,
+`ignore_eos`, 512 output tokens, c1 ×4 and c4 ×16 requests. It also reports
+`tokens_per_verify` and `ms_per_iteration` from `spec_verify_calls_total` /
+`generation_tokens_total` deltas, because per-request tok/s moves with EAGLE
+acceptance whenever numerics change the generated text. Prefill: unique-salted
+filler, `max_tokens=1`, cold (0 cached tokens, from response usage), 3 reps
+(median). Raw files: `/home/luke/inference/glm53-kexp/.experiments/`.
+
+### Where the time goes (torch profiler, TP0)
+
+| decode c1, 40 iterations (21.7 ms each) | share | prefill, 3 × 6,144-token chunks | share |
+| --- | --- | --- | --- |
+| MoE b12x W4A16 (154 µs/layer, at DRAM bandwidth) | 32% | MoE b12x W4A16 (7.3 ms/layer, 169 TFLOPS = 60% of BF16 peak) | 34% |
+| FP8 block GEMMs (CUTLASS, N/128 CTAs) + activation quant | 25.5% + 3% | NCCL all-reduce (`RING_LL` over **SHM**, 2.47 ms per 50 MB) | 24% |
+| BF16 GEMMs (dense MLP 0-2, MTP `eh_proj`, KDA gates; all near bandwidth) | 13% | sparse-MLA prefill (185 TFLOPS) | 11% |
+| mHC (TileLang, 3 kernels/sublayer) | 7% | FP8 GEMM (494 TFLOPS = 91% of FP8 peak) | 10% |
+| PCIe IPC all-reduce + NCCL all-gather | 6% | mHC | 7% |
+
+Measured peaks on this card: 1.24-1.36 TB/s DRAM read (not the 1.79 TB/s
+spec), 280 TFLOPS BF16, 543 TFLOPS FP8 (`torch.matmul` / `_scaled_mm` 8192³).
+`layer_norm_gated_fwd_kernel` and the KDA recurrent update look slow (14.7 µs)
+only because they use PDL and spin in `gdc_wait` while their producer runs.
+
+### Results (before → after, same replica, same client)
+
+| cell | baseline (`baseline-v2client`) | W8A16 + chunked tuned IPC | change |
+| --- | ---: | ---: | ---: |
+| prefill 9.3k tokens, TTFT / tok/s | 1.580 s / 5,912 | 1.447 s / 6,453 | **+9.1%** |
+| prefill 37k tokens | 6.348 s / 5,871 | 5.786 s / 6,440 | **+9.7%** |
+| prefill 149k tokens | 25.496 s / 5,843 | 23.334 s / 6,384 | **+9.3%** |
+| decode c1: ms per iteration (tokens/verify) | 18.93 (2.84) | 19.01 (3.02) | flat |
+| decode c1: per-request tok/s, TTFT p50 | 150.1, 97.8 ms | 154.7, 105.8 ms | acceptance, not kernels |
+| decode c4: ms per verify, aggregate tok/s | 8.79, 318.5 | 8.84, 320.4 | flat |
+
+A second baseline (first run, older client) measured 5,910/5,905/5,839
+prefill tok/s, so prefill noise is about ±0.5%. Agent protocol gate on the
+candidate (`agentbench.py`, deterministic, direct engine): v1 5/5, v2_sessions
+7/7, v2_deep_context 4/4 protocol-valid. No baseline agent run was repeated.
+
+### What worked: chunked, tuned FlashInfer PCIe IPC all-reduce (prefill +9%)
+
+NCCL picks the SHM transport (staging through host memory) for this pair
+because the GPUs meet only at a PCIe host bridge (`nvidia-smi topo`: NODE),
+above NCCL's default `NCCL_P2P_LEVEL`. P2P works (SGLang's own PCIe IPC
+all-reduce uses it; raw copy engine 42 GB/s one way, 37.5 GB/s each way
+bidirectional). All-reduce of a 6,144 × 4,096 BF16 tensor, two ranks:
+
+| path | µs |
+| --- | ---: |
+| NCCL default (SHM) | 2,297 |
+| NCCL `P2P_LEVEL=SYS` | 1,837 |
+| NCCL `P2P_LEVEL=SYS`, 8-32 channels | 1,657-1,752 |
+| FlashInfer `PcieIpcAllReduceWorkspace`, untuned | 3,104 |
+| same, tuned (`SGLANG_PCIE_IPC_TUNE=1`) | 1,580 |
+| **tuned, 192-row chunks through the existing 786,432-element workspace** | **1,461** |
+
+Production enables the IPC path only up to `SGLANG_PCIE_IPC_MAX_NUMEL`
+(192 tokens) and never tunes it. The patch
+(`sglang-patches/10-pcie-ipc-chunked.patch`, new `SGLANG_PCIE_IPC_CHUNKED`)
+serves larger all-reduces as contiguous row chunks through the same workspace,
+so it costs **no device memory**. Results are bit-identical to NCCL. In the
+engine profile prefill all-reduce fell 2.47 → ~1.5 ms per call.
+
+NCCL P2P alone gave prefill +4%/-1%/+3% end to end (-6% GPU time in the
+profile). 32 channels × 16 MB buffers needs ~1 GB of device memory and OOMed
+during warmup at `--mem-fraction-static=0.99`; 8 × 4 MB fits. The chunked IPC
+path supersedes it, and NCCL stays on its default.
+
+### What did not move decode: TileLang W8A16 split-K GEMM
+
+`FP8_PB_WO` is FP8 *weight-only*, but SGLang serves it as W8A8: every
+activation row is quantized to FP8 (an extra kernel), then CUTLASS runs 128-wide
+tiles (16-96 CTAs at decode M on 188 SMs). The TileLang kernel
+(`sglang-patches/w8a16_tilelang.py`, dispatched by `20-w8a16-tilelang.patch`)
+keeps BF16 activations, converts the FP8 tile to BF16 with the 128×128 block
+scale folded in, runs
+mma.sync, splits K across CTAs, and has the last CTA of each N tile (device
+atomic ticket) sum fp32 partials in fixed order. That is deterministic,
+needs no second launch, and the ticket self-resets for CUDA-graph replay.
+Graph replays matched eager bit for bit.
+
+Cold-weight microbench at M=6 (rotating copies to defeat L2; CUTLASS includes
+its activation-quant kernel): KDA qkv 47.4 → 43.5 µs, KDA o 24.8 → 18.0,
+MLA qkv_a 24.2 → 12.1, MLA q_b 21.2 → 15.3, MLA o 39.2 → 30.9, shared-expert
+gate_up 22.5 → 11.6, down 14.0 → 8.0. Error vs an fp32 dequant reference is
+2-4e-3 against 2-3e-2 for W8A8, about 8× lower. LM head and KDA qkv at M>16
+stay on CUTLASS (faster there).
+
+In the engine the gain mostly vanished. The shared experts run on an
+alternate stream concurrently with the routed MoE. The split-K kernel's 512
+CTAs slowed the MoE (153.8 → 158 µs/layer) and itself took 45 µs, so
+`_forward_shared_experts` now keeps alt-stream GEMMs on CUTLASS
+(same patch, `deepseek_v2.py`). On the critical path CUTLASS runs
+faster in situ than in the cold microbench (~22 µs for KDA o). Net: ~0.4 ms
+per 21.7 ms iteration of kernel time, offset by longer PCIe all-reduce waits,
+and `ms_per_iteration` was flat. It stays enabled for the accuracy gain only.
+
+Also tried and rejected:
+* A PDL variant that prefetches the CTA's weight slab to L2 before
+  `griddepcontrol.wait` was 10-25% slower.
+* Register-sourced weights (transposed MMA) were slower.
+* BK 256/512 was slower; occupancy, not per-step overhead, limits it.
+
+TileLang notes (0.1.12, SM120): `TL_DISABLE_WARP_SPECIALIZED` +
+`TL_DISABLE_TMA_LOWER` as SGLang's mHC kernels use. Do not put
+`from __future__ import annotations` in a module defining `@T.prim_func`: the
+signature annotations close over `T.dynamic("m")` and become unresolvable
+strings. `T.import_source` + `T.call_extern` inject raw PTX helpers.
+
+### Verdict and next
+
+Decode on this TP2 replica is bounded by DRAM bandwidth (MoE weight streaming
+55% at c4, 32% at c1) with every large kernel at or near roofline. Kernel work
+cannot buy a big decode win without reading fewer bytes. Prefill keeps one
+large lever: the MoE runs BF16 MMAs at 60% of BF16 peak. A W4A8 grouped GEMM
+(FP8 activations against the FP4/E4M3-K32 weights) could run at FP8 rate.
+FlashInfer's SM12x MoE has no such mode (`w4a16`, `nvfp4` = W4A4/group 16,
+`mxfp4` = UE8M0), so it would be new TileLang work with a numerics review.
+
+**Promoted (18:00-18:32Z).** `Dockerfile.pcie-ipc-chunked` (pinned-SHA
+`patch-pcie-ipc-chunked.py` over `swiglu-clamp-r1`) built offline on node06
+as `ramjet/glm53-sm120:pcie-ipc-chunked-r1` =
+`sha256:faec1edf65b6a614b38309d3894da102f2cb41cf06d0e939476c79c21ca88c97`.
+The Compose file now pins it and sets `SGLANG_PCIE_IPC_TUNE=1
+SGLANG_PCIE_IPC_CHUNKED=1` (Compose SHA-256 `7b470eda…`; the previous on-box
+file is kept as `docker-compose.yaml.bak-20261022-pre-ipc`). W8A16 is not in
+the image. `node06-engine-rollout.sh` rolled `glm53sm120-b` then `-c` under
+the thermal guard while the peer served (ready in 955 s and 957 s). The
+script's co-resident check now targets `glm53-unc-fp8`; Qwen A has been
+stopped since early October. Live checks on b: tuned IPC enabled on both
+ranks, LB `ramjet_upstream_up` 1 for all three GLM engines, an image-input
+smoke answered correctly, and one cold 42.5k-token prefill ran at 6,476 tok/s
+alongside live traffic. Evidence:
+`/home/luke/inference/glm53_flash_sm120/.experiments/20261022-pcie-ipc-chunked/`.
+Rollback: repin `sha256:899fe8eb…`, drop the two variables, and roll each
+replica the same way.
+
+Upstream context: ormandj's runtime is at v0.6.1 (node06 runs v0.4.3) and
+still caps IPC at 192 tokens, untuned. Upstream SGLang main's
+`pcie_ipc_ar.py` keeps prefill on NCCL on purpose. Its notes measured a
+prefill-sized single-call workspace at +66% TTFT on TP8 across two sockets. The
+TP2 single-socket, chunked-through-the-decode-workspace case here is not what
+that measurement covered.
+
 ## 2026-10-21 (afternoon) — Domyn Edge SFT: agent protocol, thinking, speculative decoding, routing, and an RTX 4090
 
 **Shape.** `domyn/Domyn-Edge-SFT` (same 4B architecture as the base model

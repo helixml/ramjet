@@ -109,7 +109,13 @@ class Glm53Sm120DeployTests(unittest.TestCase):
     def test_recipe_documents_cache_capacity_and_clamp(self):
         readme = (DEPLOY / "README.md").read_text()
         compose = (DEPLOY / "docker-compose.yaml").read_text()
-        for required in ("Prefix-cache capacity", "Routed-expert SwiGLU clamp", "Dockerfile.swiglu-clamp"):
+        for required in (
+            "Prefix-cache capacity",
+            "Routed-expert SwiGLU clamp",
+            "Dockerfile.swiglu-clamp",
+            "Chunked PCIe IPC all-reduce",
+            "Dockerfile.pcie-ipc-chunked",
+        ):
             self.assertIn(required, readme)
         self.assertIn("${GLM53_MAMBA_MAX_STATES_PER_PATH:-2}", compose)
         self.assertIn("--enable-hierarchical-cache", compose)

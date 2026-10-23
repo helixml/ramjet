@@ -10,10 +10,11 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent
 COMPOSE = ROOT / "docker-compose.yaml"
-EXPECTED_IMAGE = "sha256:899fe8eb0f563b6654125f7b1c3ac7ad497e5c2e02256b30dc8fd7059e957a64"
+EXPECTED_IMAGE = "sha256:faec1edf65b6a614b38309d3894da102f2cb41cf06d0e939476c79c21ca88c97"
 EXPECTED_BASE = "sha256:ec4243f940a179a27fea21895077efd47cd050501f99a1d2a5fecf7df2e7be71"
 EXPECTED_PARSER = "8ed76f9da2aa782b3e9374d00687186624fd383e98acf9ba0d6ac9759e1425d7"
 SWIGLU_PATCH = ROOT / "patch-swiglu-clamp.py"
+IPC_PATCH = ROOT / "patch-pcie-ipc-chunked.py"
 
 
 def fail(message: str) -> None:
@@ -75,12 +76,25 @@ for name, expected in EXPECTED_ENGINES.items():
         SWIGLU_PATCH.read_bytes()
     ).hexdigest():
         fail(f"{name} does not identify the committed SwiGLU clamp patch")
+    if labels.get("ai.ramjet.runtime.pcie-ipc-chunked-patch-sha256") != hashlib.sha256(
+        IPC_PATCH.read_bytes()
+    ).hexdigest():
+        fail(f"{name} does not identify the committed PCIe IPC chunking patch")
     if service.get("restart") not in ("no", None):
         fail(f"{name} restart policy must remain disabled")
     if service.get("cpuset") != "12-23,36-47":
         fail(f"{name} must remain NUMA-local to GPUs 4-7")
     if service.get("environment", {}).get("CUDA_VISIBLE_DEVICES") != "0,1":
         fail(f"{name} must expose exactly two container-local GPU ordinals")
+    environment = service.get("environment", {})
+    for key in (
+        "SGLANG_ENABLE_PCIE_IPC_ALLREDUCE",
+        "SGLANG_PCIE_IPC_TUNE",
+        "SGLANG_PCIE_IPC_CHUNKED",
+        "NCCL_CUMEM_ENABLE",
+    ):
+        if environment.get(key) != "1":
+            fail(f"{name} must set {key}=1 (prefill off NCCL SHM; NCCL SHM NUMA-local)")
 
     ports = service.get("ports", [])
     if (
