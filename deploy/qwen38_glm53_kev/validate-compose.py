@@ -56,6 +56,25 @@ def validate_long_prompt_lane(environment: dict) -> None:
         fail("long-prompt lane members must be OpenAI-profile upstreams")
 
 
+def validate_long_session(environment: dict) -> None:
+    """Mirror Ramjet's boot-time long-session rules."""
+    raw_tokens = environment.get("RJ_ROUTE_LONG_SESSION_TOKENS")
+    if raw_tokens is None or not re.fullmatch(r"[0-9]+", raw_tokens):
+        fail("RJ_ROUTE_LONG_SESSION_TOKENS must be a non-negative integer (0 disables)")
+    raw_capacity = environment.get("RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS", "")
+    if int(raw_tokens) == 0:
+        return
+    upstreams = environment.get("RJ_UPSTREAM", "").split(",")
+    capacities = [value.strip() for value in raw_capacity.split(",")]
+    if len(capacities) not in (1, len(upstreams)):
+        fail("RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS needs one value or one per upstream")
+    for value in capacities:
+        if value == "-":
+            continue
+        if not re.fullmatch(r"[0-9]+", value) or int(value) < int(raw_tokens):
+            fail("long-session capacities must be integers no smaller than the threshold")
+
+
 def validate(document: dict) -> None:
     if document.get("name") != "qwen38_glm53_kev":
         fail("unexpected Compose project name")
@@ -68,15 +87,17 @@ def validate(document: dict) -> None:
         fail("Ramjet image must be an immutable tag@sha256 reference")
     environment = lb.get("environment", {})
     expected = {
-        "RJ_UPSTREAM": "http://glm53sm120-b:8000,http://glm53sm120-c:8000,http://glm53-unc-fp8:8000",
-        "RJ_UPSTREAM_MODELS": "glm-5.3-flash,glm-5.3-flash,glm-5.3-flash-uncensored",
-        "RJ_UPSTREAM_APIS": "openai,openai,openai",
+        "RJ_UPSTREAM": "http://glm53sm120-b:8000,http://glm53sm120-c:8000,"
+        "http://glm53sm120-d:8000,http://glm53sm120-e:8000",
+        "RJ_UPSTREAM_MODELS": "glm-5.3-flash,glm-5.3-flash,glm-5.3-flash,glm-5.3-flash",
+        "RJ_UPSTREAM_APIS": "openai,openai,openai,openai",
         "RJ_MODEL_ALIASES": "qwen3.8-flash-next=glm-5.3-flash",
     }
     for key, value in expected.items():
         if environment.get(key) != value:
             fail(f"{key} must be {value!r}")
     validate_long_prompt_lane(environment)
+    validate_long_session(environment)
     for key in (
         "RJ_TOKENIZER_MODE",
         "RJ_EXACT_ROUTE_MODE",

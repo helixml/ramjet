@@ -89,13 +89,22 @@ class RouteJournalArchiveTest(unittest.TestCase):
         with self.assertRaises(archive.ArchiveError):
             archive.decode_record(json.dumps(record))
 
-    def test_v14_affinity_basis_is_approved_and_v15_is_not(self):
+    def test_v14_affinity_basis_is_approved_and_v16_is_not(self):
         record = start(1, 1_000)
         record["v"] = 14
         record["request_id"] = "req_01m2test"
         record["affinity_basis"] = "marginal"
         self.assertEqual(archive.decode_record(json.dumps(record)), record)
+        record["v"] = 16
+        with self.assertRaises(archive.ArchiveError):
+            archive.decode_record(json.dumps(record))
+
+    def test_v15_long_session_is_approved_and_bounded(self):
+        record = start(1, 1_000)
         record["v"] = 15
+        record["long_session"] = {"outcome": "moved", "estimated_ktokens": 312}
+        self.assertEqual(archive.decode_record(json.dumps(record)), record)
+        record["long_session"]["fingerprints"] = [1]
         with self.assertRaises(archive.ArchiveError):
             archive.decode_record(json.dumps(record))
 

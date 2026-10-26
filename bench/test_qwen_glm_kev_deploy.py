@@ -53,7 +53,7 @@ class QwenGlmKevDeployTests(unittest.TestCase):
             ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", None),
             ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,lane"),
             ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,-"),
-            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,-,lane"),
+            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,-,-,lane"),
         ):
             changed = copy.deepcopy(self.document)
             environment = changed["services"]["ds4-loadbalancer"]["environment"]
@@ -67,6 +67,29 @@ class QwenGlmKevDeployTests(unittest.TestCase):
         rolled_back["services"]["ds4-loadbalancer"]["environment"][
             "RJ_ROUTE_LONG_PROMPT_BYTES"
         ] = "0"
+        self.validator.validate(rolled_back)
+
+    def test_long_session_placement_is_on_with_the_engine_kv_pool(self):
+        environment = self.document["services"]["ds4-loadbalancer"]["environment"]
+        self.assertEqual(environment["RJ_ROUTE_LONG_SESSION_TOKENS"], "100000")
+        self.assertEqual(environment["RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS"], "500000")
+        for key, value in (
+            ("RJ_ROUTE_LONG_SESSION_TOKENS", None),
+            ("RJ_ROUTE_LONG_SESSION_TOKENS", "100k"),
+            ("RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS", "50000"),
+            ("RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS", "500000,500000"),
+        ):
+            changed = copy.deepcopy(self.document)
+            environment = changed["services"]["ds4-loadbalancer"]["environment"]
+            if value is None:
+                environment.pop(key)
+            else:
+                environment[key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                self.validator.validate(changed)
+        rolled_back = copy.deepcopy(self.document)
+        environment = rolled_back["services"]["ds4-loadbalancer"]["environment"]
+        environment["RJ_ROUTE_LONG_SESSION_TOKENS"] = "0"
         self.validator.validate(rolled_back)
 
     def test_ramjet_is_the_api_authority_with_persistent_state(self):

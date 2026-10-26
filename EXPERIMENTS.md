@@ -1,5 +1,61 @@
 # node06 experiment journal
 
+## 2026-10-26 — GLM-5.3-Flash on all eight GPUs, and long-conversation placement
+
+**Trigger.** An opencode user on `qwen3.8-flash-next` (aliased to
+`glm-5.3-flash`) at 361k/516k context reported the session "ground to a
+halt". Route journal 14:00-15:00Z: four to five concurrent 310k-440k-token
+agent conversations on the two GLM TP2 replicas (`glm53sm120-b`/`-c`,
+`--max-total-tokens=500000` each). One pool holds one such conversation, so
+they evicted each other: 29 of 363 prompts over 100k re-prefilled more than
+50k tokens, at about 6k tok/s prefill. The prefix index had no eviction signal
+and kept crediting replica b with prefixes it had lost (e.g. four consecutive
+375k turns each reused exactly 104k cached tokens while the router scored a
+742/743-block overlap). b took 145 of the 159 prompts over 250k. Decode was
+healthy throughout (120-180 tok/s). `glm53-unc-fp8` (GPUs 0-3, TP4) served
+0 requests in the same 6h.
+
+**Change.**
+- Engines: `glm53-unc-fp8` stopped; `glm53sm120-d` (GPUs 0-1, `:8065`) and
+  `-e` (GPUs 2-3, `:8066`) added to `deploy/glm53_flash_sm120`, same image and
+  flags as b/c, cpuset `0-11,24-35` (NUMA 0). Caches seeded from b with the
+  PCIe IPC autotune JSON removed. d: cold start to ready 16 min (ZFS read
+  ~200 MB/s, swap full); `max_total_num_tokens=499968`. GPUs 0-3 remain capped
+  at 450 W, so d/e are not identical to b/c in throughput.
+- Router (`src/long_session.rs`, LB image
+  `ghcr.io/helixml/ds4-loadbalancer:rust-long-session-1f3c1c1`,
+  `sha256:fc0e8bc1f573…`): per-replica model of resident conversations of at
+  least `RJ_ROUTE_LONG_SESSION_TOKENS` (100000), sized by engine-reported
+  prompt tokens and evicted LRU at `RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS`
+  (500000). A long prompt whose chosen replica cannot also hold it moves to
+  the best-ranked serving replica that can; a modelled eviction, or an engine
+  miss on a conversation believed resident, drops that conversation's
+  untouched blocks from the prefix index. Journal v15 adds `long_session`.
+  Rollback: `RJ_ROUTE_LONG_SESSION_TOKENS=0`; full rollback script beside the
+  node06 Compose file (previous LB `ghcr.io/helixml/ramjet:rust-api-tokens-c55b7cb`,
+  `sha256:2347132201db…`, three upstreams including uncensored).
+
+**Shape.** GLM-5.3-Flash W4A16/NVFP4-experts (ormandj, `ee0989a9`), SGLang
+v0.4.3 SM120 image `sha256:faec1edf…`, 4× TP2 on 8× RTX PRO 6000 Blackwell
+(GPUs 0-3 at 450 W), ramjet prefix affinity alpha 4.
+
+| prompts >100k tokens | before (14:00-15:00Z, 2 replicas) | after (first 15 min, 4 replicas) |
+|---|---|---|
+| requests | 363 | 40 |
+| cached prompt share (response usage) | 92.2% | 99.9% |
+| re-prefills >50k tokens | 29 | 0 |
+| TTFT p50 / p90 / max | 3.1 / 4.2 / 111.9 s | 1.4 / 1.5 / 1.5 s |
+| TTFT p90 for prompts >250k | 47.8 s | n/a (none yet) |
+| decode (per request) | 120-180 tok/s | 120-180 tok/s |
+
+The "after" column is one conversation (~190k, `fits` on c every turn) after
+the reporting user switched away, so it shows the change is harmless, not
+that it fixes the contended case. Aggregate throughput was not measured.
+Re-read the journal under multiple concurrent long conversations: expect
+`ramjet_route_long_session_total{outcome="moved"}` > 0, no replica with
+`ramjet_route_long_session_resident_tokens` above 500k, and no re-prefill
+of a conversation that stayed on its replica.
+
 ## 2026-10-25 — Nanbeige4.3-33B on node06 GPUs 0-3: quantisation, shape, Claude Code prefix caching, thinking, suffix decoding, routing
 
 **Shape.** `Nanbeige/Nanbeige4.3-33B` (released 2026-10-24, revision

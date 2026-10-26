@@ -77,6 +77,8 @@ pub struct Metrics {
     pub route_prefix_single_flight: CounterVec,
     pub route_long_prompt: CounterVec,
     pub route_long_prompt_short: CounterVec,
+    pub route_long_session: CounterVec,
+    pub route_long_session_resident_tokens: GaugeVec,
     pub route_affinity_horizon: CounterVec,
     pub route_affinity_horizon_seconds: GaugeVec,
     pub route_stale_overlap: Histogram,
@@ -503,6 +505,16 @@ impl Metrics {
                 "ramjet_route_long_prompt_short_total",
                 "Requests below the long-prompt threshold under an exclusive lane, by first selected upstream and excluded or excluded_fallback outcome",
                 &["upstream", "outcome"],
+            )?,
+            route_long_session: counter(
+                "ramjet_route_long_session_total",
+                "Long-conversation placement decisions by first selected upstream and fits, moved, or all_crowded outcome",
+                &["upstream", "outcome"],
+            )?,
+            route_long_session_resident_tokens: gauge(
+                "ramjet_route_long_session_resident_tokens",
+                "Modelled resident long-conversation prompt tokens per upstream",
+                &["upstream"],
             )?,
             route_affinity_horizon: counter(
                 "ramjet_route_affinity_horizon_total",
@@ -1118,6 +1130,8 @@ impl Metrics {
             Box::new(self.route_prefix_single_flight.clone()),
             Box::new(self.route_long_prompt.clone()),
             Box::new(self.route_long_prompt_short.clone()),
+            Box::new(self.route_long_session.clone()),
+            Box::new(self.route_long_session_resident_tokens.clone()),
             Box::new(self.route_affinity_horizon.clone()),
             Box::new(self.route_affinity_horizon_seconds.clone()),
             Box::new(self.route_stale_overlap.clone()),
@@ -1324,6 +1338,14 @@ mod tests {
             .with_label_values(&["http://glm53sm120-c:8000", "excluded"])
             .inc();
         metrics
+            .route_long_session
+            .with_label_values(&["http://glm53sm120-c:8000", "moved"])
+            .inc();
+        metrics
+            .route_long_session_resident_tokens
+            .with_label_values(&["http://glm53sm120-c:8000"])
+            .set(350_000.0);
+        metrics
             .route_affinity_horizon_seconds
             .with_label_values(&["0"])
             .set(f64::INFINITY);
@@ -1410,6 +1432,8 @@ mod tests {
             "ramjet_session_affinity_total",
             "ramjet_route_long_prompt_total",
             "ramjet_route_long_prompt_short_total",
+            "ramjet_route_long_session_total",
+            "ramjet_route_long_session_resident_tokens",
             "ramjet_shadow_soak_source_attempts_total",
             "ramjet_compat_attested",
             "ramjet_kv_event_trusted",

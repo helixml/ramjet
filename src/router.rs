@@ -230,6 +230,15 @@ impl Decision {
     /// document branch on an arbitrary replica, so this authority is stronger
     /// than ordinary prefix affinity once the owner has been observed.
     pub(crate) fn prefer_upstream(&mut self, upstream: usize) -> bool {
+        if !self.promote(upstream) {
+            return false;
+        }
+        self.outcome = Outcome::StateAffinity;
+        true
+    }
+
+    /// Moves a serving candidate to the front, keeping the decision outcome.
+    pub(crate) fn promote(&mut self, upstream: usize) -> bool {
         let Some(candidate_position) = self
             .candidates
             .iter()
@@ -253,7 +262,6 @@ impl Decision {
         self.overlap_blocks = selected.overlap_blocks;
         self.affinity_blocks = selected.affinity_blocks;
         self.load_units = selected.request_load_units;
-        self.outcome = Outcome::StateAffinity;
         true
     }
 
@@ -942,6 +950,26 @@ impl Router {
         }
         for fingerprint in fingerprints {
             state.lru.push(*fingerprint, now);
+        }
+    }
+
+    /// Drops blocks a replica is known to have evicted, unless something
+    /// served them after `served_before` (a shared system prompt another
+    /// request refreshed stays creditable).
+    pub fn forget(&self, upstream: usize, fingerprints: &[u64], served_before: Option<Instant>) {
+        let mut inner = self.inner.lock();
+        let Some(state) = inner.states.get_mut(upstream) else {
+            return;
+        };
+        for fingerprint in fingerprints {
+            let evicted = match (state.lru.peek(fingerprint), served_before) {
+                (Some(_), None) => true,
+                (Some(seen), Some(before)) => *seen <= before,
+                (None, _) => false,
+            };
+            if evicted {
+                state.lru.pop(fingerprint);
+            }
         }
     }
 
@@ -2023,6 +2051,25 @@ mod tests {
         assert_ne!(router.route(&body).candidates[0], home);
         router.set_healthy(home, true);
         assert_eq!(router.route(&body).candidates[0], home);
+    }
+
+    #[test]
+    fn forget_drops_only_blocks_nothing_served_since() {
+        let router = Router::new(config());
+        let start = Instant::now();
+        let shared = [1_u64, 2];
+        let evicted = [1_u64, 2, 30, 31];
+        router.observe_at(0, &evicted, None, start);
+        // Another conversation refreshes the shared system prompt later.
+        router.observe_at(0, &[1, 2, 40], None, start + Duration::from_secs(5));
+        router.forget(0, &evicted, Some(start));
+        let decision = router.route_prepared_at(1, &evicted, start + Duration::from_secs(6));
+        let home = decision
+            .candidate_state
+            .iter()
+            .find(|candidate| candidate.index == 0)
+            .unwrap();
+        assert_eq!(home.overlap_blocks, shared.len());
     }
 
     #[test]

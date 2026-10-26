@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.10.0 — 2026-10-26
+
+- Long-conversation placement, off by default. With
+  `RJ_ROUTE_LONG_SESSION_TOKENS` (threshold) and
+  `RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS` (KV pool per upstream, or `-`),
+  ramjet models which conversations of at least the threshold are resident on
+  each replica, sized by engine-reported prompt tokens and evicted LRU at the
+  capacity. A long prompt whose chosen replica cannot also hold it moves to
+  the best-ranked serving replica that can, and a modelled eviction or an
+  engine-reported miss drops that conversation's untouched blocks from the
+  prefix index so it stops attracting traffic to a replica that lost it.
+  Measured on node06: concurrent 310-440k-token agent conversations on
+  500k-token GLM pools re-prefilled 200-380k tokens on about one turn in ten
+  (45-112 s TTFT). New `ramjet_route_long_session_total{upstream,outcome}`
+  and `ramjet_route_long_session_resident_tokens{upstream}`; route journal v15
+  adds a bounded `long_session` annotation.
 - Minted client API tokens. `RJ_API_TOKENS_MODE=on` makes ramjet
   authenticate every proxied request: the master token (`RJ_UPSTREAM_TOKEN`)
   keeps working, and `rjk_*` tokens minted from the dashboard (name,

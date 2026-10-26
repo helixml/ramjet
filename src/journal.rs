@@ -9,6 +9,7 @@ use crate::{
     affinity_horizon::AffinityHorizonObservation,
     config::Config,
     long_prompt_lane::LongPromptLaneObservation,
+    long_session::LongSessionObservation,
     prefix_single_flight::PrefixSingleFlightObservation,
     prepare::OutputLimitObservation,
     router::{CandidateState, Decision},
@@ -17,7 +18,7 @@ use crate::{
     usage::Accumulator,
 };
 
-const VERSION: u8 = 14;
+const VERSION: u8 = 15;
 
 pub struct RouteJournal {
     enabled: bool,
@@ -34,6 +35,7 @@ pub(crate) struct RouteAnnotations {
     pub(crate) prefix_single_flight: PrefixSingleFlightObservation,
     pub(crate) affinity_horizon: AffinityHorizonObservation,
     pub(crate) long_prompt_lane: LongPromptLaneObservation,
+    pub(crate) long_session: LongSessionObservation,
 }
 
 #[derive(Debug, Serialize)]
@@ -73,6 +75,7 @@ pub struct StartRecord<'a> {
     /// Named for its request-size signal: the privacy test forbids the
     /// substring "prompt" anywhere in a journal record.
     long_request_lane: LongPromptLaneObservation,
+    long_session: LongSessionObservation,
     candidates: &'a [CandidateState],
 }
 
@@ -180,6 +183,7 @@ impl RouteJournal {
             prefix_single_flight: annotations.prefix_single_flight,
             affinity_horizon: annotations.affinity_horizon,
             long_request_lane: annotations.long_prompt_lane,
+            long_session: annotations.long_session,
             candidates: &decision.candidate_state,
         }
     }
@@ -338,6 +342,10 @@ mod tests {
                     outcome: "would_move",
                 },
                 long_prompt_lane: crate::long_prompt_lane::LongPromptLaneOutcome::Lane.into(),
+                long_session: LongSessionObservation {
+                    outcome: "moved",
+                    estimated_ktokens: 312,
+                },
             },
         ))
         .unwrap();
@@ -355,9 +363,12 @@ mod tests {
         }
         assert!(encoded.contains("\"chosen\":1"));
         assert!(encoded.contains("\"served_chosen\":1"));
-        assert!(encoded.contains("\"v\":14"));
+        assert!(encoded.contains("\"v\":15"));
         assert!(encoded.contains("\"request_id\":\"req_01m2test\""));
         assert!(encoded.contains("\"long_request_lane\":{\"outcome\":\"lane\"}"));
+        assert!(
+            encoded.contains("\"long_session\":{\"outcome\":\"moved\",\"estimated_ktokens\":312}")
+        );
         assert!(encoded.contains("\"affinity_basis\":\"absolute\""));
         assert!(
             encoded.contains("\"prefix_single_flight\":{\"mode\":\"off\",\"outcome\":\"off\"}")
@@ -404,7 +415,7 @@ mod tests {
         };
 
         let encoded = serde_json::to_string(&record).unwrap();
-        assert!(encoded.contains("\"v\":14"));
+        assert!(encoded.contains("\"v\":15"));
         assert!(encoded.contains("\"request_id\":\"req_01m2test\""));
         assert!(encoded.contains("\"upstream\":1"));
         assert!(encoded.contains("\"request_load_units\":4"));

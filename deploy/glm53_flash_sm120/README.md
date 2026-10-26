@@ -6,6 +6,14 @@ Ramjet service. Qwen A continues serving on GPUs 0-3, GLM B owns GPUs 4-5 at
 `127.0.0.1:8062`, and GLM C owns GPUs 6-7 at `127.0.0.1:8063`. Start or recreate
 only the explicitly named service being managed.
 
+**Four replicas since 2026-10-26.** GLM D owns GPUs 0-1 at `127.0.0.1:8065`
+and GLM E owns GPUs 2-3 at `127.0.0.1:8066`, NUMA-local on CPUs
+`0-11,24-35`. They replaced the uncensored TP4 replica (`glm53-unc-fp8`),
+which had served no request in the preceding six hours, while four or five
+concurrent 300-440k-token agent conversations thrashed the two 500k-token KV
+pools. Their caches were seeded from B's kernel cache with the PCIe IPC
+autotune result removed, so each pair tunes its own all-reduce.
+
 Immutable inputs:
 
 - Runtime: `ghcr.io/ormandj/sglang-glm53-flash-sm120` at manifest digest

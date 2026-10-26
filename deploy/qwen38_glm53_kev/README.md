@@ -1,9 +1,19 @@
 # GLM-5.3 on node06 (the `qwen38_glm53_kev` project)
 
-**Current shape (2026-10-20).** This Compose project owns only Ramjet, in
-front of three OpenAI-profile upstreams: two stock GLM-5.3-Flash replicas
-(`glm53sm120-b`, `glm53sm120-c`) and the uncensored GLM (`glm53-unc-fp8`).
-`qwen3.8-flash-next` is a model alias for the stock GLM pool. Kev-small was
+**Current shape (2026-10-26).** This Compose project owns only Ramjet, in
+front of four stock GLM-5.3-Flash TP2 replicas (`glm53sm120-b` through
+`glm53sm120-e`). The uncensored GLM (`glm53-unc-fp8`) was stopped to free
+GPUs 0-3, so `glm-5.3-flash-uncensored` is no longer served.
+`qwen3.8-flash-next` is a model alias for the stock GLM pool.
+
+Long-conversation placement is on (`RJ_ROUTE_LONG_SESSION_TOKENS=100000`,
+capacity 500000 per replica, matching the engines' `--max-total-tokens`).
+A conversation of at least 100k tokens is moved off a replica whose modelled
+long residents would overflow its KV pool, and the prefix-index blocks of a
+conversation the model evicts stop attracting traffic. Watch
+`ramjet_route_long_session_total{outcome}` and
+`ramjet_route_long_session_resident_tokens`; roll back with
+`RJ_ROUTE_LONG_SESSION_TOKENS=0`. Kev-small was
 removed on 2026-10-07 and the Qwen engine no longer serves here; the history
 below describes the original four-upstream rollout.
 

@@ -13,6 +13,7 @@ use crate::{
     affinity_horizon::{AffinityHorizonConfig, AffinityHorizonMode, AffinityHorizonSource},
     engine_park::{EngineParkConfig, ParkActuator, SleepLevel},
     idle_drain::{IdleDrainConfig, IdleDrainMode, IdleDrainRelease},
+    long_session::LongSessionConfig,
     topology::{self, Topology},
 };
 
@@ -161,6 +162,8 @@ pub struct Config {
     /// Whether prompts below the threshold may use lane members. Always
     /// `Shared` while the lane is off.
     pub route_long_prompt_sharing: LongPromptLaneSharing,
+    /// Long-conversation placement by modelled KV residency; off by default.
+    pub route_long_session: LongSessionConfig,
     pub affinity: Affinity,
     pub route_affinity_basis: AffinityBasis,
     pub route_affinity_horizon: AffinityHorizonConfig,
@@ -934,6 +937,7 @@ impl Config {
         }
         let (route_long_prompt_bytes, route_long_prompt_upstreams, route_long_prompt_sharing) =
             long_prompt_lane_settings(&mut get, &upstream_api_profiles)?;
+        let route_long_session = long_session_settings(&mut get, upstreams.len())?;
         let session_affinity = session_affinity_settings(
             &mut get,
             upstreams.len(),
@@ -1219,6 +1223,7 @@ impl Config {
             route_long_prompt_bytes,
             route_long_prompt_upstreams,
             route_long_prompt_sharing,
+            route_long_session,
             affinity,
             route_affinity_basis,
             route_affinity_horizon,
@@ -2258,7 +2263,23 @@ fn fill_affinity_horizon(
     get: &mut impl FnMut(&str) -> Option<String>,
     upstreams: usize,
 ) -> Result<AffinityHorizonSource, ConfigError> {
-    let parsed = value_list(get, "RJ_ROUTE_KV_CAPACITY_TOKENS")?
+    let capacity_tokens = capacity_list(
+        get,
+        "RJ_ROUTE_KV_CAPACITY_TOKENS",
+        upstreams,
+        "positive integer KV capacities in tokens, or - for an unknown replica, when RJ_ROUTE_AFFINITY_HORIZON_SOURCE=fill",
+    )?;
+    Ok(AffinityHorizonSource::Fill { capacity_tokens })
+}
+
+/// One positive token capacity, or `-` for unknown, broadcast or per upstream.
+fn capacity_list(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    key: &'static str,
+    upstreams: usize,
+    reason: &'static str,
+) -> Result<Vec<Option<u64>>, ConfigError> {
+    let parsed = value_list(get, key)?
         .into_iter()
         .map(|value| match value.as_str() {
             "-" => Ok(None),
@@ -2272,25 +2293,69 @@ fn fill_affinity_horizon(
         .collect::<Result<Vec<_>, ()>>()
         .ok()
         .filter(|parsed| !parsed.is_empty())
-        .ok_or_else(|| {
-            invalid(
-                "RJ_ROUTE_KV_CAPACITY_TOKENS",
-                "<redacted>".to_owned(),
-                "positive integer KV capacities in tokens, or - for an unknown replica, when RJ_ROUTE_AFFINITY_HORIZON_SOURCE=fill",
-            )
-        })?;
-    let capacity_tokens = if parsed.len() == 1 {
-        vec![parsed[0]; upstreams]
+        .ok_or_else(|| invalid(key, "<redacted>".to_owned(), reason))?;
+    if parsed.len() == 1 {
+        Ok(vec![parsed[0]; upstreams])
     } else if parsed.len() == upstreams {
-        parsed
+        Ok(parsed)
     } else {
-        return Err(invalid(
-            "RJ_ROUTE_KV_CAPACITY_TOKENS",
+        Err(invalid(
+            key,
             "<redacted>".to_owned(),
             "one value or one value per upstream",
-        ));
+        ))
+    }
+}
+
+fn long_session_settings(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    upstreams: usize,
+) -> Result<LongSessionConfig, ConfigError> {
+    const TOKENS: &str = "RJ_ROUTE_LONG_SESSION_TOKENS";
+    const CAPACITY: &str = "RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS";
+    const TTL: &str = "RJ_ROUTE_LONG_SESSION_TTL_SECONDS";
+    let threshold_tokens = match get(TOKENS).filter(|value| !value.is_empty()) {
+        None => 0,
+        Some(raw) => raw
+            .parse::<u64>()
+            .map_err(|_| invalid(TOKENS, raw.clone(), "a non-negative integer"))?,
     };
-    Ok(AffinityHorizonSource::Fill { capacity_tokens })
+    // Zero is the one-variable rollback: the capacity and TTL may stay
+    // rendered while placement is off.
+    if threshold_tokens == 0 {
+        return Ok(LongSessionConfig::off());
+    }
+    let raw_ttl = get(TTL).filter(|value| !value.is_empty());
+    let capacity_tokens = capacity_list(
+        get,
+        CAPACITY,
+        upstreams,
+        "positive integer KV capacities in tokens, or - for an unknown replica",
+    )?;
+    if capacity_tokens
+        .iter()
+        .flatten()
+        .any(|capacity| *capacity < threshold_tokens)
+    {
+        return Err(invalid(
+            CAPACITY,
+            "<redacted>".to_owned(),
+            "no smaller than RJ_ROUTE_LONG_SESSION_TOKENS",
+        ));
+    }
+    let ttl_seconds = match raw_ttl {
+        None => 1800,
+        Some(raw) => raw
+            .parse::<u64>()
+            .ok()
+            .filter(|value| (1..=MAX_AFFINITY_HORIZON_SECONDS).contains(value))
+            .ok_or_else(|| invalid(TTL, raw.clone(), "a positive integer of at most one week"))?,
+    };
+    Ok(LongSessionConfig {
+        threshold_tokens,
+        capacity_tokens,
+        ttl: Duration::from_secs(ttl_seconds),
+    })
 }
 
 fn parsed_list<T: std::str::FromStr>(
@@ -3018,6 +3083,78 @@ mod tests {
         match result {
             Err(ConfigError::InvalidValue { key, .. }) => assert_eq!(key, expected, "{case}"),
             other => panic!("{case}: expected {expected} rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn long_session_placement_is_off_by_default_and_parses_capacities() {
+        let off = live_shape(&[]).unwrap();
+        assert!(!off.route_long_session.enabled());
+
+        let on = live_shape(&[
+            ("RJ_ROUTE_LONG_SESSION_TOKENS", "100000"),
+            ("RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS", "-,500000,500000,-"),
+            ("RJ_ROUTE_LONG_SESSION_TTL_SECONDS", "600"),
+        ])
+        .unwrap();
+        assert_eq!(on.route_long_session.threshold_tokens, 100_000);
+        assert_eq!(
+            on.route_long_session.capacity_tokens,
+            [None, Some(500_000), Some(500_000), None]
+        );
+        assert_eq!(on.route_long_session.ttl, Duration::from_mins(10));
+
+        let broadcast = live_shape(&[
+            ("RJ_ROUTE_LONG_SESSION_TOKENS", "100000"),
+            ("RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS", "500000"),
+        ])
+        .unwrap();
+        assert_eq!(
+            broadcast.route_long_session.capacity_tokens,
+            [Some(500_000); 4]
+        );
+        assert_eq!(broadcast.route_long_session.ttl, Duration::from_mins(30));
+
+        let rolled_back = live_shape(&[
+            ("RJ_ROUTE_LONG_SESSION_TOKENS", "0"),
+            ("RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS", "500000"),
+        ])
+        .unwrap();
+        assert!(!rolled_back.route_long_session.enabled());
+
+        for (case, extra, key) in [
+            (
+                "threshold without capacity",
+                vec![("RJ_ROUTE_LONG_SESSION_TOKENS", "100000")],
+                "RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS",
+            ),
+            (
+                "capacity below threshold",
+                vec![
+                    ("RJ_ROUTE_LONG_SESSION_TOKENS", "100000"),
+                    ("RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS", "50000"),
+                ],
+                "RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS",
+            ),
+            (
+                "wrong cardinality",
+                vec![
+                    ("RJ_ROUTE_LONG_SESSION_TOKENS", "100000"),
+                    ("RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS", "500000,500000"),
+                ],
+                "RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS",
+            ),
+            (
+                "zero ttl",
+                vec![
+                    ("RJ_ROUTE_LONG_SESSION_TOKENS", "100000"),
+                    ("RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS", "500000"),
+                    ("RJ_ROUTE_LONG_SESSION_TTL_SECONDS", "0"),
+                ],
+                "RJ_ROUTE_LONG_SESSION_TTL_SECONDS",
+            ),
+        ] {
+            assert_invalid(live_shape(&extra), key, case);
         }
     }
 
