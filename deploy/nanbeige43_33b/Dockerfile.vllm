@@ -1,0 +1,12 @@
+# vLLM for Nanbeige4.3-33B with suffix speculative decoding.
+#
+# Nanbeige4.3-33B is LlamaForCausalLM, so stock vLLM loads it. This image only
+# adds arctic-inference (suffix decoding) to the vLLM nightly qualified on RTX
+# PRO 6000 Blackwell (SM120, driver 595) for Domyn Edge. The base is CUDA 13.0
+# and needs NVIDIA driver >= 580.
+#
+#   docker build -f deploy/nanbeige43_33b/Dockerfile.vllm -t local/vllm-nanbeige43:0916-suffix .
+ARG BASE=vllm/vllm-openai@sha256:f1491cb3abc84aca4e319c2b3f3f23644f0d9e19fdb9012c80818d3f30e5a0a0
+FROM ${BASE}
+RUN pip install --no-cache-dir --no-deps arctic-inference==0.3.0 \
+  && python3 -c "from arctic_inference.suffix_decoding import SuffixDecodingCache"

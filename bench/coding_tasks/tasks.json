@@ -1,0 +1,12 @@
+[
+  {"id": "lru_cache", "category": "bugfix", "difficulty": "easy"},
+  {"id": "interval_merge", "category": "bugfix", "difficulty": "easy"},
+  {"id": "todo_cli", "category": "feature", "difficulty": "medium"},
+  {"id": "rename_refactor", "category": "refactor", "difficulty": "medium"},
+  {"id": "expr_parser", "category": "bugfix", "difficulty": "hard"},
+  {"id": "month_ranges", "category": "bugfix", "difficulty": "medium"},
+  {"id": "rate_limiter", "category": "feature", "difficulty": "medium"},
+  {"id": "deep_merge", "category": "bugfix", "difficulty": "medium"},
+  {"id": "circular_import", "category": "debugging", "difficulty": "easy"},
+  {"id": "pair_count_perf", "category": "performance", "difficulty": "easy"}
+]

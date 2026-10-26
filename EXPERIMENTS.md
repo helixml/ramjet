@@ -1,5 +1,235 @@
 # node06 experiment journal
 
+## 2026-10-25 — Nanbeige4.3-33B on node06 GPUs 0-3: quantisation, shape, Claude Code prefix caching, thinking, suffix decoding, routing
+
+**Shape.** `Nanbeige/Nanbeige4.3-33B` (released 2026-10-24, revision
+`c1093c501cc6`, Apache-2.0): 33B dense `LlamaForCausalLM`, 52 layers, hidden
+7168, 56 query / 8 KV heads × 128, vocab 166,912, 512K context, BF16 66.2 GB.
+Chat template thinks by default (`<think>\n` generation prompt), tool calls in
+Qwen3-Coder XML, `preserve_thinking` undefined = keep past reasoning. NVFP4
+candidate: `primitive-ai/Nanbeige4.3-33B-NVFP4` (`5ddf8788ed1f`,
+compressed-tensors `nvfp4-pack-quantized`, W4A4 group 16; vLLM picks
+`FlashInferCutlassNvFp4LinearKernel`). Engine image
+`local/vllm-nanbeige43:0916-suffix` (`sha256:daed96c3…`) =
+`deploy/nanbeige43_33b/Dockerfile.vllm`: the 09-16 nightly
+(`0.29.1rc1.dev187+gaf1c01499`) plus `arctic-inference==0.3.0` (unpinned pip
+picked a newer sdist and started compiling). Parsers `qwen3` / `qwen3_coder`,
+`--enable-prompt-tokens-details`. No in-family draft model: Nanbeige4.2-3B and
+its DSpark head use vocab 166,144. GPUs 0-3 came from stopping
+`glm53-unc-fp8` at 18:54:47Z at the operator's request; the production LB was
+not touched (its uncensored upstream showed down meanwhile). **GPUs 0-3 run at
+a 450 W power limit** (600 W max); every number here is under that cap.
+
+**Bring-up** (cold ZFS read ~8 s/shard): BF16 TP1 load 150 s, 61.9 GiB, KV pool
+108k tokens at 32k max length; FP8 online (`--quantization fp8 --kv-cache-dtype
+fp8`) load 150 s, 33.4 GiB, KV 499k; NVFP4 + fp8 KV load 52 s, 20.9 GiB, KV
+623k; TP2 NVFP4 KV 1.49M. Greedy smoke (capital, 17×23, two parallel tool
+calls with and without thinking, cached-token reporting) correct on all three.
+`reasoning_effort: low` turns thinking on; `none` turns it off.
+
+**Single-GPU scout** (`vllm bench serve`, random 2,200 in / 256 out,
+`--ignore-eos`, no prefix reuse, temperature 0; FP8 and NVFP4 in parallel on
+their own GPUs; guard `6b7d9b03…`). Total tok/s includes prompt tokens.
+
+| config | c1 out tok/s (TTFT) | c16 total | c64 total (TTFT p50 / p99) | c128 total (TTFT p50) |
+| --- | --- | --- | --- | --- |
+| BF16 TP1 | 17.6 (618 ms) | 1,630 | — | — |
+| FP8 + fp8 KV TP1 | 31.1 (386 ms) | 2,916 | 5,037 (3.6 / 20.8 s) | 5,307 (4.9 s) |
+| **NVFP4 + fp8 KV TP1** | **50.6 (232 ms)** | **4,737** | **8,120 (2.1 / 11.8 s)** | **9,143 (2.8 s)** |
+| NVFP4 + fp8 KV TP2 (2 GPUs) | 73.5 (286 ms) | 5,174 | 7,228 (3.8 / 16.2 s) | 7,799; c256 8,029 |
+
+TP2 (GPUs 0+3, `NCCL_CUMEM_ENABLE=1`; SymmMem reports SM120 unsupported) is
+1.45× faster for one stream but delivers 4.0k tok/s per GPU against 9.1k for
+TP1. Four TP1 replicas is the fleet shape. A TP4 cell was not run.
+
+**Quality** (guards `ab14401f…`, `1ba520ed…`, `70816edb…`, `26cd2d77…`).
+Perplexity is prompt-token NLL on held-out ramjet docs (EXPERIMENTS.md plus
+CLAUDE.md, the Domyn file). GSM8K is `bench/gsm8k_check.py`, greedy,
+`reasoning_effort none`, max 1,024 tokens; it is deterministic, so the
+1,319-question score is questions 1-500 plus 501-1,319.
+
+| config | ppl 24 × 2.8k tokens | ppl 4 × 27k tokens | GSM8K 1-500 | GSM8K 1,319 |
+| --- | --- | --- | --- | --- |
+| BF16 | 18.739 | 14.408 | 96.0% | — |
+| FP8 + fp8 KV | 18.850 (+0.6%) | 14.251 (−1.1%) | 95.8% | 94.69% |
+| NVFP4 + fp8 KV | 18.638 (−0.5%) | 14.084 (−2.2%) | 94.6% | 94.16% |
+
+Agent protocol (`bench/agentbench.py`, three corpora, direct to one engine,
+c1): FP8 and NVFP4 were both 100% valid in every cell: deterministic thinking
+off (corpus caps and cap 1,024), deterministic thinking on (cap 4,096) and
+sampled thinking on ×2. Thinking on used 73-181 completion tokens per task
+against 39-53 off. agentbench caps `--max-output-tokens` at 4,096; the first
+thinking-on attempt at 8,192 produced no data.
+
+**Claude Code coding tasks** (new `bench/claude_code_tasks.py`: ten small
+Python repositories, each graded only by hidden unittest files the agent never
+sees; `validate` proves every hidden suite fails on the shipped repo and passes
+with a reference solution). Claude Code 2.1.302 headless, run on the
+development host with a clean HOME through SSH tunnels to the engines, 4
+concurrent attempts per engine, 900 s timeout, 60 turns. The prompts come from
+the desktop, so a node06 guard ran a sentinel workload and the driver stopped
+the runners if it ended; each round was cut by the guard's 25-minute cap
+(exit 79), so some lanes ran fewer than ten tasks. An attempt passes on the
+hidden tests alone, even if it timed out.
+
+Two bugs found on the way:
+
+1. *Prefix caching broke on every turn.* Engine-native prefix hit during
+   round 1 was 13-28%, against 99.9% cache reads for Domyn Edge under the same
+   Claude Code. A logging proxy showed that Claude Code sends `role: system`
+   entries inside `messages`: an environment block, then a new
+   `<total_tokens>… tokens left</total_tokens>` line each turn. vLLM's
+   Anthropic endpoint test-renders the template with an inline system
+   message (`_detect_merge_inline_system`); Nanbeige's template raises
+   `System message must be at the beginning.`, so vLLM appends every inline
+   system message to the leading system block, ahead of the 20 tool schemas
+   and the history. Replaying six captured requests through vLLM's converter
+   and the tokenizer: consecutive requests shared 3,466-3,542 of 16.9-19.4k
+   tokens (~19%). `deploy/nanbeige43_33b/chat_template.jinja` renders a
+   non-first system message in place instead; vLLM then keeps them in place,
+   and each request starts with the entire previous one (16,514/16,936, then
+   100%). Renders without inline system messages are byte-identical (checked
+   for plain, system+reasoning history, tools and multi-tool conversations
+   with thinking on/off and `preserve_thinking` false). Live, engine prefix
+   hit rose to 91.7-95.8%.
+2. *Claude Code always requests thinking.* It sends `output_config.effort`
+   (`high` by default; `CLAUDE_CODE_EFFORT_LEVEL` accepts `low` but not
+   `none`/`minimal`; `MAX_THINKING_TOKENS=0` removes only the `thinking`
+   field). vLLM maps effort to `reasoning_effort` and so to
+   `enable_thinking=true`, overriding a server default of thinking off: round
+   1's "thinking off" lanes were thinking. The template now also accepts a
+   server-only `disable_thinking` kwarg (`NANBEIGE_THINKING=never`). That mode
+   must drop `--reasoning-parser`: with the parser on and the request saying
+   thinking, `qwen3` filed the whole answer as reasoning (empty content).
+
+| round | engine (one GPU each) | passed | passed in time | median wall | median turns | median output tokens |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1, stock template | FP8, thinking | 7/7 | 6 | 795 s | 14 | 11.4k |
+| 1, stock template | NVFP4, thinking (two lanes) | 16/18 | 14 | 503-673 s | 19-20 | 11.0-13.0k |
+| 1, stock template | NVFP4, thinking, suffix | 8/8 | 8 | 577 s | 18 | 16.0k |
+| 2, fixed template | FP8, thinking | 7/7 | 7 | 621 s | 18 | 14.9k |
+| 2, fixed template | NVFP4, thinking | 9/10 | 6 | 552 s | 20 | 13.3k |
+| 2, fixed template | **NVFP4, thinking, suffix** | **10/10** | **9** | **367 s** | 22 | 15.6k |
+| 2, fixed template | NVFP4, thinking `never` | 8/10 | 8 | 272 s | 32 | 9.2k |
+
+Matched tasks (both rounds passed in time): the fixed template cut median wall
+time by 13% without speculation (9 tasks), 18% for FP8 (6) and 35% with suffix
+decoding (7). With the fixed template, suffix decoding took a median 0.81× the
+wall time of no speculation (6 tasks), and thinking `never` 0.53×, but its two
+failures (expr_parser, deep_merge) ran out of Claude Code's 60 turns. The
+remaining failures were one hidden-test failure (lru_cache, thinking) and
+timeouts. Ten tasks at n=1 per lane cannot separate FP8 from NVFP4.
+
+**Speculative decoding** (NVFP4 TP1, thinking off by server default, the Domyn
+code-edit and prose prompt files, temperature 0, both engines in parallel;
+guard `92155637…`). Output tok/s (TTFT p50).
+
+| cell | none | suffix k=16 (acceptance length) |
+| --- | --- | --- |
+| code edit c1 | 52.8 (138 ms) | **438.0** (128 ms; 10.83) |
+| code edit c32 | 1,041.5 (407 ms) | **2,387.3** (320 ms; 8.92) |
+| prose c1 | **53.0** (46 ms) | 49.9 (43 ms; 1.19) |
+| prose c32 | **1,397.0** (104 ms) | 1,086.9 (67 ms; 1.26) |
+
+vLLM logs `Async scheduling not supported with suffix-based speculative
+decoding` and falls back to the V1 model runner, as with Domyn Edge.
+
+**Routing an agent fleet** (`bench/agent_swarm_bench.py`, seed
+`swarm-nanbeige-v1`, fresh salt per arm, 120 s warm-up plus 480 s measured,
+`--reasoning-effort none`, forced output lengths). Four NVFP4 TP1 replicas
+with the fixed template and no speculation, restarted before every arm (each
+became healthy in 100-105 s from the warm compile cache). LBs on loopback: nginx
+(`least_conn` or round-robin, adding `x-ramjet-upstream: $upstream_addr`) or
+ramjet `rust-f5b7f09@sha256:8a06f192…` with `RJ_AFFINITY=prefix`,
+`RJ_ROUTE_AFFINITY_BASIS=relative`. One guard per arm with
+`--runtime-start-signal`; all passed. Cache column is engine-native. The
+fleet KV pool is 4 × 623k = 2.5M tokens; 32 developers average ~40k-token
+contexts, so the working set (~1.4M) fits the fleet but not one replica; 64
+developers (~2.4M) fill it. Order: 32 ramjet, `least_conn`, round-robin, then
+64 `least_conn`, ramjet, then a 32-developer ramjet replication.
+
+| developers | arm | turns/min | output tok/s | TTFT p50 / p90 / p99 (s) | turns TTFT ≤ 2 s | e2e p50 (s) | engine prefix hit | stickiness |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 32 | nginx round-robin | 48.6 | 216 | 3.65 / 17.25 / 32.04 | 35.5% | 24.9 | 79.7% | 0.28 |
+| 32 | nginx `least_conn` | 53.1 | 231 | 3.92 / 10.99 / 18.96 | 28.5% | 20.4 | 81.1% | 0.38 |
+| 32 | **ramjet relative** | **72.7** | **336** | **1.28 / 4.10 / 10.04** | **70.5%** | **11.5** | **93.9%** | **0.997** |
+| 32 | ramjet relative (replication) | 73.9 | 335 | 1.33 / 3.87 / 8.89 | 70.6% | 12.1 | 94.0% | 0.994 |
+| 64 | nginx `least_conn` | 62.6 | 278 | 3.83 / 11.87 / 23.66 | 27.0% | 35.3 | 80.2% | 0.39 |
+| 64 | **ramjet relative** | **103.4** | **455** | **1.48 / 4.63 / 8.58** | **65.9%** | **18.7** | **93.1%** | **0.97** |
+
+Ramjet relative vs nginx `least_conn`: +37% turns/min at 32 developers (+50%
+over round-robin) and +65% at 64, with median TTFT −67% and −61% and p90
+−63% and −61%. The replication moved by 1.7%. TTFT p50 by context bucket at 32
+developers: ramjet 0.52 / 1.26 / 1.98 s for <32k / 32-64k / 64-128k against
+0.84 / 4.32 / 5.05 s for `least_conn`. Route decisions: 716 overlap / 9 load /
+2 rr (32) and 1,008 / 16 / 2 (64). Zero failed requests and zero preemptions
+in every arm. Guards `0246f436…`, `4d4c8f5f…`, `82e754df…`, `59054646…`,
+`d496af40…`, `48924c01…`.
+
+**Routing real Claude Code agents** (`bench/claude_code_tasks.py`, 16
+concurrent Claude Code 2.1.302 sessions, all ten tasks × 2 = 20 attempts per
+arm, 900 s timeout, through an SSH tunnel to the arm's LB). Four NVFP4 TP1
+replicas with the fixed template, thinking on (Claude Code's effort) and suffix
+decoding, restarted before every arm (`lb_up.sh`); same LB images as above.
+Three pairs, order alternated; one guard sentinel per arm, all passed. Engine
+counters are deltas over the arm; "uncached" is prompt tokens minus
+prefix-cache hits.
+
+| pair | arm | all 20 done | median / p90 task | total agent time | passed | engine prefix hit | uncached prompt tokens | requests per replica |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | ramjet relative (first) | **639 s** | **198 / 330 s** | **4,654 s** | 19/20 | 93.9% | 0.44M | — |
+| 1 | nginx `least_conn` | 1,044 s | 361 / 662 s | 7,669 s | 20/20 | 75.9% | 2.23M | — |
+| 2 | nginx `least_conn` (first) | **910 s** | **240** / 617 s | **6,490 s** | 20/20 | 81.1% | 1.54M | — |
+| 2 | ramjet relative | 1,044 s | 266 / 646 s | 6,659 s | 20/20 | 94.4% | 0.45M | 61 / 56 / 58 / 98 |
+| 3 | ramjet relative (first) | 859 s | 235 / **382 s** | **5,671 s** | 20/20 | 94.5% | 0.45M | 89 / 63 / 72 / 73 |
+| 3 | nginx `least_conn` | **673 s** | **218** / 593 s | 5,968 s | 20/20 | 79.8% | 1.76M | 61 / 95 / 57 / 88 |
+
+Ramjet recomputed 71-80% fewer prompt tokens in every pair, and total agent
+time over the three pairs was 16% lower (16,984 vs 20,127 s). The end-to-end
+time is not a clear win: pair 1 −39% makespan, pairs 2 and 3 +15% and +28%,
+with medians within run-to-run spread. At four agents per GPU this workload
+is decode-bound (thinking plus edits): nginx's extra prefill is ~1.5M tokens
+over ~15 minutes, under 2k tok/s across GPUs that each prefill ~9k tok/s.
+Routing pays where prefill is the bottleneck, as in the 32-64-developer
+simulation above. In pair 2, one replica served 36% of ramjet's requests and
+45% of its output tokens: the 16 simultaneous session starts share no prefix
+(16 decisions in the 0-block affinity bucket), so they are placed by in-flight
+load, and sessions then stay sticky. Agents executing tools or between turns
+have nothing in flight, so a replica already hosting many sessions can look
+idle. Follow-up for ramjet: weigh resident sessions, not only in-flight
+requests, when placing a new session.
+
+**Compose file, end to end on node06** (GPUs 0-3, `deploy/nanbeige43_33b`,
+SHA-256 `986df921…` as committed, `.env` with the NVFP4 directory and the
+warm compile cache): `docker compose build && up -d` reached a healthy LB in
+167 s. Each engine logged suffix speculation and the mounted template, KV
+605k tokens (623k without the speculator). Keyless 401, wrong key 401, master
+200; OpenAI chat returned two parallel tool calls with reasoning separated. On
+`/v1/messages`, master Bearer and a minted `rjk_*` token as `x-api-key`
+returned `thinking` + `tool_use`. Claude Code with the minted token solved
+expr_parser and deep_merge (the two hardest tasks) in 16-19 turns, 90% cache
+reads. Ramjet attributed 26 requests to the token (TTFT p50 729 ms, decode
+p50 69 tok/s). Two ramjet follow-ups found here: (1) the master key sent as
+`x-api-key` is admitted without exchange and forwarded unchanged, and vLLM
+checks only `Authorization`, so it gets the engine's 401 (minted tokens are
+exchanged and work; the unit test asserts `exchange: false`); (2) for
+`/v1/messages` the usage store records Anthropic `input_tokens`, which
+exclude cache reads, as `prompt_tokens` (175 prompt vs 899,616 cached), so
+dashboard prompt totals mix two meanings across the APIs.
+
+**Verdict.** Ship `deploy/nanbeige43_33b`: four NVFP4 TP1 replicas with fp8 KV,
+the fixed chat template, thinking on (`never` available), suffix decoding on
+for coding fleets (`off` for prose), ramjet prefix routing with the relative
+basis. The template fix matters for any Claude Code + vLLM deployment whose
+template rejects mid-conversation system messages (Qwen-family templates
+do). Not run: TP4, a self-made NVFP4 or official FP8 checkpoint, accuracy
+beyond GSM8K/perplexity/ten coding tasks. GPUs returned: `docker start
+glm53-unc-fp8` at 00:19:29Z. Raw files: node06
+`/prod/tmp/nanbeige/work/exp/` (quality, scouts, spec, fleets, thermal
+journals) and `/prod/engine-cache-vllm-nanbeige/bench/`; desktop
+`~/nanbeige-exp/` (Claude Code rounds `cc/`, fleets `ccfleet{,2,3}/`, captured
+requests `proxy/cap1/`).
+
 ## 2026-10-22 (night) — Root cause of "slow v0.6.1": NCCL SHM buffers on the remote NUMA node
 
 The 27% prefill loss blamed on v0.6.1 in the next entry was not v0.6.1. It is
