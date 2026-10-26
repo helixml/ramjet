@@ -34,7 +34,7 @@ services:
     # stack is not currently deployed -- node06 serves the qwen38_27b stack --
     # so v0.7.0 here is the current default, not a qualified rollout. Qualify
     # before reviving this stack.
-    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673}
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.10.0@sha256:4b3ced81f657e87f4f7597ef49728a08a584ee2c1aa0034a863880db7dd77f31}
     container_name: ds4-loadbalancer
     restart: unless-stopped
     ports:

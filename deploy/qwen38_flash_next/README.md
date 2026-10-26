@@ -9,7 +9,7 @@ The client-facing model ID remains `qwen3.8-flash-next`. The checkpoint
 manifest is `swift15-model-manifest.json` (verified manifest SHA-256
 `de956cabfc92ef5cd382e2557d03aa22d25fb57be3fe9048ed844d6863800287`).
 The canonical `docker-compose.yaml` has SHA-256
-`1471faed18de14356202ad25fbb3a339777ac44687e5232ce3f11e5d812296c2`
+`cb37d61753fcc7f95b4b279a6505a9083b11d9bf16cee3acddadb5d7f365e065`
 and pins these weights and the existing vLLM image. Its admitted Qwen A shape
 is TP4, 16 GB KV cache per rank, 16 sequences,
 4,096 batched tokens, and 262,144 maximum model tokens.
@@ -37,8 +37,8 @@ The checkpoint and image are immutable inputs:
 - linux/amd64 vLLM image: `sha256:5f1142f7ceea906a61bc46c76b1f1d562c2d4898f604e1f6cd3620ceafd9ce93`
 - vLLM runtime: `0.28.1rc1.dev472+gd9105ea80`, build revision `d9105ea8001e0a6d77a96327d17515bb5791fb36`
 - earlier official FP8 checkpoint: `bcd9f01ddc9cff2316eb84281bebcd5b058bddce`, 185,502,232,570 bytes across 131 safetensors shards, served by `sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3`
-- released ramjet Compose default: `v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673` (deployed and verified on the node06 `qwen38_glm53_kev` shared stack on 2026-10-07; see EXPERIMENTS.md)
-- node06-qualified live ramjet image: `v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673` (previous: locally built alias image `sha256:8197c573270f33ed32e1a81947763e3a5fa8ec7b6ceddd269b5459c9ef205151` from 2026-10-03, then the Swift-transition build `rust-0c7c7bc@sha256:f9215991a15a2d5ea223c84bfc4a2f7af423b0a3d4868423543c5d8a5315615f`, then `rust-962b7b2@sha256:53047a816c8ae1dbade7e27b86d2e3eda40cfeaa48826ae06bf2ac1d35a27cc6`, the v0.6.2 long-prompt lane build)
+- released ramjet Compose default: `v0.10.0@sha256:4b3ced81f657e87f4f7597ef49728a08a584ee2c1aa0034a863880db7dd77f31` (deployed and verified on the node06 `qwen38_glm53_kev` shared stack on 2026-10-26; see EXPERIMENTS.md)
+- node06-qualified live ramjet image: `v0.10.0@sha256:4b3ced81f657e87f4f7597ef49728a08a584ee2c1aa0034a863880db7dd77f31` (previous: `v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673`; before that the locally built alias image `sha256:8197c573270f33ed32e1a81947763e3a5fa8ec7b6ceddd269b5459c9ef205151` from 2026-10-03, then the Swift-transition build `rust-0c7c7bc@sha256:f9215991a15a2d5ea223c84bfc4a2f7af423b0a3d4868423543c5d8a5315615f`, then `rust-962b7b2@sha256:53047a816c8ae1dbade7e27b86d2e3eda40cfeaa48826ae06bf2ac1d35a27cc6`, the v0.6.2 long-prompt lane build)
 - exact-route manifest (retired; retained for evidence only): `compat/qwen38-flash-next-r134.json`, SHA-256 `a5efb2db66475b8a7c4f01bbb5d47b62387f251354bdebd2641b1f2d00a64a67`
 
 The pinned NVIDIA revision contains the corrected `FP8_PB_WO` MTP metadata.
@@ -307,13 +307,13 @@ prefix hits while regressing returning-probe TTFT by 15%, blocker TTFT p95 by
 qualified value.
 
 The checked-in Compose default follows the repository-wide released-image
-policy. It is v0.8.0, which was released after CI and deployed and verified on
-the node06 `qwen38_glm53_kev` shared stack on 2026-10-07 (see
+policy. It is v0.10.0, which was released after CI and deployed and verified on
+the node06 `qwen38_glm53_kev` shared stack on 2026-10-26 (see
 `EXPERIMENTS.md`). Emergency candidate
 or rollback renders must carry an explicit immutable `LB_IMAGE` override on
 every `docker compose` invocation, including cleanup traps; ordinary
 production renders use the released default. The canonical Compose SHA-256 is
-`1471faed18de14356202ad25fbb3a339777ac44687e5232ce3f11e5d812296c2`; the
+`cb37d61753fcc7f95b4b279a6505a9083b11d9bf16cee3acddadb5d7f365e065`; the
 Swift-transition render with the `rust-0c7c7bc` default was
 `9f81085ccaf2b385d32a58ae12aaf6fdfe2e7991b831fe6c6dca193dfbc7054e`; the
 previous released-default render was

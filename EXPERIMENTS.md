@@ -56,6 +56,17 @@ Re-read the journal under multiple concurrent long conversations: expect
 `ramjet_route_long_session_resident_tokens` above 500k, and no re-prefill
 of a conversation that stayed on its replica.
 
+**Release v0.10.0.** Merged as #325 (`4c68aa4`); Drone #796 (PR), #797
+(main publish), #798 (tag promotion, source and destination digests equal).
+`ghcr.io/helixml/ramjet:v0.10.0@sha256:4b3ced81…` and
+`companion-v0.10.0@sha256:ad303053…`, OCI version 0.10.0, revision `4c68aa4`.
+Deployed by digest (`rust-4c68aa4@sha256:4b3ced81…`) under the deployment lock
+at about 16:2xZ; the rendered config differed only in the image line. `/health`
+200, all four upstreams up, and a `qwen3.8-flash-next` request answered
+correctly on replica d. No benchmark gate; live traffic is the watch.
+Rollback: the locally built `rust-long-session-1f3c1c1` (same code), or the
+pre-change `rust-api-tokens-c55b7cb` via the rollback script.
+
 ## 2026-10-25 — Nanbeige4.3-33B on node06 GPUs 0-3: quantisation, shape, Claude Code prefix caching, thinking, suffix decoding, routing
 
 **Shape.** `Nanbeige/Nanbeige4.3-33B` (released 2026-10-24, revision
