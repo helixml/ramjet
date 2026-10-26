@@ -47,6 +47,7 @@ use crate::{
     journal::{RouteAnnotations, RouteJournal},
     kv_consumer::SharedFencedInventory,
     long_prompt_lane::{self, LongPromptLaneOutcome},
+    long_session::{LongSessionObservation, LongSessions},
     metrics::Metrics,
     prefix_single_flight::{PrefixSingleFlight, PrefixSingleFlightConfig, PrefixSingleFlightGuard},
     prepare::{PreparedRequest, RequestedModel},
@@ -157,6 +158,7 @@ struct Inner {
     session_affinity: SessionAffinity,
     decision_state_affinity: DecisionStateAffinity,
     prefix_single_flight: PrefixSingleFlight,
+    long_sessions: LongSessions,
     tokenizer: TokenizerObserver,
     warmup_admission: Option<WarmupAdmission>,
     dspark_guards: Arc<[DsparkGuardReplica]>,
@@ -934,6 +936,13 @@ impl Proxy {
             capacity: config.route_prefix_single_flight_capacity,
             max_load_delta: config.route_prefix_single_flight_max_load_delta,
         });
+        let long_sessions = LongSessions::new(
+            config.route_long_session.clone(),
+            config.upstreams.len(),
+            config
+                .route_max_prefix_bytes
+                .div_ceil(config.route_chunk_bytes.max(1)),
+        );
         let initial_probe_health =
             config.upstream_admission_mode != UpstreamAdmissionMode::Compatibility;
         let upstream_commitments = config
@@ -1023,6 +1032,7 @@ impl Proxy {
                 session_affinity,
                 decision_state_affinity,
                 prefix_single_flight,
+                long_sessions,
                 tokenizer,
                 warmup_admission,
                 dspark_guards,
@@ -1493,6 +1503,17 @@ impl Proxy {
             &self.inner.config.route_long_prompt_upstreams,
             self.inner.config.route_long_prompt_sharing,
         );
+        // Keep conversations that each fill most of a replica's KV pool apart.
+        // Like the lane, this only reorders the model's own serving replicas.
+        let long_session = if endpoint == Endpoint::Other {
+            LongSessionObservation::off()
+        } else {
+            self.inner.long_sessions.place(
+                &mut approximate_decision,
+                &prepared.fingerprints,
+                std::time::Instant::now(),
+            )
+        };
         self.inner
             .metrics
             .route_speculation_profile
@@ -1580,6 +1601,7 @@ impl Proxy {
 
         self.record_decision(&decision);
         self.record_long_prompt_lane(long_prompt_lane, &decision);
+        self.record_long_session(long_session, &decision);
         let journal_sequence = self.inner.journal.start(
             request_id.as_deref(),
             endpoint_label,
@@ -1595,6 +1617,7 @@ impl Proxy {
                 prefix_single_flight,
                 affinity_horizon,
                 long_prompt_lane: long_prompt_lane.into(),
+                long_session,
             },
         );
 
@@ -2007,6 +2030,7 @@ impl Proxy {
                 self.inner
                     .router
                     .observe_served(upstream, &fingerprints, new_kv_tokens(&usage));
+                self.observe_long_session(upstream, &fingerprints, &usage);
                 if tokenizer_selected && let Some(route_snapshot) = exact_route_snapshot {
                     self.inner.tokenizer.submit(
                         endpoint,
@@ -2586,6 +2610,65 @@ impl Proxy {
     ///
     /// Short prompts kept off an `exclusive` lane are counted separately, so
     /// neither series changes meaning when exclusion is switched on.
+    fn record_long_session(&self, observation: LongSessionObservation, decision: &Decision) {
+        if !observation.counted() {
+            return;
+        }
+        let Some(&upstream) = decision.candidates.first() else {
+            return;
+        };
+        self.inner
+            .metrics
+            .route_long_session
+            .with_label_values(&[&self.upstream_label(upstream), observation.outcome])
+            .inc();
+    }
+
+    /// Records a completed long conversation and drops the prefix-index blocks
+    /// of conversations the KV capacity model now considers evicted.
+    fn observe_long_session(&self, upstream: usize, fingerprints: &[u64], usage: &Accumulator) {
+        let tokens = |value: Option<f64>| {
+            value
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|value| {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let tokens = value.round() as u64;
+                    tokens
+                })
+        };
+        let evicted = self.inner.long_sessions.served(
+            upstream,
+            fingerprints,
+            tokens(usage.prompt),
+            tokens(usage.cached),
+            std::time::Instant::now(),
+        );
+        for evicted in &evicted {
+            self.inner.router.forget(
+                evicted.upstream,
+                &evicted.fingerprints,
+                evicted.served_before,
+            );
+        }
+        if !self.inner.config.route_long_session.enabled() {
+            return;
+        }
+        for (index, resident) in self
+            .inner
+            .long_sessions
+            .resident_tokens()
+            .iter()
+            .enumerate()
+        {
+            #[allow(clippy::cast_precision_loss)]
+            self.inner
+                .metrics
+                .route_long_session_resident_tokens
+                .with_label_values(&[&self.upstream_label(index)])
+                .set(*resident as f64);
+        }
+    }
+
     fn record_long_prompt_lane(&self, outcome: LongPromptLaneOutcome, decision: &Decision) {
         let counter = if outcome.counted() {
             &self.inner.metrics.route_long_prompt
@@ -5750,6 +5833,92 @@ mod tests {
             assert!(long_prompt_count(&proxy, url, "fallback").abs() < f64::EPSILON);
         }
         assert!(long_prompt_count(&proxy, &urls[0], "lane").abs() < f64::EPSILON);
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    async fn long_session_fleet() -> (Proxy, Vec<Url>, Vec<tokio::task::JoinHandle<()>>) {
+        let mut urls = Vec::new();
+        let mut tasks = Vec::new();
+        for index in 0..2 {
+            let app = AxumRouter::new().fallback(any(move || async move {
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"engine":{index},"choices":[{{"message":{{"content":"ok"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":400000,"completion_tokens":5,"prompt_tokens_details":{{"cached_tokens":0}}}}}}"#
+                    )))
+                    .unwrap()
+            }));
+            let (url, task) = start_upstream(app).await;
+            urls.push(url);
+            tasks.push(task);
+        }
+        let joined = urls.iter().map(Url::as_str).collect::<Vec<_>>().join(",");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_ROUTE_LONG_SESSION_TOKENS" => Some("50000".to_owned()),
+            "RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS" => Some("450000".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        (proxy_for_config(config, Arc::from([])), urls, tasks)
+    }
+
+    /// A conversation sharing the fleet's system prompt, distinct after it.
+    async fn conversation_upstream(proxy: &Proxy, conversation: char, turns: usize) -> String {
+        let mut messages =
+            vec![serde_json::json!({"role": "system", "content": "s".repeat(2_048)})];
+        for turn in 0..turns {
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": format!("{turn}{}", conversation.to_string().repeat(8_192)),
+            }));
+            messages.push(serde_json::json!({"role": "assistant", "content": "ok"}));
+        }
+        messages.pop();
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                serde_json::json!({"model": "m", "messages": messages}).to_string(),
+            ))
+            .unwrap();
+        let response = proxy.serve(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let upstream = response.headers()["x-ramjet-upstream"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        upstream
+    }
+
+    #[tokio::test]
+    async fn long_conversations_that_cannot_share_a_kv_pool_are_kept_apart() {
+        let (proxy, urls, tasks) = long_session_fleet().await;
+        let home_a = conversation_upstream(&proxy, 'a', 1).await;
+        // B shares A's system prompt, so prefix affinity alone sends it to
+        // A's replica, where 400k + B does not fit a 450k pool.
+        let home_b = conversation_upstream(&proxy, 'b', 1).await;
+        assert_ne!(home_a, home_b);
+        let moved = proxy
+            .inner
+            .metrics
+            .route_long_session
+            .with_label_values(&[
+                urls[home_b.parse::<usize>().unwrap()]
+                    .as_str()
+                    .trim_end_matches('/'),
+                "moved",
+            ])
+            .get();
+        assert!((moved - 1.0).abs() < f64::EPSILON);
+        // Each continues on its own replica.
+        for turns in 2..4 {
+            assert_eq!(conversation_upstream(&proxy, 'a', turns).await, home_a);
+            assert_eq!(conversation_upstream(&proxy, 'b', turns).await, home_b);
+        }
         for task in tasks {
             task.abort();
         }

@@ -41,9 +41,20 @@ EXPECTED_ENGINES = {
         "devices": ["6", "7"],
         "cache": "/prod/engine-cache-sglang-glm53-sm120-v84-c",
     },
+    "glm53sm120-d": {
+        "port": "8065",
+        "devices": ["0", "1"],
+        "cache": "/prod/engine-cache-sglang-glm53-sm120-v84-d",
+    },
+    "glm53sm120-e": {
+        "port": "8066",
+        "devices": ["2", "3"],
+        "cache": "/prod/engine-cache-sglang-glm53-sm120-v84-e",
+    },
 }
+NUMA_CPUSET = {"0": "0-11,24-35", "2": "0-11,24-35", "4": "12-23,36-47", "6": "12-23,36-47"}
 if set(services) != set(EXPECTED_ENGINES):
-    fail("the file must define exactly the two reviewed TP2 replicas")
+    fail("the file must define exactly the four reviewed TP2 replicas")
 
 required = {
     "--tp=2",
@@ -82,8 +93,8 @@ for name, expected in EXPECTED_ENGINES.items():
         fail(f"{name} does not identify the committed PCIe IPC chunking patch")
     if service.get("restart") not in ("no", None):
         fail(f"{name} restart policy must remain disabled")
-    if service.get("cpuset") != "12-23,36-47":
-        fail(f"{name} must remain NUMA-local to GPUs 4-7")
+    if service.get("cpuset") != NUMA_CPUSET[expected["devices"][0]]:
+        fail(f"{name} must remain NUMA-local to GPUs {expected['devices']}")
     if service.get("environment", {}).get("CUDA_VISIBLE_DEVICES") != "0,1":
         fail(f"{name} must expose exactly two container-local GPU ordinals")
     environment = service.get("environment", {})
@@ -126,7 +137,7 @@ for name, expected in EXPECTED_ENGINES.items():
     if caches != [expected["cache"]]:
         fail(f"{name} must use its reviewed private compilation cache")
     if caches[0] in seen_caches:
-        fail("the two replicas must not share a writable compilation cache")
+        fail("replicas must not share a writable compilation cache")
     seen_caches.add(caches[0])
 
     command = service.get("command", [])
@@ -136,6 +147,6 @@ for name, expected in EXPECTED_ENGINES.items():
     if any(arg.startswith("--enable-int8-mamba-checkpoint") for arg in command):
         fail(f"{name}: int8 mamba checkpoints are incompatible with HiCache")
 
-if seen_devices != {"4", "5", "6", "7"}:
-    fail("the GLM replica set must own exactly host GPUs 4-7")
-print("glm53 SM120 compose validation: two TP2 replicas ok")
+if seen_devices != {str(gpu) for gpu in range(8)}:
+    fail("the GLM replica set must own exactly host GPUs 0-7")
+print("glm53 SM120 compose validation: four TP2 replicas ok")

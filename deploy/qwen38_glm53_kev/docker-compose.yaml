@@ -28,12 +28,13 @@ services:
       - machineview-host
       - kev-engine
     environment:
-      # Stock and uncensored GLM retain distinct model ownership.
-      RJ_UPSTREAM: http://glm53sm120-b:8000,http://glm53sm120-c:8000,http://glm53-unc-fp8:8000
+      # Four stock GLM TP2 replicas (2026-10-26): d and e took GPUs 0-3 from
+      # the uncensored replica, which served nothing in the prior 6h.
+      RJ_UPSTREAM: http://glm53sm120-b:8000,http://glm53sm120-c:8000,http://glm53sm120-d:8000,http://glm53sm120-e:8000
       # Qwen compatibility alias stays on the stock GLM pool.
       RJ_MODEL_ALIASES: qwen3.8-flash-next=glm-5.3-flash
-      RJ_UPSTREAM_MODELS: glm-5.3-flash,glm-5.3-flash,glm-5.3-flash-uncensored
-      RJ_UPSTREAM_APIS: openai,openai,openai
+      RJ_UPSTREAM_MODELS: glm-5.3-flash,glm-5.3-flash,glm-5.3-flash,glm-5.3-flash
+      RJ_UPSTREAM_APIS: openai,openai,openai,openai
       RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:?set VLLM_API_KEY in protected mode-0600 .env}
       RJ_UI_AUTH_TOKEN: ${RJ_UI_AUTH_TOKEN:?set RJ_UI_AUTH_TOKEN in protected mode-0600 .env}
       # Ramjet is the API authority: the master token (RJ_UPSTREAM_TOKEN, the
@@ -65,7 +66,16 @@ services:
       # other session on c. The per-path snapshot cap already stops one long
       # prompt from evicting other sessions, so ordinary routing wins.
       RJ_ROUTE_LONG_PROMPT_BYTES: "${RJ_ROUTE_LONG_PROMPT_BYTES:-0}"
-      RJ_ROUTE_LONG_PROMPT_UPSTREAMS: "${RJ_ROUTE_LONG_PROMPT_UPSTREAMS:--,lane,-}"
+      RJ_ROUTE_LONG_PROMPT_UPSTREAMS: "${RJ_ROUTE_LONG_PROMPT_UPSTREAMS:--,lane,-,-}"
+      # Long-conversation placement (2026-10-26). Each replica's KV pool is
+      # --max-total-tokens=500000, so two ~300k-token agent conversations
+      # cannot share one; together they re-prefilled 200-380k tokens on about
+      # one turn in ten (45-112s TTFT). A conversation of at least 100k tokens
+      # moves off a replica whose modelled residents would overflow the pool,
+      # and blocks of conversations the model evicts stop attracting traffic.
+      # Rollback: RJ_ROUTE_LONG_SESSION_TOKENS=0.
+      RJ_ROUTE_LONG_SESSION_TOKENS: "${RJ_ROUTE_LONG_SESSION_TOKENS:-100000}"
+      RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS: "${RJ_ROUTE_LONG_SESSION_CAPACITY_TOKENS:-500000}"
       RJ_ROUTE_JOURNAL: "true"
       RJ_TOKENIZER_MODE: "off"
       RJ_EXACT_ROUTE_MODE: "off"

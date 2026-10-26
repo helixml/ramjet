@@ -1,6 +1,11 @@
 # Independently managed node06 TP2 replicas for the community-qualified
 # GLM-5.3-Flash SM120 stack. The shared Ramjet service is deliberately absent:
-# Qwen A keeps serving while either GLM engine is managed through this file.
+# any one engine can be recreated through this file while its peers serve.
+#
+# Four replicas since 2026-10-26: d and e took GPUs 0-3 from the idle
+# uncensored TP4 replica (0 requests in the prior 6h). One replica's 500k-token
+# KV pool holds only one ~300k-token agent conversation, so four concurrent
+# long sessions on two replicas re-read 200-380k tokens per turn (45-112s TTFT).
 name: glm53_flash_sm120
 
 x-glm-engine: &glm-engine
@@ -22,6 +27,7 @@ x-glm-engine: &glm-engine
   ipc: host
   shm_size: 64gb
   stop_grace_period: 120s
+  # NUMA node 1 (GPUs 4-7); d and e override this with node 0 (GPUs 0-3).
   cpuset: "12-23,36-47"
   ulimits:
     memlock: -1
@@ -145,3 +151,35 @@ services:
         reservations:
           devices:
             - {driver: nvidia, device_ids: ["6", "7"], capabilities: [gpu]}
+
+  glm53sm120-d:
+    <<: *glm-engine
+    container_name: glm53sm120-d
+    cpuset: "0-11,24-35"
+    ports:
+      - "127.0.0.1:8065:8000"
+    volumes:
+      - ${MODEL_DIR:-/prod/models/ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO-ee0989a944b0}:/models/glm53-flash-w4a16-e4m3-k32:ro
+      - ${SGLANG_CACHE_DIR_D:-/prod/engine-cache-sglang-glm53-sm120-v84-d}:/root/.cache
+      - ./glm53-adaptive.json:/etc/glm53-adaptive/adaptive.json:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["0", "1"], capabilities: [gpu]}
+
+  glm53sm120-e:
+    <<: *glm-engine
+    container_name: glm53sm120-e
+    cpuset: "0-11,24-35"
+    ports:
+      - "127.0.0.1:8066:8000"
+    volumes:
+      - ${MODEL_DIR:-/prod/models/ormandj/GLM-5.3-Flash-W4A16-NVFP4-K32-Experts-FP8-WO-ee0989a944b0}:/models/glm53-flash-w4a16-e4m3-k32:ro
+      - ${SGLANG_CACHE_DIR_E:-/prod/engine-cache-sglang-glm53-sm120-v84-e}:/root/.cache
+      - ./glm53-adaptive.json:/etc/glm53-adaptive/adaptive.json:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["2", "3"], capabilities: [gpu]}
