@@ -1,0 +1,169 @@
+# Canonical source: helixml/ramjet/deploy/nanbeige43_33b/docker-compose.yaml
+#
+# Nanbeige4.3-33B (Nanbeige/Nanbeige4.3-33B, 33B dense Llama, Apache-2.0) on
+# four RTX PRO 6000 Blackwell GPUs: four single-GPU vLLM replicas behind
+# ramjet.
+#
+# THIS IS THE WHOLE DEPLOYMENT. One file, no overlays:
+#
+#     docker compose build            # vLLM nightly + arctic-inference (~1 min)
+#     docker compose up -d
+#     curl -s localhost:8000/v1/models -H "Authorization: Bearer $NANBEIGE_API_KEY"
+#
+# Every tunable has a ${VAR:-default} form; change a default here when a
+# measurement says so and record it in EXPERIMENTS.md.
+#
+# Why this shape (measured 2026-10-25 on node06, EXPERIMENTS.md):
+#
+#   * One replica per GPU. NVFP4 weights are 21 GiB, leaving a 623k-token fp8
+#     KV pool per GPU. TP2 decodes one stream 1.45x faster but delivers less
+#     than half the throughput per GPU: on PCIe-only RTX PRO 6000 every layer's
+#     all-reduce goes through NCCL.
+#   * NVFP4 weights (W4A4, FlashInfer CUTLASS kernels) + fp8 KV: 1.6-1.7x the
+#     throughput of online FP8 and 2.9x BF16 on one GPU, with no loss we could
+#     measure (GSM8K, perplexity, agent protocol suite, Claude Code tasks).
+#   * Suffix speculative decoding (NANBEIGE_SPEC_METHOD=suffix): code edits
+#     8.3x faster single-stream and 2.3x at 32 concurrent; Claude Code tasks
+#     finished in a median 0.81x the time. Prose loses 6-22% because vLLM
+#     disables async scheduling with suffix speculation; set
+#     NANBEIGE_SPEC_METHOD=off for chat/prose-heavy traffic.
+#   * chat_template.jinja is the model's template with one change: a system
+#     message after the first is rendered in place instead of raising. Claude
+#     Code inserts such messages every turn; with the stock template vLLM's
+#     Anthropic endpoint merges them into the leading system block, so every
+#     turn re-prefills the tool schemas and the whole history (~19% of each
+#     prompt reused instead of ~100%). It also adds `disable_thinking`, the
+#     hard switch behind NANBEIGE_THINKING=never.
+#   * Thinking: vLLM turns any request reasoning_effort other than "none"
+#     (Claude Code always sends output_config.effort) into
+#     enable_thinking=true, overriding a server default of off. `never` makes
+#     the template ignore it and drops the reasoning parser, which would
+#     otherwise file the whole answer as reasoning.
+#   * ramjet prefix routing: same session -> same replica, so its prefix stays
+#     cached; live load still overrides affinity before a replica becomes a
+#     hotspot.
+#
+# Weights: `hf download primitive-ai/Nanbeige4.3-33B-NVFP4 --local-dir $NANBEIGE_MODEL_DIR`
+# (21 GB; a community NVFP4 quantisation of Nanbeige/Nanbeige4.3-33B).
+
+x-nanbeige-engine: &nanbeige-engine
+  build:
+    context: .
+    dockerfile: Dockerfile.vllm
+  image: ${NANBEIGE_ENGINE_IMAGE:-local/vllm-nanbeige43:0916-suffix}
+  restart: unless-stopped
+  ipc: host
+  shm_size: 16g
+  volumes:
+    - ${NANBEIGE_MODEL_DIR:?set NANBEIGE_MODEL_DIR to the downloaded checkpoint directory}:/models/nanbeige:ro
+    - ${NANBEIGE_CACHE_DIR:-./cache}:/root/.cache
+    - ./chat_template.jinja:/chat_template.jinja:ro
+  environment:
+    VLLM_API_KEY: ${NANBEIGE_API_KEY:?set NANBEIGE_API_KEY (engine bearer; ramjet holds it)}
+    NANBEIGE_SPEC_METHOD: ${NANBEIGE_SPEC_METHOD:-suffix}
+    NANBEIGE_THINKING: ${NANBEIGE_THINKING:-on}
+  entrypoint: ["/bin/sh", "-c"]
+  command:
+    - >-
+      case "$$NANBEIGE_SPEC_METHOD" in
+      suffix) set -- --speculative-config '{"method":"suffix","num_speculative_tokens":16}' ;;
+      ngram) set -- --speculative-config '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_min":2,"prompt_lookup_max":4}' ;;
+      off) set -- ;;
+      *) echo "NANBEIGE_SPEC_METHOD must be suffix, ngram or off" >&2; exit 64 ;;
+      esac;
+      case "$$NANBEIGE_THINKING" in
+      on) set -- "$$@" --reasoning-parser qwen3 ;;
+      off) set -- "$$@" --reasoning-parser qwen3 --default-chat-template-kwargs '{"enable_thinking": false}' ;;
+      never) set -- "$$@" --default-chat-template-kwargs '{"enable_thinking": false, "disable_thinking": true}' ;;
+      *) echo "NANBEIGE_THINKING must be on, off or never" >&2; exit 64 ;;
+      esac;
+      exec vllm serve /models/nanbeige
+      --served-model-name nanbeige4.3-33b
+      --max-model-len ${NANBEIGE_MAX_MODEL_LEN:-262144}
+      --kv-cache-dtype fp8
+      --gpu-memory-utilization ${NANBEIGE_GPU_UTIL:-0.92}
+      --chat-template /chat_template.jinja
+      --enable-auto-tool-choice
+      --tool-call-parser qwen3_coder
+      --enable-prompt-tokens-details
+      --host 0.0.0.0 --port 8000
+      ${NANBEIGE_EXTRA_ARGS:-}
+      "$$@"
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health >/dev/null || exit 1"]
+    interval: 15s
+    timeout: 5s
+    retries: 3
+    start_period: 900s
+  networks: [nanbeige]
+
+services:
+  nanbeige-0:
+    <<: *nanbeige-engine
+    container_name: nanbeige-0
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["${NANBEIGE_GPU_0:-0}"], capabilities: [gpu]}]
+
+  nanbeige-1:
+    <<: *nanbeige-engine
+    container_name: nanbeige-1
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["${NANBEIGE_GPU_1:-1}"], capabilities: [gpu]}]
+
+  nanbeige-2:
+    <<: *nanbeige-engine
+    container_name: nanbeige-2
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["${NANBEIGE_GPU_2:-2}"], capabilities: [gpu]}]
+
+  nanbeige-3:
+    <<: *nanbeige-engine
+    container_name: nanbeige-3
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["${NANBEIGE_GPU_3:-3}"], capabilities: [gpu]}]
+
+  ramjet:
+    # API tokens and per-token usage are not in a tagged release yet, so there
+    # is no released default to pin. Set LB_IMAGE explicitly; qualified with
+    # ghcr.io/helixml/ramjet:rust-f5b7f09@sha256:8a06f192bd13dce3baba429da2fd9a67a6f222760d0794ea996af90e4884e739
+    image: ${LB_IMAGE:?set LB_IMAGE to an immutable ramjet tag@sha256 reference (see README)}
+    container_name: nanbeige-ramjet
+    restart: unless-stopped
+    ports:
+      - "${LB_BIND:-127.0.0.1}:${LB_API_PORT:-8000}:8000"   # OpenAI + Anthropic Messages API
+      - "127.0.0.1:${LB_METRICS_PORT:-9090}:9090"           # /metrics and the /ui/ dashboard
+    volumes:
+      - ${RAMJET_STATE_DIR:-./ramjet-state}:/var/lib/ramjet-api
+    environment:
+      RJ_UPSTREAM: http://nanbeige-0:8000,http://nanbeige-1:8000,http://nanbeige-2:8000,http://nanbeige-3:8000
+      RJ_UPSTREAM_MODELS: nanbeige4.3-33b,nanbeige4.3-33b,nanbeige4.3-33b,nanbeige4.3-33b
+      RJ_UPSTREAM_TOKEN: ${NANBEIGE_API_KEY}
+      RJ_MACHINEVIEW_UPSTREAM_GPUS: ${NANBEIGE_GPU_0:-0};${NANBEIGE_GPU_1:-1};${NANBEIGE_GPU_2:-2};${NANBEIGE_GPU_3:-3}
+      # Clients authenticate to ramjet with the master token or a minted rjk_*
+      # token (dashboard Tokens tab); engines only ever see the master token.
+      RJ_API_TOKENS_MODE: ${RJ_API_TOKENS_MODE:-on}
+      RJ_API_STATE_DIR: /var/lib/ramjet-api
+      RJ_UI_AUTH_TOKEN: ${RJ_UI_AUTH_TOKEN:?set RJ_UI_AUTH_TOKEN (32-256 bytes) for the dashboard}
+      RJ_AFFINITY: prefix
+      RJ_ROUTE_AFFINITY_BASIS: ${RJ_ROUTE_AFFINITY_BASIS:-relative}
+      RJ_UPSTREAM_WARMUP_MODE: enforce
+      # Optional host/GPU telemetry for the dashboard: run
+      # bench/machineview_agent.py on the host and point this at it.
+      RJ_MACHINEVIEW_AGENT_URL: ${RJ_MACHINEVIEW_AGENT_URL:-}
+    depends_on:
+      nanbeige-0: {condition: service_healthy}
+      nanbeige-1: {condition: service_healthy}
+      nanbeige-2: {condition: service_healthy}
+      nanbeige-3: {condition: service_healthy}
+    networks: [nanbeige]
+
+networks:
+  nanbeige: {}
