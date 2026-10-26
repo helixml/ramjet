@@ -164,7 +164,7 @@ For existing engines, the upstream list is normally the only setting you need:
 ```yaml
 services:
   ramjet:
-    image: ghcr.io/helixml/ramjet:v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673
+    image: ghcr.io/helixml/ramjet:v0.10.0@sha256:4b3ced81f657e87f4f7597ef49728a08a584ee2c1aa0034a863880db7dd77f31
     restart: unless-stopped
     ports:
       - "8000:8000" # OpenAI API + /health

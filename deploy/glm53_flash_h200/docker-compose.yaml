@@ -152,7 +152,7 @@ services:
   ramjet:
     # v0.7.0 carries #294 (marginal affinity basis) and #296 (upstream pool idle). The v0.6.2 control is
     # ghcr.io/helixml/ramjet:v0.6.2@sha256:53047a816c8ae1dbade7e27b86d2e3eda40cfeaa48826ae06bf2ac1d35a27cc6.
-    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.8.0@sha256:fe432bbca183d2a457a7713fb150ea5ee36aba7a13f92280ef3ec7195ec23673}
+    image: ${LB_IMAGE:-ghcr.io/helixml/ramjet:v0.10.0@sha256:4b3ced81f657e87f4f7597ef49728a08a584ee2c1aa0034a863880db7dd77f31}
     container_name: ramjet
     restart: unless-stopped
     ports:
