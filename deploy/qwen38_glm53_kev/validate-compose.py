@@ -88,9 +88,9 @@ def validate(document: dict) -> None:
     environment = lb.get("environment", {})
     expected = {
         "RJ_UPSTREAM": "http://glm53sm120-b:8000,http://glm53sm120-c:8000,"
-        "http://glm53sm120-d:8000,http://glm53sm120-e:8000",
-        "RJ_UPSTREAM_MODELS": "glm-5.3-flash,glm-5.3-flash,glm-5.3-flash,glm-5.3-flash",
-        "RJ_UPSTREAM_APIS": "openai,openai,openai,openai",
+        "http://glm53-unc-fp8:8000",
+        "RJ_UPSTREAM_MODELS": "glm-5.3-flash,glm-5.3-flash,glm-5.3-flash-uncensored",
+        "RJ_UPSTREAM_APIS": "openai,openai,openai",
         "RJ_MODEL_ALIASES": "qwen3.8-flash-next=glm-5.3-flash",
     }
     for key, value in expected.items():

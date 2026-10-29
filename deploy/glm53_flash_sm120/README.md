@@ -6,7 +6,11 @@ Ramjet service. Qwen A continues serving on GPUs 0-3, GLM B owns GPUs 4-5 at
 `127.0.0.1:8062`, and GLM C owns GPUs 6-7 at `127.0.0.1:8063`. Start or recreate
 only the explicitly named service being managed.
 
-**Four replicas since 2026-10-26.** GLM D owns GPUs 0-1 at `127.0.0.1:8065`
+**D and E stopped on 2026-10-29.** GPUs 0-3 went back to the uncensored
+TP4 replica (`glm53-unc-fp8`), so only B and C serve from this file. Do not
+start D or E while `glm53-unc-fp8` owns GPUs 0-3.
+
+**Four replicas from 2026-10-26.** GLM D owns GPUs 0-1 at `127.0.0.1:8065`
 and GLM E owns GPUs 2-3 at `127.0.0.1:8066`, NUMA-local on CPUs
 `0-11,24-35`. They replaced the uncensored TP4 replica (`glm53-unc-fp8`),
 which had served no request in the preceding six hours, while four or five

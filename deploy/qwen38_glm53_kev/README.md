@@ -1,10 +1,15 @@
 # GLM-5.3 on node06 (the `qwen38_glm53_kev` project)
 
-**Current shape (2026-10-26).** This Compose project owns only Ramjet, in
-front of four stock GLM-5.3-Flash TP2 replicas (`glm53sm120-b` through
-`glm53sm120-e`). The uncensored GLM (`glm53-unc-fp8`) was stopped to free
-GPUs 0-3, so `glm-5.3-flash-uncensored` is no longer served.
+**Current shape (2026-10-29).** This Compose project owns only Ramjet, in
+front of three OpenAI-profile upstreams: two stock GLM-5.3-Flash TP2 replicas
+(`glm53sm120-b`, `glm53sm120-c`, GPUs 4-7) and the uncensored GLM TP4 replica
+(`glm53-unc-fp8`, GPUs 0-3, served as `glm-5.3-flash-uncensored`).
 `qwen3.8-flash-next` is a model alias for the stock GLM pool.
+
+From 2026-10-26 to 2026-10-29 GPUs 0-3 instead ran two more stock replicas
+(`glm53sm120-d`, `glm53sm120-e`) and the uncensored model was not served.
+Those containers are stopped, not removed; switching back means stopping
+`glm53-unc-fp8`, starting `d`/`e`, and restoring the four-upstream lists.
 
 Long-conversation placement is on (`RJ_ROUTE_LONG_SESSION_TOKENS=100000`,
 capacity 500000 per replica, matching the engines' `--max-total-tokens`).

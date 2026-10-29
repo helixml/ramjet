@@ -53,7 +53,7 @@ class QwenGlmKevDeployTests(unittest.TestCase):
             ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", None),
             ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,lane"),
             ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,-"),
-            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,-,-,lane"),
+            ("RJ_ROUTE_LONG_PROMPT_UPSTREAMS", "-,-,-,lane"),
         ):
             changed = copy.deepcopy(self.document)
             environment = changed["services"]["ds4-loadbalancer"]["environment"]
