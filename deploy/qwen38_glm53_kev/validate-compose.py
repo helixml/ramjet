@@ -88,14 +88,15 @@ def validate(document: dict) -> None:
     environment = lb.get("environment", {})
     expected = {
         "RJ_UPSTREAM": "http://glm53sm120-b:8000,http://glm53sm120-c:8000,"
-        "http://glm53sm120-d:8000,http://glm53sm120-e:8000",
-        "RJ_UPSTREAM_MODELS": "glm-5.3-flash,glm-5.3-flash,glm-5.3-flash,glm-5.3-flash",
-        "RJ_UPSTREAM_APIS": "openai,openai,openai,openai",
-        "RJ_MODEL_ALIASES": "qwen3.8-flash-next=glm-5.3-flash",
+        "http://glm53-unc-fp8:8000",
+        "RJ_UPSTREAM_MODELS": "glm-5.3-flash,glm-5.3-flash,glm-5.3-flash-uncensored",
+        "RJ_UPSTREAM_APIS": "openai,openai,openai",
     }
     for key, value in expected.items():
         if environment.get(key) != value:
             fail(f"{key} must be {value!r}")
+    if "RJ_MODEL_ALIASES" in environment:
+        fail("RJ_MODEL_ALIASES must be unset (the qwen3.8-flash-next alias was removed 2026-11-10)")
     validate_long_prompt_lane(environment)
     validate_long_session(environment)
     for key in (
