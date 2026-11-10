@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Kernel A/B client for one directly addressed GLM-5.3 engine (stdlib only).
 
-decode : fixed coding prompts, temperature 0, measures per-request decode tok/s
+decode : fixed coding prompts, temperature 0 (or --temperature), measures per-request decode tok/s
          (completion tokens after the first, over first->last token time) and
          aggregate output tok/s at a given concurrency.
 prefill: unique-salted filler prompts of a target token length, max_tokens=1,
@@ -66,13 +66,21 @@ def post(base, body, timeout=1800):
     return {"t0": t0, "first": first, "last": last, "end": end, "usage": usage or {}}
 
 
+SCRAPED = (
+    "sglang:spec_verify_calls_total",
+    "sglang:generation_tokens_total",
+    "vllm:spec_decode_num_drafts_total",
+    "vllm:spec_decode_num_accepted_tokens_total",
+)
+
+
 def scrape(base):
-    """Sum sglang counters across TP ranks' exported series (rank 0 exports)."""
+    """Sum SGLang or vLLM counters across exported series."""
     vals = {}
     try:
         with urllib.request.urlopen(base + "/metrics", timeout=10) as r:
             for line in r.read().decode().splitlines():
-                for name in ("sglang:spec_verify_calls_total", "sglang:generation_tokens_total"):
+                for name in SCRAPED:
                     if line.startswith(name + "{") or line.startswith(name + " "):
                         vals[name] = vals.get(name, 0.0) + float(line.rsplit(" ", 1)[1])
     except Exception:  # noqa: BLE001
@@ -80,7 +88,7 @@ def scrape(base):
     return vals
 
 
-def decode_cell(base, model, conc, max_tokens, rounds, salt):
+def decode_cell(base, model, conc, max_tokens, rounds, salt, temperature=0.0):
     m0 = scrape(base)
     jobs = []
     for r in range(rounds):
@@ -105,7 +113,7 @@ def decode_cell(base, model, conc, max_tokens, rounds, salt):
                     {"role": "user", "content": jobs[j]},
                 ],
                 "max_tokens": max_tokens,
-                "temperature": 0,
+                "temperature": temperature,
                 "stream": True,
                 "stream_options": {"include_usage": True},
                 "ignore_eos": True,
@@ -122,8 +130,14 @@ def decode_cell(base, model, conc, max_tokens, rounds, salt):
         t.join()
     wall = time.perf_counter() - t_start
     m1 = scrape(base)
-    dv = m1.get("sglang:spec_verify_calls_total", 0) - m0.get("sglang:spec_verify_calls_total", 0)
-    dg = m1.get("sglang:generation_tokens_total", 0) - m0.get("sglang:generation_tokens_total", 0)
+    def delta(name):
+        return m1.get(name, 0) - m0.get(name, 0)
+
+    dv = delta("sglang:spec_verify_calls_total")
+    dg = delta("sglang:generation_tokens_total")
+    if not dv:  # vLLM: one verify per draft; each emits its accepted tokens plus one.
+        dv = delta("vllm:spec_decode_num_drafts_total")
+        dg = dv + delta("vllm:spec_decode_num_accepted_tokens_total")
     per_req = []
     ttft = []
     total_out = 0
@@ -136,6 +150,7 @@ def decode_cell(base, model, conc, max_tokens, rounds, salt):
             per_req.append((n - 1) / span)
     return {
         "cell": f"decode-c{conc}",
+        "temperature": temperature,
         "requests": len(results),
         "max_tokens": max_tokens,
         "decode_tps_per_req_mean": round(statistics.mean(per_req), 2),
@@ -193,6 +208,7 @@ def main():
     ap.add_argument("--salt", default=str(time.time_ns()))
     ap.add_argument("--decode-conc", default="1,4")
     ap.add_argument("--max-tokens", type=int, default=512)
+    ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--prefill-k", default="8,32,128")
     ap.add_argument("--prefill-reps", type=int, default=2)
@@ -203,7 +219,7 @@ def main():
     post(a.base, {"model": a.model, "messages": [{"role": "user", "content": f"hi {a.salt}"}],
                   "max_tokens": 8, "stream": True})
     for c in [int(x) for x in a.decode_conc.split(",") if x and int(x) > 0]:
-        cells.append(decode_cell(a.base, a.model, c, a.max_tokens, a.rounds, a.salt))
+        cells.append(decode_cell(a.base, a.model, c, a.max_tokens, a.rounds, a.salt, a.temperature))
         print(json.dumps({"label": a.label, **cells[-1]}), flush=True)
     for k in [int(x) for x in a.prefill_k.split(",") if x and int(x) > 0]:
         cells.append(prefill_cell(a.base, a.model, k * 1024, a.prefill_reps, a.salt))
