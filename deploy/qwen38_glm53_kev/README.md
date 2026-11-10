@@ -4,7 +4,8 @@
 front of three OpenAI-profile upstreams: two stock GLM-5.3-Flash TP2 replicas
 (`glm53sm120-b`, `glm53sm120-c`, GPUs 4-7) and the uncensored GLM TP4 replica
 (`glm53-unc-fp8`, GPUs 0-3, served as `glm-5.3-flash-uncensored`).
-`qwen3.8-flash-next` is a model alias for the stock GLM pool.
+The `qwen3.8-flash-next` alias for the stock GLM pool was removed on
+2026-11-10; requests for that model now get `404`.
 
 From 2026-10-26 to 2026-10-29 GPUs 0-3 instead ran two more stock replicas
 (`glm53sm120-d`, `glm53sm120-e`) and the uncensored model was not served.

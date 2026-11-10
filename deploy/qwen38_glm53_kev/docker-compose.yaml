@@ -31,8 +31,6 @@ services:
       # Two stock GLM TP2 replicas (GPUs 4-7) plus the uncensored GLM TP4
       # replica (GPUs 0-3), restored 2026-10-29; d and e are stopped.
       RJ_UPSTREAM: http://glm53sm120-b:8000,http://glm53sm120-c:8000,http://glm53-unc-fp8:8000
-      # Qwen compatibility alias stays on the stock GLM pool.
-      RJ_MODEL_ALIASES: qwen3.8-flash-next=glm-5.3-flash
       RJ_UPSTREAM_MODELS: glm-5.3-flash,glm-5.3-flash,glm-5.3-flash-uncensored
       RJ_UPSTREAM_APIS: openai,openai,openai
       RJ_UPSTREAM_TOKEN: ${VLLM_API_KEY:?set VLLM_API_KEY in protected mode-0600 .env}
