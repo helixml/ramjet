@@ -145,9 +145,6 @@ services:
       # turns/min, TTFT p90 2.9 vs 4.3 s, 92% vs 80% same-replica turns.
       RJ_ROUTE_AFFINITY_BASIS: ${RJ_ROUTE_AFFINITY_BASIS:-relative}
       RJ_UPSTREAM_WARMUP_MODE: enforce
-      # Optional host/GPU telemetry for the dashboard: run
-      # bench/machineview_agent.py on the host and point this at it.
-      RJ_MACHINEVIEW_AGENT_URL: ${RJ_MACHINEVIEW_AGENT_URL:-}
     depends_on:
       domyn-edge-0: {condition: service_healthy}
       domyn-edge-1: {condition: service_healthy}

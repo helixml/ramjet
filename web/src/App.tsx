@@ -53,7 +53,7 @@ type Row = { t: number } & Record<string, number | null>
 /**
  * The load-balancer-derived half of a row. These are the keys the live
  * stream can fill on its own, because they come from the proxy's own
- * registry rather than from scraping engines or the host agent.
+ * registry rather than from scraping engines or sampling the host.
  */
 function toServingRow(t: number, serving: ServingSample | undefined): Row {
   const row: Row = { t }
@@ -697,7 +697,7 @@ function Dashboard({
         ) : null}
         {(latestHost?.disks ?? []).length === 0 && memPct == null ? (
           <div className="text-faint-foreground py-6 text-center text-xs">
-            no host telemetry — run bench/machineview_agent.py
+            no host telemetry — see Host telemetry in web/README.md
           </div>
         ) : null}
           </>

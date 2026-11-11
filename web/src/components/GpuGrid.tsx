@@ -12,7 +12,7 @@ interface GpuView {
 }
 
 function collect(points: Sample[], latest: Sample | null): GpuView[] {
-  // An unsuccessful host-agent scrape is an empty inventory, not eight idle
+  // An unsuccessful GPU query is an empty inventory, not eight idle
   // GPUs. Keep the most recent known inventory so a transient miss does not
   // collapse the grid; individual absent values remain null in the trend.
   let source = latest?.gpus?.length ? latest.gpus : []
@@ -234,8 +234,8 @@ export function GpuGrid({
     return (
       <Card>
         <CardContent className="text-faint-foreground py-8 text-center text-xs">
-          no GPU telemetry — point RJ_MACHINEVIEW_AGENT_URL at a running
-          bench/machineview_agent.py
+          no GPU telemetry — grant the load balancer the NVIDIA utility
+          capability (see Host telemetry in web/README.md)
         </CardContent>
       </Card>
     )

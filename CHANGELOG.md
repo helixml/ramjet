@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Host telemetry moved into the load balancer. The machine view now samples
+  CPU, memory, pressure, disk and network rates, filesystem usage, RAPL CPU
+  power, and NVIDIA GPUs (via `nvidia-smi`) in-process, showing only the
+  sources it can read. `RJ_MACHINEVIEW_HOST_ROOT` points at a read-only
+  host-root mount and `RJ_MACHINEVIEW_DISKS` lists the mounts to report; GPUs
+  need the NVIDIA `utility` capability. The separate
+  `bench/machineview_agent.py` and `RJ_MACHINEVIEW_AGENT_URL` are removed;
+  a leftover `RJ_MACHINEVIEW_AGENT_URL` is ignored.
+
 ## 0.10.0 — 2026-10-26
 
 - Long-conversation placement, off by default. With

@@ -22,6 +22,7 @@ this gap wrong in both directions.
 
 import json
 import pathlib
+import re
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -111,6 +112,13 @@ def _json_argv(document: object) -> list[str]:
     return found
 
 
+# Ramjet's own reservation for dashboard GPU telemetry: nvidia-smi only, no
+# CUDA. It does not make a deployment a model server.
+TELEMETRY_ONLY_GPU = re.compile(
+    r"driver: nvidia\s*\n\s*count: all\s*\n\s*capabilities: \[gpu, utility\]"
+)
+
+
 def _gpu_deployments() -> set[str]:
     """Deployment directories that reserve NVIDIA GPUs, i.e. serve a model."""
     found = set()
@@ -121,7 +129,7 @@ def _gpu_deployments() -> set[str]:
             raw = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        if "driver: nvidia" in raw:
+        if "driver: nvidia" in TELEMETRY_ONLY_GPU.sub("", raw):
             found.add(path.relative_to(DEPLOY).parts[0])
     return found
 

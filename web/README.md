@@ -15,13 +15,11 @@ tooltips, and a table-view twin behind the toggle in each card header.
 ## How it fits together
 
 ```
-bench/machineview_agent.py   host agent (loopback): /proc, statvfs, RAPL, nvidia-smi
-        │  GET /sample (JSON)
-        ▼
 ramjet LB               samples every RJ_MACHINEVIEW_INTERVAL_MS:
   src/machineview.rs           - its own Prometheus registry (ramjet_*)
         │                      - each upstream's /metrics (vllm:* or sglang:*)
-        │                      - the agent (host + GPUs + energy)
+        │                      - the host: /proc, statvfs, RAPL, nvidia-smi
+        │                        (src/host_telemetry.rs)
         │                    stores a bounded in-memory ring plus a long
         │                    hourly token history (optionally persisted),
         │                    serves JSON + this UI on :9090
@@ -31,7 +29,7 @@ ramjet LB               samples every RJ_MACHINEVIEW_INTERVAL_MS:
 ```
 
 Three cadences, deliberately. `RJ_MACHINEVIEW_INTERVAL_MS` (5 s) is what
-costs network: it scrapes every engine's `/metrics` and the host agent, and
+costs network: it scrapes every engine's `/metrics` and samples the host, and
 it is what the ring stores. `RJ_MACHINEVIEW_STREAM_INTERVAL_MS` (1 s) reads
 only the proxy's own in-process registry, so serving throughput, TTFT, TPOT,
 in-flight and per-upstream request rate stream at 1 Hz without adding a
@@ -95,7 +93,8 @@ VPN opens http://100.89.187.17:8007/ui/ directly.
 | `RJ_MACHINEVIEW_RETENTION_SECONDS` | `86400` | ring retention (60–604800) |
 | `RJ_MACHINEVIEW_TOKEN_HISTORY_DAYS` | `30` | hourly token-history retention (1–400) |
 | `RJ_MACHINEVIEW_STREAM_INTERVAL_MS` | `1000` | live WebSocket cadence for registry-derived serving metrics (200–10000) |
-| `RJ_MACHINEVIEW_AGENT_URL` | unset | host agent `/sample` URL; without it there is no host/GPU/energy telemetry |
+| `RJ_MACHINEVIEW_HOST_ROOT` | `/` | where the host's filesystem is visible; set to the read-only host-root mount (see Host telemetry) |
+| `RJ_MACHINEVIEW_DISKS` | `/` | comma-separated host mount points reported as storage; empty reports none |
 | `RJ_MACHINEVIEW_STATE_PATH` | unset | JSON snapshot path; restores both the ring and the token history across LB restarts |
 | `RJ_MACHINEVIEW_UI_DIR` | `/ui` if present | static bundle directory |
 | `RJ_MACHINEVIEW_UPSTREAM_GPUS` | unset | dense semicolon-separated GPU sets matching `RJ_UPSTREAM`, for example `0,1,2,3;4,5`; the UI derives each engine's TP size from its set |
@@ -106,8 +105,9 @@ Engine scraping needs no configuration — it reuses the configured
 (`sglang:*`) equivalents: `num_running_reqs`, `num_queue_reqs`, `token_usage`
 for KV cache, and the generation/prompt token counters. SGLang scheduler
 gauges are counted once per scheduler (`tp_rank`/`pp_rank` 0): running and
-waiting are summed across DP ranks, KV cache is their mean. Without the agent the serving charts still work; the
-machine/GPU sections show their empty states.
+waiting are summed across DP ranks, KV cache is their mean. Without host
+access the serving charts still work; the machine/GPU sections show only what
+the LB could read, or their empty states.
 
 ## Tokens & usage
 
@@ -151,19 +151,43 @@ serves a deterministic synthetic fleet of 60 tokens
 `__other`, and `before_ms` like the backend; token create/edit/revoke/delete
 mutate it in memory.
 
-## Host agent
+## Host telemetry
 
-Stdlib-only, loopback-only by default, read-only:
+The LB samples the host it runs on (`src/host_telemetry.rs`): CPU busy and
+iowait share, load, memory/swap, pressure, whole-disk I/O rates, per-mount
+usage, physical-interface network rates, RAPL package watts, and one row per
+GPU from `nvidia-smi`. Every source is optional: what the process cannot read
+is left out of the dashboard rather than shown as zero. Rates need two
+samples, so the first one after start has none.
 
-```bash
-python3 bench/machineview_agent.py --port 8016 --mounts /,/home/luke
+What a container can see depends on what it is granted:
+
+| Source | Plain container | Needs |
+|---|---|---|
+| CPU, load, memory, pressure, block I/O | yes (`/proc` is host-wide) | — |
+| Network rates | no (its own namespace) | host root mounted, or `pid: host` |
+| RAPL CPU watts | no (Docker masks it) | host root mounted, LB running as root |
+| Filesystem usage | the image's overlay | host root mounted |
+| GPUs | no | NVIDIA `utility` capability |
+
+The full setup in Compose — read-only access only; the GPU capability injects
+`nvidia-smi` and the NVML library but creates no CUDA context and reserves no
+device memory:
+
+```yaml
+    volumes:
+      - /:/host:ro
+    environment:
+      RJ_MACHINEVIEW_HOST_ROOT: /host
+      RJ_MACHINEVIEW_DISKS: /,/data        # host mount points
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility]
 ```
-
-On a Docker-bridge deployment the LB reaches it via the gateway address,
-e.g. `RJ_MACHINEVIEW_AGENT_URL=http://172.17.0.1:8016/sample`. It reports
-CPU busy share, load, memory/swap, per-mount usage, whole-disk I/O rates,
-physical-interface network rates, RAPL package watts, and one row per GPU
-from `nvidia-smi`. Rates need two scrapes, so the first sample returns nulls.
 
 ## Where the cache-hit number comes from
 

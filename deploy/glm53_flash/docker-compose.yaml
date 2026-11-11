@@ -81,7 +81,6 @@ services:
       RJ_KV_EVENT_LIVE_ENDPOINTS: ""
       RJ_KV_EVENT_REPLAY_ENDPOINTS: ""
       RJ_SNAPSHOT_ROUTE_MODE: "off"
-      RJ_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
       RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json
       RJ_IDLE_DRAIN_MODE: "off"
 

@@ -57,6 +57,10 @@ And specific serving tab:
 
 <img width="1419" height="1214" alt="image" src="https://github.com/user-attachments/assets/6703a7a9-53b4-4d9a-ab07-7389a96fc684" />
 
+Host and GPU panels show whatever the load balancer can read. For all of them,
+mount the host root read-only and grant the NVIDIA `utility` capability; see
+[Host telemetry](web/README.md#host-telemetry).
+
 You can also just plug it into prometheus, `/metrics` API is available. 
 
 ## Measured on real hardware
