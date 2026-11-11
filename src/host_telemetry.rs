@@ -49,7 +49,9 @@ power.draw,temperature.gpu,clocks.sm,utilization.memory,clocks.mem,power.limit,f
 pstate,temperature.memory,clocks_throttle_reasons.sw_power_cap,\
 clocks_throttle_reasons.sw_thermal_slowdown,clocks_throttle_reasons.hw_thermal_slowdown,\
 clocks_throttle_reasons.hw_slowdown";
-const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_secs(3);
+/// node06 (8 busy GPUs) measured 1.7-3.0s per query, so a 3s bound dropped
+/// about one sample in six. A slow query only stretches that sampler tick.
+const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RAPL_DOMAINS: usize = 8;
 /// `/proc/self/ns/pid` of a process in the initial PID namespace. The kernel
 /// fixes this inode (`PROC_PID_INIT_INO`).
