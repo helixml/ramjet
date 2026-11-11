@@ -22,10 +22,21 @@ services:
       # Minted API token hashes and the per-token usage store
       # (docs/api-tokens.md). Root-owned mode 0700 on the host.
       - /var/lib/ramjet-api:/var/lib/ramjet-api
+      # Host telemetry for the dashboard (web/README.md#host-telemetry):
+      # network rates, RAPL power, filesystem usage, and the host name.
+      - /:/host:ro
+    # nvidia-smi for the GPU panels. `utility` alone creates no CUDA context
+    # and reserves no device memory.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility]
     networks:
       - qwen-engine
       - glm-engine
-      - machineview-host
       - kev-engine
     environment:
       # Two stock GLM TP2 replicas (GPUs 4-7) plus the uncensored GLM TP4
@@ -84,7 +95,8 @@ services:
       RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES: "3"
       RJ_UPSTREAM_WARMUP_STABLE_SECONDS: "30"
       RJ_IDLE_DRAIN_MODE: "off"
-      RJ_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
+      RJ_MACHINEVIEW_HOST_ROOT: /host
+      RJ_MACHINEVIEW_DISKS: /,/prod
       RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json
 
 networks:
@@ -94,9 +106,6 @@ networks:
   glm-engine:
     external: true
     name: glm53_flash_sm120_default
-  machineview-host:
-    external: true
-    name: qwen38_27b_default
   kev-engine:
     external: true
     name: ramjet_kev_systemone

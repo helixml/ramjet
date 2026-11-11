@@ -22,6 +22,7 @@ pub mod engine_park;
 pub mod exact_index;
 pub mod exact_route_inventory;
 pub mod exact_shadow;
+pub mod host_telemetry;
 pub mod idle_drain;
 pub mod journal;
 pub mod kv_consumer;

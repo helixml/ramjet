@@ -115,6 +115,23 @@ class QwenGlmKevDeployTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.validator.validate(changed)
 
+    def test_host_telemetry_is_read_only_and_cannot_run_cuda(self):
+        lb = self.document["services"]["ds4-loadbalancer"]
+        host = [volume for volume in lb["volumes"] if volume.get("target") == "/host"]
+        self.assertEqual(len(host), 1)
+        self.assertTrue(host[0]["read_only"])
+        writable = copy.deepcopy(self.document)
+        for volume in writable["services"]["ds4-loadbalancer"]["volumes"]:
+            if volume.get("target") == "/host":
+                volume["read_only"] = False
+        with self.assertRaises(ValueError):
+            self.validator.validate(writable)
+        compute = copy.deepcopy(self.document)
+        devices = compute["services"]["ds4-loadbalancer"]["deploy"]["resources"]["reservations"]["devices"]
+        devices[0]["capabilities"] = ["gpu", "utility", "compute"]
+        with self.assertRaises(ValueError):
+            self.validator.validate(compute)
+
     def test_rollout_preserves_exact_lb_and_warms_before_canary(self):
         script = DEPLOY / "node06-rollout.sh"
         subprocess.run(["bash", "-n", script], check=True)

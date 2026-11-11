@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG RUST_DEPS_IMAGE=ghcr.io/helixml/ramjet:rust-deps-sha256-e58d88f2df8ecd4dfeae0c5f4dc90077293d46fa0611b363509e37c914206131
+ARG RUST_DEPS_IMAGE=ghcr.io/helixml/ramjet:rust-deps-sha256-c8b4eba12d76472810fb43ff5225c8a7d793beaea91e640d322693d4688df8e6
 ARG OCI_REVISION=unknown
 FROM ${RUST_DEPS_IMAGE} AS build
 WORKDIR /src

@@ -168,12 +168,12 @@ The router is the interesting surface — `src/router.rs` contains the active
 Rust tests and frozen legacy fingerprint goldens. Add a Rust test for every
 routing change and retain a golden wherever compatibility matters.
 
-For the machine-view dashboard (`src/machineview.rs`, `web/`,
-`bench/machineview_agent.py`), keep the loop GPU-free and local:
+For the machine-view dashboard (`src/machineview.rs`,
+`src/host_telemetry.rs`, `web/`), keep the loop GPU-free and local:
 
 ```bash
 cargo test --locked machineview
-python3 -m unittest bench.test_machineview_agent
+cargo test --locked host_telemetry
 cd web && npm run build           # tsc + vite; catches type and bundle breaks
 UI_PROXY_TARGET=http://127.0.0.1:8007 npm run dev   # live LB via SSH tunnel
 npm run dev                       # then /ui/?mock=1 for backend-free UI work
@@ -181,9 +181,12 @@ npm run dev                       # then /ui/?mock=1 for backend-free UI work
 
 Machine view is observation-only: it must never influence routing, upstream
 health, `/health`, or request handling, and it publishes on the loopback
-metrics listener only. Engine scraping reuses `RJ_UPSTREAM`; host/GPU/energy
-telemetry appears only when `RJ_MACHINEVIEW_AGENT_URL` points at the
-loopback host agent. The UI bundle is built in the Dockerfile's `ui` stage
+metrics listener only. Engine scraping reuses `RJ_UPSTREAM`. The LB samples
+host/GPU/energy telemetry itself and shows only what it can read: a plain
+container sees CPU, memory, pressure, and block I/O; network, RAPL power, and
+real filesystem usage need the host root mounted read-only at
+`RJ_MACHINEVIEW_HOST_ROOT`; GPUs need the NVIDIA `utility` capability, which
+injects `nvidia-smi` without reserving device memory. The UI bundle is built in the Dockerfile's `ui` stage
 (`web/**` is an lb-image input in `bench/drone_publish_plan.sh`); a `web/`
 edit re-runs npm but must not invalidate the Rust build layer. See
 `web/README.md` for the full contract.
@@ -506,7 +509,6 @@ cargo test --locked engine_park
 cargo test --locked utilization_tests
 cargo test --locked --test engine_park_simulation
 cargo test --locked proxy::tests::a_parked
-python3 -m unittest bench.test_machineview_agent
 ```
 
 `RJ_IDLE_DRAIN_ACTUATOR=sleep` is the first configuration in which the LB

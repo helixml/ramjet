@@ -184,8 +184,8 @@ affinity all use ordinals.
 - **Idle drain and engine parking** count warm replicas and parked replicas
   across the whole fleet. `RJ_IDLE_DRAIN_MAX_PARKED` bounds host memory, which
   is a per-node resource.
-- **Machine view** scrapes one host agent and requires GPU indices to be
-  unique across all upstreams.
+- **Machine view** samples only the balancer's own host and requires GPU
+  indices to be unique across all upstreams.
 - **Snapshot inventory** connects to its companions over Unix sockets, so the
   companions must run on the balancer's host. Direct KV-event subscription
   uses TCP and works across nodes.

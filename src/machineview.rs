@@ -1,9 +1,9 @@
 //! Machine view: a self-contained dashboard for the whole serving box.
 //!
-//! The module samples three local sources on a fixed interval — the proxy's
-//! own Prometheus registry, each upstream engine's `/metrics` endpoint, and an
-//! optional loopback host agent (`bench/machineview_agent.py`) for CPU / GPU /
-//! disk / energy telemetry — and keeps the result in a bounded in-memory ring
+//! The module samples three sources on a fixed interval — the proxy's own
+//! Prometheus registry, each upstream engine's `/metrics` endpoint, and the
+//! host it runs on for CPU / GPU / disk / energy telemetry
+//! ([`crate::host_telemetry`]) — and keeps the result in a bounded in-memory ring
 //! with optional JSON snapshot persistence. A small JSON API plus a static
 //! bundle served under `/ui` on the metrics listener make the box observable
 //! without Prometheus or Grafana.
@@ -46,6 +46,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use url::Url;
 
+use crate::host_telemetry::HostTelemetry;
+
 const MIN_INTERVAL_MS: u64 = 1_000;
 const MAX_INTERVAL_MS: u64 = 60_000;
 const MIN_RETENTION_SECONDS: u64 = 60;
@@ -66,6 +68,7 @@ const MIN_TOKEN_HISTORY_DAYS: u64 = 1;
 const MAX_TOKEN_HISTORY_DAYS: u64 = 400;
 const MAX_MODEL_TOKEN_HISTORIES: usize = 64;
 const MAX_MODEL_LABEL_BYTES: usize = 256;
+const MAX_DISKS: usize = 16;
 /// Version 1 files carry samples only, version 2 adds aggregate token history,
 /// and version 3 adds per-model token history. Older snapshots remain valid.
 const STATE_VERSION: u32 = 3;
@@ -87,7 +90,11 @@ pub struct Settings {
     pub retention_seconds: u64,
     pub token_history_days: u64,
     pub stream_interval_ms: u64,
-    pub agent_url: Option<Url>,
+    /// Where the host's filesystem is visible; `/` unless the host root is
+    /// bind-mounted into a container.
+    pub host_root: PathBuf,
+    /// Host mount points reported as storage.
+    pub disks: Vec<String>,
     pub state_path: Option<PathBuf>,
     pub ui_dir: Option<PathBuf>,
     pub upstream_gpus: Vec<Vec<u32>>,
@@ -164,7 +171,7 @@ impl Settings {
         )?;
         // The live stream reads only the proxy's own in-process registry, so
         // it can run far faster than the interval that scrapes engines and
-        // the host agent over the network.
+        // samples the host.
         let stream_interval_ms = bounded(
             &mut get,
             "RJ_MACHINEVIEW_STREAM_INTERVAL_MS",
@@ -172,12 +179,20 @@ impl Settings {
             MIN_STREAM_INTERVAL_MS,
             MAX_STREAM_INTERVAL_MS,
         )?;
-        let agent_url = match get("RJ_MACHINEVIEW_AGENT_URL").filter(|value| !value.is_empty()) {
-            None => None,
-            Some(raw) => Some(Url::parse(&raw).ok().filter(Url::has_host).ok_or_else(|| {
-                invalid("RJ_MACHINEVIEW_AGENT_URL", raw, "an absolute http(s) URL")
-            })?),
+        let host_root = match get("RJ_MACHINEVIEW_HOST_ROOT").filter(|value| !value.is_empty()) {
+            None => PathBuf::from("/"),
+            Some(raw) if Path::new(&raw).is_absolute() && Path::new(&raw).is_dir() => {
+                PathBuf::from(raw)
+            }
+            Some(raw) => {
+                return Err(invalid(
+                    "RJ_MACHINEVIEW_HOST_ROOT",
+                    raw,
+                    "an existing absolute directory",
+                ));
+            }
         };
+        let disks = parse_disks(get("RJ_MACHINEVIEW_DISKS"))?;
         let state_path = get("RJ_MACHINEVIEW_STATE_PATH")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
@@ -208,7 +223,8 @@ impl Settings {
             retention_seconds,
             token_history_days,
             stream_interval_ms,
-            agent_url,
+            host_root,
+            disks,
             state_path,
             ui_dir,
             upstream_gpus,
@@ -295,6 +311,36 @@ fn bounded(
     }
 }
 
+/// Comma-separated absolute host mount points, `/` by default. An explicit
+/// empty value reports no storage.
+fn parse_disks(raw: Option<String>) -> Result<Vec<String>, SettingsError> {
+    let Some(raw) = raw else {
+        return Ok(vec!["/".to_owned()]);
+    };
+    let disks: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|mount| !mount.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let valid = disks.len() <= MAX_DISKS
+        && disks.iter().all(|mount| {
+            mount.starts_with('/')
+                && Path::new(mount)
+                    .components()
+                    .all(|part| !matches!(part, std::path::Component::ParentDir))
+        });
+    if valid {
+        Ok(disks)
+    } else {
+        Err(invalid(
+            "RJ_MACHINEVIEW_DISKS",
+            raw,
+            "at most 16 comma-separated absolute mount points",
+        ))
+    }
+}
+
 // --- Sample model -----------------------------------------------------------
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -369,7 +415,7 @@ pub struct GpuSample {
     pub power_watts: Option<f64>,
     pub temp_c: Option<f64>,
     pub sm_mhz: Option<f64>,
-    // Extended telemetry; absent from older agents and optional per driver.
+    // Extended telemetry; optional per driver.
     #[serde(default)]
     pub mem_util_pct: Option<f64>,
     #[serde(default)]
@@ -460,17 +506,6 @@ pub struct EnergySample {
     pub gpu_watts: Option<f64>,
     pub cpu_watts: Option<f64>,
     pub total_watt_hours: f64,
-}
-
-/// Payload published by the loopback host agent. Host and GPU shapes reuse the
-/// stored sample types so the agent contract and the API stay aligned.
-#[derive(Debug, Deserialize)]
-struct AgentPayload {
-    version: u32,
-    #[serde(default)]
-    host: Option<HostSample>,
-    #[serde(default)]
-    gpus: Vec<GpuSample>,
 }
 
 // --- Prometheus text parsing ------------------------------------------------
@@ -1843,8 +1878,10 @@ fn now_unix_ms() -> u64 {
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
-fn read_hostname() -> Option<String> {
-    let raw = std::fs::read_to_string("/etc/hostname")
+/// The host's name when its root is mounted, otherwise this process's (a
+/// container ID inside a container).
+fn read_hostname(host_root: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(host_root.join("etc/hostname"))
         .ok()
         .or_else(|| std::env::var("HOSTNAME").ok())?;
     let trimmed = raw.trim();
@@ -1898,7 +1935,7 @@ impl MachineView {
             stream_clients: AtomicUsize::new(0),
             upstreams: upstreams.clone(),
             topology,
-            hostname: read_hostname(),
+            hostname: read_hostname(&settings.host_root),
         });
         // The fast publisher reads only the in-process registry, so it costs
         // nothing on the network and nothing at all while no one is watching.
@@ -1932,7 +1969,7 @@ impl MachineView {
                 registry,
                 client,
                 upstreams,
-                agent_url: settings.agent_url.clone(),
+                host: HostTelemetry::new(&settings.host_root, &settings.disks),
                 rates: RateTracker::default(),
                 histograms: HistogramWindows::default(),
                 total_watt_seconds: loop_shared
@@ -2070,7 +2107,7 @@ struct Sampler {
     registry: Arc<Registry>,
     client: reqwest::Client,
     upstreams: Vec<Url>,
-    agent_url: Option<Url>,
+    host: HostTelemetry,
     rates: RateTracker,
     histograms: HistogramWindows,
     total_watt_seconds: f64,
@@ -2126,26 +2163,9 @@ impl Sampler {
         apply_engine_cache_fallback(&mut serving, &scrapes);
         let engines: Vec<EngineSample> = scrapes.into_iter().map(|scrape| scrape.sample).collect();
 
-        let mut host = None;
-        let mut gpus = Vec::new();
-        if let Some(agent_url) = &self.agent_url {
-            let payload = self
-                .client
-                .get(agent_url.clone())
-                .timeout(scrape_timeout)
-                .send()
-                .await
-                .ok();
-            if let Some(response) = payload
-                && response.status().is_success()
-                && let Ok(body) = response.text().await
-                && let Ok(payload) = serde_json::from_str::<AgentPayload>(&body)
-                && payload.version == 1
-            {
-                host = payload.host.map(sanitize_host);
-                gpus = sanitize_gpus(payload.gpus);
-            }
-        }
+        let (host, gpus) = self.host.sample().await;
+        let host = host.map(sanitize_host);
+        let gpus = sanitize_gpus(gpus);
 
         let gpu_watts = {
             let watts: Vec<f64> = gpus.iter().filter_map(|gpu| gpu.power_watts).collect();
@@ -2423,7 +2443,8 @@ mod tests {
         assert_eq!(settings.mode, Mode::On);
         assert_eq!(settings.interval_ms, 5_000);
         assert_eq!(settings.retention_seconds, 86_400);
-        assert!(settings.agent_url.is_none());
+        assert_eq!(settings.host_root, PathBuf::from("/"));
+        assert_eq!(settings.disks, vec!["/".to_owned()]);
         assert!(settings.state_path.is_none());
     }
 
@@ -2437,10 +2458,21 @@ mod tests {
             (key == "RJ_MACHINEVIEW_INTERVAL_MS").then(|| "10".to_owned())
         });
         assert!(interval.is_err());
-        let agent = Settings::from_lookup(|key| {
-            (key == "RJ_MACHINEVIEW_AGENT_URL").then(|| "not a url".to_owned())
+        let host_root = Settings::from_lookup(|key| {
+            (key == "RJ_MACHINEVIEW_HOST_ROOT").then(|| "relative/host".to_owned())
         });
-        assert!(agent.is_err());
+        assert!(host_root.is_err());
+        for disks in ["prod", "/,/../etc"] {
+            let parsed = Settings::from_lookup(|key| {
+                (key == "RJ_MACHINEVIEW_DISKS").then(|| disks.to_owned())
+            });
+            assert!(parsed.is_err(), "{disks}");
+        }
+        let disks = Settings::from_lookup(|key| {
+            (key == "RJ_MACHINEVIEW_DISKS").then(|| " /, /prod ,".to_owned())
+        })
+        .expect("disks valid");
+        assert_eq!(disks.disks, vec!["/".to_owned(), "/prod".to_owned()]);
         let ui = Settings::from_lookup(|key| {
             (key == "RJ_MACHINEVIEW_UI_DIR").then(|| "/definitely/not/a/real/dir".to_owned())
         });
@@ -3295,7 +3327,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_payload_sanitizes_hostile_values() {
+    fn host_telemetry_is_sanitized() {
         let host = sanitize_host(HostSample {
             cpu_pct: Some(250.0),
             net_rx_bps: Some(-5.0),

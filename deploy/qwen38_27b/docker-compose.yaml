@@ -142,7 +142,6 @@ services:
       # Machine view is observation-only and publishes on the metrics listener.
       # The host agent stays loopback; the LB reaches it via this project's
       # bridge gateway.
-      RJ_MACHINEVIEW_AGENT_URL: http://172.19.0.1:8016/sample
       RJ_MACHINEVIEW_STATE_PATH: /machineview/state.json
 
       # Idle drain stays in observe: it publishes what it *would* park and

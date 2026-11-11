@@ -129,10 +129,23 @@ def validate(document: dict) -> None:
         or api_state[0].get("read_only")
     ):
         fail("API token/usage state must be one writable /var/lib/ramjet-api mount")
+    host_root = [
+        volume for volume in lb.get("volumes", []) if volume.get("target") == "/host"
+    ]
+    if (
+        len(host_root) != 1
+        or host_root[0].get("source") != "/"
+        or host_root[0].get("read_only") is not True
+        or environment.get("RJ_MACHINEVIEW_HOST_ROOT") != "/host"
+    ):
+        fail("host telemetry needs exactly one read-only / mount at RJ_MACHINEVIEW_HOST_ROOT")
+    # The LB may read GPU telemetry but must never be able to run CUDA work.
+    devices = lb.get("deploy", {}).get("resources", {}).get("reservations", {}).get("devices", [])
+    if len(devices) != 1 or sorted(devices[0].get("capabilities", [])) != ["gpu", "utility"]:
+        fail("Ramjet GPU access must be exactly the nvidia utility capability")
     if set(lb.get("networks", {})) != {
         "qwen-engine",
         "glm-engine",
-        "machineview-host",
         "kev-engine",
     }:
         fail("Ramjet external network set drift")

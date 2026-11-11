@@ -5211,9 +5211,15 @@ mod tests {
         for credential in [
             None,
             Some(("authorization", "Bearer wrong".to_owned())),
+            // Flip the last character; a fixed replacement equals the real
+            // secret whenever the random secret already ends with it.
             Some((
                 "authorization",
-                format!("Bearer {}0", &secret[..secret.len() - 1]),
+                format!(
+                    "Bearer {}{}",
+                    &secret[..secret.len() - 1],
+                    if secret.ends_with('0') { '1' } else { '0' }
+                ),
             )),
         ] {
             let response = proxy.serve(send(credential)).await;
