@@ -22,7 +22,9 @@ x-glm-engine: &glm-engine
     ai.ramjet.runtime.swiglu-clamp-patch-sha256: b6bf7c99f3094c927100c0c933daa63a80ef9cffab44092f3199e2134dbfc0b9
     ai.ramjet.runtime.pcie-ipc-chunked-patch-sha256: 91c4721f27d34dc153935ca61768fbe34c2256335aa940a25442caf5ab11d71b
   entrypoint: ["sglang"]
-  restart: "no"
+  # Serving replicas must survive a host reboot. A replica stopped on purpose
+  # (docker stop, e.g. d/e) stays stopped across reboots under this policy.
+  restart: unless-stopped
   init: true
   ipc: host
   shm_size: 64gb
