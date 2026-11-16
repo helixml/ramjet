@@ -1,5 +1,172 @@
 # node06 experiment journal
 
+## 2026-11-09 — Reproducing 0xSero's GLM-5.3-Flash TP4 tweet: KV and prefill reproduce, decode is 2.5x short; node06 clock throttle found and lifted
+
+**Target.** 0xSero, 2026-11-08: GLM-5.3-Flash on 4x RTX PRO 6000, "Karmic Kraken
+vLLM, TP4, NVIDIA NVFP4 + online MXFP8 attention, MTP k=3, 300 W per card":
+337 tok/s c1 code (typical ~320), 1,838 tok/s at 32 users (57/user), 11.7K
+tok/s prefill at 30K and 116K, 30.6M KV tokens with NVFP4 KV + DCP4.
+
+**Shape.** `ghcr.io/local-inference-lab/vllm@sha256:bc48d33e…`
+(`karmic-kraken-beta` = 20261020, vLLM `0.1.dev21836+g6d66eed35`), image
+launcher `PROFILE=glm53-flash HARDWARE_PROFILE=rtx-pro-6000-pcie TP=4
+CHECKPOINT=original`, `--mode mtp --draft-tokens 3`. Checkpoint
+`nvidia/GLM-5.3-Flash-NVFP4@1d00738646` (10-28 expert refresh; downloaded
+in ~25 min to `/prod/models/nvidia/`). GPUs 0-3 (uncensored GLM stopped at
+12:02Z by request), container `glm53-kk` on `127.0.0.1:8070`, LB and b/c
+untouched. Launcher: `/home/luke/inference/glm53-kk/run.sh`. Client
+`bench/glm53_kexp/kbench.py` (fixed coding prompts, `ignore_eos`, cold
+salted prefill), one `node06_gpu_guard.py` run per cell.
+
+Three adaptations were required, none in the tweet:
+- `VLLM_GLM53_ONLINE_DENSE_MXFP8` no longer exists in this image. Online MXFP8
+  is `--quantization-config '{"targets":{"re:.*\\.self_attn\\.(?!indexer\\.weights_proj).*":"mxfp8"}}'`;
+  a plain `{"linear":...}` fails because NVIDIA already stores the dense MLP
+  in NVFP4. It converted 170 KDA projections (34 layers x 5); the 11 MLA
+  layers' projections stayed BF16.
+- The 09-29 NVIDIA revision fix declares MTP layer 45 BF16; the profile's
+  draft `moe_backend: marlin` rejects unquantized MoE, so the draft runs on
+  `triton` BF16. The pre-fix revision `423acf37` fails MTP load with a
+  256-vs-512 shape mismatch.
+- node06 ran `node06-gpu-throttle.service` (created 2026-09-07, enabled,
+  re-applied at the 11-05 reboot): `nvidia-smi -lgc 180,1500` and `-pl 450` on
+  all eight GPUs, i.e. SM clocks at 1,500 of 2,430 MHz with no throttle reason
+  reported. Stopped at 14:01Z on operator request (servers have moved); its
+  `ExecStop` `-rp` is not a valid nvidia-smi option, so power was reset by hand
+  to 600 W. The unit is still enabled and will reapply on reboot. Production
+  b/c ran under this cap from 11-05 to 11-09.
+
+| cell (TP4, DCP4, NVFP4 KV, MTP3 unless noted) | 0xSero | 1,500 MHz / 450 W | 2,430 MHz / 600 W |
+|---|---:|---:|---:|
+| KV capacity (startup log) | 30.6M | 32.2M | 32.2M |
+| decode c1, t=1, 1,024 out | 337 (typ. ~320) | 111 | 131 (21.4 ms/step, 2.82 tok/step) |
+| decode c1, t=0 | — | — | 135 (21.3 ms/step, 2.90 tok/step) |
+| decode c32 aggregate, 64 x 512 out, t=1 / t=0 | 1,838 (57/user) | — | 926 / 1,033 (41-43/user; TTFT p50 4.8 / 3.3 s) |
+| prefill 35K / 132K tokens, cold | 11.7K | — | 11,187 / 11,167 tok/s |
+| controls: MTP3, DCP1 + FP8 KV (6.1M KV), c1 t=1 | — | 93 (29.7 ms/step) | — |
+| controls: no speculation, c1 t=0 (38.6M KV) | — | 68 | 85 (11.7 ms/token) |
+
+Cache hits: all decode prompts are distinct and prefill cells report 0 cached
+tokens (response usage). Correctness smoke (17x23) passed on every config.
+
+**Verdict.** KV capacity and prefill reproduce. Decode does not: the target
+alone needs 11.7 ms per token at full clocks, so even four accepted tokens per
+step cannot reach 337 tok/s, and the BF16 triton draft adds ~9.5 ms per verify
+step. LIL's own TP4 MTP3 reference (their QAD checkpoint, DCP1, FP8 KV, Max-Q
+with VRAM +6000) is 281 tok/s at 112 steps/s. Unresolved: whether this box
+reaches LIL's number on LIL's checkpoint (separates host/topology from
+checkpoint/draft), and how 0xSero's draft ran quantized on the BF16-MTP
+revision. GPUs 0-3 are PCIe `NODE` (no switch), B12X one-shot all-reduce in
+use. The guard aborted long runs on `telemetry_unavailable` (nvidia-smi misses
+its 2 s deadline three times in a row under load); per-cell guard runs avoid
+it. Raw results and thermal journals:
+`/home/luke/inference/glm53-kk/.experiments/` (`r1`-`r5`).
+
+### Follow-up: the B12X one-shot all-reduce was the decode gap
+
+**Host control.** LIL's own stock config on their checkpoint
+(`local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD@dec48abd`, DCP1, FP8
+KV, MTP3) measured **122 tok/s c1 (23.9 ms/step)** here against LIL's
+published 281 (~9 ms/step). The gap was the host, not the NVIDIA checkpoint.
+That checkpoint's cold start took 57 min. Per-layer FP4-CSF scale preparation
+is single-threaded CPU work, 40-60 s per layer per rank. Ranks drift more than
+10 min apart and trip NCCL's 600 s watchdog unless
+`--distributed-timeout-seconds 3600` is passed.
+
+**Ruled out.** CPU: busy engine cores at 4.05 GHz, package 0 at 107/150 W,
+EngineCore at about 2% CPU. Interconnect bandwidth: 4-GPU NCCL all-reduce at
+12-196 KB takes 13-29 us; P2P copies run at 42 GB/s with 13 us latency on
+Gen5 x16; GPUs 0-3 are `NODE` (separate root ports, no switch).
+
+**Torch profile, c1 MTP3, 21.6 ms/step.** `b12xcommpcie_oneshot` averaged
+**99.9 us** per call (9,218 calls, 29% of GPU time), against 13 us for NCCL at
+the same size. The one-shot kernel loads peer memory directly, and P2P reads
+through node06's root complex are slow. The PDL-launched
+`b12xnormmhc MHCPostPre` that follows averaged 98.6 us (26%); it is
+spin-waiting on the all-reduce.
+
+**Fix: `VLLM_ENABLE_PCIE_ALLREDUCE=0`** (NCCL fallback; the
+`rtx-pro-6000-pcie` hardware profile sets it to 1). mHC dropped to 3.8 us.
+
+| config (NVIDIA `1d00738646`, online MXFP8 KDA, MTP3 with MXFP8 draft experts on marlin, full clocks) | KV tokens | c1 t=1 | c32 aggregate t=1 (per user) | prefill 35K / 132K |
+|---|---:|---:|---:|---:|
+| DCP4, NVFP4 KV, B12X all-reduce (tweet config) | 32.2M | 131 | 926 (41.7) | 11.2K / 11.2K |
+| DCP4, NVFP4 KV, NCCL | 33.5M | 225 (12.7 ms/step) | 1,008 (43.6) | 7.7K* / 11.2K |
+| **DCP1, NVFP4 KV, NCCL** | **10.4M** | **250 (10.9 ms/step)** | **1,256 (51.5)** | **11.9K / 11.9K** |
+| DCP1, NVFP4 KV, FlashInfer PCIe IPC all-reduce | 10.4M | 245 | 1,292 (52.8) | — |
+| DCP1, NVFP4 KV, NCCL, W4A4 experts (`EXPERT_ACTIVATIONS=fp4`) | — | 252 | 1,293 (51.9) | — |
+| DCP1, NVFP4 KV, NCCL, no speculation | 11.9M | 144 | 877 (34.7) | — |
+| DCP1, NVFP4 KV, NCCL, MTP4 | fails graph capture (128 vs 130 shape) | | | |
+
+| **LIL QAD CSF checkpoint, DCP1, NVFP4 KV, NCCL** (stock LIL draft) | **10.9M** | **270 (10.6 ms/step)** | **1,295 (53.6); t=0 1,333 (55.4)** | **10.6K / 11.9K** |
+
+\* Measured straight after the c32 burst; likely noise.
+
+**Verdict.** Best on node06: LIL's QAD CSF checkpoint at TP4 with MTP3, DCP1,
+NVFP4 KV and `VLLM_ENABLE_PCIE_ALLREDUCE=0`. Against the tweet (337 c1,
+1,838 at 32 users, 11.7K prefill, 30.6M KV) that is 80% of c1, about 72% of
+c32 aggregate (93-97% of his 57 tok/s per user once our c32 cell's prefill
+burst is excluded), matched prefill, and a third of the KV. The tweet's KV
+needs DCP4, which costs about 18% of c32 throughput here. Remaining
+differences we cannot close in config: LIL measured on Max-Q cards with
+VRAM +6000, and its one-shot all-reduce suits PCIe-switch hosts. The CSF
+checkpoint costs a 57 min cold start (single-threaded scale preparation on
+this CPU) against about 9 min for NVIDIA's; the NVIDIA checkpoint is 7% slower
+at c1 and 3% slower at c32. No quality comparison has been run yet.
+Production GLM is still SGLang TP2 b/c; nothing here is deployed.
+
+### TP4 concurrency curve and the LIL TP2 recipe vs production SGLang TP2 (2026-11-10)
+
+TP4 best config (LIL CSF, DCP1, NVFP4 KV, NCCL), t=1, 1,024 out, aggregate
+(per user, TTFT p50): c1 257 (270, 0.17 s); c4 486 (136, 0.53 s); c8 642 (91,
+1.05 s); c16 919 (67, 1.89 s); c32 1,295 (54, 2.4 s). LIL's table gives c8
+897.6, so this is 72% of it.
+
+The LIL TP2 recipe (`PRESET=glm53-tp2`, printed with `--print-command`;
+checkpoint revision `0a0417631b`, 177 GB) is TP2/DCP2, MTP3 with B12X draft
+experts, 8 slots and a fixed 7.65 GB FP8 KV per GPU. Two things were needed:
+- With `VLLM_ENABLE_PCIE_ALLREDUCE=0` at TP2, vLLM's own custom all-reduce
+  takes over and crashes graph capture (`custom_all_reduce.cuh:164 'invalid
+  argument'`). `--disable-custom-all-reduce` forces NCCL.
+- Two TP2 LIL engines loading at once beside production b/c pushed host
+  available memory to 2.7 GB with swap full. The stock-B12X engine was stopped
+  to protect production, so that variant is unmeasured at TP2.
+
+Cold start was ~55 min. Same-day A/B, full clocks, GPUs 2-3 (LIL) vs GPUs 0-1
+(`glm53_kexp`, the isolated production-config SGLang v0.4.3 replica: EAGLE
+adaptive, chunked PCIe IPC, W8A16 TileLang):
+
+| per TP2 replica | SGLang production config | LIL TP2 + NCCL |
+|---|---:|---:|
+| KV tokens | 500K | 1.84M |
+| c1 t=0, 512 out (per req / aggregate) | **201 / 196** | 186 / 170 |
+| c4 t=0, 512 out aggregate (TTFT p50) | **395 (108 ms)** | 271 (1.42 s) |
+| c1 t=1, 1,024 out | 173 | 172 |
+| c4 t=1 aggregate (TTFT p50) | **380 (107 ms)** | 288 (1.83 s) |
+| c8 t=1 aggregate (TTFT p50) | 367 (11.0 s; `max-running-requests=4`) | **418 (2.26 s)** |
+| prefill 35K / 132K | 8.6K / 8.4K | **9.7K / 8.6K** |
+
+The same SGLang config measured 154.7 c1 and 320 c4 on 10-22, under the
+1,500 MHz clock cap. Lifting the throttle is worth about +30% / +23% to
+production decode by itself.
+
+**Verdict.** Not a production upgrade. Per GPU pair, SGLang wins c1 and c4
+decode and has 13-17x lower TTFT under concurrency. LIL TP2 wins only beyond
+SGLang's four running slots, plus prefill (+13% short, +2% long) and KV
+(3.7x). On four GPUs, LIL TP4 is the latency option (270 c1 vs 201) but
+loses throughput to two SGLang TP2 replicas (c8 total 642 vs ~790). The case
+for any LIL variant is long-context KV capacity. Raw results:
+`.experiments/r16`-`r18` under `/home/luke/inference/glm53-kk/`.
+
+The c32 profile (DCP4, NCCL; ~50 ms/step at 128 tokens per verify) splits as
+W4A16 MoE 51%, NCCL all-reduce 20%, DCP4 all-gather + reduce-scatter 18%.
+DCP1 removes that last share for about a third of the KV capacity, which is
+still 20x one SGLang TP2 replica's 500K pool. Quantizing the BF16 MTP draft
+experts to MXFP8 was decode-neutral (21.4 vs 21.3 ms/step under the slow
+all-reduce) but saves about 1.2M KV tokens. W4A4 gains are within noise and
+LIL reports accuracy cost, so W4A16 stays. Cache hits: every decode prompt is
+distinct; prefill cells had 0 cached tokens (response usage).
+
 ## 2026-10-26 — GLM-5.3-Flash on all eight GPUs, and long-conversation placement
 
 **Trigger.** An opencode user on `qwen3.8-flash-next` (aliased to
