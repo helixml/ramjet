@@ -91,8 +91,8 @@ for name, expected in EXPECTED_ENGINES.items():
         IPC_PATCH.read_bytes()
     ).hexdigest():
         fail(f"{name} does not identify the committed PCIe IPC chunking patch")
-    if service.get("restart") not in ("no", None):
-        fail(f"{name} restart policy must remain disabled")
+    if service.get("restart") != "unless-stopped":
+        fail(f"{name} must come back after a host reboot (restart: unless-stopped)")
     if service.get("cpuset") != NUMA_CPUSET[expected["devices"][0]]:
         fail(f"{name} must remain NUMA-local to GPUs {expected['devices']}")
     if service.get("environment", {}).get("CUDA_VISIBLE_DEVICES") != "0,1":
