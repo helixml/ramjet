@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 — 2026-11-17
 
 - Host telemetry moved into the load balancer. The machine view now samples
   CPU, memory, pressure, disk and network rates, filesystem usage, RAPL CPU
