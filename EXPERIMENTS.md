@@ -32,8 +32,8 @@ tuned IPC (1.46 ms) beats NCCL P2P (1.66-1.84 ms). The SHM column depends on whe
 the `/dev/shm` pages land (see the 2026-10-22 NUMA entry). The disposable
 container hit the bad case, and node 0 had only 1.3 GB free.
 
-**Change** (on-box `/home/luke/inference/glm53-unc-fp8/docker-compose.yaml`, not in
-this repo; previous file kept as `docker-compose.yaml.bak-20261122-pre-nccl-p2p`;
+**Change** (on-box `/home/luke/inference/glm53-unc-fp8/docker-compose.yaml`,
+now canonical in `deploy/glm53_unc_fp8`; previous file kept as `docker-compose.yaml.bak-20261122-pre-nccl-p2p`;
 rendered diff was exactly these lines): `NCCL_CUMEM_ENABLE=1`,
 `NCCL_P2P_LEVEL=SYS`, `SGLANG_PCIE_IPC_MAX_NUMEL` 786432 → 16384. The IPC
 path now takes only calls of 4 rows or fewer, which are the MTP draft steps.
