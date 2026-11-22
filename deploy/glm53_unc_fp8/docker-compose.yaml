@@ -1,0 +1,136 @@
+# Uncensored GLM-5.3-Flash (orcarouter red-team fine-tune, FP8) TP4 replica on
+# GPUs 0-3, served as glm-5.3-flash-uncensored. Joins the standing
+# glm53_flash_sm120_default network so ds4-loadbalancer reaches it.
+# Canonical copy: deploy/glm53_unc_fp8 in ramjet; node06 runs it from
+# /home/luke/inference/glm53-unc-fp8. See README.md beside this file.
+# Deltas vs the glm53_flash_sm120 file: tp=4, its own cache dir,
+# mem-fraction-static=0.93 (at 0.90 the KV pool sized to 249,152 tokens and
+# rejected ~252k-token agent sessions), hicache-size=2 (host RAM headroom),
+# and NCCL P2P for the all-reduce instead of chunked PCIe IPC.
+name: glm53_unc_fp8
+
+services:
+  glm53-unc-fp8:
+    image: ramjet/glm53-sm120@sha256:899fe8eb0f563b6654125f7b1c3ac7ad497e5c2e02256b30dc8fd7059e957a64
+    pull_policy: never
+    container_name: glm53-unc-fp8
+    restart: unless-stopped
+    init: true
+    ipc: host
+    shm_size: 64gb
+    stop_grace_period: 120s
+    cpuset: "0-11,24-35"
+    labels:
+      ai.ramjet.model.repository: orcarouter/GLM-5.3-Flash-Uncensored-FP8
+      ai.ramjet.model.revision: 0480f690f80e8f4c4ee63edd10dcbea8b7d9e31b
+      ai.ramjet.runtime.repository: ormandj/sglang-glm53-flash-sm120
+      ai.ramjet.runtime.revision: 386684975edf3cbce15c4b12df37908366e2aa8b
+      ai.ramjet.runtime.release: v0.4.3
+    entrypoint: ["sglang"]
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile: {soft: 1048576, hard: 1048576}
+    environment:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "0,1,2,3"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION: "0"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      CUBLAS_WORKSPACE_CONFIG: ":4096:2:16:8"
+      SGLANG_ENABLE_PCIE_IPC_ALLREDUCE: "1"
+      # TP4 all-reduce (2026-11-22 microbench, 4096-wide bf16): NCCL defaults to
+      # the SHM transport here (GPUs meet at a PCIe host bridge) and SGLang
+      # forces NCCL_CUMEM_ENABLE=0, so a 6,144-token prefill all-reduce took
+      # 6.8-20 ms depending on NUMA placement. NCCL P2P with cuMem buffers takes
+      # 2.4 ms, and beats the PCIe IPC one-shot from 6 rows up (24 rows: 29 vs
+      # 53 us), so IPC keeps only <=4-row calls (MTP draft steps).
+      SGLANG_PCIE_IPC_MAX_NUMEL: "16384"
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_P2P_LEVEL: SYS
+      SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION: "1"
+      SGLANG_LM_HEAD_FP8: "1"
+      TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+      TILELANG_CACHE_DIR: /root/.cache/tilelang
+      TRITON_CACHE_DIR: /root/.cache/triton
+      SGLANG_MOE_CONFIG_DIR: /opt/moe-configs
+      CUDA_CACHE_PATH: /root/.cache/nv/ComputeCache
+      SGLANG_KDA_EXTEND_BLOCK_TOKENS: "2048"
+      SGLANG_BCG_RAGGED_SHAPES: "1"
+      SGLANG_BCG_RAGGED_MAX_BS: "1"
+      SGLANG_BCG_SEPARATE_CAPTURE_SESSIONS: "1"
+    command:
+      - serve
+      - --model-path=/models/glm53-unc-fp8
+      - --served-model-name=glm-5.3-flash-uncensored
+      - --tp=4
+      - --enable-multimodal
+      - --warmups=serving_coverage
+      - --image-processor-backend=torchvision
+      - --mm-preprocessing-device=cpu
+      - --moe-runner-backend=auto
+      - --disable-shared-experts-fusion
+      - --disable-custom-all-reduce
+      - --attention-backend=dsa
+      - --linear-attn-backend=triton
+      - --context-length=524288
+      - --max-total-tokens=500000
+      - --kv-cache-dtype=fp8_e4m3
+      - --mem-fraction-static=0.93
+      - --chunked-prefill-size=6144
+      - --max-prefill-tokens=6144
+      - --max-running-requests=4
+      - --max-mamba-cache-size=28
+      - --mamba-ssm-dtype=bfloat16
+      - --mamba-max-states-per-path=2
+      - --enable-hierarchical-cache
+      - --hicache-size=2
+      - --cuda-graph-backend-prefill=breakable
+      - --cuda-graph-bs-prefill
+      - "64"
+      - "128"
+      - --cuda-graph-backend-decode=full
+      - --cuda-graph-bs-decode
+      - "1"
+      - "2"
+      - "3"
+      - "4"
+      - --dsa-prefill-backend=flashinfer_sparse_mla
+      - --dsa-decode-backend=flashinfer_sparse_mla
+      - --speculative-algorithm=EAGLE
+      - --speculative-num-steps=5
+      - --speculative-eagle-topk=1
+      - --speculative-num-draft-tokens=6
+      - --speculative-adaptive
+      - --speculative-adaptive-config=/etc/glm53-adaptive/adaptive.json
+      - --reasoning-parser=glm45
+      - --tool-call-parser=glm47
+      - --enable-metrics
+      - --enable-cache-report
+      - --host=0.0.0.0
+      - --port=8000
+    ports:
+      - "127.0.0.1:8064:8000"
+    volumes:
+      - /prod/models/orcarouter/GLM-5.3-Flash-Uncensored-FP8:/models/glm53-unc-fp8:ro
+      - /prod/engine-cache-sglang-glm53-unc-fp8:/root/.cache
+      - /home/luke/inference/glm53-unc-fp8/moe-configs:/opt/moe-configs:ro
+      - /home/luke/inference/glm53_flash_sm120/glm53-adaptive.json:/etc/glm53-adaptive/adaptive.json:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, device_ids: ["0", "1", "2", "3"], capabilities: [gpu]}
+    networks:
+      - glm-engine
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 180
+      start_period: 900s
+networks:
+  glm-engine:
+    external: true
+    name: glm53_flash_sm120_default

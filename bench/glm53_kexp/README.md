@@ -19,7 +19,9 @@ experiment harness, not deployments; the deployment is
 - `trace_*.py`: torch-profiler trace analysis (kernel categories, launch
   shapes, overlap, memcpys, cross-rank skew).
 - `micro/`: all-reduce / P2P microbenchmarks, including the NCCL SHM NUMA
-  reproduction (`ar_enginelike.py`).
+  reproduction (`ar_enginelike.py`). `ar_tp4.py` compares NCCL (transport
+  chosen by the caller's `NCCL_*` environment) with the PCIe IPC one-shot,
+  untuned and tuned, at four ranks.
 - `dev/`: TileLang W8A16 kernel development and the cold-weight GEMM shootout.
 
 GPUs 0-3 belong to `glm53-unc-fp8`; stop it only with the operator's OK and
