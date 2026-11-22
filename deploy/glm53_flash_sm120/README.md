@@ -172,6 +172,9 @@ an isolated replica, cold prefill went from 5,912/5,871/5,843 to
 time per iteration was unchanged. The agent protocol corpora pass 5/5, 7/7,
 4/4. See EXPERIMENTS.md 2026-10-22.
 
+The TP4 uncensored replica uses NCCL P2P instead: at four ranks it beats
+chunked IPC (2.4 vs 4.3 ms). See `deploy/glm53_unc_fp8/README.md`.
+
 ## Prefix-cache capacity
 
 GLM-5.3 is hybrid: resuming a cached prefix needs a saved linear-attention

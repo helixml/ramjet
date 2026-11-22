@@ -42,6 +42,7 @@ DEPLOYMENTS = {
     "qwen38_27b": "sglang",
     "glm53_flash": "sglang",
     "glm53_flash_sm120": "sglang",
+    "glm53_unc_fp8": "sglang",
     "glm53_flash_h200": "sglang",
     "dsv41_flash_h200": "sglang",
     "glm53_h200": "sglang",

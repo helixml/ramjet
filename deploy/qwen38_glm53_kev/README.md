@@ -3,7 +3,8 @@
 **Current shape (2026-10-29).** This Compose project owns only Ramjet, in
 front of three OpenAI-profile upstreams: two stock GLM-5.3-Flash TP2 replicas
 (`glm53sm120-b`, `glm53sm120-c`, GPUs 4-7) and the uncensored GLM TP4 replica
-(`glm53-unc-fp8`, GPUs 0-3, served as `glm-5.3-flash-uncensored`).
+(`glm53-unc-fp8`, GPUs 0-3, served as `glm-5.3-flash-uncensored`; its Compose
+file is `deploy/glm53_unc_fp8`).
 The `qwen3.8-flash-next` alias for the stock GLM pool was removed on
 2026-11-10; requests for that model now get `404`.
 

@@ -1,5 +1,92 @@
 # node06 experiment journal
 
+## 2026-11-22 — Uncensored GLM-5.3-Flash TP4: NCCL P2P all-reduce, prefill +60%
+
+**Trigger.** The `inference-optimisation` skill
+(github.com/sybil-solutions/inference-optimisation-skill) says: read the existing
+log, compute the gap, then pick the lever with the largest gap. The stock TP2
+replicas had already been profiled to roofline (2026-10-22 entries). Their uncensored TP4
+sibling `glm53-unc-fp8` (GPUs 0-3) never received those all-reduce fixes. It is still
+on image `sha256:899fe8eb…` with SGLang's forced `NCCL_CUMEM_ENABLE=0`, and its
+scheduler processes mapped dozens of `/dev/shm/nccl-*` segments, so NCCL ran
+the SHM transport. It served 4,511 requests in the 3.5 days since the
+11-18 reboot (b: 7,190, c: 5,660), with the largest prompts (167k tokens on
+average against 87k on b). Its TTFT per uncached prompt token was the worst of the three
+(8,218 s over 17.6M uncached tokens, about 2.1k tok/s, against about 3.4k on b).
+
+**Microbench** (`bench/glm53_kexp/micro/ar_tp4.py`, disposable container on
+the same image, GPUs 0-3, NUMA-0 cpuset, engines idle; bf16 × 4096, median of 3):
+
+| rows | NCCL SHM, cuMem off (as deployed) | NCCL SHM, cuMem on | NCCL P2P (`P2P_LEVEL=SYS`, cuMem on) | PCIe IPC untuned / tuned |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 21.8 µs | 19.0 | 22.4 | 15.2-16.4 / 14.0-15.8 |
+| 6 | 19.7 | 19.9 | 19.0 | 24.0 / 31-74 |
+| 24 | 146.1 | 30.4 | **29.1** | 53.0 / 32-45 |
+| 192 | 237.1 | 121.4 | **94.5** | 144-150 / 132-136 |
+| 1,024 | 3,035 | 960 | **410** | 787-794 / 707-724 |
+| 6,144 | 20,122 | 6,761 | **2,389** | 4,610-4,705 / 4,331-4,409 (192-row chunks) |
+
+At four ranks the IPC one-shot reads three peers across the root complex, and
+loses to NCCL P2P from 6 rows up. This is the opposite of TP2, where chunked
+tuned IPC (1.46 ms) beats NCCL P2P (1.66-1.84 ms). The SHM column depends on where
+the `/dev/shm` pages land (see the 2026-10-22 NUMA entry). The disposable
+container hit the bad case, and node 0 had only 1.3 GB free.
+
+**Change** (on-box `/home/luke/inference/glm53-unc-fp8/docker-compose.yaml`, not in
+this repo; previous file kept as `docker-compose.yaml.bak-20261122-pre-nccl-p2p`;
+rendered diff was exactly these lines): `NCCL_CUMEM_ENABLE=1`,
+`NCCL_P2P_LEVEL=SYS`, `SGLANG_PCIE_IPC_MAX_NUMEL` 786432 → 16384. The IPC
+path now takes only calls of 4 rows or fewer, which are the MTP draft steps.
+The replica was recreated at 05:13:38Z under the deployment lock, after a check
+that it had 0 running requests and about 3 real requests in the prior 10 minutes. It
+was healthy at 05:35:27Z (21.6 min, page cache cold). The LB was not touched, and
+`ramjet_upstream_up` returned to 1. No `/dev/shm/nccl` mappings remain. The KV
+pool is unchanged (`max_total_num_tokens=499968`) and 9.99 GB was free after
+init.
+
+**Result** (`bench/glm53_kexp/kbench.py`, direct to `:8064`, under
+`node06_gpu_guard.py`, fresh salts, cold prefill with 0 cached tokens from
+response usage, intake air 30C). Shape: orcarouter GLM-5.3-Flash-Uncensored-FP8
+`0480f690`, SGLang v0.4.3 (ormandj) `899fe8eb`, TP4 on 4× RTX PRO 6000
+Blackwell Server Edition at 600 W and full clocks, EAGLE adaptive 5/1/6.
+Raw files are in `/home/luke/inference/glm53-unc-fp8/.experiments/20261122-allreduce/`.
+
+| cell | before (SHM) | after (P2P) | change |
+| --- | ---: | ---: | ---: |
+| prefill 9.3k tokens: tok/s (TTFT) | 6,204 (1.51 s) | 9,885 (0.95 s) | **+59%** |
+| prefill 37k tokens | 6,161 (6.05 s) | 10,181 (3.66 s) | **+65%** |
+| prefill 149k tokens | not measured | 10,116 (14.7 s) | vs about 6,400 on a TP2 replica |
+| decode c1: per-request tok/s, ms/iteration (tokens/verify) | 198.5, 14.77 (2.94), **n=1** | 195.5 median, 15.56 (3.06), n=4 | flat; see below |
+| decode c4: aggregate tok/s, ms/iteration (tokens/verify) | 388.3, 8.22 (3.19), n=4 | 415.0, 6.85 (2.84), n=16 | **+7% aggregate** |
+| TTFT p50, short prompt, c1 / c4 | 85 / 191 ms | 77 / 110 ms | |
+
+Cache hits are not applicable here, because every cell is cold by construction. On live traffic,
+96-98% of prompt tokens on this replica come from cache (engine-native
+`cached_tokens_total`). Prefill speed therefore matters for the cache-miss turns and for
+the first turn of each conversation.
+
+The c1 decode iteration may be about 5% slower, from 14.8 to 15.6 ms. The baseline is a single
+256-token request, so this is inside noise. A real 6-row verify call is now on NCCL
+P2P, which took 19.0 µs against 24.0 µs for IPC in the microbench. In the engine,
+NCCL's kernels may compete with compute for SMs where the IPC one-shot did not. If
+a future A/B confirms a c1 loss, raise the IPC cap to 6 rows
+(`SGLANG_PCIE_IPC_MAX_NUMEL=24576`) and keep P2P for everything larger.
+
+**Correctness** (`agentbench.py`, deterministic, c1, direct engine, on the
+new configuration): v1 5/5, v2_sessions 7/7, and v2_deep_context 4/4 protocol-valid,
+including the 256k and 512k needle depth ladders. NCCL P2P reduces in a different
+order than SHM, so outputs are not claimed to be bit-identical. The microbench max error
+was the same as the SHM path (≤0.0156 on bf16 inputs of magnitude about 0.1).
+
+**Not done.** No interleaved control. Each configuration change costs a 21-minute
+cold start of the only uncensored replica, so the baseline is one pass before the
+restart. Prefill moved far outside the noise, but decode did not. The stock TP2 replicas
+are unchanged. Chunked tuned IPC already beats NCCL P2P at two ranks.
+
+**Rollback.** `cp docker-compose.yaml.bak-20261122-pre-nccl-p2p
+docker-compose.yaml`, then `flock /run/lock/ramjet-node06-deployment.lock docker
+compose up -d glm53-unc-fp8` in that directory. This costs about 21 minutes without the uncensored model.
+
 ## 2026-10-26 — GLM-5.3-Flash on all eight GPUs, and long-conversation placement
 
 **Trigger.** An opencode user on `qwen3.8-flash-next` (aliased to
