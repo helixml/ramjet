@@ -27,8 +27,11 @@
 //!   moved to the best-ranked serving replica where it fits. When none fits,
 //!   ordinary routing stands.
 //!
-//! A conversation is identified by its fingerprint chain: a later turn whose
-//! chain shares at least half of a recorded chain is the same conversation.
+//! A conversation is identified by its fingerprint chain: a later turn is the
+//! same conversation when its chain is at least as long as the recorded one
+//! and repeats all of it except a small tail (the recorded turn's partial last
+//! block and generation prompt). A shared system prompt alone never aliases
+//! two conversations, and a shorter prompt never inherits a longer one's size.
 //! Only fixed outcome labels reach the journal and metrics.
 
 use std::time::{Duration, Instant};
@@ -45,6 +48,12 @@ const MAX_RESIDENTS: usize = 16;
 /// Initial tokens per fingerprint block before the first long completion
 /// calibrates it: 2 KiB canonical blocks at about four bytes per token.
 const DEFAULT_TOKENS_PER_BLOCK: f64 = 512.0;
+
+/// Blocks at the end of a recorded chain that a continuation may rewrite: the
+/// partial last block and the generation prompt that the next turn replaces
+/// with the assistant's reply. Longer chains tolerate proportionally more.
+const MIN_CONTINUATION_SLACK_BLOCKS: usize = 2;
+const CONTINUATION_SLACK_DIVISOR: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LongSessionConfig {
@@ -139,20 +148,60 @@ struct Resident {
 
 impl Resident {
     /// Whether a request with `fingerprints` continues this conversation.
+    ///
+    /// A continuation is never shorter than the recorded turn and repeats it
+    /// up to a small tail. Two chains truncated at the router's cap are only
+    /// the same conversation when they agree on almost the whole cap, not
+    /// merely on a long shared system prompt.
     fn continued_by(&self, fingerprints: &[u64]) -> bool {
+        let recorded = self.fingerprints.len();
+        if recorded == 0 || fingerprints.len() < recorded {
+            return false;
+        }
         let shared = self
             .fingerprints
             .iter()
             .zip(fingerprints)
             .take_while(|(left, right)| left == right)
             .count();
-        !self.fingerprints.is_empty() && shared * 2 >= self.fingerprints.len()
+        let slack = (recorded / CONTINUATION_SLACK_DIVISOR).max(MIN_CONTINUATION_SLACK_BLOCKS);
+        shared > 0 && shared.saturating_add(slack) >= recorded
     }
 }
 
 struct State {
     residents: Vec<Vec<Resident>>,
-    tokens_per_block: f64,
+    /// Calibrated tokens per fingerprint block per upstream. Replicas of
+    /// different models tokenize differently, so one model's completions must
+    /// not move another's estimate. `None` is uncalibrated.
+    tokens_per_block: Vec<Option<f64>>,
+    /// Whether an upstream has ever reported a positive cached-token count.
+    /// Until it has, a zero is indistinguishable from an engine that does not
+    /// report prefix-cache telemetry and is not evidence of a miss.
+    cache_reported: Vec<bool>,
+}
+
+impl State {
+    fn prune_expired(&mut self, now: Instant, ttl: Duration) {
+        for residents in &mut self.residents {
+            residents.retain(|resident| now.saturating_duration_since(resident.last_served) <= ttl);
+        }
+    }
+
+    /// Tokens per block for a request that may be served by `candidates`,
+    /// which the proxy has already restricted to one model's replicas: the
+    /// mean of their calibrations, or the default before any calibrates.
+    fn tokens_per_block(&self, candidates: &[usize]) -> f64 {
+        let (sum, count) = candidates
+            .iter()
+            .filter_map(|&upstream| self.tokens_per_block.get(upstream).copied().flatten())
+            .fold((0.0, 0_u32), |(sum, count), value| (sum + value, count + 1));
+        if count == 0 {
+            DEFAULT_TOKENS_PER_BLOCK
+        } else {
+            sum / f64::from(count)
+        }
+    }
 }
 
 pub struct LongSessions {
@@ -180,7 +229,8 @@ impl LongSessions {
             max_blocks,
             state: Mutex::new(State {
                 residents: (0..upstreams).map(|_| Vec::new()).collect(),
-                tokens_per_block: DEFAULT_TOKENS_PER_BLOCK,
+                tokens_per_block: vec![None; upstreams],
+                cache_reported: vec![false; upstreams],
             }),
         }
     }
@@ -200,10 +250,7 @@ impl LongSessions {
             return LongSessionObservation::off();
         }
         let mut state = self.state.lock();
-        let ttl = self.config.ttl;
-        for residents in &mut state.residents {
-            residents.retain(|resident| now.saturating_duration_since(resident.last_served) <= ttl);
-        }
+        state.prune_expired(now, self.config.ttl);
         // A continued conversation is at least as long as its recorded turn.
         let recorded = state
             .residents
@@ -218,7 +265,8 @@ impl LongSessions {
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss
         )]
-        let estimated = recorded.max((fingerprints.len() as f64 * state.tokens_per_block) as u64);
+        let estimated = recorded
+            .max((fingerprints.len() as f64 * state.tokens_per_block(&decision.candidates)) as u64);
         let observation = |outcome: LongSessionOutcome| LongSessionObservation {
             outcome: outcome.label(),
             estimated_ktokens: estimated.div_ceil(1000),
@@ -287,16 +335,25 @@ impl LongSessions {
         if upstream >= state.residents.len() {
             return Vec::new();
         }
+        state.prune_expired(now, self.config.ttl);
+        if cached_tokens.is_some_and(|cached| cached > 0) {
+            state.cache_reported[upstream] = true;
+        }
         if fingerprints.len() < self.max_blocks {
             #[allow(clippy::cast_precision_loss)]
             let observed = prompt as f64 / fingerprints.len() as f64;
             if prompt >= self.config.threshold_tokens && observed.is_finite() && observed > 0.0 {
-                state.tokens_per_block = 0.8f64.mul_add(state.tokens_per_block, 0.2 * observed);
+                let calibrated = &mut state.tokens_per_block[upstream];
+                *calibrated = Some(calibrated.map_or(observed, |previous| {
+                    0.8f64.mul_add(previous, 0.2 * observed)
+                }));
             }
         }
         if prompt < self.config.threshold_tokens {
             return Vec::new();
         }
+        // Only an engine known to report prefix-cache hits can report a miss.
+        let reported_cached = cached_tokens.filter(|_| state.cache_reported[upstream]);
         let mut evicted = Vec::new();
         // The conversation now lives here; a copy elsewhere is the LRU's to
         // drop and must not crowd out the replica it left.
@@ -306,15 +363,31 @@ impl LongSessions {
             }
         }
         let residents = &mut state.residents[upstream];
-        let previous = residents
-            .iter()
-            .position(|resident| resident.continued_by(fingerprints))
-            .map(|position| residents.remove(position));
+        // Replace every record of this conversation, not just the first: a
+        // duplicate would count the same KV twice against capacity.
+        let mut previous: Option<Resident> = None;
+        residents.retain_mut(|resident| {
+            if !resident.continued_by(fingerprints) {
+                return true;
+            }
+            if previous
+                .as_ref()
+                .is_none_or(|kept| resident.last_served > kept.last_served)
+            {
+                previous = Some(Resident {
+                    fingerprints: std::mem::take(&mut resident.fingerprints),
+                    tokens: resident.tokens,
+                    last_served: resident.last_served,
+                });
+            }
+            false
+        });
         // A miss for a conversation the model held resident means the replica
         // churned more than the model saw: everything older than its last turn
-        // is gone too.
+        // is gone too. Missing cache telemetry is not a miss.
         if let Some(previous) = &previous
-            && cached_tokens.unwrap_or(0).saturating_mul(2) < previous.tokens
+            && let Some(cached) = reported_cached
+            && cached.saturating_mul(2) < previous.tokens
         {
             let horizon = previous.last_served;
             residents.retain(|resident| {
@@ -592,5 +665,211 @@ mod tests {
         );
         let estimated = observed.estimated_ktokens;
         assert!((125..140).contains(&estimated), "{estimated}");
+    }
+
+    #[test]
+    fn missing_cache_telemetry_never_evicts_residents() {
+        let sessions = LongSessions::new(
+            LongSessionConfig {
+                threshold_tokens: 100_000,
+                capacity_tokens: vec![Some(2_000_000)],
+                ttl: Duration::from_mins(30),
+            },
+            1,
+            1024,
+        );
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let a = chain(1, 25, 600);
+        let b = chain(2, 25, 600);
+        sessions.served(0, &b, Some(300_000), None, at(0));
+        sessions.served(0, &a, Some(300_000), None, at(1));
+        // The engine omits cached_tokens on A's next turn: not a miss.
+        assert!(
+            sessions
+                .served(0, &chain(1, 25, 610), Some(305_000), None, at(2))
+                .is_empty()
+        );
+        assert_eq!(sessions.resident_tokens(), vec![605_000]);
+    }
+
+    #[test]
+    fn zero_cached_tokens_from_an_engine_without_cache_telemetry_is_not_a_miss() {
+        let sessions = LongSessions::new(
+            LongSessionConfig {
+                threshold_tokens: 100_000,
+                capacity_tokens: vec![Some(2_000_000); 2],
+                ttl: Duration::from_mins(30),
+            },
+            2,
+            1024,
+        );
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let a = chain(1, 25, 600);
+        let b = chain(2, 25, 600);
+        sessions.served(0, &b, Some(300_000), Some(0), at(0));
+        sessions.served(0, &a, Some(300_000), Some(0), at(1));
+        // Upstream 0 has never reported a hit; a zero is untrusted.
+        assert!(
+            sessions
+                .served(0, &chain(1, 25, 610), Some(305_000), Some(0), at(2))
+                .is_empty()
+        );
+        assert_eq!(sessions.resident_tokens(), vec![605_000, 0]);
+
+        // Another upstream's hits do not make upstream 0's zeros trusted.
+        sessions.served(1, &chain(3, 25, 400), Some(200_000), Some(50_000), at(3));
+        assert!(
+            sessions
+                .served(0, &chain(1, 25, 620), Some(310_000), Some(0), at(4))
+                .is_empty()
+        );
+
+        // Once upstream 0 reports a hit, a later zero is a real miss.
+        sessions.served(0, &chain(1, 25, 630), Some(315_000), Some(300_000), at(5));
+        let c = chain(4, 25, 600);
+        sessions.served(0, &c, Some(300_000), Some(0), at(6));
+        let evicted = sessions.served(0, &chain(1, 25, 640), Some(320_000), Some(0), at(7));
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].fingerprints, b);
+    }
+
+    #[test]
+    fn a_shorter_prompt_sharing_a_prefix_is_not_the_conversation() {
+        let sessions = sessions(2);
+        let now = Instant::now();
+        let a = chain(1, 25, 700);
+        sessions.served(0, &a, Some(350_000), Some(0), now);
+        // A sub-agent that forks the first 400 blocks of A is a shorter,
+        // distinct prompt: it must not inherit A's 350k size.
+        let fork = a[..400].to_vec();
+        let mut routed = decision(&[0, 1], &[true, true]);
+        let observed = sessions.place(&mut routed, &fork, now);
+        // 400 blocks at A's calibrated 500 tokens per block.
+        assert_eq!(observed.estimated_ktokens, 200);
+        // Nor may serving it replace A's record.
+        sessions.served(0, &fork, Some(100_000), Some(0), now);
+        assert_eq!(sessions.resident_tokens(), vec![450_000, 0]);
+    }
+
+    #[test]
+    fn a_shared_system_prompt_does_not_alias_conversations() {
+        let sessions = sessions(2);
+        let now = Instant::now();
+        // Two conversations sharing a 400-block system prompt, then
+        // diverging; under the old half-shared rule they were one.
+        let a = chain(1, 400, 700);
+        let b = chain(2, 400, 720);
+        sessions.served(0, &a, Some(350_000), Some(0), now);
+        let mut routed = decision(&[0, 1], &[true, true]);
+        assert_eq!(sessions.place(&mut routed, &b, now).outcome, "moved");
+        assert_eq!(routed.candidates[0], 1);
+        sessions.served(1, &b, Some(360_000), Some(0), now);
+        // Serving B elsewhere does not remove A from its own replica.
+        assert_eq!(sessions.resident_tokens(), vec![350_000, 360_000]);
+    }
+
+    #[test]
+    fn truncated_chains_alias_only_when_they_agree_on_the_cap() {
+        let sessions = LongSessions::new(
+            LongSessionConfig {
+                threshold_tokens: 100_000,
+                capacity_tokens: vec![Some(2_000_000); 2],
+                ttl: Duration::from_mins(30),
+            },
+            2,
+            1024,
+        );
+        let now = Instant::now();
+        // Both chains reach the 1024-block cap and share the first 600.
+        let a = chain(1, 600, 1024);
+        let b = chain(2, 600, 1024);
+        sessions.served(0, &a, Some(600_000), Some(0), now);
+        sessions.served(0, &b, Some(650_000), Some(0), now);
+        assert_eq!(sessions.resident_tokens(), vec![1_250_000, 0]);
+        // A's next turn is the same truncated chain.
+        sessions.served(0, &a, Some(610_000), Some(0), now);
+        assert_eq!(sessions.resident_tokens(), vec![1_260_000, 0]);
+    }
+
+    #[test]
+    fn a_continuation_tolerates_a_rewritten_tail() {
+        let sessions = sessions(1);
+        let now = Instant::now();
+        let a = chain(1, 25, 700);
+        sessions.served(0, &a, Some(350_000), Some(0), now);
+        // The next turn rewrites the recorded turn's last block.
+        let mut next = a[..699].to_vec();
+        next.extend(chain(9, 0, 30));
+        sessions.served(0, &next, Some(365_000), Some(0), now);
+        assert_eq!(sessions.resident_tokens(), vec![365_000]);
+    }
+
+    #[test]
+    fn every_duplicate_record_of_a_conversation_is_replaced() {
+        let sessions = LongSessions::new(
+            LongSessionConfig {
+                threshold_tokens: 100_000,
+                capacity_tokens: vec![Some(5_000_000)],
+                ttl: Duration::from_mins(30),
+            },
+            1,
+            1024,
+        );
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let a = chain(1, 25, 600);
+        // Inject two records of A, as an earlier alias could leave.
+        {
+            let mut state = sessions.state.lock();
+            for (tokens, seconds) in [(300_000, 0), (290_000, 1)] {
+                state.residents[0].push(Resident {
+                    fingerprints: a.clone(),
+                    tokens,
+                    last_served: at(seconds),
+                });
+            }
+        }
+        assert_eq!(sessions.resident_tokens(), vec![590_000]);
+        sessions.served(0, &chain(1, 25, 610), Some(305_000), Some(300_000), at(2));
+        assert_eq!(sessions.resident_tokens(), vec![305_000]);
+        assert_eq!(sessions.state.lock().residents[0].len(), 1);
+    }
+
+    #[test]
+    fn served_prunes_expired_residents() {
+        let sessions = sessions(1);
+        let start = Instant::now();
+        sessions.served(0, &chain(1, 25, 700), Some(350_000), Some(0), start);
+        let later = start + Duration::from_secs(1801);
+        // A expired: B fits beside nothing, so neither capacity eviction nor
+        // a stale total reports A.
+        let evicted = sessions.served(0, &chain(2, 25, 700), Some(350_000), Some(0), later);
+        assert!(evicted.is_empty());
+        assert_eq!(sessions.resident_tokens(), vec![350_000]);
+    }
+
+    #[test]
+    fn tokens_per_block_is_calibrated_per_upstream() {
+        let sessions = sessions(3);
+        let now = Instant::now();
+        // Upstream 1 serves a model at 250 tokens per block; upstreams 0 and
+        // 2 serve another model that never completed a long prompt.
+        for id in 0..20 {
+            sessions.served(1, &chain(100 + id, 0, 400), Some(100_000), Some(0), now);
+        }
+        let other_model = sessions.place(
+            &mut decision(&[0, 2], &[true, true, true]),
+            &chain(1, 0, 500),
+            now,
+        );
+        assert_eq!(other_model.estimated_ktokens, 256);
+        let same_model = sessions.place(
+            &mut decision(&[1], &[true, true, true]),
+            &chain(2, 0, 500),
+            now,
+        );
+        assert_eq!(same_model.estimated_ktokens, 125);
     }
 }
