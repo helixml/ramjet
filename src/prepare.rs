@@ -344,6 +344,7 @@ impl PreparedRequest {
         router: &Router,
         endpoint: Endpoint,
         load_floor: usize,
+        eligible: &[bool],
     ) -> (
         Decision,
         SpeculationRouteObservation,
@@ -354,6 +355,7 @@ impl PreparedRequest {
             &self.fingerprints,
             load_floor,
             self.output_limit.speculation_preference(endpoint),
+            eligible,
         )
     }
 }
@@ -375,18 +377,32 @@ fn tokenization_body(endpoint: Endpoint, object: &Map<String, Value>) -> Option<
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
+            // Mirror top-level template inputs into the kwargs only where the
+            // caller left them unset. Overwriting would hide a conflicting
+            // `chat_template_kwargs` value from the local request classifier,
+            // which defers such requests to the engine.
             for key in ["documents", "reasoning_effort"] {
                 if let Some(value) = request
                     .get(key)
                     .filter(|value| !value.is_null() && value.as_str() != Some("auto"))
                 {
-                    template_kwargs.insert(key.to_owned(), value.clone());
+                    template_kwargs
+                        .entry(key.to_owned())
+                        .or_insert_with(|| value.clone());
                 }
             }
+            // An explicit effort implies thinking, unless the caller already
+            // set either thinking switch (an explicit `thinking: false` must
+            // stay off). `none` is not translated into `enable_thinking:
+            // false`: whether a model can disable thinking, and what `none`
+            // means to it, is the model profile's decision, and a synthesized
+            // switch would let an unsupported effort pass its validation.
             if let Some(effort) = request.get("reasoning_effort").and_then(Value::as_str)
+                && effort != "none"
                 && !template_kwargs.contains_key("enable_thinking")
+                && !template_kwargs.contains_key("thinking")
             {
-                template_kwargs.insert("enable_thinking".to_owned(), Value::Bool(effort != "none"));
+                template_kwargs.insert("enable_thinking".to_owned(), Value::Bool(true));
             }
             if !template_kwargs.is_empty() {
                 request.insert(
@@ -540,7 +556,12 @@ mod tests {
         assert_eq!(body["return_token_strs"], false);
         assert_eq!(body["messages"][0]["content"], "hello");
         assert_eq!(body["chat_template_kwargs"]["reasoning_effort"], "none");
-        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+        assert!(
+            body["chat_template_kwargs"]
+                .get("enable_thinking")
+                .is_none(),
+            "`none` must not be translated into a thinking switch"
+        );
         assert_eq!(body["chat_template_kwargs"]["custom"], 7);
     }
 
@@ -831,5 +852,91 @@ mod tests {
 
         let invalid = PreparedRequest::new(Endpoint::Responses, b"not-json", 100_000, &router());
         assert_eq!(invalid.output_limit, OutputLimitObservation::unparseable());
+    }
+
+    fn tokenizer_payload(raw: &[u8]) -> Map<String, Value> {
+        let router = router();
+        let prepared = PreparedRequest::with_tokenizer(Endpoint::Chat, raw, 100_000, &router, true);
+        serde_json::from_slice::<Value>(prepared.tokenizer_body.as_ref().unwrap())
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+
+    fn template_args(payload: &Map<String, Value>) -> std::collections::HashMap<String, Value> {
+        payload["chat_template_kwargs"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    fn qwen() -> &'static dyn crate::model::ModelProfile {
+        crate::model::profile_for("qwen3.8-flash-next").unwrap()
+    }
+
+    #[test]
+    fn tokenizer_payload_keeps_a_conflicting_template_effort_visible() {
+        let payload = tokenizer_payload(
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low","chat_template_kwargs":{"reasoning_effort":"medium"}}"#,
+        );
+        assert_eq!(payload["reasoning_effort"], "low");
+        assert_eq!(
+            payload["chat_template_kwargs"]["reasoning_effort"], "medium",
+            "the caller's kwarg is not overwritten"
+        );
+        // The classifier still sees the conflict and defers to the engine.
+        assert!(crate::model::request_class(qwen(), &payload).is_err());
+
+        // Without a conflict the top-level effort is still mirrored.
+        let payload = tokenizer_payload(
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low"}"#,
+        );
+        assert_eq!(payload["chat_template_kwargs"]["reasoning_effort"], "low");
+        assert_eq!(payload["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(
+            crate::model::request_class(qwen(), &payload).ok(),
+            Some("reasoning_low")
+        );
+    }
+
+    #[test]
+    fn tokenizer_payload_respects_an_explicit_thinking_false() {
+        let payload = tokenizer_payload(
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low","chat_template_kwargs":{"thinking":false}}"#,
+        );
+        let args = payload["chat_template_kwargs"].as_object().unwrap();
+        assert!(
+            !args.contains_key("enable_thinking"),
+            "a synthesized enable_thinking would outrank the caller's thinking: false"
+        );
+        assert_eq!(args["thinking"], false);
+        let mut args = template_args(&payload);
+        qwen().apply_reasoning(&mut args).unwrap();
+        assert_eq!(args.get("enable_thinking"), Some(&Value::Bool(false)));
+
+        // An explicit enable_thinking is never replaced either.
+        let payload = tokenizer_payload(
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low","chat_template_kwargs":{"enable_thinking":false}}"#,
+        );
+        assert_eq!(payload["chat_template_kwargs"]["enable_thinking"], false);
+    }
+
+    #[test]
+    fn tokenizer_payload_does_not_turn_effort_none_into_a_thinking_switch() {
+        let payload = tokenizer_payload(
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}"#,
+        );
+        let args = payload["chat_template_kwargs"].as_object().unwrap();
+        assert_eq!(args["reasoning_effort"], "none");
+        assert!(!args.contains_key("enable_thinking"));
+        // Qwen3.8 has no `none` effort: local tokenization must defer to the
+        // engine rather than render a non-thinking prompt it was never asked
+        // for.
+        let mut args = template_args(&payload);
+        assert!(qwen().apply_reasoning(&mut args).is_err());
+        assert!(crate::model::request_class(qwen(), &payload).is_err());
     }
 }

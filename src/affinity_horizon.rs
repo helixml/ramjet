@@ -31,9 +31,9 @@ use std::{
 
 use serde::Serialize;
 
-/// Bound on retained fill samples per replica. Beyond it the two oldest
-/// samples merge onto the newer timestamp, which can only shorten the
-/// horizon.
+/// Bound on retained fill samples per replica. Beyond it adjacent interior
+/// samples (every one but the oldest) merge pairwise onto the newer
+/// timestamp, which can only shorten a later horizon.
 const MAX_FILL_SAMPLES: usize = 65_536;
 
 /// Bound on run-length age entries recorded per candidate for the journal.
@@ -159,6 +159,15 @@ impl HorizonEstimator {
         }
     }
 
+    /// Retained fill samples, oldest first; empty unless this is a fill model.
+    #[cfg(test)]
+    pub(crate) fn fill_samples(&self) -> Vec<(Instant, u64)> {
+        match self {
+            Self::Fill(fill) => fill.samples.iter().copied().collect(),
+            Self::Unbounded | Self::Static(_) => Vec::new(),
+        }
+    }
+
     /// Account for KV that a completed response newly wrote on this replica.
     pub fn record_fill(&mut self, tokens: u64, now: Instant) {
         if let Self::Fill(fill) = self {
@@ -198,7 +207,17 @@ impl FillHorizon {
         if tokens == 0 {
             return;
         }
-        self.samples.push_back((now, tokens));
+        // The window is ordered by time. A sample stamped earlier than the
+        // newest one is attributed to the newest instant instead, which keeps
+        // the deque sorted and can only shorten the horizon.
+        let now = self
+            .samples
+            .back()
+            .map_or(now, |&(newest, _)| newest.max(now));
+        match self.samples.back_mut() {
+            Some(newest) if newest.0 == now => newest.1 = newest.1.saturating_add(tokens),
+            Some(_) | None => self.samples.push_back((now, tokens)),
+        }
         self.total = self.total.saturating_add(tokens);
         while let Some(&(_, front)) = self.samples.front() {
             if self.total.saturating_sub(front) >= self.capacity_tokens {
@@ -208,13 +227,33 @@ impl FillHorizon {
                 break;
             }
         }
-        while self.samples.len() > MAX_FILL_SAMPLES {
-            if let Some((_, merged)) = self.samples.pop_front()
-                && let Some(front) = self.samples.front_mut()
-            {
-                front.1 = front.1.saturating_add(merged);
-            }
+        if self.samples.len() > MAX_FILL_SAMPLES {
+            self.coarsen();
         }
+    }
+
+    /// Halves the retained samples by merging interior neighbours onto the
+    /// newer timestamp of each pair.
+    ///
+    /// The front is never merged. It is the horizon, and the eviction loop
+    /// must keep popping it as soon as one capacity of newer fill exists;
+    /// folding it into its neighbour instead grows it until the loop can never
+    /// pop it again, after which `total` and the horizon age grow without
+    /// bound. Interior merges leave both `total` and the front unchanged, so
+    /// the eviction invariant `total - front < capacity` still holds.
+    fn coarsen(&mut self) {
+        let Some(front) = self.samples.pop_front() else {
+            return;
+        };
+        let mut coarse = VecDeque::with_capacity(self.samples.len() / 2 + 2);
+        coarse.push_back(front);
+        while let Some((older_at, older)) = self.samples.pop_front() {
+            coarse.push_back(match self.samples.pop_front() {
+                Some((newer_at, newer)) => (newer_at, older.saturating_add(newer)),
+                None => (older_at, older),
+            });
+        }
+        self.samples = coarse;
     }
 
     #[must_use]
@@ -227,8 +266,8 @@ impl FillHorizon {
             .map(|(at, _)| now.saturating_duration_since(*at))
     }
 
-    /// Tokens written since the oldest retained sample; at most one capacity
-    /// plus the newest sample.
+    /// Tokens written since the oldest retained sample; less than one capacity
+    /// plus that oldest sample.
     #[must_use]
     pub const fn tracked_tokens(&self) -> u64 {
         self.total
@@ -406,10 +445,124 @@ mod tests {
         for offset in 0..(MAX_FILL_SAMPLES as u64 + 10) {
             fill.record(1, start + Duration::from_millis(offset));
         }
-        assert_eq!(fill.samples.len(), MAX_FILL_SAMPLES);
+        assert!(fill.samples.len() <= MAX_FILL_SAMPLES);
         assert_eq!(fill.tracked_tokens(), MAX_FILL_SAMPLES as u64 + 10);
-        // Merged tokens moved onto the newer timestamp.
-        assert_eq!(fill.samples.front().unwrap().1, 11);
+        assert_eq!(
+            fill.samples.iter().map(|sample| sample.1).sum::<u64>(),
+            fill.tracked_tokens()
+        );
+        // The oldest sample is the horizon and is never merged away.
+        assert_eq!(fill.samples.front(), Some(&(start, 1)));
+        assert!(
+            fill.samples
+                .iter()
+                .zip(fill.samples.iter().skip(1))
+                .all(|(older, newer)| older.0 < newer.0)
+        );
+    }
+
+    /// Exact horizon by brute force over every sample: the age of the oldest
+    /// sample with less than `capacity` tokens written after it.
+    fn exact_horizon(samples: &[(Instant, u64)], capacity: u64, now: Instant) -> Option<Duration> {
+        let total = samples.iter().map(|sample| sample.1).sum::<u64>();
+        if total < capacity {
+            return None;
+        }
+        let mut newer = 0_u64;
+        let mut oldest = None;
+        for &(at, tokens) in samples.iter().rev() {
+            if newer >= capacity {
+                break;
+            }
+            oldest = Some(at);
+            newer += tokens;
+        }
+        oldest.map(|at| now.saturating_duration_since(at))
+    }
+
+    #[test]
+    fn fill_horizon_stays_bounded_past_the_sample_cap() {
+        // One large fill followed by far more than MAX_FILL_SAMPLES one-token
+        // fills: the regression snowballed the front sample so it was never
+        // evicted, `total` grew without bound, and the horizon froze on the
+        // 65,535th-newest sample instead of one capacity ago.
+        let capacity = 100_000_u64;
+        let start = Instant::now();
+        let mut fill = FillHorizon::new(capacity);
+        let mut history = vec![(start, 2 * capacity)];
+        fill.record(2 * capacity, start);
+        let small = 3 * MAX_FILL_SAMPLES as u64;
+        for offset in 1..=small {
+            let at = start + Duration::from_millis(offset);
+            fill.record(1, at);
+            history.push((at, 1));
+            assert!(fill.samples.len() <= MAX_FILL_SAMPLES);
+            assert!(
+                fill.tracked_tokens() < capacity + fill.samples.front().unwrap().1,
+                "front must stay evictable"
+            );
+        }
+        assert!(fill.tracked_tokens() <= 2 * capacity);
+        let now = start + Duration::from_millis(small + 1);
+        let exact = exact_horizon(&history, capacity, now).unwrap();
+        let modelled = fill.horizon(now).unwrap();
+        // Coarsening may only shorten the horizon, by a few merged samples.
+        assert!(modelled <= exact, "{modelled:?} > {exact:?}");
+        assert!(
+            exact.checked_sub(modelled).unwrap() <= Duration::from_millis(8),
+            "{modelled:?} vs {exact:?}"
+        );
+        // One capacity ago, not the 65,535th-newest sample.
+        assert!(exact >= Duration::from_millis(capacity - 1));
+    }
+
+    #[test]
+    fn fill_horizon_matches_brute_force_across_coarsening() {
+        // About 80,000 samples per capacity, so coarsening runs repeatedly.
+        let capacity = 200_000_u64;
+        let start = Instant::now();
+        let mut fill = FillHorizon::new(capacity);
+        let mut history = Vec::new();
+        let mut seed = 0x9e37_79b9_u64;
+        for offset in 1..=(3 * MAX_FILL_SAMPLES as u64) {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let tokens = 1 + (seed >> 62);
+            let at = start + Duration::from_millis(offset);
+            fill.record(tokens, at);
+            history.push((at, tokens));
+            if offset % 4_099 == 0 {
+                let now = at + Duration::from_millis(1);
+                let exact = exact_horizon(&history, capacity, now);
+                let modelled = fill.horizon(now);
+                assert_eq!(exact.is_some(), modelled.is_some());
+                if let (Some(exact), Some(modelled)) = (exact, modelled) {
+                    assert!(modelled <= exact);
+                    assert!(exact.checked_sub(modelled).unwrap() <= Duration::from_millis(64));
+                }
+            }
+        }
+        assert!(fill.tracked_tokens() < 2 * capacity);
+    }
+
+    #[test]
+    fn fill_horizon_keeps_samples_ordered_when_timestamps_arrive_late() {
+        let start = Instant::now();
+        let mut fill = FillHorizon::new(1_000);
+        fill.record(600, start + secs(10));
+        // Stamped before the newest sample, as a completion that read the
+        // clock before a concurrent one took the router lock would be.
+        fill.record(600, start + secs(5));
+        assert_eq!(fill.samples.len(), 1, "attributed to the newest instant");
+        assert_eq!(fill.samples.front(), Some(&(start + secs(10), 1_200)));
+        // Never longer than what monotone stamping would report.
+        assert_eq!(fill.horizon(start + secs(20)), Some(secs(10)));
+        fill.record(500, start + secs(30));
+        assert!(
+            fill.samples
+                .iter()
+                .zip(fill.samples.iter().skip(1))
+                .all(|(older, newer)| older.0 < newer.0)
+        );
     }
 
     #[test]

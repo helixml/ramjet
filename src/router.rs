@@ -219,10 +219,51 @@ impl Decision {
         self.overlap_blocks = winner.overlap_blocks;
         self.affinity_blocks = winner.affinity_blocks;
         self.load_units = winner.request_load_units;
-        if self.candidates.len() == 1 {
-            self.outcome = Outcome::Single;
-        }
+        self.refresh_scored_outcome();
         true
+    }
+
+    /// Re-derives a score-based outcome after the candidate set shrank, so a
+    /// restriction cannot leave `overlap` on a winner with no overlap, or
+    /// `single` off a sole remaining candidate. Authority outcomes (exact,
+    /// state) are left alone. Candidate state carries no weighted score, so
+    /// `load` versus `rr` compares the score inputs instead.
+    fn refresh_scored_outcome(&mut self) {
+        if !matches!(
+            self.outcome,
+            Outcome::Overlap | Outcome::Load | Outcome::RoundRobin | Outcome::Single
+        ) {
+            return;
+        }
+        let retained = self
+            .candidate_state
+            .iter()
+            .filter(|state| self.candidates.contains(&state.index))
+            .collect::<Vec<_>>();
+        let Some(winner) = retained.first() else {
+            return;
+        };
+        let inputs = |state: &CandidateState| {
+            (
+                state.healthy,
+                state.affinity_blocks,
+                state.load_units,
+                state.request_load_units,
+            )
+        };
+        self.outcome = if self.candidates.len() == 1 {
+            Outcome::Single
+        } else if winner.overlap_blocks > 0 {
+            Outcome::Overlap
+        } else if retained
+            .iter()
+            .skip(1)
+            .any(|state| inputs(state) != inputs(winner))
+        {
+            Outcome::Load
+        } else {
+            Outcome::RoundRobin
+        };
     }
 
     /// Promote a state-owning upstream without bypassing the router's serving
@@ -253,8 +294,13 @@ impl Decision {
         else {
             return false;
         };
-        self.candidates.swap(0, candidate_position);
-        self.candidate_state.swap(0, state_position);
+        // Rotate rather than swap: swapping would demote the router's best
+        // replica to the promoted one's old rank, possibly past the retry
+        // budget, while every other fallback keeps its scored order here.
+        let promoted = self.candidates.remove(candidate_position);
+        self.candidates.insert(0, promoted);
+        let promoted = self.candidate_state.remove(state_position);
+        self.candidate_state.insert(0, promoted);
         for (rank, state) in self.candidate_state.iter_mut().enumerate() {
             state.rank = rank;
         }
@@ -372,47 +418,57 @@ struct Score {
 }
 
 /// Least and greatest overlap among the serving replicas of one peer group.
-/// A group with no serving member reports zero for both; its candidates
-/// cannot win anyway.
+/// A group with no serving member falls back to the members the proxy may
+/// still fail open onto, so fail-open scoring keeps its affinity; a group
+/// with neither reports zero for both.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct PeerOverlap {
     floor: usize,
     lead: usize,
 }
 
-/// One pass over the fleet, so scoring stays linear in the upstream count.
+/// One pass per membership tier, so scoring stays linear in the upstream
+/// count. `serving` and `fail_open` are per-upstream masks.
 fn peer_overlaps(
-    states: &[UpstreamState],
+    serving: &[bool],
+    fail_open: &[bool],
     overlaps: &[usize],
     groups: &[usize],
 ) -> Vec<PeerOverlap> {
     let group = |index: usize| groups.get(index).copied().unwrap_or(0);
-    let mut per_group: Vec<Option<PeerOverlap>> = Vec::new();
-    for (index, (state, &overlap)) in states.iter().zip(overlaps).enumerate() {
-        if !state.serving() {
-            continue;
+    let gather = |members: &[bool]| {
+        let mut per_group: Vec<Option<PeerOverlap>> = Vec::new();
+        for (index, (&member, &overlap)) in members.iter().zip(overlaps).enumerate() {
+            if !member {
+                continue;
+            }
+            let key = group(index);
+            if per_group.len() <= key {
+                per_group.resize(key + 1, None);
+            }
+            per_group[key] = Some(per_group[key].map_or(
+                PeerOverlap {
+                    floor: overlap,
+                    lead: overlap,
+                },
+                |known| PeerOverlap {
+                    floor: known.floor.min(overlap),
+                    lead: known.lead.max(overlap),
+                },
+            ));
         }
-        let key = group(index);
-        if per_group.len() <= key {
-            per_group.resize(key + 1, None);
-        }
-        per_group[key] = Some(per_group[key].map_or(
-            PeerOverlap {
-                floor: overlap,
-                lead: overlap,
-            },
-            |known| PeerOverlap {
-                floor: known.floor.min(overlap),
-                lead: known.lead.max(overlap),
-            },
-        ));
-    }
-    (0..states.len())
+        per_group
+    };
+    let serving = gather(serving);
+    let fail_open = gather(fail_open);
+    (0..overlaps.len())
         .map(|index| {
-            per_group
-                .get(group(index))
+            let key = group(index);
+            serving
+                .get(key)
                 .copied()
                 .flatten()
+                .or_else(|| fail_open.get(key).copied().flatten())
                 .unwrap_or_default()
         })
         .collect()
@@ -425,10 +481,18 @@ fn peer_overlaps(
 /// cap and hides the session history beyond it. That floor is only useful
 /// while every peer holds the shared prefix: one cold replica in a larger
 /// fleet makes it zero. `Relative` measures from the warmest serving peer
-/// instead, which no cold replica can move: a candidate is credited the
+/// instead, which no cold replica can move.
+///
+/// While the whole group spans at most `cap` blocks (always true for two
+/// replicas, where the trailing one is the floor), a candidate is credited the
 /// leader's capped overlap minus how far it trails the leader, so the
-/// difference between any two candidates is what the lesser would recompute,
-/// capped.
+/// difference between any two candidates is exactly what the lesser would
+/// recompute. A wider spread cannot keep every pairwise difference: the
+/// leader and the coldest peer still differ by exactly `cap`, and every
+/// candidate between them is credited in proportion to its position in that
+/// spread, rounded up. A warm peer that trails the leader by a full cap
+/// therefore still outranks a cold one, rather than both collapsing to zero
+/// and letting spillover from a busy leader recompute the shared prompt.
 fn credited_affinity(
     basis: AffinityBasis,
     overlap: usize,
@@ -438,10 +502,17 @@ fn credited_affinity(
     match basis {
         AffinityBasis::Absolute => overlap.min(cap),
         AffinityBasis::Marginal => overlap.saturating_sub(peers.floor).min(cap),
-        AffinityBasis::Relative => peers
-            .lead
-            .min(cap)
-            .saturating_sub(peers.lead.saturating_sub(overlap).min(cap)),
+        AffinityBasis::Relative => {
+            let lead = peers.lead.max(overlap);
+            let floor = peers.floor.min(overlap);
+            let spread = lead - floor;
+            if spread <= cap {
+                lead.min(cap).saturating_sub(lead - overlap)
+            } else {
+                let credit = (cap as u128 * (overlap - floor) as u128).div_ceil(spread as u128);
+                usize::try_from(credit).unwrap_or(cap).min(cap)
+            }
+        }
     }
 }
 
@@ -518,7 +589,15 @@ fn speculation_route_outcome(
     }
 }
 
-fn decision_from_scores(scores: &[Score], total_blocks: usize, rotation: usize) -> Decision {
+/// `scores` are the eligible candidates in dispatch order and decide the
+/// outcome; `ineligible` follow them only so candidate state keeps one entry
+/// per configured upstream.
+fn decision_from_scores(
+    scores: &[Score],
+    ineligible: &[Score],
+    total_blocks: usize,
+    rotation: usize,
+) -> Decision {
     let winner = &scores[0];
     #[allow(clippy::float_cmp)] // Exact equality is the established routing policy.
     let scores_differ = scores
@@ -536,6 +615,7 @@ fn decision_from_scores(scores: &[Score], total_blocks: usize, rotation: usize) 
     };
     let candidate_state = scores
         .iter()
+        .chain(ineligible)
         .enumerate()
         .map(|(rank, score)| CandidateState {
             index: score.index,
@@ -551,7 +631,11 @@ fn decision_from_scores(scores: &[Score], total_blocks: usize, rotation: usize) 
         })
         .collect();
     Decision {
-        candidates: scores.iter().map(|score| score.index).collect(),
+        candidates: scores
+            .iter()
+            .chain(ineligible)
+            .map(|score| score.index)
+            .collect(),
         candidate_state,
         overlap_blocks: winner.overlap,
         total_blocks,
@@ -625,12 +709,12 @@ impl Router {
 
     pub fn route(&self, body: &[u8]) -> Decision {
         let fingerprints = self.fingerprints(body);
-        self.route_fingerprints(
+        self.route_eligible(
             body.len(),
             &fingerprints,
             1,
             SpeculationPreference::Neutral,
-            true,
+            &[],
             Instant::now(),
         )
         .0
@@ -643,12 +727,12 @@ impl Router {
     pub fn route_with_fingerprints(&self, body: &[u8]) -> (Decision, Vec<u64>) {
         let fingerprints = self.fingerprints(body);
         let decision = self
-            .route_fingerprints(
+            .route_eligible(
                 body.len(),
                 &fingerprints,
                 1,
                 SpeculationPreference::Neutral,
-                true,
+                &[],
                 Instant::now(),
             )
             .0;
@@ -678,12 +762,12 @@ impl Router {
         fingerprints: &[u64],
         now: Instant,
     ) -> Decision {
-        self.route_fingerprints(
+        self.route_eligible(
             body_bytes,
             fingerprints,
             1,
             SpeculationPreference::Neutral,
-            true,
+            &[],
             now,
         )
         .0
@@ -697,12 +781,12 @@ impl Router {
         fingerprints: &[u64],
         now: Instant,
     ) -> (Decision, AffinityHorizonObservation) {
-        let (decision, _, horizon) = self.route_fingerprints(
+        let (decision, _, horizon) = self.route_eligible(
             body_bytes,
             fingerprints,
             1,
             SpeculationPreference::Neutral,
-            true,
+            &[],
             now,
         );
         (decision, horizon)
@@ -715,12 +799,12 @@ impl Router {
         fingerprints: &[u64],
         load_floor: usize,
     ) -> Decision {
-        self.route_fingerprints(
+        self.route_eligible(
             body_bytes,
             fingerprints,
             load_floor,
             SpeculationPreference::Neutral,
-            true,
+            &[],
             Instant::now(),
         )
         .0
@@ -733,40 +817,53 @@ impl Router {
         fingerprints: &[u64],
         preference: SpeculationPreference,
     ) -> (Decision, SpeculationRouteObservation) {
-        let (decision, speculation, _) =
-            self.route_prepared_profiled_with_load_floor(body_bytes, fingerprints, 1, preference);
+        let (decision, speculation, _) = self.route_prepared_profiled_with_load_floor(
+            body_bytes,
+            fingerprints,
+            1,
+            preference,
+            &[],
+        );
         (decision, speculation)
     }
 
+    /// Routes over the `eligible` upstreams (model and API profile owners).
+    ///
+    /// Ineligible replicas still get candidate state, behind every eligible
+    /// one and marked non-serving, but nothing that describes the decision is
+    /// computed from them: the speculation baseline, the horizon observation,
+    /// the outcome, and the peer group a basis is measured against. A mask of
+    /// the wrong length, or one with no eligible upstream, admits every one.
     pub(crate) fn route_prepared_profiled_with_load_floor(
         &self,
         body_bytes: usize,
         fingerprints: &[u64],
         load_floor: usize,
         preference: SpeculationPreference,
+        eligible: &[bool],
     ) -> (
         Decision,
         SpeculationRouteObservation,
         AffinityHorizonObservation,
     ) {
-        self.route_fingerprints(
+        self.route_eligible(
             body_bytes,
             fingerprints,
             load_floor,
             preference,
-            true,
+            eligible,
             Instant::now(),
         )
     }
 
     #[allow(clippy::too_many_lines)] // One locked pass builds both scorings.
-    fn route_fingerprints(
+    pub(crate) fn route_eligible(
         &self,
         body_bytes: usize,
         fingerprints: &[u64],
         load_floor: usize,
         preference: SpeculationPreference,
-        advance_rotation: bool,
+        eligible: &[bool],
         now: Instant,
     ) -> (
         Decision,
@@ -774,11 +871,27 @@ impl Router {
         AffinityHorizonObservation,
     ) {
         let mut inner = self.inner.lock();
-        let next_rotation = inner.rr.wrapping_add(1);
-        if advance_rotation {
-            inner.rr = next_rotation;
-        }
-        let rotation = next_rotation % inner.states.len();
+        inner.rr = inner.rr.wrapping_add(1);
+        let rotation = inner.rr % inner.states.len();
+        let eligible = if eligible.len() == inner.states.len() && eligible.contains(&true) {
+            eligible.to_vec()
+        } else {
+            vec![true; inner.states.len()]
+        };
+        // Who the basis measures against: eligible serving replicas, or, when
+        // none is serving, the eligible replicas fail-open may still use.
+        let serving = inner
+            .states
+            .iter()
+            .zip(&eligible)
+            .map(|(state, &eligible)| eligible && state.serving())
+            .collect::<Vec<_>>();
+        let fail_open = inner
+            .states
+            .iter()
+            .zip(&eligible)
+            .map(|(state, &eligible)| eligible && !state.drained)
+            .collect::<Vec<_>>();
         let horizon_mode = self.config.affinity_horizon.mode;
         let localities = inner
             .states
@@ -808,9 +921,12 @@ impl Router {
             let overlaps = localities.iter().map(overlap_of).collect::<Vec<_>>();
             let peers = match self.config.affinity_basis {
                 AffinityBasis::Absolute => Vec::new(),
-                AffinityBasis::Marginal | AffinityBasis::Relative => {
-                    peer_overlaps(&inner.states, &overlaps, &self.config.affinity_groups)
-                }
+                AffinityBasis::Marginal | AffinityBasis::Relative => peer_overlaps(
+                    &serving,
+                    &fail_open,
+                    &overlaps,
+                    &self.config.affinity_groups,
+                ),
             };
             inner
                 .states
@@ -843,13 +959,17 @@ impl Router {
                         request_load,
                         #[allow(clippy::cast_precision_loss)]
                         weighted: affinity as f64 - self.config.alpha * projected_load as f64,
-                        healthy: state.serving(),
+                        healthy: serving[index],
                         stale: locality.stale_blocks(),
                         horizon_ms: locality.horizon_ms,
                         ages: locality.ages.clone(),
                     }
                 })
                 .collect::<Vec<_>>()
+        };
+        // Eligible scores decide; ineligible ones only keep state cardinality.
+        let split = |scores: Vec<Score>| -> (Vec<Score>, Vec<Score>) {
+            scores.into_iter().partition(|score| eligible[score.index])
         };
         let candidate_count = localities.len();
         let sort = |scores: &mut Vec<Score>, profile_tie_break: bool| {
@@ -866,14 +986,36 @@ impl Router {
             });
         };
         let enforce = horizon_mode == AffinityHorizonMode::Enforce;
-        let mut scores = score(enforce);
+        let (mut scores, mut ineligible) = split(score(enforce));
         sort(&mut scores, false);
+        sort(&mut ineligible, false);
         let horizon_observation = if horizon_mode == AffinityHorizonMode::Off {
             AffinityHorizonObservation::off()
         } else {
-            let mut alternative = score(!enforce);
+            let (mut alternative, _) = split(score(!enforce));
             sort(&mut alternative, false);
-            let outcome = if localities.iter().all(|locality| locality.raw_overlap == 0) {
+            let mut alternative_affinity = vec![0; candidate_count];
+            for score in &alternative {
+                alternative_affinity[score.index] = score.affinity;
+            }
+            let eligible_localities = || {
+                localities
+                    .iter()
+                    .zip(&eligible)
+                    .filter(|(_, eligible)| **eligible)
+                    .map(|(locality, _)| locality)
+            };
+            // Trimmed when the horizon changed what any candidate is credited
+            // under the configured basis, not only its capped raw overlap:
+            // under marginal or relative scoring both overlaps can exceed the
+            // cap while the credited difference to a peer still moves.
+            let trimmed = scores
+                .iter()
+                .any(|score| score.affinity != alternative_affinity[score.index])
+                || eligible_localities().any(|locality| {
+                    locality.fresh_overlap.min(cap) < locality.raw_overlap.min(cap)
+                });
+            let outcome = if eligible_localities().all(|locality| locality.raw_overlap == 0) {
                 AffinityHorizonOutcome::NoOverlap
             } else if scores[0].index != alternative[0].index {
                 if enforce {
@@ -881,10 +1023,7 @@ impl Router {
                 } else {
                     AffinityHorizonOutcome::WouldMove
                 }
-            } else if localities
-                .iter()
-                .any(|locality| locality.fresh_overlap.min(cap) < locality.raw_overlap.min(cap))
-            {
+            } else if trimmed {
                 AffinityHorizonOutcome::Trimmed
             } else {
                 AffinityHorizonOutcome::Fresh
@@ -906,7 +1045,7 @@ impl Router {
         {
             sort(&mut scores, true);
         }
-        let decision = decision_from_scores(&scores, fingerprints.len(), rotation);
+        let decision = decision_from_scores(&scores, &ineligible, fingerprints.len(), rotation);
         (
             decision,
             SpeculationRouteObservation {
@@ -919,7 +1058,7 @@ impl Router {
 
     /// Records a served prefix without any fill accounting.
     pub fn observe(&self, upstream: usize, fingerprints: &[u64]) {
-        self.observe_at(upstream, fingerprints, None, Instant::now());
+        self.observe_locked(upstream, fingerprints, None, None);
     }
 
     /// Records a completed response: the served prefix becomes fresh on this
@@ -931,9 +1070,10 @@ impl Router {
         fingerprints: &[u64],
         new_kv_tokens: Option<u64>,
     ) {
-        self.observe_at(upstream, fingerprints, new_kv_tokens, Instant::now());
+        self.observe_locked(upstream, fingerprints, new_kv_tokens, None);
     }
 
+    #[cfg(test)]
     pub(crate) fn observe_at(
         &self,
         upstream: usize,
@@ -941,7 +1081,22 @@ impl Router {
         new_kv_tokens: Option<u64>,
         now: Instant,
     ) {
+        self.observe_locked(upstream, fingerprints, new_kv_tokens, Some(now));
+    }
+
+    /// `at` of `None` reads the clock only once the router lock is held, so
+    /// concurrent completions stamp the served index and the fill model in
+    /// the order they apply. Reading it before locking let a later writer
+    /// install an older instant over a fresher one.
+    fn observe_locked(
+        &self,
+        upstream: usize,
+        fingerprints: &[u64],
+        new_kv_tokens: Option<u64>,
+        at: Option<Instant>,
+    ) {
         let mut inner = self.inner.lock();
+        let now = at.unwrap_or_else(Instant::now);
         let Some(state) = inner.states.get_mut(upstream) else {
             return;
         };
@@ -1171,12 +1326,19 @@ fn canonical_prompt(body: &[u8], object: Option<&Map<String, Value>>, max_bytes:
     let Some(object) = object else {
         return fallback();
     };
+    let present = |key: &str| object.get(key).is_some_and(|value| !value.is_null());
     let messages = match object.get("messages") {
         None | Some(Value::Null) => None,
         Some(Value::Array(messages)) => Some(messages),
         Some(_) => return fallback(),
     };
-    if messages.is_none() && object.get("system").is_none_or(Value::is_null) {
+    if messages.is_none() && !present("system") {
+        if present("input") || present("instructions") {
+            return canonical_responses_prompt(object, max_bytes);
+        }
+        if present("prompt") {
+            return canonical_completion_prompt(object, max_bytes);
+        }
         return fallback();
     }
     let messages = messages.map(Vec::as_slice).unwrap_or_default();
@@ -1224,6 +1386,62 @@ fn canonical_prompt(body: &[u8], object: Option<&Map<String, Value>>, max_bytes:
     }
     output.truncate(max_bytes);
     output
+}
+
+/// `/v1/responses`: `instructions` render first as the system turn, then the
+/// controls that shape the rendered prompt, then the `input` items in order.
+/// Per-turn fields such as `previous_response_id`, `max_output_tokens`,
+/// `stream`, `temperature` or `metadata` are excluded, and every value is
+/// serialized with sorted keys, so neither they nor key order can move the
+/// prefix.
+fn canonical_responses_prompt(object: &Map<String, Value>, max_bytes: usize) -> Vec<u8> {
+    let mut output = Vec::with_capacity(max_bytes.min(64 << 10));
+    output.extend_from_slice(b"responses\0");
+    append_prompt_text(&mut output, "instructions", object.get("instructions"));
+    for key in [
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "text",
+        "chat_template_kwargs",
+    ] {
+        append_field(&mut output, key, object.get(key));
+    }
+    match object.get("input") {
+        Some(Value::Array(items)) => {
+            for item in items {
+                append_field(&mut output, "item", Some(item));
+            }
+        }
+        input => append_prompt_text(&mut output, "input", input),
+    }
+    output.truncate(max_bytes);
+    output
+}
+
+/// `/v1/completions`: only the prompt itself, so sampling and streaming
+/// options anywhere in the body cannot move the prefix.
+fn canonical_completion_prompt(object: &Map<String, Value>, max_bytes: usize) -> Vec<u8> {
+    let mut output = Vec::with_capacity(max_bytes.min(64 << 10));
+    output.extend_from_slice(b"completion\0");
+    append_prompt_text(&mut output, "prompt", object.get("prompt"));
+    output.truncate(max_bytes);
+    output
+}
+
+/// A string is appended as its raw bytes, so a prompt that grows by appending
+/// keeps every earlier block; anything else is canonical JSON.
+fn append_prompt_text(output: &mut Vec<u8>, key: &str, value: Option<&Value>) {
+    match value {
+        Some(Value::String(text)) => {
+            output.extend_from_slice(key.as_bytes());
+            output.push(0);
+            output.extend_from_slice(text.as_bytes());
+            output.push(0);
+        }
+        value => append_field(output, key, value),
+    }
 }
 
 fn append_message(output: &mut Vec<u8>, message: &Map<String, Value>) {
@@ -2350,5 +2568,479 @@ mod tests {
         let (decision, observation) = router.route_prepared_observed_at(1, &[9], Instant::now());
         assert_eq!(observation.outcome, "no_overlap");
         assert_eq!(decision.outcome, Outcome::RoundRobin);
+    }
+
+    #[test]
+    fn concurrent_completions_stamp_the_index_in_lock_order() {
+        let mut configured = config();
+        configured.affinity_horizon = AffinityHorizonConfig {
+            mode: AffinityHorizonMode::Observe,
+            source: Some(AffinityHorizonSource::Fill {
+                capacity_tokens: vec![Some(u64::MAX), Some(u64::MAX)],
+            }),
+        };
+        let router = Arc::new(Router::new(configured));
+        let threads = (0..8)
+            .map(|_| {
+                let router = Arc::clone(&router);
+                std::thread::spawn(move || {
+                    for _ in 0..2_000 {
+                        router.observe_served(0, &[42], Some(1));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let inner = router.inner.lock();
+        let state = &inner.states[0];
+        let samples = state.horizon.fill_samples();
+        assert!(
+            samples
+                .iter()
+                .zip(samples.iter().skip(1))
+                .all(|(older, newer)| older.0 < newer.0),
+            "fill samples are recorded in time order"
+        );
+        assert_eq!(samples.iter().map(|sample| sample.1).sum::<u64>(), 16_000);
+        // The last writer under the lock holds the newest instant, so the
+        // index can never be left older than the fill model.
+        assert_eq!(
+            state.lru.peek(&42).copied(),
+            samples.last().map(|sample| sample.0)
+        );
+    }
+
+    /// Leader 0 holds a 40-block system prompt plus 32 session blocks, peer 1
+    /// only the system prompt, peer 2 nothing.
+    fn spillover_fleet(basis: AffinityBasis) -> (Arc<Router>, Vec<u64>) {
+        let router = Arc::new(Router::new(fleet(3, basis)));
+        let chain = (1..=72).collect::<Vec<u64>>();
+        router.observe(0, &chain);
+        router.observe(1, &chain[..40]);
+        (router, chain)
+    }
+
+    #[test]
+    fn relative_spillover_prefers_a_warm_peer_over_a_cold_one() {
+        let (router, chain) = spillover_fleet(AffinityBasis::Relative);
+        let _leader = (0..9).map(|_| router.acquire(0, 1)).collect::<Vec<_>>();
+        let _warm = router.acquire(1, 1);
+        let decision = router.route_prepared(1, &chain);
+        assert_eq!(candidate(&decision, 0).affinity_blocks, 32);
+        let warm = candidate(&decision, 1).affinity_blocks;
+        assert!(
+            warm > 4,
+            "the warm peer saves the whole system prompt over a cold one: {warm}"
+        );
+        assert!(warm < 32, "but still trails the leader");
+        assert_eq!(candidate(&decision, 2).affinity_blocks, 0);
+        assert_eq!(
+            decision.candidates[0], 1,
+            "spillover keeps the system prompt warm"
+        );
+        // Leader to coldest is still exactly one cap.
+        assert_eq!(
+            candidate(&decision, 0).affinity_blocks - candidate(&decision, 2).affinity_blocks,
+            32
+        );
+    }
+
+    #[test]
+    fn relative_credit_is_monotone_in_overlap_across_a_wide_spread() {
+        let cap = 32;
+        for lead in [0_usize, 1, 31, 32, 33, 64, 72, 500] {
+            for floor in 0..=lead.min(80) {
+                let peers = PeerOverlap { floor, lead };
+                let mut previous = None;
+                for overlap in floor..=lead {
+                    let credit = credited_affinity(AffinityBasis::Relative, overlap, peers, cap);
+                    assert!(credit <= cap);
+                    if let Some(previous) = previous {
+                        assert!(credit >= previous, "{floor}..{lead} at {overlap}");
+                    }
+                    if overlap > floor && lead > 0 {
+                        assert!(credit > 0, "warmer than the floor at {overlap}");
+                    }
+                    previous = Some(credit);
+                }
+                assert_eq!(
+                    credited_affinity(AffinityBasis::Relative, lead, peers, cap),
+                    lead.min(cap)
+                );
+                if lead - floor <= cap {
+                    // Inside one cap every pairwise difference is exact.
+                    for overlap in floor..=lead {
+                        assert_eq!(
+                            credited_affinity(AffinityBasis::Relative, overlap, peers, cap),
+                            lead.min(cap) - (lead - overlap)
+                        );
+                    }
+                } else {
+                    assert_eq!(
+                        credited_affinity(AffinityBasis::Relative, floor, peers, cap),
+                        0
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fail_open_scoring_keeps_peer_relative_affinity() {
+        for basis in [AffinityBasis::Marginal, AffinityBasis::Relative] {
+            let (router, chain) = spillover_fleet(basis);
+            for upstream in 0..3 {
+                router.set_healthy(upstream, false);
+            }
+            let decision = router.route_prepared(1, &chain);
+            assert_eq!(
+                candidate(&decision, 0).affinity_blocks,
+                32,
+                "{}: fail-open still measures against the fleet",
+                basis.label()
+            );
+            assert_eq!(candidate(&decision, 2).affinity_blocks, 0);
+            assert_eq!(decision.candidates[0], 0, "{}", basis.label());
+            assert_eq!(decision.outcome, Outcome::Overlap);
+        }
+        // A drained replica is never a fail-open target, so it is no peer.
+        let (router, chain) = spillover_fleet(AffinityBasis::Marginal);
+        router.set_drained(2, true);
+        router.set_healthy(0, false);
+        router.set_healthy(1, false);
+        let decision = router.route_prepared(1, &chain);
+        assert_eq!(
+            candidate(&decision, 0).affinity_blocks,
+            32,
+            "floor comes from the 40-block peer, not the drained cold one"
+        );
+    }
+
+    fn route_eligible_at(
+        router: &Router,
+        fingerprints: &[u64],
+        preference: SpeculationPreference,
+        eligible: &[bool],
+    ) -> (
+        Decision,
+        SpeculationRouteObservation,
+        AffinityHorizonObservation,
+    ) {
+        router.route_prepared_profiled_with_load_floor(1, fingerprints, 1, preference, eligible)
+    }
+
+    #[test]
+    fn an_ineligible_replica_does_not_decide_outcome_or_order() {
+        let router = Router::new(fleet(3, AffinityBasis::Absolute));
+        let chain = (1..=20).collect::<Vec<u64>>();
+        router.observe(0, &chain);
+        let (mut decision, _, _) = route_eligible_at(
+            &router,
+            &chain,
+            SpeculationPreference::Neutral,
+            &[false, true, true],
+        );
+        assert_ne!(decision.candidates[0], 0);
+        assert_eq!(decision.overlap_blocks, 0);
+        assert_eq!(
+            decision.outcome,
+            Outcome::RoundRobin,
+            "no eligible replica has overlap"
+        );
+        let last = decision.candidate_state.last().unwrap();
+        assert_eq!(last.index, 0);
+        assert!(!last.healthy);
+        assert_eq!(decision.candidate_state.len(), 3);
+        assert!(decision.restrict_to(&[false, true, true]));
+        assert_eq!(decision.candidates.len(), 2);
+        assert_eq!(decision.outcome, Outcome::RoundRobin);
+
+        // Without a mask the same request is an overlap decision on 0.
+        let decision = router.route_prepared(1, &chain);
+        assert_eq!(decision.candidates[0], 0);
+        assert_eq!(decision.outcome, Outcome::Overlap);
+    }
+
+    #[test]
+    fn an_ineligible_replica_does_not_set_the_speculation_baseline() {
+        let mut configured = fleet(3, AffinityBasis::Absolute);
+        configured.speculation_mode = SpeculationRouteMode::Shadow;
+        configured.speculation_profiles = vec![
+            SpeculationProfile::Mtp,
+            SpeculationProfile::Standard,
+            SpeculationProfile::Standard,
+        ];
+        let router = Router::new(configured);
+        let chain = (1..=20).collect::<Vec<u64>>();
+        router.observe(0, &chain);
+        let (_, observation, _) =
+            route_eligible_at(&router, &chain, SpeculationPreference::Mtp, &[true; 3]);
+        assert_eq!(observation.outcome, SpeculationRouteOutcome::Match);
+        let (_, observation, _) = route_eligible_at(
+            &router,
+            &chain,
+            SpeculationPreference::Mtp,
+            &[false, true, true],
+        );
+        assert_eq!(
+            observation.outcome,
+            SpeculationRouteOutcome::Unavailable,
+            "the only MTP replica cannot serve this model"
+        );
+    }
+
+    #[test]
+    fn prefer_mode_breaks_ties_among_eligible_replicas_only() {
+        let mut configured = fleet(3, AffinityBasis::Absolute);
+        configured.speculation_mode = SpeculationRouteMode::Prefer;
+        configured.speculation_profiles = vec![
+            SpeculationProfile::Mtp,
+            SpeculationProfile::Standard,
+            SpeculationProfile::Mtp,
+        ];
+        let router = Router::new(configured);
+        let chain = (1..=20).collect::<Vec<u64>>();
+        // Replica 0 is warm but ineligible; 1 and 2 tie.
+        router.observe(0, &chain);
+        for _ in 0..6 {
+            let (decision, observation, _) = route_eligible_at(
+                &router,
+                &chain,
+                SpeculationPreference::Mtp,
+                &[false, true, true],
+            );
+            assert_eq!(decision.candidates[0], 2, "the eligible MTP replica wins");
+            assert!(matches!(
+                observation.outcome,
+                SpeculationRouteOutcome::Match | SpeculationRouteOutcome::Moved
+            ));
+        }
+    }
+
+    fn observed_fleet(basis: AffinityBasis, size: usize) -> Router {
+        let mut configured = fleet(size, basis);
+        configured.affinity_horizon = AffinityHorizonConfig {
+            mode: AffinityHorizonMode::Observe,
+            source: Some(AffinityHorizonSource::Static { seconds: 60 }),
+        };
+        Router::new(configured)
+    }
+
+    #[test]
+    fn horizon_observation_ignores_ineligible_replicas() {
+        let router = observed_fleet(AffinityBasis::Absolute, 3);
+        let chain = (1..=20).collect::<Vec<u64>>();
+        let now = Instant::now();
+        // Only the ineligible replica has served this prefix, long ago.
+        router.observe_at(
+            0,
+            &chain,
+            None,
+            now.checked_sub(Duration::from_mins(10)).unwrap(),
+        );
+        let (_, _, horizon) = router.route_eligible(
+            1,
+            &chain,
+            1,
+            SpeculationPreference::Neutral,
+            &[false, true, true],
+            now,
+        );
+        assert_eq!(horizon.outcome, "no_overlap");
+        let (_, _, horizon) = router.route_eligible(
+            1,
+            &chain,
+            1,
+            SpeculationPreference::Neutral,
+            &[true; 3],
+            now,
+        );
+        assert_eq!(horizon.outcome, "would_move");
+    }
+
+    #[test]
+    fn horizon_trim_is_detected_on_credited_affinity_above_the_cap() {
+        // Both raw and fresh overlap exceed the cap on every replica, so the
+        // capped raw overlap never changes, but the marginal credit does.
+        let router = observed_fleet(AffinityBasis::Marginal, 2);
+        let chain = (1..=60).collect::<Vec<u64>>();
+        let now = Instant::now();
+        router.observe_at(
+            0,
+            &chain,
+            None,
+            now.checked_sub(Duration::from_mins(10)).unwrap(),
+        );
+        router.observe_at(0, &chain[..50], None, now);
+        router.observe_at(1, &chain[..40], None, now);
+        let (decision, horizon) = router.route_prepared_observed_at(1, &chain, now);
+        assert_eq!(decision.candidates[0], 0);
+        assert_eq!(candidate(&decision, 0).stale_blocks, 10);
+        assert_eq!(candidate(&decision, 0).affinity_blocks, 20, "raw credit");
+        assert_eq!(horizon.outcome, "trimmed");
+
+        // Absolute scoring of the same shape is unaffected by the stale tail.
+        let router = observed_fleet(AffinityBasis::Absolute, 2);
+        router.observe_at(
+            0,
+            &chain,
+            None,
+            now.checked_sub(Duration::from_mins(10)).unwrap(),
+        );
+        router.observe_at(0, &chain[..50], None, now);
+        router.observe_at(1, &chain[..40], None, now);
+        let (_, horizon) = router.route_prepared_observed_at(1, &chain, now);
+        assert_eq!(horizon.outcome, "fresh");
+    }
+
+    #[test]
+    fn promote_keeps_the_remaining_fallback_order() {
+        let router = Arc::new(Router::new(fleet(5, AffinityBasis::Absolute)));
+        let _loads = (0..5)
+            .flat_map(|upstream| (0..upstream).map(move |_| upstream))
+            .map(|upstream| router.acquire(upstream, 1))
+            .collect::<Vec<_>>();
+        let mut decision = router.route_prepared(1, &[]);
+        assert_eq!(decision.candidates, [0, 1, 2, 3, 4]);
+        assert!(decision.promote(3));
+        assert_eq!(
+            decision.candidates,
+            [3, 0, 1, 2, 4],
+            "the router's best replica stays first in line behind the promotion"
+        );
+        assert_eq!(
+            decision
+                .candidate_state
+                .iter()
+                .map(|state| (state.index, state.rank))
+                .collect::<Vec<_>>(),
+            [(3, 0), (0, 1), (1, 2), (2, 3), (4, 4)]
+        );
+        assert_eq!(
+            decision.load_units,
+            candidate(&decision, 3).request_load_units
+        );
+        assert!(decision.prefer_upstream(4));
+        assert_eq!(decision.candidates, [4, 3, 0, 1, 2]);
+        assert_eq!(decision.outcome, Outcome::StateAffinity);
+        assert!(decision.promote(4), "promoting the leader is a no-op");
+        assert_eq!(decision.candidates, [4, 3, 0, 1, 2]);
+    }
+
+    #[test]
+    fn restriction_refreshes_a_stale_score_outcome() {
+        let router = Arc::new(Router::new(fleet(3, AffinityBasis::Absolute)));
+        let chain = (1..=20).collect::<Vec<u64>>();
+        router.observe(0, &chain);
+        let mut decision = router.route_prepared(1, &chain);
+        assert_eq!(decision.outcome, Outcome::Overlap);
+        assert!(decision.restrict_to(&[false, true, true]));
+        assert_eq!(decision.overlap_blocks, 0);
+        assert_eq!(decision.outcome, Outcome::RoundRobin);
+
+        let _load = router.acquire(2, 1);
+        let mut decision = router.route_prepared(1, &chain);
+        assert!(decision.restrict_to(&[false, true, true]));
+        assert_eq!(decision.candidates, [1, 2]);
+        assert_eq!(decision.outcome, Outcome::Load);
+
+        // Restricting onto the warm replica turns a load decision into overlap.
+        let _busy = (0..20).map(|_| router.acquire(0, 1)).collect::<Vec<_>>();
+        let mut decision = router.route_prepared(1, &chain);
+        assert_ne!(decision.candidates[0], 0);
+        assert!(decision.restrict_to(&[true, false, true]));
+        assert_eq!(decision.candidates[0], 2);
+        assert!(decision.restrict_to(&[true, false, false]));
+        assert_eq!(decision.outcome, Outcome::Single);
+    }
+
+    #[test]
+    fn responses_prompt_is_stable_across_per_turn_fields_and_key_order() {
+        let router = Router::new(config());
+        let instructions = "You are a coding agent. ".repeat(40);
+        let first = serde_json::to_vec(&json!({
+            "model": "m",
+            "stream": true,
+            "previous_response_id": "resp_1",
+            "instructions": instructions,
+            "tools": [{"type": "function", "name": "lookup", "parameters": {"b": 1, "a": 2}}],
+            "input": [{"role": "user", "content": "first question ".repeat(20)}],
+        }))
+        .unwrap();
+        let reordered = format!(
+            r#"{{"input":[{{"content":{content},"role":"user"}}],"temperature":0.2,"max_output_tokens":99,"metadata":{{"turn":"7"}},"tools":[{{"parameters":{{"a":2,"b":1}},"name":"lookup","type":"function"}}],"previous_response_id":"resp_2","instructions":{instructions},"model":"m"}}"#,
+            content = serde_json::to_string(&"first question ".repeat(20)).unwrap(),
+            instructions = serde_json::to_string(&instructions).unwrap(),
+        );
+        let first_fingerprints = router.fingerprints(&first);
+        assert!(first_fingerprints.len() > 4);
+        assert_eq!(
+            first_fingerprints,
+            router.fingerprints(reordered.as_bytes())
+        );
+
+        let next_turn = serde_json::to_vec(&json!({
+            "model": "m",
+            "instructions": instructions,
+            "tools": [{"type": "function", "name": "lookup", "parameters": {"b": 1, "a": 2}}],
+            "input": [
+                {"role": "user", "content": "first question ".repeat(20)},
+                {"role": "assistant", "content": "an answer"},
+                {"role": "user", "content": "follow up"},
+            ],
+        }))
+        .unwrap();
+        let next = router.fingerprints(&next_turn);
+        let shared = first_fingerprints.len() - 1;
+        assert_eq!(next[..shared], first_fingerprints[..shared]);
+
+        let other = serde_json::to_vec(&json!({
+            "model": "m",
+            "instructions": "Different instructions.",
+            "input": "first question",
+        }))
+        .unwrap();
+        assert_ne!(router.fingerprints(&other)[0], first_fingerprints[0]);
+    }
+
+    #[test]
+    fn completion_prompt_is_stable_across_sampling_fields_and_key_order() {
+        let router = Router::new(config());
+        let prompt = "def fibonacci(n):\n    ".repeat(30);
+        let first = serde_json::to_vec(&json!({
+            "model": "m",
+            "stream": true,
+            "temperature": 0.1,
+            "max_tokens": 64,
+            "prompt": prompt,
+        }))
+        .unwrap();
+        let reordered = format!(
+            r#"{{"prompt":{},"max_tokens":512,"model":"m","seed":9}}"#,
+            serde_json::to_string(&prompt).unwrap()
+        );
+        let first_fingerprints = router.fingerprints(&first);
+        assert!(first_fingerprints.len() > 4);
+        assert_eq!(
+            first_fingerprints,
+            router.fingerprints(reordered.as_bytes())
+        );
+
+        let extended = serde_json::to_vec(&json!({
+            "stream": false,
+            "prompt": format!("{prompt}return fibonacci(n - 1)"),
+            "model": "m",
+        }))
+        .unwrap();
+        let extended = router.fingerprints(&extended);
+        let shared = first_fingerprints.len() - 1;
+        assert_eq!(extended[..shared], first_fingerprints[..shared]);
+
+        // Token-id prompts canonicalize too.
+        let ids = br#"{"model":"m","prompt":[1,2,3],"stream":true}"#;
+        let ids_reordered = br#"{"stream":false,"prompt":[1,2,3],"model":"m"}"#;
+        assert_eq!(router.fingerprints(ids), router.fingerprints(ids_reordered));
     }
 }

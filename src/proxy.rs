@@ -1426,8 +1426,6 @@ impl Proxy {
         } else {
             None
         };
-        let (mut approximate_decision, speculation_profile, affinity_horizon) =
-            prepared.route_profiled(&self.inner.router, endpoint, decode_load_units);
         let requested_profile = if endpoint == Endpoint::SystemOne {
             UpstreamApiProfile::SystemOne
         } else {
@@ -1478,6 +1476,12 @@ impl Proxy {
                 .find(|configured| *configured == model)
                 .map(String::as_str)
         };
+        // Score only the model's own replicas: the speculation baseline, the
+        // horizon observation and the outcome must not come from a replica
+        // this request can never be dispatched to. A mask with no eligible
+        // upstream scores them all; `restrict_to` then rejects the request.
+        let (mut approximate_decision, speculation_profile, affinity_horizon) =
+            prepared.route_profiled(&self.inner.router, endpoint, decode_load_units, &eligible);
         if !approximate_decision.restrict_to(&eligible) {
             self.record_error(
                 endpoint_label,
