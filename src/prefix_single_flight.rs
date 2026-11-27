@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+    sync::Arc,
+};
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -8,7 +12,7 @@ use crate::{
     router::{Decision, Outcome},
 };
 
-pub const PREFIX_SINGLE_FLIGHT_OUTCOMES: [&str; 10] = [
+pub const PREFIX_SINGLE_FLIGHT_OUTCOMES: [&str; 11] = [
     "off",
     "short",
     "exact_blocked",
@@ -19,6 +23,7 @@ pub const PREFIX_SINGLE_FLIGHT_OUTCOMES: [&str; 10] = [
     "already_home",
     "load_blocked",
     "would_move",
+    "moved",
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -29,8 +34,39 @@ pub struct PrefixSingleFlightConfig {
     pub max_load_delta: usize,
 }
 
+/// What a request may be served by, beyond its prefix: the model, API
+/// profile, and long-prompt lane it was routed under. Requests that share a
+/// prefix but not a scope cannot share a replica's warm cache, so they must
+/// never join one another's flight.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FlightScope(u64);
+
+impl FlightScope {
+    #[must_use]
+    pub fn new(model: Option<&str>, api_profile: &str, lane: &str) -> Self {
+        let mut hasher = DefaultHasher::new();
+        model.hash(&mut hasher);
+        api_profile.hash(&mut hasher);
+        lane.hash(&mut hasher);
+        Self(hasher.finish())
+    }
+
+    /// Binds the scope to the exact set of replicas the request may use, so
+    /// even two requests whose labels match can only coalesce when they are
+    /// eligible for the same replicas.
+    fn with_eligible(self, candidates: &[usize]) -> u64 {
+        let mut eligible = candidates.to_vec();
+        eligible.sort_unstable();
+        let mut hasher = DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        eligible.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct FlightKey {
+    scope: u64,
     prefix_blocks: usize,
     fingerprint: u64,
 }
@@ -77,8 +113,13 @@ pub struct PrefixSingleFlightGuard {
 }
 
 impl PrefixSingleFlightGuard {
-    /// Update the shared target after dispatch failover. Generation matching
-    /// prevents an old guard from changing a later flight that reused the key.
+    /// Update the shared target to the replica the leader is about to send
+    /// its prefill to. Call it before dispatch, so followers join the replica
+    /// warming the prefix rather than the one first chosen. Only the flight's
+    /// leader may move it: a follower's failover is its own, and must not
+    /// drag later followers away from the replica the leader is warming.
+    /// Generation matching prevents an old guard from changing a later flight
+    /// that reused the key.
     pub fn retarget(&mut self, upstream: usize) {
         if !self.retarget_allowed {
             return;
@@ -135,8 +176,13 @@ impl PrefixSingleFlight {
     /// Only cold approximate decisions participate; exact placement and an
     /// already warm approximate prefix retain authority. `shadow` maintains
     /// the same bounded flight lifetimes but never changes the decision.
+    ///
+    /// A follower that cannot join (its flight's target is not a serving
+    /// candidate, or is too loaded) routes elsewhere and gets no guard, so it
+    /// neither holds the flight open nor can move it.
     pub fn route(
         &self,
+        scope: FlightScope,
         fingerprints: &[u64],
         decision: &mut Decision,
     ) -> (
@@ -160,15 +206,12 @@ impl PrefixSingleFlight {
             return (observation(mode, "unavailable"), None);
         };
         let key = FlightKey {
+            scope: scope.with_eligible(&decision.candidates),
             prefix_blocks: self.config.min_blocks,
             fingerprint: fingerprints[self.config.min_blocks - 1],
         };
         let mut state = self.state.lock();
-        let (target, generation, leader_request) = if let Some(flight) = state.flights.get_mut(&key)
-        {
-            flight.requests = flight.requests.saturating_add(1);
-            (flight.target, flight.generation, false)
-        } else {
+        let Some(flight) = state.flights.get_mut(&key) else {
             if state.flights.len() >= self.config.capacity {
                 return (observation(mode, "capacity"), None);
             }
@@ -182,42 +225,54 @@ impl PrefixSingleFlight {
                     requests: 1,
                 },
             );
-            (leader, generation, true)
+            drop(state);
+            return (
+                observation(mode, "leader"),
+                Some(self.guard(key, generation, true)),
+            );
         };
+        let (target, generation) = (flight.target, flight.generation);
+        let outcome = if target == leader {
+            "already_home"
+        } else {
+            let target_state = decision.candidate_state.iter().find(|candidate| {
+                candidate.index == target
+                    && candidate.healthy
+                    && decision.candidates.contains(&target)
+            });
+            match (decision.candidate_state.first(), target_state) {
+                (Some(winner), Some(target_state))
+                    if target_state.load_units
+                        <= winner.load_units.saturating_add(self.config.max_load_delta) =>
+                {
+                    if self.config.mode == PrefixSingleFlightMode::Shadow {
+                        "would_move"
+                    } else {
+                        "moved"
+                    }
+                }
+                (Some(_), Some(_)) => return (observation(mode, "load_blocked"), None),
+                _ => return (observation(mode, "unavailable"), None),
+            }
+        };
+        flight.requests = flight.requests.saturating_add(1);
         drop(state);
-        let mut guard = PrefixSingleFlightGuard {
+        if outcome == "moved" {
+            move_to_front(decision, target);
+        }
+        (
+            observation(mode, outcome),
+            Some(self.guard(key, generation, false)),
+        )
+    }
+
+    fn guard(&self, key: FlightKey, generation: u64, leader: bool) -> PrefixSingleFlightGuard {
+        PrefixSingleFlightGuard {
             state: Arc::clone(&self.state),
             key,
             generation,
-            retarget_allowed: false,
-        };
-        if leader_request {
-            guard.retarget_allowed = true;
-            return (observation(mode, "leader"), Some(guard));
+            retarget_allowed: leader,
         }
-        if target == leader {
-            guard.retarget_allowed = true;
-            return (observation(mode, "already_home"), Some(guard));
-        }
-        let Some(winner) = decision.candidate_state.first() else {
-            return (observation(mode, "unavailable"), Some(guard));
-        };
-        let Some(target_state) = decision
-            .candidate_state
-            .iter()
-            .find(|candidate| candidate.index == target && candidate.healthy)
-        else {
-            return (observation(mode, "unavailable"), Some(guard));
-        };
-        if target_state.load_units > winner.load_units.saturating_add(self.config.max_load_delta) {
-            return (observation(mode, "load_blocked"), Some(guard));
-        }
-        if self.config.mode == PrefixSingleFlightMode::Shadow {
-            return (observation(mode, "would_move"), Some(guard));
-        }
-        move_to_front(decision, target);
-        guard.retarget_allowed = true;
-        (observation(mode, "moved"), Some(guard))
     }
 }
 
@@ -306,23 +361,55 @@ mod tests {
         })
     }
 
+    fn scope() -> FlightScope {
+        FlightScope::new(Some("model-a"), "openai", "off")
+    }
+
+    fn route(
+        router: &PrefixSingleFlight,
+        fingerprints: &[u64],
+        decision: &mut Decision,
+    ) -> (
+        PrefixSingleFlightObservation,
+        Option<PrefixSingleFlightGuard>,
+    ) {
+        router.route(scope(), fingerprints, decision)
+    }
+
+    fn requests(router: &PrefixSingleFlight) -> Vec<usize> {
+        let state = router.state.lock();
+        let mut requests = state
+            .flights
+            .values()
+            .map(|flight| flight.requests)
+            .collect::<Vec<_>>();
+        requests.sort_unstable();
+        requests
+    }
+
+    fn target(router: &PrefixSingleFlight) -> usize {
+        let state = router.state.lock();
+        assert_eq!(state.flights.len(), 1);
+        state.flights.values().next().unwrap().target
+    }
+
     #[test]
     fn prefer_coalesces_a_cold_shared_prefix_until_the_leader_finishes() {
         let router = router(PrefixSingleFlightMode::Prefer, 1);
         let fingerprints = [7, 8, 9];
         let mut leader = decision(0, [0, 0]);
-        let (observation, leader_guard) = router.route(&fingerprints, &mut leader);
+        let (observation, leader_guard) = route(&router, &fingerprints, &mut leader);
         assert_eq!(observation.outcome, "leader");
 
         let mut follower = decision(1, [1, 0]);
-        let (observation, follower_guard) = router.route(&fingerprints, &mut follower);
+        let (observation, follower_guard) = route(&router, &fingerprints, &mut follower);
         assert_eq!(observation.outcome, "moved");
         assert_eq!(follower.candidates[0], 0);
 
         drop(leader_guard);
         drop(follower_guard);
         let mut next = decision(1, [0, 0]);
-        let (observation, _) = router.route(&fingerprints, &mut next);
+        let (observation, _) = route(&router, &fingerprints, &mut next);
         assert_eq!(observation.outcome, "leader");
         assert_eq!(next.candidates[0], 1);
     }
@@ -332,22 +419,22 @@ mod tests {
         let fingerprints = [7, 8, 9];
         let shadow = router(PrefixSingleFlightMode::Shadow, 1);
         let mut leader = decision(0, [0, 0]);
-        let (_, _leader_guard) = shadow.route(&fingerprints, &mut leader);
+        let (_, _leader_guard) = route(&shadow, &fingerprints, &mut leader);
         let mut follower = decision(1, [0, 0]);
-        let (observation, _) = shadow.route(&fingerprints, &mut follower);
+        let (observation, _) = route(&shadow, &fingerprints, &mut follower);
         assert_eq!(observation.outcome, "would_move");
         assert_eq!(follower.candidates[0], 1);
 
         let prefer = router(PrefixSingleFlightMode::Prefer, 1);
         let mut leader = decision(0, [0, 0]);
-        let (_, _leader_guard) = prefer.route(&fingerprints, &mut leader);
+        let (_, _leader_guard) = route(&prefer, &fingerprints, &mut leader);
         let mut follower = decision(1, [3, 0]);
-        let (observation, mut blocked_guard) = prefer.route(&fingerprints, &mut follower);
+        let (observation, blocked_guard) = route(&prefer, &fingerprints, &mut follower);
         assert_eq!(observation.outcome, "load_blocked");
         assert_eq!(follower.candidates[0], 1);
-        blocked_guard.as_mut().unwrap().retarget(1);
+        assert!(blocked_guard.is_none());
         let mut later = decision(1, [0, 0]);
-        let (observation, _) = prefer.route(&fingerprints, &mut later);
+        let (observation, _) = route(&prefer, &fingerprints, &mut later);
         assert_eq!(observation.outcome, "moved");
         assert_eq!(later.candidates[0], 0);
     }
@@ -356,21 +443,202 @@ mod tests {
     fn warm_exact_short_and_capacity_paths_never_move() {
         let router = router(PrefixSingleFlightMode::Prefer, 1);
         let mut short = decision(0, [0, 0]);
-        assert_eq!(router.route(&[7], &mut short).0.outcome, "short");
+        assert_eq!(route(&router, &[7], &mut short).0.outcome, "short");
 
         let mut exact = decision(0, [0, 0]);
         exact.outcome = Outcome::Exact;
-        assert_eq!(router.route(&[7, 8], &mut exact).0.outcome, "exact_blocked");
+        assert_eq!(
+            route(&router, &[7, 8], &mut exact).0.outcome,
+            "exact_blocked"
+        );
 
         let mut warm = decision(0, [0, 0]);
         warm.overlap_blocks = 2;
-        assert_eq!(router.route(&[7, 8], &mut warm).0.outcome, "warm");
+        assert_eq!(route(&router, &[7, 8], &mut warm).0.outcome, "warm");
 
         let mut one = decision(0, [0, 0]);
-        let (_, _one) = router.route(&[1, 2], &mut one);
+        let (_, _one) = route(&router, &[1, 2], &mut one);
         let mut two = decision(0, [0, 0]);
-        let (_, _two) = router.route(&[3, 4], &mut two);
+        let (_, _two) = route(&router, &[3, 4], &mut two);
         let mut three = decision(0, [0, 0]);
-        assert_eq!(router.route(&[5, 6], &mut three).0.outcome, "capacity");
+        assert_eq!(route(&router, &[5, 6], &mut three).0.outcome, "capacity");
+    }
+
+    #[test]
+    fn unavailable_followers_do_not_pin_a_dead_flight() {
+        let router = router(PrefixSingleFlightMode::Prefer, 1);
+        let fingerprints = [7, 8, 9];
+        let mut leader = decision(0, [0, 0]);
+        let (_, leader_guard) = route(&router, &fingerprints, &mut leader);
+
+        // The flight's target goes unhealthy; steady follower traffic routes
+        // elsewhere and must not keep the flight alive.
+        let mut followers = Vec::new();
+        for _ in 0..5 {
+            let mut follower = decision(1, [0, 0]);
+            follower.candidate_state[1].healthy = false;
+            let (observation, guard) = route(&router, &fingerprints, &mut follower);
+            assert_eq!(observation.outcome, "unavailable");
+            assert_eq!(follower.candidates[0], 1);
+            assert!(guard.is_none());
+            followers.push(guard);
+        }
+        assert_eq!(requests(&router), vec![1]);
+
+        // Once the leader finishes the flight is gone, so the next request
+        // leads a fresh flight on a serving replica.
+        drop(leader_guard);
+        assert!(requests(&router).is_empty());
+        let mut next = decision(1, [0, 0]);
+        let (observation, _next_guard) = route(&router, &fingerprints, &mut next);
+        assert_eq!(observation.outcome, "leader");
+        assert_eq!(target(&router), 1);
+    }
+
+    #[test]
+    fn load_blocked_followers_do_not_pin_an_overloaded_flight() {
+        let router = router(PrefixSingleFlightMode::Prefer, 0);
+        let fingerprints = [7, 8, 9];
+        let mut leader = decision(0, [0, 0]);
+        let (_, leader_guard) = route(&router, &fingerprints, &mut leader);
+        let mut blocked = Vec::new();
+        for _ in 0..3 {
+            let mut follower = decision(1, [5, 0]);
+            let (observation, guard) = route(&router, &fingerprints, &mut follower);
+            assert_eq!(observation.outcome, "load_blocked");
+            blocked.push(guard);
+        }
+        assert!(blocked.iter().all(Option::is_none));
+        assert_eq!(requests(&router), vec![1]);
+        drop(leader_guard);
+        assert!(requests(&router).is_empty());
+    }
+
+    #[test]
+    fn only_the_leader_may_retarget_the_flight() {
+        let router = router(PrefixSingleFlightMode::Prefer, 1);
+        let fingerprints = [7, 8, 9];
+        let mut leader = decision(0, [0, 0]);
+        let (_, mut leader_guard) = route(&router, &fingerprints, &mut leader);
+
+        // An already-home follower fails over: the warming leader keeps the
+        // flight.
+        let mut home = decision(0, [0, 0]);
+        let (observation, mut home_guard) = route(&router, &fingerprints, &mut home);
+        assert_eq!(observation.outcome, "already_home");
+        home_guard.as_mut().unwrap().retarget(1);
+        assert_eq!(target(&router), 0);
+
+        // A moved follower fails over: same.
+        let mut moved = decision(1, [0, 0]);
+        let (observation, mut moved_guard) = route(&router, &fingerprints, &mut moved);
+        assert_eq!(observation.outcome, "moved");
+        moved_guard.as_mut().unwrap().retarget(1);
+        assert_eq!(target(&router), 0);
+
+        // The leader's own failover moves the flight for later followers.
+        leader_guard.as_mut().unwrap().retarget(1);
+        assert_eq!(target(&router), 1);
+        let mut later = decision(0, [0, 0]);
+        let (observation, later_guard) = route(&router, &fingerprints, &mut later);
+        assert_eq!(observation.outcome, "moved");
+        assert_eq!(later.candidates[0], 1);
+
+        // Followers still hold the flight open until they finish.
+        drop(leader_guard);
+        assert_eq!(requests(&router), vec![3]);
+        drop(home_guard);
+        drop(moved_guard);
+        drop(later_guard);
+        assert!(requests(&router).is_empty());
+    }
+
+    #[test]
+    fn stale_leader_guard_cannot_retarget_a_reused_key() {
+        let router = router(PrefixSingleFlightMode::Prefer, 1);
+        let fingerprints = [7, 8, 9];
+        let mut first = decision(0, [0, 0]);
+        let (_, mut stale) = route(&router, &fingerprints, &mut first);
+        // Expire the first flight out from under its guard, then let a new
+        // flight reuse the key on upstream 1.
+        let key = stale.as_ref().unwrap().key;
+        router.state.lock().flights.remove(&key);
+        let mut second = decision(1, [0, 0]);
+        let (observation, _second_guard) = route(&router, &fingerprints, &mut second);
+        assert_eq!(observation.outcome, "leader");
+        stale.as_mut().unwrap().retarget(0);
+        assert_eq!(target(&router), 1);
+        drop(stale);
+        assert_eq!(requests(&router), vec![1]);
+    }
+
+    #[test]
+    fn flights_are_scoped_by_model_profile_lane_and_eligible_set() {
+        let router = PrefixSingleFlight::new(PrefixSingleFlightConfig {
+            mode: PrefixSingleFlightMode::Prefer,
+            min_blocks: 2,
+            capacity: 8,
+            max_load_delta: 1,
+        });
+        let fingerprints = [7, 8, 9];
+        let mut leader = decision(0, [0, 0]);
+        let (_, _leader) = router.route(
+            FlightScope::new(Some("model-a"), "openai", "off"),
+            &fingerprints,
+            &mut leader,
+        );
+        for scope in [
+            FlightScope::new(Some("model-b"), "openai", "off"),
+            FlightScope::new(None, "openai", "off"),
+            FlightScope::new(Some("model-a"), "systemone", "off"),
+            FlightScope::new(Some("model-a"), "openai", "confined"),
+        ] {
+            let mut other = decision(1, [0, 0]);
+            let (observation, _guard) = router.route(scope, &fingerprints, &mut other);
+            assert_eq!(observation.outcome, "leader", "{scope:?}");
+            assert_eq!(other.candidates[0], 1);
+        }
+
+        // Same labels but a different eligible replica set: separate flight.
+        let mut restricted = decision(1, [0, 0]);
+        restricted.candidates = vec![1];
+        let (observation, _guard) = router.route(
+            FlightScope::new(Some("model-a"), "openai", "off"),
+            &fingerprints,
+            &mut restricted,
+        );
+        assert_eq!(observation.outcome, "leader");
+        assert_eq!(restricted.candidates, vec![1]);
+
+        // The matching scope joins the original flight regardless of order.
+        let mut same = decision(1, [0, 0]);
+        let (observation, _guard) = router.route(
+            FlightScope::new(Some("model-a"), "openai", "off"),
+            &fingerprints,
+            &mut same,
+        );
+        assert_eq!(observation.outcome, "moved");
+        assert_eq!(same.candidates[0], 0);
+    }
+
+    #[test]
+    fn every_outcome_label_is_preinitialized() {
+        for outcome in [
+            "short",
+            "exact_blocked",
+            "warm",
+            "unavailable",
+            "capacity",
+            "leader",
+            "already_home",
+            "load_blocked",
+            "would_move",
+            "moved",
+        ] {
+            assert!(
+                PREFIX_SINGLE_FLIGHT_OUTCOMES.contains(&outcome),
+                "{outcome}"
+            );
+        }
     }
 }

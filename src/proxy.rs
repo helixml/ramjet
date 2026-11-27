@@ -49,7 +49,9 @@ use crate::{
     long_prompt_lane::{self, LongPromptLaneOutcome},
     long_session::{LongSessionObservation, LongSessions},
     metrics::Metrics,
-    prefix_single_flight::{PrefixSingleFlight, PrefixSingleFlightConfig, PrefixSingleFlightGuard},
+    prefix_single_flight::{
+        FlightScope, PrefixSingleFlight, PrefixSingleFlightConfig, PrefixSingleFlightGuard,
+    },
     prepare::{PreparedRequest, RequestedModel},
     router::{Decision, LoadGuard, Router},
     session::OpaqueSession,
@@ -1573,10 +1575,16 @@ impl Proxy {
         } else {
             prepared.fingerprints
         };
-        let (prefix_single_flight, mut prefix_single_flight_guard) = self
-            .inner
-            .prefix_single_flight
-            .route(&fingerprints, &mut decision);
+        let (prefix_single_flight, mut prefix_single_flight_guard) =
+            self.inner.prefix_single_flight.route(
+                FlightScope::new(
+                    configured_model,
+                    requested_profile.label(),
+                    long_prompt_lane.label(),
+                ),
+                &fingerprints,
+                &mut decision,
+            );
         // State ownership is stronger than speculative-profile, exact-prefix,
         // and concurrent-prefix preferences. Apply it last so none of those
         // optional routing layers can move a saved-state request away from the
@@ -1708,6 +1716,13 @@ impl Proxy {
                 attempt += 1;
                 continue;
             };
+            // Point the flight at this replica before the prefill starts, not
+            // after the response arrives: state affinity or failover may have
+            // moved the leader, and followers arriving during its prefill must
+            // join the replica that is actually warming the prefix.
+            if let Some(guard) = prefix_single_flight_guard.as_mut() {
+                guard.retarget(candidate);
+            }
             if failing_open {
                 self.inner
                     .metrics
@@ -1807,9 +1822,6 @@ impl Proxy {
             drop(inflight_guard);
             return json_error(status, "upstream unavailable");
         };
-        if let Some(guard) = prefix_single_flight_guard.as_mut() {
-            guard.retarget(upstream);
-        }
 
         let status = response.status();
         if capture_shadow_soak
@@ -6567,6 +6579,75 @@ mod tests {
         );
         task_a.abort();
         task_b.abort();
+    }
+
+    #[tokio::test]
+    async fn session_affinity_shadow_evaluates_model_restricted_requests() {
+        let requests = Arc::new([
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+        ]);
+        let upstream = |index: usize| {
+            let requests = Arc::clone(&requests);
+            AxumRouter::new().fallback(any(move || {
+                let requests = Arc::clone(&requests);
+                async move {
+                    requests[index].fetch_add(1, Ordering::Relaxed);
+                    (StatusCode::OK, r#"{"ok":true}"#)
+                }
+            }))
+        };
+        let (url_a, task_a) = start_upstream(upstream(0)).await;
+        let (url_b, task_b) = start_upstream(upstream(1)).await;
+        let (url_c, task_c) = start_upstream(upstream(2)).await;
+        let values = HashMap::from([
+            ("RJ_UPSTREAM", format!("{url_a},{url_b},{url_c}")),
+            ("RJ_UPSTREAM_MODELS", "model-a,model-b,model-a".to_owned()),
+            ("RJ_SESSION_AFFINITY_MODE", "shadow".to_owned()),
+            (
+                "RJ_SESSION_AFFINITY_KEY",
+                "0123456789abcdef0123456789abcdef".to_owned(),
+            ),
+        ]);
+        let config = Config::from_lookup(|key| values.get(key).cloned()).unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        let sessions = 8;
+        for session in 0..sessions {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .header("x-session-id", format!("session-{session}"))
+                .body(Body::from(
+                    r#"{"model":"model-a","messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap();
+            let response = proxy.serve(request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        }
+        assert_eq!(requests[1].load(Ordering::Relaxed), 0);
+        let metric = |outcome: crate::session_affinity::SessionAffinityOutcome| {
+            proxy
+                .inner
+                .metrics
+                .session_affinity
+                .with_label_values(&["chat", outcome.label()])
+                .get()
+        };
+        // Before the fix every restricted request was `invalid_decision`.
+        assert!(
+            metric(crate::session_affinity::SessionAffinityOutcome::InvalidDecision).abs()
+                < f64::EPSILON
+        );
+        let observed: f64 = crate::session_affinity::SessionAffinityOutcome::ALL
+            .into_iter()
+            .map(metric)
+            .sum();
+        assert!((observed - f64::from(sessions)).abs() < f64::EPSILON);
+        task_a.abort();
+        task_b.abort();
+        task_c.abort();
     }
 
     #[tokio::test]
