@@ -14,7 +14,7 @@ use tokio::{sync::watch, time::sleep};
 
 use crate::{
     companion_index_source::{CompanionIndexSource, CompanionIndexSourceError},
-    kv_fence::{IngestAction, KvEventFence, ReplayAction},
+    kv_fence::{IngestAction, KvEventFence, ReplayAction, ReplayCoverage},
     kv_snapshot::EngineIncarnation,
     kv_transport::{
         KvTransportConfig, KvTransportError, LiveActivity, ReplayProfile, SequencedBatch,
@@ -214,6 +214,10 @@ pub struct CompanionIndexOwnerConfig {
     pub replay_limit: u64,
     pub reconnect_min: Duration,
     pub reconnect_max: Duration,
+    /// The engine publisher's replay ring capacity (vLLM `buffer_steps`), the
+    /// evidence that lets a replay missing its leading sequences prove those
+    /// were no-op steps rather than evicted batches. `None` fails closed.
+    pub publisher_capacity: Option<u64>,
 }
 
 impl CompanionIndexOwnerConfig {
@@ -308,7 +312,8 @@ impl CompanionIndexOwner {
         };
 
         let mut report = CompanionIndexOwnerReport::default();
-        let mut fence = KvEventFence::new(self.config.replay_limit);
+        let mut fence = KvEventFence::new(self.config.replay_limit)
+            .with_publisher_capacity(self.config.publisher_capacity);
         let mut current_authority = engine_authority.borrow_and_update().clone();
         let mut backoff = self.config.reconnect_min;
         rebuild(
@@ -750,7 +755,10 @@ async fn recover_full(
             CompanionIndexOwnerRebuildReason::ReplayInvalid,
         ));
     }
-    if fence.accept_replay(&replayed.sequences, replayed.establishes_boundary)
+    let coverage = ReplayCoverage::Response {
+        retained_batches: replayed.sequences.len().saturating_add(replayed.tail.len()),
+    };
+    if fence.accept_replay(&replayed.sequences, replayed.establishes_boundary, coverage)
         != ReplayAction::Recovered
     {
         record_invalid_replay(
@@ -808,7 +816,11 @@ fn accept_replay_tail(fence: &mut KvEventFence, tail: &[(u64, bool)]) -> bool {
             | IngestAction::UnrecoverableGap => return false,
         }
     }
-    pending.is_empty() || fence.accept_replay(&pending, false) == ReplayAction::Recovered
+    // The tail is the rest of the response the requested interval was
+    // accepted from, so a gap inside it can only be no-op scheduler steps.
+    pending.is_empty()
+        || fence.accept_replay(&pending, false, ReplayCoverage::Continuation)
+            == ReplayAction::Recovered
 }
 
 enum FullReplayControl {
@@ -1213,12 +1225,27 @@ mod tests {
         observer: Arc<RecordingObserver>,
         replay_limit: u64,
     ) -> CompanionIndexOwner {
-        CompanionIndexOwner::new(
+        owner_with_config(
+            source,
+            transports,
+            observer,
             CompanionIndexOwnerConfig {
                 replay_limit,
                 reconnect_min: Duration::from_millis(5),
                 reconnect_max: Duration::from_millis(20),
+                publisher_capacity: None,
             },
+        )
+    }
+
+    fn owner_with_config(
+        source: Arc<CompanionIndexSource>,
+        transports: Vec<Box<dyn CompanionKvEventTransport>>,
+        observer: Arc<RecordingObserver>,
+        config: CompanionIndexOwnerConfig,
+    ) -> CompanionIndexOwner {
+        CompanionIndexOwner::new(
+            config,
             source,
             Arc::new(MockConnector {
                 transports: Mutex::new(transports.into()),
@@ -1552,6 +1579,72 @@ mod tests {
         assert_eq!(report.rebuilds, 1);
     }
 
+    /// Run one full replay for live watermark 3 whose response omits the
+    /// leading sequences 0 and 1, and report whether authority was restored.
+    async fn leading_gap_full_replay_restores_authority(publisher_capacity: Option<u64>) -> bool {
+        let source = source();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (activity_tx, activity_rx) = mpsc::unbounded_channel();
+        let transport = MockTransport {
+            activities: activity_rx,
+            replays: VecDeque::from([ReplayPlan::Complete(vec![
+                batch(2, Some(10)),
+                batch(3, Some(11)),
+            ])]),
+            requests: Arc::clone(&requests),
+        };
+        let observer = Arc::new(RecordingObserver::default());
+        let (_authority_tx, authority_rx) = watch::channel(Some(incarnation("engine-a", 1)));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(
+            owner_with_config(
+                Arc::clone(&source),
+                vec![Box::new(transport)],
+                Arc::clone(&observer),
+                CompanionIndexOwnerConfig {
+                    replay_limit: 16,
+                    reconnect_min: Duration::from_millis(5),
+                    reconnect_max: Duration::from_millis(20),
+                    publisher_capacity,
+                },
+            )
+            .run(authority_rx, shutdown_rx),
+        );
+        activity_tx
+            .send(Ok(LiveActivity::Batch(batch(3, None))))
+            .unwrap();
+        wait_until(|| {
+            observer.0.lock().unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    CompanionIndexOwnerEvent::Replay {
+                        outcome: CompanionIndexOwnerReplayOutcome::Invalid
+                            | CompanionIndexOwnerReplayOutcome::Complete,
+                        ..
+                    }
+                )
+            })
+        })
+        .await;
+        let ready = source.status().ready;
+        assert_eq!(*requests.lock().unwrap(), [(0, 3)]);
+        shutdown_tx.send(true).unwrap();
+        task.await.unwrap().unwrap();
+        ready
+    }
+
+    #[tokio::test]
+    async fn full_replay_with_possibly_evicted_leading_history_stays_fenced() {
+        assert!(!leading_gap_full_replay_restores_authority(None).await);
+        // Two batches fill a two-entry ring: eviction cannot be ruled out.
+        assert!(!leading_gap_full_replay_restores_authority(Some(2)).await);
+    }
+
+    #[tokio::test]
+    async fn full_replay_smaller_than_the_ring_proves_sparse_leading_steps() {
+        assert!(leading_gap_full_replay_restores_authority(Some(16)).await);
+    }
+
     #[tokio::test]
     async fn invalid_full_replay_stays_connected_and_does_not_repeat_until_clear() {
         let source = source();
@@ -1789,6 +1882,7 @@ mod tests {
                 replay_limit: 16,
                 reconnect_min: Duration::from_millis(5),
                 reconnect_max: Duration::from_millis(20),
+                publisher_capacity: None,
             },
             Arc::clone(&source),
             connector,
@@ -1853,10 +1947,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(second_request.get(2).unwrap().as_ref(), 0_u64.to_be_bytes());
+        // The rebuild starts at zero, so the ring must still hold every
+        // earlier batch; `[6, 7]` alone would prove 0-5 were evicted.
         send_replay(
             &mut replay_server,
             second_request.get(0).unwrap().clone(),
-            &[6, 7],
+            &[0, 2, 4, 5, 6, 7],
         )
         .await;
         wait_until(|| source.status().watermark == Some(7)).await;

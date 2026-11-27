@@ -754,10 +754,16 @@ existing raw-residency shadow.
 | `RJ_KV_EVENT_TIMEOUT_MS` | `5000` | Connect/replay operation deadline. |
 | `RJ_KV_EVENT_RECONNECT_MIN_MS` | `250` | Initial reconnect backoff. |
 | `RJ_KV_EVENT_RECONNECT_MAX_MS` | `10000` | Maximum reconnect backoff. |
+| `RJ_KV_EVENT_PUBLISHER_BUFFER_STEPS` | unset | The engine's replay ring capacity, vLLM `kv-events-config.buffer_steps`. Set it to the engine's value. |
 
 Inventories start untrusted and fence on disconnect or invalid replay. Sparse
 vLLM scheduler sequence numbers are valid; duplicate, decreasing,
-out-of-range, or incomplete replay remains invalid. Raw hashes and token IDs
+out-of-range, or incomplete replay remains invalid. A gap *before* the first
+replayed batch is either no-op steps or batches the engine's ring evicted, and
+the replay alone cannot tell which. Such a replay is trusted only when it
+contains an all-blocks clear, or when `RJ_KV_EVENT_PUBLISHER_BUFFER_STEPS` is
+set and the whole response (requested plus tail) is smaller than the ring:
+eviction leaves the ring full. Otherwise the inventory stays fenced. Raw hashes and token IDs
 never enter logs, metrics, or journals.
 
 ### Snapshot inventory client (experimental)
@@ -822,6 +828,7 @@ validated Compose overlay.
 | `RJ_SNAPSHOT_REPLAY_TIMEOUT_MS` | `30000` | Engine replay timeout. |
 | `RJ_SNAPSHOT_REPLAY_LIMIT` | `10000` | Maximum replay batches. |
 | `RJ_SNAPSHOT_REPLAY_TAIL_LIMIT` | `1024` | Maximum replay tail batches. |
+| `RJ_SNAPSHOT_PUBLISHER_BUFFER_STEPS` | unset | The engine's replay ring capacity (vLLM `buffer_steps`); proves a full replay missing its leading sequences lost nothing. Unset fails closed. |
 | `RJ_SNAPSHOT_RECONNECT_MIN_MS` | `250` | Initial source reconnect backoff. |
 | `RJ_SNAPSHOT_RECONNECT_MAX_MS` | `5000` | Maximum source reconnect backoff. |
 | `RJ_SNAPSHOT_METRICS_BIND` | `127.0.0.1:9091` | Loopback-only TCP metrics address. |
