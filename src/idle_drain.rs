@@ -197,6 +197,11 @@ pub struct UpstreamObservation {
     pub healthy: bool,
     /// Requests currently dispatched to this upstream.
     pub inflight: usize,
+    /// Whether the engine's weights are resident so it can absorb routed
+    /// work. A replica the policy wants warm may still be parked, waking, or
+    /// in an unknown sleep state, and is fenced from routing until it wakes;
+    /// it is intended capacity, not serving capacity.
+    pub awake: bool,
 }
 
 /// The policy's published conclusion for one upstream.
@@ -269,6 +274,9 @@ pub struct IdleDrainPolicy {
     idle_since_ms: Vec<u64>,
     last_activity_ms: u64,
     last_drain_transition_ms: Option<u64>,
+    /// Warm-floor group of each upstream. Replicas serving different models
+    /// are not interchangeable, so the floor holds per group.
+    groups: Vec<usize>,
 }
 
 impl IdleDrainPolicy {
@@ -287,7 +295,19 @@ impl IdleDrainPolicy {
             idle_since_ms: vec![now_ms; upstreams],
             last_activity_ms: now_ms,
             last_drain_transition_ms: None,
+            groups: vec![0; upstreams],
         }
+    }
+
+    /// Applies the warm floor per group instead of fleet-wide, for fleets
+    /// whose replicas serve different models. `groups[i]` is upstream `i`'s
+    /// group; a missing entry joins group zero.
+    #[must_use]
+    pub fn with_groups(mut self, groups: &[usize]) -> Self {
+        for (index, group) in self.groups.iter_mut().enumerate() {
+            *group = groups.get(index).copied().unwrap_or(0);
+        }
+        self
     }
 
     #[must_use]
@@ -428,11 +448,9 @@ impl IdleDrainPolicy {
     }
 
     fn serving_inflight(&self, observations: &[UpstreamObservation]) -> usize {
-        self.states
-            .iter()
-            .enumerate()
-            .filter(|(_, state)| !state.fenced())
-            .filter_map(|(index, _)| observations.get(index))
+        (0..self.states.len())
+            .filter(|index| self.serving(*index, observations))
+            .filter_map(|index| observations.get(index))
             .map(|observation| observation.inflight)
             .sum()
     }
@@ -451,11 +469,10 @@ impl IdleDrainPolicy {
         self.states
             .iter()
             .enumerate()
-            .filter(|(index, state)| {
-                !state.fenced()
-                    && observations
-                        .get(*index)
-                        .is_some_and(|observation| observation.healthy && observation.inflight == 0)
+            .filter(|(index, _)| {
+                self.serving(*index, observations)
+                    && observations[*index].inflight == 0
+                    && self.releasable(*index, observations)
             })
             .map(|(index, _)| (index, now_ms.saturating_sub(self.idle_since_ms[index])))
             .filter(|(_, quiet_ms)| *quiet_ms >= threshold_ms)
@@ -509,24 +526,41 @@ impl IdleDrainPolicy {
     /// Restoring cannot conjure capacity that does not exist: an unhealthy
     /// parked replica is skipped, because un-fencing it would only advertise a
     /// replica that still cannot serve.
+    ///
+    /// The floor counts *intended* capacity: a healthy replica the policy
+    /// already wants warm counts even while its engine is still waking, so a
+    /// slow wake does not cascade into waking every parked replica. It holds
+    /// per warm-floor group.
     fn restore_warm_floor(&mut self, now_ms: u64, observations: &[UpstreamObservation]) {
         let min_warm = self.config.effective_min_warm();
-        loop {
-            if self.warm_serving_count(observations) >= min_warm {
-                return;
+        let healthy = |index: usize| {
+            observations
+                .get(index)
+                .is_some_and(|observation| observation.healthy)
+        };
+        for upstream in 0..self.states.len() {
+            let group = self.groups[upstream];
+            loop {
+                let intended = (0..self.states.len())
+                    .filter(|index| {
+                        self.groups[*index] == group
+                            && !self.states[*index].fenced()
+                            && healthy(*index)
+                    })
+                    .count();
+                if intended >= min_warm {
+                    break;
+                }
+                let Some(restore) = (0..self.states.len()).find(|index| {
+                    self.groups[*index] == group && self.states[*index].fenced() && healthy(*index)
+                }) else {
+                    break;
+                };
+                self.states[restore] = UpstreamDrainState::Warm;
+                // Spaced like a drain transition so a flapping peer cannot
+                // drive a park/un-park cycle every tick.
+                self.last_drain_transition_ms = Some(now_ms);
             }
-            let Some(restore) = self.states.iter().enumerate().position(|(index, state)| {
-                state.fenced()
-                    && observations
-                        .get(index)
-                        .is_some_and(|observation| observation.healthy)
-            }) else {
-                return;
-            };
-            self.states[restore] = UpstreamDrainState::Warm;
-            // Spaced like a drain transition so a flapping peer cannot drive a
-            // park/un-park cycle every tick.
-            self.last_drain_transition_ms = Some(now_ms);
         }
     }
 
@@ -551,20 +585,35 @@ impl IdleDrainPolicy {
         }
     }
 
-    /// Replicas that are both healthy and not already parked. An unhealthy
-    /// replica never counts toward the warm floor, so the policy cannot park
-    /// its way down to a fleet that only looks safe on paper.
+    /// Replicas that are healthy, not parked by the policy, and awake. An
+    /// unhealthy replica never counts toward the warm floor, so the policy
+    /// cannot park its way down to a fleet that only looks safe on paper; nor
+    /// does one whose engine is still asleep or waking, because routing fences
+    /// it until its weights are resident.
     fn warm_serving_count(&self, observations: &[UpstreamObservation]) -> usize {
-        self.states
-            .iter()
-            .enumerate()
-            .filter(|(index, state)| {
-                !state.fenced()
-                    && observations
-                        .get(*index)
-                        .is_some_and(|observation| observation.healthy)
-            })
+        (0..self.states.len())
+            .filter(|index| self.serving(*index, observations))
             .count()
+    }
+
+    fn serving(&self, index: usize, observations: &[UpstreamObservation]) -> bool {
+        !self.states[index].fenced()
+            && observations
+                .get(index)
+                .is_some_and(|observation| observation.healthy && observation.awake)
+    }
+
+    /// Serving replicas in `upstream`'s warm-floor group.
+    fn group_serving_count(&self, upstream: usize, observations: &[UpstreamObservation]) -> usize {
+        (0..self.states.len())
+            .filter(|index| self.groups[*index] == self.groups[upstream])
+            .filter(|index| self.serving(*index, observations))
+            .count()
+    }
+
+    /// Whether parking `upstream` keeps its group above the warm floor.
+    fn releasable(&self, upstream: usize, observations: &[UpstreamObservation]) -> bool {
+        self.group_serving_count(upstream, observations) > self.config.effective_min_warm()
     }
 
     /// Picks the highest-indexed healthy warm replica. Deterministic selection
@@ -575,11 +624,8 @@ impl IdleDrainPolicy {
             .iter()
             .enumerate()
             .rev()
-            .find(|(index, state)| {
-                !state.fenced()
-                    && observations
-                        .get(*index)
-                        .is_some_and(|observation| observation.healthy)
+            .find(|(index, _)| {
+                self.serving(*index, observations) && self.releasable(*index, observations)
             })
             .map(|(index, _)| index)
     }
@@ -629,16 +675,22 @@ impl IdleDrainPolicy {
             .map(|(index, state)| (index, *state))
             .collect();
 
-        // Resuming clears the cooldown so a later idle window is not charged
-        // for a drain that traffic already undid.
-        if self
-            .states
-            .iter()
-            .all(|state| *state == UpstreamDrainState::Warm)
-        {
-            self.last_drain_transition_ms = None;
+        // A resumed replica starts a fresh quiet measurement. Its pre-park
+        // quiet time described a replica that was then parked; carrying it over
+        // would make it immediately re-eligible for utilization release.
+        //
+        // The cooldown is deliberately *not* cleared here, even when every
+        // replica is warm again: resume paths stamp it precisely to space the
+        // next park, and it expires on its own.
+        for (index, state) in self.states.iter().enumerate() {
+            if *state == UpstreamDrainState::Warm
+                && previous
+                    .get(index)
+                    .is_some_and(|previous| previous.fenced())
+            {
+                self.idle_since_ms[index] = now_ms;
+            }
         }
-        let _ = now_ms;
 
         IdleDrainDecision {
             load_per_serving_replica: self.load_per_serving_replica(observations),
@@ -677,6 +729,7 @@ mod utilization_tests {
             .map(|inflight| UpstreamObservation {
                 healthy: true,
                 inflight: *inflight,
+                awake: true,
             })
             .collect()
     }
@@ -704,6 +757,78 @@ mod utilization_tests {
             .filter(|index| !policy.tick(now, &busy).upstreams[*index].desired_running)
             .count();
         assert!(parked > 0, "a quiet replica should have been released");
+    }
+
+    /// Two replicas: 0 serves steadily, 1 is quiet.
+    fn released_pair(config: IdleDrainConfig) -> (IdleDrainPolicy, u64) {
+        let mut policy = IdleDrainPolicy::new(config, 2, 0);
+        let now = 310_000;
+        let decision = policy.tick(now, &observations(&[1, 0]));
+        assert_eq!(decision.upstreams[1].state, UpstreamDrainState::Draining);
+        (policy, now)
+    }
+
+    #[test]
+    fn the_cooldown_survives_a_load_resume_that_leaves_every_replica_warm() {
+        let (mut policy, mut now) = released_pair(node06_config());
+        // A spike resumes everything and stamps the cooldown.
+        now += 10_000;
+        let decision = policy.tick(now, &observations(&[8, 0]));
+        assert_eq!(decision.desired_running(), 2);
+        // Load falls back. Before the fix the all-warm tick wiped the
+        // cooldown and the stale quiet stamp re-released replica 1 at once.
+        for _ in 0..9 {
+            now += 30_000;
+            let decision = policy.tick(now, &observations(&[1, 0]));
+            assert_eq!(
+                decision.desired_running(),
+                2,
+                "replica 1 re-parked inside the cooldown at t={now}"
+            );
+        }
+        // Once both the cooldown and a fresh quiet window have elapsed it may
+        // park again.
+        now += 5 * 60_000;
+        let decision = policy.tick(now, &observations(&[1, 0]));
+        assert_eq!(decision.upstreams[1].state, UpstreamDrainState::Draining);
+    }
+
+    #[test]
+    fn a_resumed_replica_restarts_its_quiet_window() {
+        // No cooldown, so only the per-replica quiet window gates re-release.
+        let config = IdleDrainConfig {
+            cooldown: Duration::ZERO,
+            ..node06_config()
+        };
+        let (mut policy, mut now) = released_pair(config);
+        now += 10_000;
+        policy.tick(now, &observations(&[8, 0]));
+        assert_eq!(policy.state(1), Some(UpstreamDrainState::Warm));
+        let resumed = now;
+        while now < resumed + 290_000 {
+            now += 10_000;
+            let decision = policy.tick(now, &observations(&[1, 0]));
+            assert!(
+                decision.upstreams[1].desired_running,
+                "pre-park quiet time must not carry over (t={now})"
+            );
+        }
+        now = resumed + 300_000;
+        policy.tick(now, &observations(&[1, 0]));
+        assert_eq!(policy.state(1), Some(UpstreamDrainState::Draining));
+    }
+
+    #[test]
+    fn a_replica_that_is_not_awake_is_not_serving_capacity() {
+        // Replica 0 is warm by policy but its engine is still waking, so it is
+        // fenced from routing. Releasing 1 would leave nothing serving, and its
+        // load must not be averaged over a replica that cannot take any.
+        let mut policy = IdleDrainPolicy::new(node06_config(), 2, 0);
+        let mut observed = observations(&[0, 3]);
+        observed[0].awake = false;
+        let decision = policy.tick(310_000, &observed);
+        assert_eq!(decision.desired_running(), 2);
+        assert_eq!(decision.load_per_serving_replica, 3);
     }
 
     #[test]
@@ -787,10 +912,12 @@ mod utilization_tests {
             UpstreamObservation {
                 healthy: false,
                 inflight: 0,
+                awake: true,
             },
             UpstreamObservation {
                 healthy: true,
                 inflight: 1,
+                awake: true,
             },
         ];
         let decision = policy.tick(310_000, &sick);
@@ -845,6 +972,7 @@ mod tests {
             UpstreamObservation {
                 healthy: true,
                 inflight: 0,
+                awake: true,
             };
             count
         ]
@@ -857,6 +985,92 @@ mod tests {
         now += MINUTE;
         policy.tick(now, &healthy_idle(2));
         now
+    }
+
+    #[test]
+    fn a_waking_replica_is_not_counted_toward_parking_another() {
+        let mut policy = IdleDrainPolicy::new(config(IdleDrainMode::Drain), 3, 0);
+        let mut observed = healthy_idle(3);
+        observed[0].awake = false;
+        observed[1].awake = false;
+        // Only replica 2 can serve; parking it would leave nothing routable.
+        let decision = policy.tick(11 * MINUTE, &observed);
+        assert_eq!(decision.desired_running(), 3);
+    }
+
+    #[test]
+    fn restoring_the_floor_counts_a_waking_replica_and_does_not_cascade() {
+        let mut policy = IdleDrainPolicy::new(config(IdleDrainMode::Drain), 3, 0);
+        let mut now = 11 * MINUTE;
+        policy.tick(now, &healthy_idle(3));
+        now += 6 * MINUTE;
+        policy.tick(now, &healthy_idle(3));
+        assert_eq!(policy.state(1), Some(UpstreamDrainState::Draining));
+        assert_eq!(policy.state(2), Some(UpstreamDrainState::Drained));
+
+        // The warm replica fails: the floor wakes exactly one parked replica.
+        let mut observed = healthy_idle(3);
+        observed[0].healthy = false;
+        observed[1].awake = false;
+        observed[2].awake = false;
+        now += MINUTE;
+        let decision = policy.tick(now, &observed);
+        assert_eq!(decision.desired_running(), 2);
+        assert_eq!(policy.state(1), Some(UpstreamDrainState::Warm));
+
+        // While replica 1 is still waking it is intended capacity; the floor
+        // is met and replica 2 stays parked.
+        now += MINUTE;
+        let decision = policy.tick(now, &observed);
+        assert_eq!(decision.desired_running(), 2);
+        assert_eq!(policy.state(2), Some(UpstreamDrainState::Drained));
+    }
+
+    #[test]
+    fn the_warm_floor_holds_per_model_group() {
+        // Replicas 0-2 serve one model, replica 3 the only copy of another.
+        let mut policy =
+            IdleDrainPolicy::new(config(IdleDrainMode::Drain), 4, 0).with_groups(&[0, 0, 0, 1]);
+        let mut now = 11 * MINUTE;
+        for _ in 0..10 {
+            let decision = policy.tick(now, &healthy_idle(4));
+            assert!(
+                decision.upstreams[3].desired_running,
+                "the only replica of its model is never parked"
+            );
+            assert!(
+                decision.upstreams[..3]
+                    .iter()
+                    .any(|intent| intent.desired_running)
+            );
+            now += 6 * MINUTE;
+        }
+        assert_eq!(policy.state(0), Some(UpstreamDrainState::Warm));
+        assert_eq!(policy.state(1), Some(UpstreamDrainState::Drained));
+        assert_eq!(policy.state(2), Some(UpstreamDrainState::Drained));
+    }
+
+    #[test]
+    fn the_floor_is_restored_only_in_the_group_that_lost_capacity() {
+        let mut policy =
+            IdleDrainPolicy::new(config(IdleDrainMode::Drain), 4, 0).with_groups(&[0, 0, 1, 1]);
+        let mut now = 11 * MINUTE;
+        policy.tick(now, &healthy_idle(4));
+        now += 6 * MINUTE;
+        policy.tick(now, &healthy_idle(4));
+        assert_eq!(policy.state(3), Some(UpstreamDrainState::Drained));
+        assert_eq!(policy.state(1), Some(UpstreamDrainState::Draining));
+
+        let mut observed = healthy_idle(4);
+        observed[0].healthy = false;
+        now += MINUTE;
+        policy.tick(now, &observed);
+        assert_eq!(policy.state(1), Some(UpstreamDrainState::Warm));
+        assert_eq!(
+            policy.state(3),
+            Some(UpstreamDrainState::Drained),
+            "group 1 still has its warm replica"
+        );
     }
 
     #[test]
@@ -966,10 +1180,12 @@ mod tests {
             UpstreamObservation {
                 healthy: false,
                 inflight: 0,
+                awake: true,
             },
             UpstreamObservation {
                 healthy: true,
                 inflight: 0,
+                awake: true,
             },
         ];
         // Only one replica is actually serving, so parking the other would
@@ -1003,10 +1219,12 @@ mod tests {
             UpstreamObservation {
                 healthy: true,
                 inflight: 0,
+                awake: true,
             },
             UpstreamObservation {
                 healthy: true,
                 inflight: 1,
+                awake: true,
             },
         ];
         // A request still draining out resets the clock and un-idles the fleet.
@@ -1099,10 +1317,12 @@ mod tests {
             UpstreamObservation {
                 healthy: true,
                 inflight: 0,
+                awake: true,
             },
             UpstreamObservation {
                 healthy: false,
                 inflight: 0,
+                awake: true,
             },
         ];
         for _ in 0..10 {
@@ -1147,10 +1367,12 @@ mod tests {
                 UpstreamObservation {
                     healthy: false,
                     inflight: 0,
+                    awake: true,
                 },
                 UpstreamObservation {
                     healthy: true,
                     inflight: 0,
+                    awake: true,
                 },
             ],
         );
@@ -1181,10 +1403,12 @@ mod tests {
                 UpstreamObservation {
                     healthy: false,
                     inflight: 0,
+                    awake: true,
                 },
                 UpstreamObservation {
                     healthy: false,
                     inflight: 0,
+                    awake: true,
                 },
             ],
         );
@@ -1229,6 +1453,7 @@ mod tests {
                             // Health flips freely, including all-unhealthy.
                             healthy: rng.below(4) != 0,
                             inflight: usize::try_from(rng.below(3)).unwrap_or(0),
+                            awake: true,
                         })
                         .collect::<Vec<_>>();
                     if rng.below(3) == 0 {
@@ -1293,10 +1518,12 @@ mod tests {
                 UpstreamObservation {
                     healthy: true,
                     inflight: 0,
+                    awake: true,
                 },
                 UpstreamObservation {
                     healthy: false,
                     inflight: 0,
+                    awake: true,
                 },
             ],
         );

@@ -1128,6 +1128,18 @@ impl Router {
         }
     }
 
+    /// Forgets every cached prefix and fill sample for a replica whose KV
+    /// cache was discarded, e.g. by engine sleep. Without this a woken replica
+    /// keeps attracting sessions for prefixes it no longer holds.
+    pub fn invalidate_cache(&self, upstream: usize) {
+        let mut inner = self.inner.lock();
+        let Some(state) = inner.states.get_mut(upstream) else {
+            return;
+        };
+        state.lru.clear();
+        state.horizon.reset();
+    }
+
     /// Current eviction horizon per upstream; `None` is unbounded.
     #[must_use]
     pub fn affinity_horizons(&self) -> Vec<Option<Duration>> {
@@ -2513,6 +2525,37 @@ mod tests {
         assert_eq!(warm.overlap_blocks, 2);
         assert_eq!(warm.stale_blocks, 2);
         assert_eq!(warm.overlap_ages_ms, vec![[2, 30_000], [2, 130_000]]);
+    }
+
+    #[test]
+    fn invalidating_a_replica_cache_forgets_its_prefixes_and_fill() {
+        let router = horizon_router(
+            AffinityHorizonMode::Enforce,
+            AffinityHorizonSource::Fill {
+                capacity_tokens: vec![Some(1_000), Some(1_000)],
+            },
+        );
+        let chain = (1..=8).collect::<Vec<u64>>();
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        router.observe_at(0, &chain, Some(1_200), start);
+        router.observe_at(1, &chain, Some(1_200), start);
+        let (decision, _) = router.route_prepared_observed_at(1, &chain, at(10));
+        assert_eq!(candidate(&decision, 1).overlap_blocks, 8);
+        assert_eq!(candidate(&decision, 1).horizon_ms, Some(10_000));
+
+        // The engine slept and discarded its KV cache.
+        router.invalidate_cache(1);
+        let (decision, _) = router.route_prepared_observed_at(1, &chain, at(20));
+        assert_eq!(candidate(&decision, 1).overlap_blocks, 0);
+        assert_eq!(candidate(&decision, 1).stale_blocks, 0);
+        assert_eq!(
+            candidate(&decision, 1).horizon_ms,
+            None,
+            "fill restarts empty"
+        );
+        assert_eq!(decision.candidates[0], 0, "the warm replica now wins");
+        assert_eq!(candidate(&decision, 0).overlap_blocks, 8);
     }
 
     #[test]

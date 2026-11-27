@@ -180,10 +180,15 @@ impl ParkState {
         )
     }
 
-    /// Whether the replica is holding host memory for offloaded weights.
+    /// Whether the replica may be holding host memory for offloaded weights.
+    ///
+    /// Only `Awake` releases the slot. `Waking` still holds the weights in
+    /// host memory until its device copy completes, and `Unknown` may still be
+    /// asleep; counting either as free would let another replica park past
+    /// the cap.
     #[must_use]
     pub const fn occupies_park_slot(self) -> bool {
-        matches!(self, Self::Parking | Self::Parked)
+        !matches!(self, Self::Awake)
     }
 }
 
@@ -253,13 +258,15 @@ pub fn plan(
         let Some(state) = states.get(upstream).copied() else {
             continue;
         };
-        if !intent.desired_running {
-            continue;
-        }
+        // An unknown replica is reconciled whatever the intent: it holds a
+        // park slot until its real state is observed, so leaving it unknown
+        // while the policy wants it parked would leak that slot forever.
         actions[upstream] = match state {
-            ParkState::Parked | ParkState::Parking => Some(ParkAction::Wake),
             ParkState::Unknown => Some(ParkAction::Reconcile),
-            ParkState::Awake | ParkState::Waking => None,
+            ParkState::Parked | ParkState::Parking if intent.desired_running => {
+                Some(ParkAction::Wake)
+            }
+            _ => None,
         };
     }
 
@@ -408,9 +415,29 @@ mod tests {
 
     #[test]
     fn an_unknown_replica_is_never_slept_because_it_may_already_be_asleep() {
+        // It is reconciled instead, so its park slot is not leaked while the
+        // policy keeps wanting it parked.
         let intents = [intent(false, true)];
         let states = [ParkState::Unknown];
-        assert_eq!(plan(&intents, &states, &config(1)), vec![None]);
+        assert_eq!(
+            plan(&intents, &states, &config(1)),
+            vec![Some(ParkAction::Reconcile)]
+        );
+    }
+
+    #[test]
+    fn waking_and_unknown_replicas_occupy_park_slots() {
+        // A waking replica's weights stay in host memory until its device
+        // copy completes, and an unknown one may still be asleep; another
+        // replica must not park past the cap meanwhile.
+        for occupied in [ParkState::Waking, ParkState::Unknown] {
+            assert!(occupied.occupies_park_slot(), "{}", occupied.label());
+            let intents = [intent(true, false), intent(false, true)];
+            let states = [occupied, ParkState::Awake];
+            let planned = plan(&intents, &states, &config(1));
+            assert_eq!(planned[1], None, "{} must hold the slot", occupied.label());
+        }
+        assert!(!ParkState::Awake.occupies_park_slot());
     }
 
     #[test]

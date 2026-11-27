@@ -10,6 +10,22 @@
   need the NVIDIA `utility` capability. The separate
   `bench/machineview_agent.py` and `RJ_MACHINEVIEW_AGENT_URL` are removed;
   a leftover `RJ_MACHINEVIEW_AGENT_URL` is ignored.
+- Health admission, failover, and parking fixes. Every router health
+  publication (probe, serving evidence, `DSpark` guard poll) is now gated on
+  passive warmup admission, and warmup observes a probe before health is
+  published, so a warming replica is never briefly routable. `/v1/models`
+  answers and responses that fail mid-stream no longer count as serving
+  evidence. Marking an upstream unavailable around an engine restart also
+  resets its guard probe health, warmup admission, and compatibility
+  attestation. A state-reuse 404 on the last allowed attempt is forwarded
+  instead of becoming a 503, retries record failover reason
+  `state_not_found`, and an explicit `"state_id": null` creates a state whose
+  owner is learned. A candidate fenced between routing and dispatch no longer
+  spends `RJ_ROUTE_MAX_ATTEMPTS`. Idle drain keeps its cooldown after a resume
+  and restarts a resumed replica's quiet window, counts only awake engines as
+  serving capacity, and holds the warm floor per configured model. Sleeping
+  an engine clears its prefix index, fill horizon, and long-session
+  residents; waking and unknown engines keep their park slot.
 
 ## 0.10.0 — 2026-10-26
 

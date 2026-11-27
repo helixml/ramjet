@@ -174,6 +174,14 @@ impl HorizonEstimator {
             fill.record(tokens, now);
         }
     }
+
+    /// Forget all fill history after the replica's KV cache was discarded
+    /// (engine sleep): its cache is empty, so nothing has been evicted yet.
+    pub fn reset(&mut self) {
+        if let Self::Fill(fill) = self {
+            fill.clear();
+        }
+    }
 }
 
 /// LRU fill model for one replica.
@@ -201,6 +209,12 @@ impl FillHorizon {
             samples: VecDeque::new(),
             total: 0,
         }
+    }
+
+    /// Drops every fill sample, as for a freshly started replica.
+    pub fn clear(&mut self) {
+        self.samples.clear();
+        self.total = 0;
     }
 
     pub fn record(&mut self, tokens: u64, now: Instant) {
@@ -400,6 +414,18 @@ mod tests {
 
     fn secs(seconds: u64) -> Duration {
         Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn a_cleared_fill_horizon_is_unbounded_again() {
+        let start = Instant::now();
+        let mut estimator = HorizonEstimator::Fill(FillHorizon::new(1_000));
+        estimator.record_fill(1_200, start);
+        assert_eq!(estimator.horizon(start + secs(5)), Some(secs(5)));
+        estimator.reset();
+        assert_eq!(estimator.horizon(start + secs(10)), None);
+        estimator.record_fill(400, start + secs(20));
+        assert_eq!(estimator.horizon(start + secs(30)), None);
     }
 
     #[test]

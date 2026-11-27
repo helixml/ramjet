@@ -76,8 +76,10 @@ impl DecisionStateAffinity {
         let object = value.as_object()?;
         match object.get("state_id") {
             Some(Value::String(state_id)) => state_key(state_id).map(StateRequest::Reuse),
+            // An explicit `null` is the JSON spelling of "no state yet": the
+            // engine creates one, so its owner must be learned like an absent key.
+            Some(Value::Null) | None => Some(StateRequest::Create),
             Some(_) => None,
-            None => Some(StateRequest::Create),
         }
     }
 
@@ -210,6 +212,24 @@ mod tests {
         assert_eq!(
             affinity.request(&Method::POST, "/states/abc/decide", br#"{"questions":{}}"#),
             Some(reuse)
+        );
+    }
+
+    #[test]
+    fn explicit_null_state_id_is_a_create_and_learns_its_owner() {
+        let affinity = DecisionStateAffinity::new(true, 4);
+        let request = affinity.request(
+            &Method::POST,
+            "/v1/decide",
+            br#"{"state_id":null,"state":"document","questions":{}}"#,
+        );
+        assert_eq!(request, Some(StateRequest::Create));
+        affinity.learn_response(request, 1, br#"{"state_id":"fresh"}"#);
+        assert_eq!(affinity.owner("fresh"), Some(1));
+        // Any other non-string spelling is still unrecognized.
+        assert_eq!(
+            affinity.request(&Method::POST, "/v1/decide", br#"{"state_id":7}"#),
+            None
         );
     }
 

@@ -177,9 +177,11 @@ impl Simulation {
         let observations: Vec<UpstreamObservation> = self
             .engines
             .iter()
-            .map(|engine| UpstreamObservation {
+            .zip(&self.park)
+            .map(|(engine, park)| UpstreamObservation {
                 healthy: engine.healthy,
                 inflight: engine.inflight,
+                awake: *park == ParkState::Awake,
             })
             .collect();
         let decision = self.policy.tick(self.now_ms, &observations);

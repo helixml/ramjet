@@ -354,9 +354,19 @@ struct GuardApplication {
 struct GuardPublication<'a> {
     router: &'a Router,
     metrics: &'a Metrics,
+    warmup: Option<&'a WarmupAdmission>,
     upstream: usize,
     upstream_label: &'a str,
     store: Option<&'a DsparkGuardStore>,
+}
+
+impl GuardPublication<'_> {
+    /// Passive warmup admission for this replica. Every router health
+    /// publication is gated on it, so no path can un-fence a warming replica.
+    fn warmup_routing_ready(&self) -> bool {
+        self.warmup
+            .is_none_or(|warmup| warmup.routing_ready(self.upstream))
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -431,17 +441,20 @@ impl DsparkGuardReplica {
         inner.snapshot()
     }
 
+    /// Records a probe result and publishes the resulting health. `observe`
+    /// runs under the replica lock with the underlying (guard-effective) health
+    /// before anything is published, so warmup admission is always updated
+    /// first and a warming replica is never briefly routable.
     fn publish_probe_health(
         &self,
-        router: &Router,
-        metrics: &Metrics,
-        upstream: usize,
-        upstream_label: &str,
+        publication: GuardPublication<'_>,
         healthy: bool,
+        observe: impl FnOnce(bool),
     ) -> bool {
         let mut inner = self.inner.lock();
         inner.probe_healthy = healthy;
-        inner.publish_effective_health(router, metrics, upstream, upstream_label)
+        observe(inner.underlying_healthy());
+        inner.publish_effective_health(publication)
     }
 
     fn apply(
@@ -488,12 +501,7 @@ impl DsparkGuardReplica {
                 | WindowOutcome::Parse(_) => ReliabilityState::Unavailable,
             }
         };
-        inner.publish_effective_health(
-            publication.router,
-            publication.metrics,
-            publication.upstream,
-            publication.upstream_label,
-        );
+        inner.publish_effective_health(publication);
         GuardApplication {
             observation,
             state: inner.state,
@@ -643,24 +651,31 @@ impl DsparkGuardReplicaInner {
         }
     }
 
+    /// Probe health after the guard's quarantine and durable fence, before
+    /// passive warmup admission.
+    fn underlying_healthy(&self) -> bool {
+        self.probe_healthy && !self.guard.quarantined() && !self.durable_fence.blocks_serving()
+    }
+
     /// Publish both serving authority and its public gauge while the owning
     /// per-replica lock is held. This prevents an older guard/probe result from
     /// overwriting a newer health decision after it releases the lock.
-    fn publish_effective_health(
-        &self,
-        router: &Router,
-        metrics: &Metrics,
-        upstream: usize,
-        upstream_label: &str,
-    ) -> bool {
-        let effective =
-            self.probe_healthy && !self.guard.quarantined() && !self.durable_fence.blocks_serving();
-        router.set_healthy(upstream, effective);
-        metrics
+    ///
+    /// This is the only place router health is derived from: the gauge keeps
+    /// reporting reachability, while routing additionally requires warmup
+    /// admission. Returns the underlying (reachability) health.
+    fn publish_effective_health(&self, publication: GuardPublication<'_>) -> bool {
+        let underlying = self.underlying_healthy();
+        publication.router.set_healthy(
+            publication.upstream,
+            underlying && publication.warmup_routing_ready(),
+        );
+        publication
+            .metrics
             .upstream_up
-            .with_label_values(&[upstream_label])
-            .set(f64::from(effective));
-        effective
+            .with_label_values(&[publication.upstream_label])
+            .set(f64::from(underlying));
+        underlying
     }
 }
 
@@ -802,11 +817,16 @@ fn publish_initial_replica_state(
             .with_label_values(&[&upstream_label, config.upstream_node(index)])
             .set(1.0);
         guard.publish_probe_health(
-            router,
-            metrics,
-            index,
-            &upstream_label,
+            GuardPublication {
+                router,
+                metrics,
+                warmup: None,
+                upstream: index,
+                upstream_label: &upstream_label,
+                store: None,
+            },
             initial_probe_health,
+            |_| {},
         );
     }
     if config.upstream_admission_mode != UpstreamAdmissionMode::Compatibility {
@@ -821,6 +841,25 @@ fn publish_initial_replica_state(
             .with_label_values(&[&label])
             .set(0.0);
     }
+}
+
+/// The idle-drain warm floor holds per served model: replicas of different
+/// models cannot cover for one another. A homogeneous fleet is one group.
+fn warm_floor_groups(config: &Config) -> Vec<usize> {
+    let mut models: Vec<&str> = Vec::new();
+    config
+        .upstream_models
+        .iter()
+        .map(|model| {
+            models
+                .iter()
+                .position(|known| *known == model.as_str())
+                .unwrap_or_else(|| {
+                    models.push(model);
+                    models.len() - 1
+                })
+        })
+        .collect()
 }
 
 fn initialize_warmup_admission(config: &Config, metrics: &Metrics) -> Option<WarmupAdmission> {
@@ -998,11 +1037,10 @@ impl Proxy {
         let idle_drain = config.idle_drain.mode.enabled().then(|| {
             let origin = Instant::now();
             IdleDrainState {
-                policy: Mutex::new(IdleDrainPolicy::new(
-                    config.idle_drain,
-                    config.upstreams.len(),
-                    0,
-                )),
+                policy: Mutex::new(
+                    IdleDrainPolicy::new(config.idle_drain, config.upstreams.len(), 0)
+                        .with_groups(&warm_floor_groups(&config)),
+                ),
                 origin,
                 fenced: Mutex::new(vec![false; config.upstreams.len()]),
                 park: Mutex::new(vec![ParkState::Awake; config.upstreams.len()]),
@@ -1172,8 +1210,15 @@ impl Proxy {
 
     /// Invalidates stale readiness before an engine process is stopped or
     /// restarted. A later ordinary probe is the only path that restores it.
+    ///
+    /// Every input to readiness is reset, not only router health: the guard's
+    /// probe health (else the next guard poll republishes it), warmup admission
+    /// (else a restarted engine skips its warmup) and compatibility
+    /// attestation (else a stale attestation outlives the engine process).
     pub fn mark_upstream_unavailable(&self, upstream: usize) {
-        self.inner.router.set_healthy(upstream, false);
+        self.publish_upstream_health(upstream, false);
+        self.inner.tokenizer.invalidate_attestation(upstream);
+        self.inner.tokenizer.invalidate_admission(upstream);
     }
 
     /// Start the bounded comparison phase after all marked serving requests
@@ -1698,9 +1743,16 @@ impl Proxy {
         let mut last_error = None;
         let mut failover_reason = None;
         let mut selected = None;
-        let mut attempt = 0;
-        while attempt < attempt_limit {
-            let (candidate, units) = serving_candidates[attempt];
+        // `attempt_limit` bounds network dispatches, not list positions: a
+        // candidate fenced between routing and dispatch (a concurrent probe or
+        // park, or a DP sibling going down) is skipped without spending the
+        // budget, so it can never turn healthy later candidates into a 503.
+        let mut position = 0;
+        let mut dispatches = 0;
+        while position < serving_candidates.len() && dispatches < attempt_limit {
+            let (candidate, units) = serving_candidates[position];
+            let another_dispatch_allowed =
+                dispatches + 1 < attempt_limit && position + 1 < serving_candidates.len();
             let url = upstream_url(&self.inner.config.upstreams[candidate], &parts.uri);
             let mut outbound =
                 self.inner
@@ -1712,10 +1764,11 @@ impl Proxy {
                     ));
             outbound = outbound.headers(filtered_headers(&parts.headers));
             let Some(load) = self.acquire_for_dispatch(candidate, units, failing_open) else {
-                failover_reason = Some("not_admitted");
-                attempt += 1;
+                failover_reason = failover_reason.or(Some("not_admitted"));
+                position += 1;
                 continue;
             };
+            dispatches += 1;
             // Point the flight at this replica before the prefill starts, not
             // after the response arrives: state affinity or failover may have
             // moved the leader, and followers arriving during its prefill must
@@ -1735,7 +1788,7 @@ impl Proxy {
                     if matches!(
                         response.status(),
                         StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE
-                    ) && attempt + 1 < attempt_limit =>
+                    ) && another_dispatch_allowed =>
                 {
                     failover_reason = Some(if response.status() == StatusCode::BAD_GATEWAY {
                         "status_502"
@@ -1745,13 +1798,16 @@ impl Proxy {
                     self.publish_upstream_health(candidate, false);
                     self.record_upstream_request(candidate, response.status());
                     drop(load);
-                    self.fail_over_from(&mut serving_candidates, failover_tail, attempt, false);
+                    self.fail_over_from(&mut serving_candidates, failover_tail, position, false);
                 }
+                // On the last allowed dispatch the 404 is the answer and is
+                // forwarded; dropping it would surface as a spurious 503.
                 Ok(response)
                     if response.status() == StatusCode::NOT_FOUND
                         && state_request.is_some_and(StateRequest::is_reuse)
-                        && attempt + 1 < serving_candidates.len() =>
+                        && another_dispatch_allowed =>
                 {
+                    failover_reason = Some("state_not_found");
                     self.inner
                         .decision_state_affinity
                         .forget_not_found(state_request, candidate);
@@ -1759,7 +1815,7 @@ impl Proxy {
                     drop(load);
                 }
                 Ok(response) => {
-                    if attempt > 0 {
+                    if position > 0 {
                         let from = serving_candidates[0].0;
                         let reason = failover_reason.unwrap_or("unknown");
                         tracing::warn!(from, to = candidate, reason, "upstream failover");
@@ -1785,12 +1841,12 @@ impl Proxy {
                     self.fail_over_from(
                         &mut serving_candidates,
                         failover_tail,
-                        attempt,
+                        position,
                         reason == "connect",
                     );
                 }
             }
-            attempt += 1;
+            position += 1;
         }
 
         let Some((upstream, response, load_guard, request_load_units)) = selected else {
@@ -2065,7 +2121,14 @@ impl Proxy {
                 }
             }
         }
-        self.record_upstream_request(upstream, status);
+        // Only a fully relayed inference response is serving evidence. Headers
+        // followed by a dead stream, or a model listing, prove nothing about
+        // the engine's ability to complete work.
+        if result == "complete" && endpoint != Endpoint::Other {
+            self.record_upstream_request(upstream, status);
+        } else {
+            self.count_upstream_request(upstream, status);
+        }
         self.inner.accounting.finish(
             &account,
             &Outcome {
@@ -2152,7 +2215,7 @@ impl Proxy {
                 Ok(model) => {
                     let id = self.inner.config.upstream_models[upstream].clone();
                     models.entry(id).or_insert(model);
-                    self.record_upstream_request(upstream, StatusCode::OK);
+                    self.count_upstream_request(upstream, StatusCode::OK);
                 }
                 Err(reason) => {
                     self.inner
@@ -2256,7 +2319,7 @@ impl Proxy {
                     self.inner.config.advertise_ctx_margin,
                 );
                 self.record_request(endpoint, StatusCode::OK, false, started.elapsed());
-                self.record_upstream_request(upstream, StatusCode::OK);
+                self.count_upstream_request(upstream, StatusCode::OK);
                 self.inner.journal.finish(
                     journal_sequence,
                     request_id.as_deref(),
@@ -2606,18 +2669,25 @@ impl Proxy {
     }
 
     fn record_upstream_request(&self, upstream: usize, status: StatusCode) {
-        let label = self.upstream_label(upstream);
-        self.inner
-            .metrics
-            .upstream_requests
-            .with_label_values(&[&label, status.as_str()])
-            .inc();
+        self.count_upstream_request(upstream, status);
         // A server error is how both a shedding engine and a broken one answer,
         // so it is not admitted as liveness evidence. Anything the engine
         // generated itself is.
         if !status.is_server_error() {
             self.note_upstream_serving_success(upstream);
         }
+    }
+
+    /// Counts an upstream answer without admitting it as serving evidence:
+    /// model discovery and incomplete responses prove the HTTP frontend is up,
+    /// not that the engine can complete inference.
+    fn count_upstream_request(&self, upstream: usize, status: StatusCode) {
+        let label = self.upstream_label(upstream);
+        self.inner
+            .metrics
+            .upstream_requests
+            .with_label_values(&[&label, status.as_str()])
+            .inc();
     }
 
     /// Counts requests governed by a long-prompt lane against the upstream
@@ -2775,16 +2845,7 @@ impl Proxy {
         let Some(state) = self.inner.idle_drain.as_ref() else {
             return;
         };
-        let observations = (0..self.inner.config.upstreams.len())
-            .map(|upstream| {
-                let (inflight, _, _, healthy) = self
-                    .inner
-                    .router
-                    .state(upstream)
-                    .unwrap_or((0, 0, 0, false));
-                UpstreamObservation { healthy, inflight }
-            })
-            .collect::<Vec<_>>();
+        let observations = self.idle_drain_observations();
         let now_ms = state.now_ms();
         let decision = state.policy.lock().tick(now_ms, &observations);
         self.publish_idle_drain(&decision);
@@ -2795,6 +2856,35 @@ impl Proxy {
         // observe-mode soak is asking.
         self.publish_park_state();
         self.converge_engine_parking(&decision).await;
+    }
+
+    /// Samples every upstream for the idle-drain policy. A replica whose
+    /// engine is not awake is fenced from routing whatever the policy intends,
+    /// so it is reported as intended capacity, not serving capacity.
+    fn idle_drain_observations(&self) -> Vec<UpstreamObservation> {
+        (0..self.inner.config.upstreams.len())
+            .map(|upstream| {
+                let (inflight, _, _, healthy) = self
+                    .inner
+                    .router
+                    .state(upstream)
+                    .unwrap_or((0, 0, 0, false));
+                UpstreamObservation {
+                    healthy,
+                    inflight,
+                    awake: self.park_state(upstream) == ParkState::Awake,
+                }
+            })
+            .collect()
+    }
+
+    /// Forgets the cache-locality model of a replica whose engine discarded
+    /// its KV cache. vLLM sleep drops the KV cache at every level, so on wake
+    /// the replica is cold; keeping its prefix index, fill horizon, and long-
+    /// session residents would steer warm sessions into a cold engine.
+    fn invalidate_engine_cache(&self, upstream: usize) {
+        self.inner.router.invalidate_cache(upstream);
+        self.inner.long_sessions.invalidate(upstream);
     }
 
     /// Converges each engine onto the policy's intent with vLLM sleep mode.
@@ -2852,6 +2942,12 @@ impl Proxy {
             let mut park = state.park.lock();
             for (upstream, action, outcome) in results {
                 park[upstream] = outcome;
+                // Any issued sleep may have taken effect even if its response
+                // was lost, and a reconciliation that finds the engine asleep
+                // proves its KV cache is gone.
+                if action == ParkAction::Sleep || outcome == ParkState::Parked {
+                    self.invalidate_engine_cache(upstream);
+                }
                 let label = self.upstream_label(upstream);
                 self.inner
                     .metrics
@@ -3102,6 +3198,7 @@ impl Proxy {
             GuardPublication {
                 router: &self.inner.router,
                 metrics: self.inner.metrics.as_ref(),
+                warmup: self.inner.warmup_admission.as_ref(),
                 upstream,
                 upstream_label: &upstream_label,
                 store: self.inner.dspark_guard_store.as_deref(),
@@ -3582,61 +3679,57 @@ impl Proxy {
         }
     }
 
+    /// Publishes serving-path evidence: a completed inference request
+    /// (`true`, which also admits warmup) or a dispatch failure (`false`).
     fn publish_upstream_health(&self, upstream: usize, probe_healthy: bool) -> bool {
-        let upstream_label = self.upstream_label(upstream);
-        let warmup_outcome = self.inner.warmup_admission.as_ref().map(|warmup| {
+        let origin = self.inner.origin;
+        self.publish_health(upstream, probe_healthy, |warmup, _| {
             if probe_healthy {
                 warmup.observe_serving(upstream)
             } else {
-                warmup.observe_probe(upstream, false, self.inner.origin.elapsed())
+                warmup.observe_probe(upstream, false, origin.elapsed())
             }
-        });
-        self.record_warmup(upstream, warmup_outcome);
-        let underlying = self.inner.dspark_guards.get(upstream).is_some_and(|guard| {
-            guard.publish_probe_health(
-                &self.inner.router,
-                self.inner.metrics.as_ref(),
-                upstream,
-                &upstream_label,
-                probe_healthy,
-            )
-        });
-        underlying
-            && self
-                .inner
-                .warmup_admission
-                .as_ref()
-                .is_none_or(|warmup| warmup.routing_ready(upstream))
+        })
     }
 
+    /// Publishes a readiness probe result. Warmup observes the probe before
+    /// router health is published, so admission and routing never disagree.
     fn publish_probed_upstream_health(&self, upstream: usize, probe_healthy: bool) -> bool {
+        let origin = self.inner.origin;
+        self.publish_health(upstream, probe_healthy, |warmup, underlying| {
+            warmup.observe_probe(upstream, underlying, origin.elapsed())
+        })
+    }
+
+    /// The single funnel for probe- and serving-driven health. Returns whether
+    /// the replica is routable: reachable and admitted by passive warmup.
+    fn publish_health(
+        &self,
+        upstream: usize,
+        probe_healthy: bool,
+        observe_warmup: impl FnOnce(&WarmupAdmission, bool) -> WarmupAdmissionOutcome,
+    ) -> bool {
         let upstream_label = self.upstream_label(upstream);
+        let warmup = self.inner.warmup_admission.as_ref();
+        let mut warmup_outcome = None;
         let underlying = self.inner.dspark_guards.get(upstream).is_some_and(|guard| {
             guard.publish_probe_health(
-                &self.inner.router,
-                self.inner.metrics.as_ref(),
-                upstream,
-                &upstream_label,
+                GuardPublication {
+                    router: &self.inner.router,
+                    metrics: self.inner.metrics.as_ref(),
+                    warmup,
+                    upstream,
+                    upstream_label: &upstream_label,
+                    store: None,
+                },
                 probe_healthy,
-            )
-        });
-        let warmup_outcome = self.inner.warmup_admission.as_ref().map(|warmup| {
-            warmup.observe_probe(
-                upstream,
-                probe_healthy && underlying,
-                self.inner.origin.elapsed(),
+                |underlying| {
+                    warmup_outcome = warmup.map(|warmup| observe_warmup(warmup, underlying));
+                },
             )
         });
         self.record_warmup(upstream, warmup_outcome);
-        let admitted = self
-            .inner
-            .warmup_admission
-            .as_ref()
-            .is_none_or(|warmup| warmup.routing_ready(upstream));
-        if underlying && !admitted {
-            self.inner.router.set_healthy(upstream, false);
-        }
-        underlying && admitted
+        underlying && warmup.is_none_or(|warmup| warmup.routing_ready(upstream))
     }
 
     fn record_warmup(&self, upstream: usize, outcome: Option<WarmupAdmissionOutcome>) {
@@ -4434,16 +4527,7 @@ mod tests {
     /// Advances the policy's own clock without waiting in real time.
     fn advance_idle_drain(proxy: &Proxy, ms: u64) {
         let state = proxy.inner.idle_drain.as_ref().expect("policy enabled");
-        let observations = (0..proxy.inner.config.upstreams.len())
-            .map(|upstream| {
-                let (inflight, _, _, healthy) = proxy
-                    .inner
-                    .router
-                    .state(upstream)
-                    .unwrap_or((0, 0, 0, false));
-                UpstreamObservation { healthy, inflight }
-            })
-            .collect::<Vec<_>>();
+        let observations = proxy.idle_drain_observations();
         let decision = state.policy.lock().tick(ms, &observations);
         proxy.publish_idle_drain(&decision);
     }
@@ -4523,16 +4607,7 @@ mod tests {
     /// production loop does each round.
     async fn advance_and_converge(proxy: &Proxy, ms: u64) {
         let state = proxy.inner.idle_drain.as_ref().expect("policy enabled");
-        let observations = (0..proxy.inner.config.upstreams.len())
-            .map(|upstream| {
-                let (inflight, _, _, healthy) = proxy
-                    .inner
-                    .router
-                    .state(upstream)
-                    .unwrap_or((0, 0, 0, false));
-                UpstreamObservation { healthy, inflight }
-            })
-            .collect::<Vec<_>>();
+        let observations = proxy.idle_drain_observations();
         let decision = state.policy.lock().tick(ms, &observations);
         proxy.publish_idle_drain(&decision);
         proxy.converge_engine_parking(&decision).await;
@@ -4571,6 +4646,39 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(levels, vec!["level=1&mode=abort".to_owned()]);
         assert!(park_states(&proxy).contains(&ParkState::Parked));
+    }
+
+    #[tokio::test]
+    async fn sleeping_a_replica_forgets_its_cache_locality() {
+        let (proxy, _first, _second) = sleepy_fleet("drain").await;
+        let body = long_chat(8);
+        let fingerprints = proxy.inner.router.fingerprints(body.as_bytes());
+        assert!(!fingerprints.is_empty());
+        proxy.inner.router.observe(0, &fingerprints);
+        proxy.inner.router.observe(1, &fingerprints);
+        advance_and_converge(&proxy, 61_000).await;
+        advance_and_converge(&proxy, 63_000).await;
+        let parked = park_states(&proxy)
+            .iter()
+            .position(|state| *state == ParkState::Parked)
+            .expect("one replica parked");
+
+        // vLLM sleep discards the KV cache, so a woken replica is cold: its
+        // prefix index must not keep attracting the sessions it used to hold.
+        let decision = proxy.inner.router.route_prepared(body.len(), &fingerprints);
+        let overlap = |upstream: usize| {
+            decision
+                .candidate_state
+                .iter()
+                .find(|state| state.index == upstream)
+                .unwrap()
+                .overlap_blocks
+        };
+        assert_eq!(overlap(parked), 0);
+        assert!(
+            overlap(1 - parked) > 0,
+            "the warm replica keeps its prefixes"
+        );
     }
 
     #[tokio::test]
@@ -4789,6 +4897,7 @@ mod tests {
             UpstreamObservation {
                 healthy: true,
                 inflight: 0,
+                awake: true,
             };
             2
         ];
@@ -4931,6 +5040,7 @@ mod tests {
                 GuardPublication {
                     router: &proxy.inner.router,
                     metrics: proxy.inner.metrics.as_ref(),
+                    warmup: None,
                     upstream,
                     upstream_label: &upstream_label,
                     store: proxy.inner.dspark_guard_store.as_deref(),
@@ -7656,6 +7766,7 @@ mod tests {
             GuardPublication {
                 router: &restored.inner.router,
                 metrics: restored.inner.metrics.as_ref(),
+                warmup: None,
                 upstream: 0,
                 upstream_label: &label,
                 store: restored.inner.dspark_guard_store.as_deref(),
@@ -7671,6 +7782,7 @@ mod tests {
             GuardPublication {
                 router: &restored.inner.router,
                 metrics: restored.inner.metrics.as_ref(),
+                warmup: None,
                 upstream: 0,
                 upstream_label: &label,
                 store: restored.inner.dspark_guard_store.as_deref(),
@@ -7705,6 +7817,7 @@ mod tests {
             GuardPublication {
                 router: &proxy.inner.router,
                 metrics: proxy.inner.metrics.as_ref(),
+                warmup: None,
                 upstream: 0,
                 upstream_label: &label,
                 store: proxy.inner.dspark_guard_store.as_deref(),
@@ -7739,6 +7852,7 @@ mod tests {
                 GuardPublication {
                     router: &proxy.inner.router,
                     metrics: proxy.inner.metrics.as_ref(),
+                    warmup: None,
                     upstream: 0,
                     upstream_label: &label,
                     store: proxy.inner.dspark_guard_store.as_deref(),
@@ -7753,6 +7867,7 @@ mod tests {
             GuardPublication {
                 router: &proxy.inner.router,
                 metrics: proxy.inner.metrics.as_ref(),
+                warmup: None,
                 upstream: 0,
                 upstream_label: &label,
                 store: proxy.inner.dspark_guard_store.as_deref(),
@@ -7778,6 +7893,7 @@ mod tests {
             GuardPublication {
                 router: &restarted.inner.router,
                 metrics: restarted.inner.metrics.as_ref(),
+                warmup: None,
                 upstream: 0,
                 upstream_label: &label,
                 store: restarted.inner.dspark_guard_store.as_deref(),
@@ -7804,6 +7920,7 @@ mod tests {
                 GuardPublication {
                     router: &proxy.inner.router,
                     metrics: proxy.inner.metrics.as_ref(),
+                    warmup: None,
                     upstream: 0,
                     upstream_label: &label,
                     store: proxy.inner.dspark_guard_store.as_deref(),
@@ -7822,6 +7939,7 @@ mod tests {
             GuardPublication {
                 router: &proxy.inner.router,
                 metrics: proxy.inner.metrics.as_ref(),
+                warmup: None,
                 upstream: 0,
                 upstream_label: &label,
                 store: proxy.inner.dspark_guard_store.as_deref(),
@@ -7839,6 +7957,7 @@ mod tests {
             GuardPublication {
                 router: &proxy.inner.router,
                 metrics: proxy.inner.metrics.as_ref(),
+                warmup: None,
                 upstream: 0,
                 upstream_label: &label,
                 store: proxy.inner.dspark_guard_store.as_deref(),
@@ -7858,6 +7977,7 @@ mod tests {
             GuardPublication {
                 router: &proxy.inner.router,
                 metrics: proxy.inner.metrics.as_ref(),
+                warmup: None,
                 upstream: 0,
                 upstream_label: &label,
                 store: proxy.inner.dspark_guard_store.as_deref(),
@@ -7893,6 +8013,7 @@ mod tests {
             GuardPublication {
                 router: &proxy.inner.router,
                 metrics: proxy.inner.metrics.as_ref(),
+                warmup: None,
                 upstream: 0,
                 upstream_label: &label,
                 store: None,
@@ -9076,6 +9197,407 @@ mod tests {
         let models: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(models["data"][0]["max_model_len"], 376_832);
         assert_eq!(models["data"][1]["context_length"], 245_760);
+        task.abort();
+    }
+
+    fn warming_config(upstreams: &str, extra: &[(&str, &str)]) -> Config {
+        let extra = extra
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect::<std::collections::HashMap<_, _>>();
+        Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(upstreams.to_owned()),
+            "RJ_UPSTREAM_WARMUP_MODE" => Some("enforce".to_owned()),
+            "RJ_UPSTREAM_WARMUP_CONSECUTIVE_SUCCESSES" => Some("2".to_owned()),
+            "RJ_UPSTREAM_WARMUP_STABLE_SECONDS" => Some("300".to_owned()),
+            _ => extra.get(key).cloned(),
+        })
+        .unwrap()
+    }
+
+    /// Drive replica 0 into passive warmup: it lost health and has since
+    /// passed one probe, so it is reachable but not yet admitted.
+    fn start_warmup(proxy: &Proxy) {
+        assert!(!proxy.publish_probed_upstream_health(0, false));
+        assert!(!proxy.publish_probed_upstream_health(0, true));
+        assert!(!proxy.router().state(0).unwrap().3);
+        assert!(!proxy.inner.warmup_admission.as_ref().unwrap().ready(0));
+    }
+
+    #[tokio::test]
+    async fn a_dspark_guard_poll_never_unfences_a_warming_replica() {
+        let config = warming_config("http://127.0.0.1:1", &[("RJ_DSPARK_GUARD_MODE", "observe")]);
+        let proxy = proxy_for_config(config, Arc::from([]));
+        start_warmup(&proxy);
+
+        // Observe mode never quarantines, so before the fix the guard's own
+        // publication restored `healthy = probe_healthy` on every poll.
+        proxy.poll_dspark_guard(0).await;
+        assert!(
+            !proxy.router().state(0).unwrap().3,
+            "a guard poll must not admit a replica that warmup still fences"
+        );
+        assert!(!proxy.upstream_ready(0));
+        let label = proxy.upstream_label(0);
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .upstream_up
+                .with_label_values(&[&label])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON,
+            "reachability stays published while warmup fences routing"
+        );
+    }
+
+    #[test]
+    fn a_warming_replica_is_never_observably_routable_during_a_probe() {
+        let config = warming_config("http://127.0.0.1:1", &[]);
+        let proxy = proxy_for_config(config, Arc::from([]));
+        start_warmup(&proxy);
+        let stop = AtomicBool::new(false);
+        let seen_routable = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Acquire) {
+                    if proxy.router().state(0).unwrap().3 {
+                        seen_routable.store(true, Ordering::Release);
+                    }
+                }
+            });
+            // Each passing probe keeps the replica pending (the stable window
+            // is five minutes). Publishing probe health before warmup observed it
+            // flipped routing on and back off inside every call.
+            for _ in 0..20_000 {
+                assert!(!proxy.publish_probed_upstream_health(0, true));
+            }
+            stop.store(true, Ordering::Release);
+        });
+        assert!(!seen_routable.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn model_discovery_is_not_serving_evidence_for_warmup() {
+        let models = AxumRouter::new().route(
+            "/v1/models",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    r#"{"object":"list","data":[{"id":"glm","object":"model"}]}"#,
+                )
+            }),
+        );
+        let (url, task) = start_upstream(models).await;
+        let config = warming_config(url.as_str(), &[("RJ_UPSTREAM_MODELS", "glm")]);
+        let proxy = proxy_for_config(config, Arc::from([]));
+        start_warmup(&proxy);
+
+        let response = proxy
+            .serve(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        assert!(
+            !proxy.inner.warmup_admission.as_ref().unwrap().ready(0),
+            "a model listing must not admit a warming replica"
+        );
+        assert!(!proxy.router().state(0).unwrap().3);
+        assert!(
+            !proxy.inner.upstream_liveness[0].served_within(proxy.inner.now_ms(), u64::MAX),
+            "a model listing is not inference liveness"
+        );
+        let label = proxy.upstream_label(0);
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .upstream_requests
+                .with_label_values(&[&label, "200"])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON,
+            "the answer is still counted"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn marking_an_upstream_unavailable_survives_the_next_guard_poll() {
+        for warmup in ["off", "enforce"] {
+            let config = Config::from_lookup(|key| match key {
+                "RJ_UPSTREAM" => Some("http://127.0.0.1:1".to_owned()),
+                "RJ_DSPARK_GUARD_MODE" => Some("observe".to_owned()),
+                "RJ_UPSTREAM_WARMUP_MODE" => Some(warmup.to_owned()),
+                _ => None,
+            })
+            .unwrap();
+            let proxy = proxy_for_config(config, Arc::from([]));
+            assert!(proxy.upstream_ready(0), "{warmup}");
+
+            proxy.mark_upstream_unavailable(0);
+            assert!(!proxy.inner.dspark_guards[0].status().effective_healthy);
+            if let Some(warmup) = proxy.inner.warmup_admission.as_ref() {
+                assert!(!warmup.ready(0), "a restarted engine must warm up again");
+            }
+            // The guard republishes on every poll; it must not restore the
+            // stale probe health of a container that is being stopped.
+            proxy.poll_dspark_guard(0).await;
+            assert!(!proxy.router().state(0).unwrap().3, "{warmup}");
+            assert!(!proxy.upstream_ready(0), "{warmup}");
+        }
+    }
+
+    #[test]
+    fn marking_an_upstream_unavailable_revokes_compatibility_attestation() {
+        let mut config =
+            Config::from_lookup(|key| (key == "RJ_UPSTREAM").then(|| "http://127.0.0.1:1".into()))
+                .unwrap();
+        config.upstream_admission_mode = UpstreamAdmissionMode::Compatibility;
+        let proxy = proxy_for_config_with_manifest(config, test_compatibility_manifest());
+        proxy.inner.tokenizer.publish_admission(0, true);
+        assert_eq!(proxy.inner.tokenizer.compatibility_attested(0), Some(true));
+        proxy.mark_upstream_unavailable(0);
+        assert_eq!(proxy.inner.tokenizer.compatibility_attested(0), Some(false));
+        assert!(!proxy.upstream_ready(0));
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_dies_after_its_headers_is_not_serving_evidence() {
+        let engine = AxumRouter::new().fallback(any(|| async {
+            // Headers and a first event reach the client before the engine
+            // dies; the pause keeps the failure strictly after the headers.
+            let chunks = futures_util::stream::unfold(0, |step| async move {
+                match step {
+                    0 => Some((Ok(Bytes::from_static(b"data: {\"choices\":[]}\n\n")), 1)),
+                    1 => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        Some((Err(io::Error::other("engine died")), 2))
+                    }
+                    _ => None,
+                }
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from_stream(chunks))
+                .unwrap()
+        }));
+        let (url, task) = start_upstream(engine).await;
+        let proxy = proxy_for(&[url]);
+        let label = proxy.upstream_label(0);
+        // Down, so the request is dispatched fail-open: exactly the case in
+        // which a completed request would restore health.
+        proxy.publish_upstream_health(0, false);
+
+        let response = proxy
+            .serve(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .body(Body::from(
+                        r#"{"stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(to_bytes(response.into_body(), 1 << 20).await.is_err());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while proxy
+                .inner
+                .metrics
+                .upstream_requests
+                .with_label_values(&[&label, "200"])
+                .get()
+                < 1.0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the relay must finish accounting the response");
+        assert!(
+            !proxy.router().state(0).unwrap().3,
+            "a mid-stream failure must not restore health"
+        );
+        assert!(!proxy.inner.upstream_liveness[0].served_within(proxy.inner.now_ms(), u64::MAX));
+        task.abort();
+    }
+
+    fn solomon_proxy_with_attempts(upstreams: &[Url], attempts: &str) -> Proxy {
+        let joined = upstreams
+            .iter()
+            .map(Url::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_API_PROFILE" => Some("solomon".to_owned()),
+            "RJ_ROUTE_MAX_ATTEMPTS" => Some(attempts.to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        proxy_for_config(config, Arc::from([]))
+    }
+
+    async fn solomon_pair(
+        exists: [bool; 2],
+    ) -> (
+        [Url; 2],
+        [Arc<AtomicUsize>; 2],
+        [tokio::task::JoinHandle<()>; 2],
+    ) {
+        let decides = [0, 1].map(|_| Arc::new(AtomicUsize::new(0)));
+        let (url_a, task_a) = start_upstream(solomon_upstream(
+            "state-a",
+            Arc::new(AtomicBool::new(exists[0])),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::clone(&decides[0]),
+        ))
+        .await;
+        let (url_b, task_b) = start_upstream(solomon_upstream(
+            "state-a",
+            Arc::new(AtomicBool::new(exists[1])),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::clone(&decides[1]),
+        ))
+        .await;
+        ([url_a, url_b], decides, [task_a, task_b])
+    }
+
+    fn decide_state_a() -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/decide")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"state_id":"state-a","questions":{}}"#))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_state_404_on_the_last_allowed_attempt_is_forwarded_not_a_503() {
+        let (urls, decides, tasks) = solomon_pair([false, false]).await;
+        let proxy = solomon_proxy_with_attempts(&urls, "1");
+        let response = proxy.serve(decide_state_a()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "the only allowed attempt's answer is terminal"
+        );
+        let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(
+            decides[0].load(Ordering::Relaxed) + decides[1].load(Ordering::Relaxed),
+            1,
+            "the attempt budget bounds dispatches"
+        );
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_state_404_retry_records_its_failover_reason() {
+        let (urls, decides, tasks) = solomon_pair([true, false]).await;
+        let proxy = solomon_proxy_with_attempts(&urls, "2");
+        // Rank replica 1, which does not hold the state, first.
+        let fingerprints = proxy
+            .router()
+            .fingerprints(br#"{"state_id":"state-a","questions":{}}"#);
+        proxy.router().observe(1, &fingerprints);
+
+        let response = proxy.serve(decide_state_a()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-ramjet-upstream"], "0");
+        let _ = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(decides[1].load(Ordering::Relaxed), 1);
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .upstream_failovers
+                .with_label_values(&[
+                    &proxy.upstream_label(1),
+                    &proxy.upstream_label(0),
+                    "state_not_found",
+                ])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_candidate_fenced_before_dispatch_does_not_spend_the_attempt_budget() {
+        let dead = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            drop(listener);
+            Url::parse(&format!("http://{address}")).unwrap()
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (live, task) =
+            start_upstream(counting_upstream(StatusCode::OK, Arc::clone(&calls))).await;
+        let joined = format!("{dead},{dead},{live}");
+        let config = Config::from_lookup(|key| match key {
+            "RJ_UPSTREAM" => Some(joined.clone()),
+            "RJ_UPSTREAM_DP_RANKS" => Some("0,1,-".to_owned()),
+            "RJ_ROUTE_MAX_ATTEMPTS" => Some("2".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = proxy_for_config(config, Arc::from([]));
+        // Rank 0 then rank 1 of the dead engine lead. The refused connection
+        // fences rank 1 after routing, so it is skipped without a dispatch and
+        // the second allowed dispatch reaches the live replica.
+        let body = long_chat(20);
+        let fingerprints = proxy.inner.router.fingerprints(body.as_bytes());
+        proxy.inner.router.observe(0, &fingerprints);
+        proxy.inner.router.observe(1, &fingerprints[..10]);
+        let response = proxy
+            .serve(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-ramjet-upstream"], "2");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(
+            (proxy
+                .inner
+                .metrics
+                .upstream_failovers
+                .with_label_values(&[
+                    &proxy.upstream_label(0),
+                    &proxy.upstream_label(2),
+                    "connect"
+                ])
+                .get()
+                - 1.0)
+                .abs()
+                < f64::EPSILON,
+            "the skip does not mask the failure that caused the failover"
+        );
         task.abort();
     }
 }
