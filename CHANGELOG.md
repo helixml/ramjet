@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 — 2026-11-28
 
 - Host telemetry moved into the load balancer. The machine view now samples
   CPU, memory, pressure, disk and network rates, filesystem usage, RAPL CPU
@@ -10,6 +10,38 @@
   need the NVIDIA `utility` capability. The separate
   `bench/machineview_agent.py` and `RJ_MACHINEVIEW_AGENT_URL` are removed;
   a leftover `RJ_MACHINEVIEW_AGENT_URL` is ignored.
+- Router scoring fixes. The router now scores, orders, and classifies a
+  decision over only the replicas eligible for the request's model and
+  profile, so an ineligible replica no longer changes the outcome, the
+  speculation baseline, or the fill horizon. The fill horizon stays bounded
+  once it passes its sample limit and records late timestamps in order.
+  Under the `relative` affinity basis, a warm peer now scores above a cold
+  one when the overlap spread exceeds the cap, so spillover from a busy
+  leader goes to the warm peer. `Decision::promote` keeps the fallback order.
+  `/v1/responses` and `/v1/completions` prefixes are now hashed from their
+  prompt-shaping fields rather than raw JSON, so their prefix index starts
+  cold after an upgrade; chat fingerprints are unchanged. Tokenizer payloads
+  no longer overwrite caller-set `chat_template_kwargs` or thinking switches.
+- Exact KV routing and index fixes. Exact placement breaks a saturated score
+  tie on exact tokens, evaluates restricted candidate sets, and scores with
+  the router's affinity basis. A replay whose first batch is after the
+  requested sequence is accepted only when it starts with an all-blocks
+  clear, continues an accepted response, or is smaller than the publisher's
+  ring; otherwise the inventory stays fenced. Set the ring size with the new
+  `RJ_KV_EVENT_PUBLISHER_BUFFER_STEPS` (LB) or
+  `RJ_SNAPSHOT_PUBLISHER_BUFFER_STEPS` (companion); unset fails closed.
+  Removed blocks no longer leave a stale hash that fenced re-stored tokens,
+  and an all-blocks clear also resets group tracking.
+- Session affinity, prefix single-flight, and long-session fixes. Session
+  affinity validates and ranks only the request's eligible candidates, so a
+  model- or lane-restricted request no longer records `invalid_decision`, and
+  it honours `RJ_ROUTE_PROJECTED_LOAD`. Prefix single-flight no longer keeps a
+  flight open for followers that went elsewhere, lets only the leader move a
+  flight, scopes flights by model, profile, lane, and eligible set, and moves
+  the flight before dispatch. Long-session placement evicts on a miss only
+  when the upstream has reported cache hits before, no longer aliases
+  conversations that share only a system prompt or partial history, and
+  calibrates tokens per block per upstream.
 - Health admission, failover, and parking fixes. Every router health
   publication (probe, serving evidence, `DSpark` guard poll) is now gated on
   passive warmup admission, and warmup observes a probe before health is
