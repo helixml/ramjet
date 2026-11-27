@@ -427,6 +427,14 @@ impl LongSessions {
         evicted
     }
 
+    /// Forgets every resident conversation on a replica whose KV cache was
+    /// discarded, so they neither crowd out new placements nor claim residency.
+    pub fn invalidate(&self, upstream: usize) {
+        if let Some(residents) = self.state.lock().residents.get_mut(upstream) {
+            residents.clear();
+        }
+    }
+
     /// Modelled resident long-conversation tokens per upstream.
     #[must_use]
     pub fn resident_tokens(&self) -> Vec<u64> {
@@ -495,6 +503,17 @@ mod tests {
             rotation: 0,
             outcome: Outcome::Overlap,
         }
+    }
+
+    #[test]
+    fn invalidating_a_replica_forgets_only_its_residents() {
+        let sessions = sessions(2);
+        let now = Instant::now();
+        sessions.served(0, &chain(1, 4, 200), Some(350_000), Some(0), now);
+        sessions.served(1, &chain(2, 4, 200), Some(300_000), Some(0), now);
+        assert_eq!(sessions.resident_tokens(), vec![350_000, 300_000]);
+        sessions.invalidate(1);
+        assert_eq!(sessions.resident_tokens(), vec![350_000, 0]);
     }
 
     #[test]
