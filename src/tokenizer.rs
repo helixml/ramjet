@@ -302,6 +302,11 @@ impl TokenizerObserver {
             config.route_alpha,
             config.route_max_overlap_blocks,
             load_estimator,
+        )
+        .with_router_scoring(
+            config.route_affinity_basis,
+            &config.route_affinity_groups(),
+            config.route_projected_load,
         );
         let mut pre_route = None;
         let mut attestation = None;

@@ -10,9 +10,12 @@ use std::{sync::Arc, time::Instant};
 #[cfg(test)]
 use crate::kv_consumer::SharedFencedInventory;
 use crate::{
+    config::AffinityBasis,
     exact_route_inventory::{ExactInventoryLookupError, ExactInventoryMarker, ExactRouteInventory},
     metrics::Metrics,
-    router::{CandidateState, Decision, Outcome, RequestLoadEstimator},
+    router::{
+        CandidateState, Decision, Outcome, PeerOverlap, RequestLoadEstimator, credited_affinity,
+    },
     shims::Endpoint,
 };
 
@@ -20,9 +23,150 @@ use crate::{
 pub struct ExactRouteShadow {
     inventories: Arc<[ExactRouteInventory]>,
     metrics: Arc<Metrics>,
-    alpha: f64,
-    max_overlap_units: usize,
+    scoring: ExactScoring,
     load_estimator: RequestLoadEstimator,
+}
+
+/// The live router's scoring policy, re-applied to exact overlap.
+///
+/// Exact placement only replaces the cache term of the router's score, so
+/// every other term must be the one the router used: the affinity basis and
+/// its peer groups, the overlap cap, alpha, and whether the candidate's own
+/// request load is projected onto its queue. Scoring with a different policy
+/// would report disagreements that are artifacts of the comparison itself.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ExactScoring {
+    pub(crate) alpha: f64,
+    pub(crate) max_overlap_units: usize,
+    pub(crate) affinity_basis: AffinityBasis,
+    /// Peer group per upstream, as in `RouterConfig::affinity_groups`. Empty
+    /// means one group.
+    pub(crate) affinity_groups: Arc<[usize]>,
+    pub(crate) projected_load: bool,
+}
+
+impl ExactScoring {
+    /// Absolute affinity without projected load: the router's defaults.
+    #[must_use]
+    pub(crate) fn absolute(alpha: f64, max_overlap_units: usize) -> Self {
+        Self {
+            alpha,
+            max_overlap_units,
+            affinity_basis: AffinityBasis::Absolute,
+            affinity_groups: Arc::from([]),
+            projected_load: false,
+        }
+    }
+
+    fn group(&self, index: usize) -> usize {
+        self.affinity_groups.get(index).copied().unwrap_or(0)
+    }
+
+    /// Exact score per healthy candidate whose overlap is known, in
+    /// `candidate_state` order: `(candidate, exact tokens, credited affinity
+    /// units, weighted score)`.
+    fn score<'a>(
+        &self,
+        prompt_tokens: usize,
+        overlaps: &[Option<usize>],
+        decision: &'a Decision,
+    ) -> Vec<ExactCandidateScore<'a>> {
+        let eligible = decision
+            .candidate_state
+            .iter()
+            .filter(|candidate| candidate.healthy)
+            .filter_map(|candidate| {
+                overlaps
+                    .get(candidate.index)
+                    .copied()
+                    .flatten()
+                    .map(|tokens| {
+                        (
+                            candidate,
+                            tokens,
+                            overlap_units(tokens, prompt_tokens, decision.total_blocks),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut peers: Vec<Option<PeerOverlap>> = Vec::new();
+        if self.affinity_basis != AffinityBasis::Absolute {
+            for (candidate, _, units) in &eligible {
+                let key = self.group(candidate.index);
+                if peers.len() <= key {
+                    peers.resize(key + 1, None);
+                }
+                peers[key] = Some(peers[key].map_or(
+                    PeerOverlap {
+                        floor: *units,
+                        lead: *units,
+                    },
+                    |known| PeerOverlap {
+                        floor: known.floor.min(*units),
+                        lead: known.lead.max(*units),
+                    },
+                ));
+            }
+        }
+        eligible
+            .into_iter()
+            .map(|(candidate, tokens, units)| {
+                let peer = peers
+                    .get(self.group(candidate.index))
+                    .copied()
+                    .flatten()
+                    .unwrap_or_default();
+                let affinity =
+                    credited_affinity(self.affinity_basis, units, peer, self.max_overlap_units);
+                let additional_load = if self.projected_load {
+                    candidate.request_load_units.saturating_sub(1)
+                } else {
+                    0
+                };
+                let load = candidate.load_units.saturating_add(additional_load);
+                #[allow(clippy::cast_precision_loss)]
+                let weighted = affinity as f64 - self.alpha * load as f64;
+                ExactCandidateScore {
+                    candidate,
+                    tokens,
+                    affinity,
+                    weighted,
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ExactCandidateScore<'a> {
+    candidate: &'a CandidateState,
+    tokens: usize,
+    affinity: usize,
+    weighted: f64,
+}
+
+/// The exact policy's preferred score: the highest weighted score, then the
+/// most exact tokens among candidates at that score. This mirrors the live
+/// router's ordering, which breaks a score tie on overlap before rotation, so
+/// two replicas saturating the overlap cap at equal load are still separated
+/// by whichever holds more of the prompt.
+fn best_key(scores: &[ExactCandidateScore<'_>]) -> Option<(f64, usize)> {
+    let best_score = scores
+        .iter()
+        .map(|score| score.weighted)
+        .fold(f64::NEG_INFINITY, f64::max);
+    #[allow(clippy::float_cmp)] // Exact equality mirrors the live router policy.
+    let best_tokens = scores
+        .iter()
+        .filter(|score| score.weighted == best_score)
+        .map(|score| score.tokens)
+        .max()?;
+    Some((best_score, best_tokens))
+}
+
+#[allow(clippy::float_cmp)] // Exact equality mirrors the live router policy.
+fn is_best(score: &ExactCandidateScore<'_>, (best_score, best_tokens): (f64, usize)) -> bool {
+    score.weighted == best_score && score.tokens == best_tokens
 }
 
 #[derive(Clone, Debug)]
@@ -268,10 +412,24 @@ impl ExactRouteShadow {
         Self {
             inventories,
             metrics,
-            alpha,
-            max_overlap_units,
+            scoring: ExactScoring::absolute(alpha, max_overlap_units),
             load_estimator,
         }
+    }
+
+    /// Scores exact overlap with the live router's affinity basis, peer
+    /// groups, and projected-load setting rather than the absolute defaults.
+    #[must_use]
+    pub(crate) fn with_router_scoring(
+        mut self,
+        affinity_basis: AffinityBasis,
+        affinity_groups: &[usize],
+        projected_load: bool,
+    ) -> Self {
+        self.scoring.affinity_basis = affinity_basis;
+        self.scoring.affinity_groups = Arc::from(affinity_groups);
+        self.scoring.projected_load = projected_load;
+        self
     }
 
     /// Whether every configured inventory is currently authoritative.
@@ -291,13 +449,11 @@ impl ExactRouteShadow {
     }
 
     fn placement_ready_for(&self, decision: &Decision) -> bool {
+        if !self.valid_candidate_set(decision) {
+            return false;
+        }
         let mut any_healthy = false;
-        let mut seen = vec![false; self.inventories.len()];
         for candidate in &decision.candidate_state {
-            if candidate.index >= self.inventories.len() || seen[candidate.index] {
-                return false;
-            }
-            seen[candidate.index] = true;
             if !candidate.healthy {
                 continue;
             }
@@ -307,7 +463,30 @@ impl ExactRouteShadow {
                 return false;
             }
         }
-        any_healthy && seen.into_iter().all(|seen| seen)
+        any_healthy
+    }
+
+    /// A decision is comparable when its candidate set is non-empty, every
+    /// candidate names a configured inventory exactly once, and the selected
+    /// upstream is one of them. Candidate state may cover only part of the
+    /// fleet: a model-restricted or lane-confined decision is still exact over
+    /// the replicas it may use, and an inventory outside that set is neither
+    /// read nor allowed to influence the comparison.
+    fn valid_candidate_set(&self, decision: &Decision) -> bool {
+        let Some(&selected) = decision.candidates.first() else {
+            return false;
+        };
+        if decision.candidate_state.is_empty() {
+            return false;
+        }
+        let mut seen = vec![false; self.inventories.len()];
+        for candidate in &decision.candidate_state {
+            if candidate.index >= self.inventories.len() || seen[candidate.index] {
+                return false;
+            }
+            seen[candidate.index] = true;
+        }
+        seen.get(selected).copied().unwrap_or(false)
     }
 
     /// Captures the exact inventory generation visible at approximate routing
@@ -407,7 +586,7 @@ impl ExactRouteShadow {
                 token_ids.len(),
                 decision,
                 result,
-                self.max_overlap_units,
+                &self.scoring,
                 self.load_estimator,
             );
         } else if mode.applies() {
@@ -466,25 +645,18 @@ impl ExactRouteShadow {
         if self.inventories.is_empty() {
             return PreRouteResult::failure(ShadowOutcome::NoInventories);
         }
-        let Some(&selected) = decision.candidates.first() else {
-            return PreRouteResult::failure(ShadowOutcome::CandidateMismatch);
-        };
-        if decision.candidate_state.len() != self.inventories.len() {
+        if !self.valid_candidate_set(decision) {
             return PreRouteResult::failure(ShadowOutcome::CandidateMismatch);
         }
+        let selected = decision.candidates[0];
         let markers = self
             .inventories
             .iter()
             .map(ExactRouteInventory::marker)
             .collect::<Vec<_>>();
-        let mut seen = vec![false; self.inventories.len()];
         let mut overlaps = vec![None; self.inventories.len()];
         let mut resident_tokens = vec![None; self.inventories.len()];
         for candidate in &decision.candidate_state {
-            if candidate.index >= self.inventories.len() || seen[candidate.index] {
-                return PreRouteResult::failure(ShadowOutcome::CandidateMismatch);
-            }
-            seen[candidate.index] = true;
             if !candidate.healthy {
                 continue;
             }
@@ -506,9 +678,6 @@ impl ExactRouteShadow {
             overlaps[candidate.index] = Some(lookup.overlap_tokens);
             resident_tokens[candidate.index] = Some(lookup.resident_tokens);
         }
-        if seen.iter().any(|seen| !seen) {
-            return PreRouteResult::failure(ShadowOutcome::CandidateMismatch);
-        }
         for candidate in decision
             .candidate_state
             .iter()
@@ -526,16 +695,9 @@ impl ExactRouteShadow {
             token_ids.len(),
             &overlaps,
             decision,
-            self.alpha,
-            self.max_overlap_units,
+            &self.scoring,
         );
-        let winner = unique_winner(
-            token_ids.len(),
-            &overlaps,
-            decision,
-            self.alpha,
-            self.max_overlap_units,
-        );
+        let winner = unique_winner(token_ids.len(), &overlaps, decision, &self.scoring);
         PreRouteResult {
             shadow,
             overlaps,
@@ -560,9 +722,12 @@ impl ExactRouteShadow {
         if self.inventories.is_empty() {
             return failure(ShadowOutcome::NoInventories);
         }
-        let Some(&selected) = snapshot.decision.candidates.first() else {
+        if snapshot.markers.len() != self.inventories.len()
+            || !self.valid_candidate_set(&snapshot.decision)
+        {
             return failure(ShadowOutcome::CandidateMismatch);
-        };
+        }
+        let selected = snapshot.decision.candidates[0];
         if routed_upstream != selected {
             return failure(ShadowOutcome::Failover);
         }
@@ -572,19 +737,9 @@ impl ExactRouteShadow {
         if selected_tokens > token_ids.len() {
             return failure(ShadowOutcome::InvalidCachedUsage);
         }
-        if snapshot.markers.len() != self.inventories.len()
-            || snapshot.decision.candidate_state.len() != self.inventories.len()
-        {
-            return failure(ShadowOutcome::CandidateMismatch);
-        }
 
-        let mut seen = vec![false; self.inventories.len()];
         let mut overlaps = vec![None; self.inventories.len()];
         for candidate in &snapshot.decision.candidate_state {
-            if candidate.index >= self.inventories.len() || seen[candidate.index] {
-                return failure(ShadowOutcome::CandidateMismatch);
-            }
-            seen[candidate.index] = true;
             if !candidate.healthy {
                 continue;
             }
@@ -609,17 +764,13 @@ impl ExactRouteShadow {
             }
             overlaps[candidate.index] = Some(lookup.overlap_tokens);
         }
-        if seen.iter().any(|seen| !seen) {
-            return failure(ShadowOutcome::CandidateMismatch);
-        }
 
         classify(
             selected,
             token_ids.len(),
             &overlaps,
             &snapshot.decision,
-            self.alpha,
-            self.max_overlap_units,
+            &self.scoring,
         )
     }
 }
@@ -629,164 +780,53 @@ fn classify(
     prompt_tokens: usize,
     overlaps: &[Option<usize>],
     decision: &Decision,
-    alpha: f64,
-    max_overlap_units: usize,
+    scoring: &ExactScoring,
 ) -> ShadowResult {
-    let eligible = decision
-        .candidate_state
-        .iter()
-        .filter(|candidate| candidate.healthy)
-        .filter_map(|candidate| {
-            overlaps
-                .get(candidate.index)
-                .copied()
-                .flatten()
-                .map(|tokens| (candidate, tokens))
-        })
-        .collect::<Vec<_>>();
+    let scores = scoring.score(prompt_tokens, overlaps, decision);
     let selected_tokens = overlaps.get(selected).copied().flatten().unwrap_or(0);
-    let best_tokens = eligible
-        .iter()
-        .map(|(_, tokens)| *tokens)
-        .max()
-        .unwrap_or(0);
-    if eligible.len() <= 1 {
-        return ShadowResult {
-            outcome: ShadowOutcome::Single,
-            selected_tokens,
-            best_tokens,
-        };
+    let best_tokens = scores.iter().map(|score| score.tokens).max().unwrap_or(0);
+    let result = |outcome| ShadowResult {
+        outcome,
+        selected_tokens,
+        best_tokens,
+    };
+    if scores.len() <= 1 {
+        return result(ShadowOutcome::Single);
     }
     if best_tokens == 0 {
-        return ShadowResult {
-            outcome: ShadowOutcome::AllZero,
-            selected_tokens,
-            best_tokens,
-        };
+        return result(ShadowOutcome::AllZero);
     }
-    let weighted = |candidate: &CandidateState, tokens: usize| {
-        #[allow(clippy::cast_precision_loss)]
-        let affinity = overlap_units(tokens, prompt_tokens, decision.total_blocks)
-            .min(max_overlap_units) as f64;
-        #[allow(clippy::cast_precision_loss)]
-        let load = candidate.load_units as f64;
-        affinity - alpha * load
-    };
-    let best_score = eligible
+    let Some(selected_score) = scores
         .iter()
-        .map(|(candidate, tokens)| weighted(candidate, *tokens))
-        .fold(f64::NEG_INFINITY, f64::max);
-    let Some((selected_candidate, _)) = eligible
-        .iter()
-        .find(|(candidate, _)| candidate.index == selected)
+        .find(|score| score.candidate.index == selected)
     else {
-        return ShadowResult {
-            outcome: ShadowOutcome::CandidateMismatch,
-            selected_tokens,
-            best_tokens,
-        };
+        return result(ShadowOutcome::CandidateMismatch);
     };
-    let selected_score = weighted(selected_candidate, selected_tokens);
-    #[allow(clippy::float_cmp)] // Exact equality mirrors the live router policy.
-    let tied = eligible
-        .iter()
-        .filter(|(candidate, tokens)| weighted(candidate, *tokens) == best_score)
-        .count();
-    #[allow(clippy::float_cmp)]
-    let outcome = if selected_score != best_score {
+    let Some(best) = best_key(&scores) else {
+        return result(ShadowOutcome::CandidateMismatch);
+    };
+    let tied = scores.iter().filter(|score| is_best(score, best)).count();
+    let outcome = if !is_best(selected_score, best) {
         ShadowOutcome::WouldMove
     } else if tied > 1 {
         ShadowOutcome::Tie
     } else {
         ShadowOutcome::Agree
     };
-    ShadowResult {
-        outcome,
-        selected_tokens,
-        best_tokens,
-    }
+    result(outcome)
 }
 
 fn unique_winner(
     prompt_tokens: usize,
     overlaps: &[Option<usize>],
     decision: &Decision,
-    alpha: f64,
-    max_overlap_units: usize,
+    scoring: &ExactScoring,
 ) -> Option<usize> {
-    let eligible = decision
-        .candidate_state
-        .iter()
-        .filter(|candidate| candidate.healthy)
-        .filter_map(|candidate| {
-            overlaps
-                .get(candidate.index)
-                .copied()
-                .flatten()
-                .map(|tokens| (candidate, tokens))
-        })
-        .collect::<Vec<_>>();
-    let best_score = eligible
-        .iter()
-        .map(|(candidate, tokens)| {
-            exact_score(
-                candidate,
-                *tokens,
-                prompt_tokens,
-                decision.total_blocks,
-                alpha,
-                max_overlap_units,
-            )
-        })
-        .fold(f64::NEG_INFINITY, f64::max);
-    let best_tokens = eligible
-        .iter()
-        .filter(|(candidate, tokens)| {
-            #[allow(clippy::float_cmp)]
-            {
-                exact_score(
-                    candidate,
-                    *tokens,
-                    prompt_tokens,
-                    decision.total_blocks,
-                    alpha,
-                    max_overlap_units,
-                ) == best_score
-            }
-        })
-        .map(|(_, tokens)| *tokens)
-        .max()?;
-    let mut winners = eligible.iter().filter(|(candidate, tokens)| {
-        #[allow(clippy::float_cmp)]
-        {
-            exact_score(
-                candidate,
-                *tokens,
-                prompt_tokens,
-                decision.total_blocks,
-                alpha,
-                max_overlap_units,
-            ) == best_score
-                && *tokens == best_tokens
-        }
-    });
-    let winner = winners.next()?.0.index;
+    let scores = scoring.score(prompt_tokens, overlaps, decision);
+    let best = best_key(&scores)?;
+    let mut winners = scores.iter().filter(|score| is_best(score, best));
+    let winner = winners.next()?.candidate.index;
     winners.next().is_none().then_some(winner)
-}
-
-fn exact_score(
-    candidate: &CandidateState,
-    tokens: usize,
-    prompt_tokens: usize,
-    total_units: usize,
-    alpha: f64,
-    max_overlap_units: usize,
-) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let affinity = overlap_units(tokens, prompt_tokens, total_units).min(max_overlap_units) as f64;
-    #[allow(clippy::cast_precision_loss)]
-    let load = candidate.load_units as f64;
-    affinity - alpha * load
 }
 
 fn evaluate_placement(
@@ -973,9 +1013,14 @@ fn apply_placement(
     prompt_tokens: usize,
     decision: &mut Decision,
     exact: &PreRouteResult,
-    max_overlap_units: usize,
+    scoring: &ExactScoring,
     load_estimator: RequestLoadEstimator,
 ) {
+    let credited = scoring
+        .score(prompt_tokens, &exact.overlaps, decision)
+        .into_iter()
+        .map(|score| (score.candidate.index, score.affinity))
+        .collect::<Vec<_>>();
     decision.candidates.retain(|candidate| *candidate != winner);
     decision.candidates.insert(0, winner);
     let candidate_order = decision.candidates.clone();
@@ -995,7 +1040,10 @@ fn apply_placement(
             .unwrap_or(0);
         candidate.overlap_blocks =
             overlap_units(exact_tokens, prompt_tokens, decision.total_blocks);
-        candidate.affinity_blocks = candidate.overlap_blocks.min(max_overlap_units);
+        candidate.affinity_blocks = credited
+            .iter()
+            .find_map(|(index, affinity)| (*index == candidate.index).then_some(*affinity))
+            .unwrap_or_else(|| candidate.overlap_blocks.min(scoring.max_overlap_units));
     }
     let winner_state = &mut decision.candidate_state[0];
     decision.overlap_blocks = winner_state.overlap_blocks;
@@ -1214,13 +1262,24 @@ mod tests {
     fn exact_overlap_replaces_only_the_cache_term() {
         let mut route = decision();
         route.candidate_state[1].load_units = 1;
-        let result = classify(0, 8, &[Some(0), Some(8)], &route, 1.0, 8);
+        let scoring = ExactScoring::absolute(1.0, 8);
+        let result = classify(0, 8, &[Some(0), Some(8)], &route, &scoring);
         assert_eq!(result.outcome, ShadowOutcome::WouldMove);
         assert_eq!(result.best_tokens, 8);
 
+        // Equal weighted scores are separated by exact tokens, exactly as the
+        // live router separates them by overlap.
         route.candidate_state[1].load_units = 8;
-        let result = classify(0, 8, &[Some(0), Some(8)], &route, 1.0, 8);
-        assert_eq!(result.outcome, ShadowOutcome::Tie);
+        let result = classify(0, 8, &[Some(0), Some(8)], &route, &scoring);
+        assert_eq!(result.outcome, ShadowOutcome::WouldMove);
+        assert_eq!(
+            unique_winner(8, &[Some(0), Some(8)], &route, &scoring),
+            Some(1)
+        );
+
+        route.candidate_state[1].load_units = 9;
+        let result = classify(0, 8, &[Some(0), Some(8)], &route, &scoring);
+        assert_eq!(result.outcome, ShadowOutcome::Agree);
     }
 
     #[test]
@@ -2050,5 +2109,376 @@ mod tests {
                 .abs()
                 < f64::EPSILON
         );
+    }
+    fn store_child(hash: u64, parent: u64, tokens: &[u32]) -> KvEvent {
+        let KvEvent::BlockStored(mut stored) = store_hash(hash, tokens) else {
+            unreachable!("store_hash always constructs a store event");
+        };
+        stored.parent_block_hash = Some(ExternalBlockHash::Unsigned(parent));
+        KvEvent::BlockStored(stored)
+    }
+
+    fn untrusted_inventory() -> SharedFencedInventory {
+        Arc::new(parking_lot::RwLock::new(FencedExactKvInventory::new(
+            8,
+            ExactIndexLimits::default(),
+        )))
+    }
+
+    fn policy() -> ExactPlacementPolicy {
+        ExactPlacementPolicy {
+            min_gain_tokens: 1,
+            max_load_delta: 0,
+        }
+    }
+
+    /// Replica 0 holds a 20k-token system prompt, replica 1 the same prompt
+    /// plus 180k tokens of session history. Both saturate a 16-unit cap.
+    fn saturated_route() -> (Decision, [Option<usize>; 2], usize) {
+        let mut route = decision();
+        route.total_blocks = 220;
+        (route, [Some(20_000), Some(200_000)], 220_000)
+    }
+
+    #[test]
+    fn saturated_cap_tie_is_broken_by_exact_tokens() {
+        let (route, overlaps, prompt) = saturated_route();
+        let scoring = ExactScoring::absolute(1.0, 16);
+        let result = classify(0, prompt, &overlaps, &route, &scoring);
+        assert_eq!(result.outcome, ShadowOutcome::WouldMove);
+        assert_eq!(result.selected_tokens, 20_000);
+        assert_eq!(result.best_tokens, 200_000);
+        let winner = unique_winner(prompt, &overlaps, &route, &scoring);
+        assert_eq!(winner, Some(1));
+        let exact = PreRouteResult {
+            shadow: result,
+            overlaps: overlaps.to_vec(),
+            resident_tokens: vec![Some(20_000), Some(200_000)],
+            prompt_tokens: prompt,
+            winner,
+        };
+        assert_eq!(
+            evaluate_placement(&route, &exact, policy()),
+            PlacementOutcome::Move(1)
+        );
+
+        // Already on the warmer replica: agreement, not a tie.
+        let mut on_winner = route.clone();
+        on_winner.candidates = vec![1, 0];
+        let result = classify(1, prompt, &overlaps, &on_winner, &scoring);
+        assert_eq!(result.outcome, ShadowOutcome::Agree);
+    }
+
+    #[test]
+    fn identical_score_and_tokens_remain_a_tie() {
+        let (route, _, prompt) = saturated_route();
+        let overlaps = [Some(200_000), Some(200_000)];
+        let scoring = ExactScoring::absolute(1.0, 16);
+        let result = classify(0, prompt, &overlaps, &route, &scoring);
+        assert_eq!(result.outcome, ShadowOutcome::Tie);
+        assert_eq!(unique_winner(prompt, &overlaps, &route, &scoring), None);
+        let exact = PreRouteResult {
+            shadow: result,
+            overlaps: overlaps.to_vec(),
+            resident_tokens: vec![Some(0), Some(0)],
+            prompt_tokens: prompt,
+            winner: None,
+        };
+        assert_eq!(
+            evaluate_placement(&route, &exact, policy()),
+            PlacementOutcome::KeptTie
+        );
+    }
+
+    #[test]
+    fn saturated_cap_placement_moves_to_the_warmer_inventory() {
+        let selected = trusted_inventory(vec![store_hash(1, &[1, 2, 3, 4])]);
+        let alternative = trusted_inventory(vec![
+            store_hash(1, &[1, 2, 3, 4]),
+            store_child(2, 1, &[5, 6, 7, 8]),
+        ]);
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        // A one-unit cap saturates on both replicas.
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative]),
+            Arc::clone(&metrics),
+            1.0,
+            1,
+            estimator(),
+        );
+        let mut route = decision();
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            1_024,
+            &mut route,
+            policy(),
+            ExactPlacementMode::Placement,
+        );
+        assert_eq!(route.candidates, [1, 0]);
+        assert_eq!(route.outcome, Outcome::Exact);
+        assert_one(
+            metrics
+                .exact_route_preroute
+                .with_label_values(&["chat", "would_move"])
+                .get(),
+        );
+        assert_one(
+            metrics
+                .exact_route_placement
+                .with_label_values(&["placement", "chat", "moved"])
+                .get(),
+        );
+    }
+
+    /// A decision whose candidate state covers only replicas 0 and 1 of a
+    /// three-inventory fleet, as a model- or lane-restricted route does.
+    fn restricted_route() -> Decision {
+        let mut route = decision();
+        route.candidate_state = vec![candidate(0, 0, 0), candidate(1, 1, 0)];
+        route
+    }
+
+    #[test]
+    fn restricted_decision_is_compared_over_its_own_candidates() {
+        let selected = trusted_inventory(Vec::new());
+        let alternative = trusted_inventory(vec![store(&[1, 2, 3, 4])]);
+        // The out-of-set inventory is untrusted: it must not be consulted.
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative, untrusted_inventory()]),
+            Arc::new(Metrics::new(&Registry::new()).unwrap()),
+            1.0,
+            8,
+            estimator(),
+        );
+        let route = restricted_route();
+        let evaluation = shadow.evaluate_pre_route_diagnostic(&[1, 2, 3, 4], &route);
+        assert_eq!(evaluation.outcome_label(), "would_move");
+        assert_eq!(evaluation.best_tokens(), 4);
+        assert_eq!(evaluation.placement_label(&route, policy()), "would_move");
+        assert!(shadow.placement_ready_for(&route));
+
+        let mut placed = route.clone();
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4],
+            1_024,
+            &mut placed,
+            policy(),
+            ExactPlacementMode::Placement,
+        );
+        assert_eq!(placed.candidates, [1, 0]);
+    }
+
+    #[test]
+    fn restricted_decision_post_route_shadow_is_not_a_mismatch() {
+        let selected = trusted_inventory(Vec::new());
+        let alternative = trusted_inventory(vec![store(&[1, 2, 3, 4])]);
+        let registry = Registry::new();
+        let metrics = Arc::new(Metrics::new(&registry).unwrap());
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative, untrusted_inventory()]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+            estimator(),
+        );
+        let snapshot = shadow.capture(&restricted_route());
+        shadow.observe(
+            "remote",
+            Endpoint::Chat,
+            0,
+            Some(0),
+            &[1, 2, 3, 4],
+            &snapshot,
+        );
+        assert_one(
+            metrics
+                .exact_route_shadow
+                .with_label_values(&["remote", "chat", "would_move"])
+                .get(),
+        );
+    }
+
+    #[test]
+    fn malformed_candidate_sets_still_fail_closed() {
+        let shadow = ExactRouteShadow::new(
+            Arc::from([
+                trusted_inventory(Vec::new()),
+                trusted_inventory(Vec::new()),
+                trusted_inventory(Vec::new()),
+            ]),
+            Arc::new(Metrics::new(&Registry::new()).unwrap()),
+            1.0,
+            8,
+            estimator(),
+        );
+        let mismatch = |route: &Decision| {
+            assert_eq!(
+                shadow
+                    .evaluate_pre_route_diagnostic(&[1, 2, 3, 4], route)
+                    .outcome_label(),
+                "candidate_mismatch"
+            );
+            assert!(!shadow.placement_ready_for(route));
+        };
+
+        let mut duplicate = restricted_route();
+        duplicate.candidate_state[1].index = 0;
+        mismatch(&duplicate);
+
+        let mut out_of_bounds = restricted_route();
+        out_of_bounds.candidate_state[1].index = 3;
+        mismatch(&out_of_bounds);
+
+        let mut empty_state = restricted_route();
+        empty_state.candidate_state.clear();
+        mismatch(&empty_state);
+
+        let mut no_candidates = restricted_route();
+        no_candidates.candidates.clear();
+        mismatch(&no_candidates);
+
+        let mut selected_outside = restricted_route();
+        selected_outside.candidates = vec![2, 0];
+        mismatch(&selected_outside);
+    }
+
+    #[test]
+    fn marginal_and_relative_bases_follow_the_router() {
+        let (mut route, overlaps, prompt) = saturated_route();
+        // The warmer replica is busier. Absolute affinity saturates on both
+        // and keeps the request on the idle replica; a peer-relative basis
+        // credits only the 180k tokens the idle replica would recompute.
+        route.candidate_state[1].load_units = 5;
+        let absolute = ExactScoring::absolute(1.0, 16);
+        assert_eq!(
+            classify(0, prompt, &overlaps, &route, &absolute).outcome,
+            ShadowOutcome::Agree
+        );
+        for basis in [AffinityBasis::Marginal, AffinityBasis::Relative] {
+            let scoring = ExactScoring {
+                affinity_basis: basis,
+                ..absolute.clone()
+            };
+            assert_eq!(
+                classify(0, prompt, &overlaps, &route, &scoring).outcome,
+                ShadowOutcome::WouldMove,
+                "{basis:?}"
+            );
+            assert_eq!(unique_winner(prompt, &overlaps, &route, &scoring), Some(1));
+        }
+    }
+
+    #[test]
+    fn marginal_peer_floor_is_per_affinity_group() {
+        let mut route = decision();
+        route.total_blocks = 220;
+        route.candidates = vec![0, 1, 2];
+        route.candidate_state = vec![candidate(0, 0, 0), candidate(1, 1, 5), candidate(2, 2, 0)];
+        let overlaps = [Some(20_000), Some(200_000), Some(0)];
+        let ungrouped = ExactScoring {
+            affinity_basis: AffinityBasis::Marginal,
+            ..ExactScoring::absolute(1.0, 16)
+        };
+        // A cold replica serving another model drops a fleet-wide floor to
+        // zero, which degrades marginal to absolute.
+        assert_eq!(
+            unique_winner(220_000, &overlaps, &route, &ungrouped),
+            Some(0)
+        );
+        let grouped = ExactScoring {
+            affinity_groups: Arc::from([0, 0, 1]),
+            ..ungrouped
+        };
+        assert_eq!(unique_winner(220_000, &overlaps, &route, &grouped), Some(1));
+    }
+
+    #[test]
+    fn projected_load_charges_each_candidates_own_request_work() {
+        let mut route = decision();
+        // Replica 0 is idle but would recompute the whole prompt; replica 1
+        // is busier but already holds half of it.
+        route.candidate_state[0].request_load_units = 8;
+        route.candidate_state[1].load_units = 5;
+        route.candidate_state[1].request_load_units = 1;
+        let overlaps = [Some(0), Some(4)];
+        let plain = ExactScoring::absolute(1.0, 8);
+        assert_eq!(
+            classify(0, 8, &overlaps, &route, &plain).outcome,
+            ShadowOutcome::Agree
+        );
+        let projected = ExactScoring {
+            projected_load: true,
+            ..plain
+        };
+        assert_eq!(
+            classify(0, 8, &overlaps, &route, &projected).outcome,
+            ShadowOutcome::WouldMove
+        );
+        assert_eq!(unique_winner(8, &overlaps, &route, &projected), Some(1));
+    }
+
+    #[test]
+    fn router_scoring_is_applied_by_the_shadow() {
+        let selected = trusted_inventory(Vec::new());
+        let alternative = trusted_inventory(vec![store(&[1, 2, 3, 4])]);
+        let metrics = Arc::new(Metrics::new(&Registry::new()).unwrap());
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative]),
+            Arc::clone(&metrics),
+            1.0,
+            8,
+            estimator(),
+        );
+        let mut route = decision();
+        route.candidate_state[0].request_load_units = 8;
+        route.candidate_state[1].load_units = 5;
+        assert_eq!(
+            shadow
+                .evaluate_pre_route_diagnostic(&[1, 2, 3, 4, 5, 6, 7, 8], &route)
+                .outcome_label(),
+            "agree"
+        );
+        let projected = shadow.with_router_scoring(AffinityBasis::Absolute, &[], true);
+        assert_eq!(
+            projected
+                .evaluate_pre_route_diagnostic(&[1, 2, 3, 4, 5, 6, 7, 8], &route)
+                .outcome_label(),
+            "would_move"
+        );
+    }
+
+    #[test]
+    fn placement_credits_affinity_with_the_configured_basis() {
+        let selected = trusted_inventory(vec![store_hash(1, &[1, 2, 3, 4])]);
+        let alternative = trusted_inventory(vec![
+            store_hash(1, &[1, 2, 3, 4]),
+            store_child(2, 1, &[5, 6, 7, 8]),
+        ]);
+        let shadow = ExactRouteShadow::new(
+            Arc::from([selected, alternative]),
+            Arc::new(Metrics::new(&Registry::new()).unwrap()),
+            1.0,
+            8,
+            estimator(),
+        )
+        .with_router_scoring(AffinityBasis::Marginal, &[], false);
+        let mut route = decision();
+        shadow.route_pre_route(
+            Endpoint::Chat,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            1_024,
+            &mut route,
+            policy(),
+            ExactPlacementMode::Placement,
+        );
+        assert_eq!(route.candidates, [1, 0]);
+        // Overlap stays absolute; affinity is credited above the peer floor.
+        assert_eq!(route.candidate_state[0].overlap_blocks, 8);
+        assert_eq!(route.candidate_state[0].affinity_blocks, 4);
+        assert_eq!(route.candidate_state[1].overlap_blocks, 4);
+        assert_eq!(route.candidate_state[1].affinity_blocks, 0);
+        assert_eq!(route.affinity_blocks, 4);
     }
 }
