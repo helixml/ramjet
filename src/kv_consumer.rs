@@ -51,10 +51,14 @@ impl KvEventConsumers {
             .kv_event_sources
             .iter()
             .map(|_| {
-                Arc::new(RwLock::new(FencedExactKvInventory::new(
-                    replay_limit,
-                    ExactIndexLimits::default(),
-                )))
+                Arc::new(RwLock::new(
+                    FencedExactKvInventory::new(replay_limit, ExactIndexLimits::default())
+                        .with_publisher_capacity(
+                            config
+                                .kv_event_publisher_buffer_steps
+                                .and_then(|steps| u64::try_from(steps).ok()),
+                        ),
+                ))
             })
             .collect::<Arc<[_]>>();
         let tasks = config
@@ -353,7 +357,8 @@ async fn replay_range(
         Ok(_) => "complete",
         Err(error) => error.reason(),
     };
-    record_replay_profile(metrics, upstream, outcome, source.take_replay_profile());
+    let retained_batches =
+        record_replay_profile(metrics, upstream, outcome, source.take_replay_profile());
     let replayed = match replayed {
         Ok(replayed) => replayed,
         Err(error) => return ReplayAttempt::Failed(error.reason()),
@@ -363,7 +368,7 @@ async fn replay_range(
         .with_label_values(&[upstream])
         .observe(metric_usize(replayed.len()));
     ReplayAttempt::Applied {
-        authoritative: ingest_replay(inventory, metrics, upstream, replayed),
+        authoritative: ingest_replay(inventory, metrics, upstream, replayed, retained_batches),
     }
 }
 
@@ -389,11 +394,13 @@ async fn replay_full_range(
         Ok(_) => "complete",
         Err(error) => error.reason(),
     };
-    record_replay_profile(metrics, upstream, outcome, source.take_replay_profile());
-    let stage = match replayed {
+    let retained_batches =
+        record_replay_profile(metrics, upstream, outcome, source.take_replay_profile());
+    let mut stage = match replayed {
         Ok(stage) => stage,
         Err(error) => return ReplayAttempt::Failed(error.reason()),
     };
+    stage.note_retained_batches(retained_batches);
     metrics
         .kv_event_replay_batches
         .with_label_values(&[upstream])
@@ -411,15 +418,20 @@ async fn replay_full_range(
     ReplayAttempt::Applied { authoritative }
 }
 
+/// Records the replay profile and returns how many batches the publisher
+/// returned in total (requested plus tail), the fence's eviction evidence.
 fn record_replay_profile(
     metrics: &Metrics,
     upstream: &str,
     outcome: &'static str,
     profile: Option<ReplayProfile>,
-) {
+) -> usize {
     let Some(profile) = profile else {
-        return;
+        return 0;
     };
+    let retained_batches = profile
+        .requested_batches
+        .saturating_add(profile.tail_batches);
     for (phase, duration) in [
         ("total", profile.elapsed),
         ("receive_wait", profile.receive_wait),
@@ -466,6 +478,7 @@ fn record_replay_profile(
             .with_label_values(&[upstream, kind, outcome])
             .observe(metric_usize(batches));
     }
+    retained_batches.max(profile.messages)
 }
 
 fn connection_changed(
@@ -535,12 +548,13 @@ fn ingest_replay(
     metrics: &Metrics,
     upstream: &str,
     batches: Vec<SequencedBatch>,
+    retained_batches: usize,
 ) -> bool {
     let batches = batches
         .into_iter()
         .map(|batch| (batch.sequence, batch.batch))
         .collect::<Vec<_>>();
-    let outcome = inventory.write().ingest_replay(&batches);
+    let outcome = inventory.write().ingest_replay(&batches, retained_batches);
     let (label, summary) = match outcome {
         Ok(ReplayBatchOutcome::Applied(summary)) => ("applied", Some(summary)),
         Ok(ReplayBatchOutcome::ObserveOnly) => ("observe_only", None),
@@ -985,7 +999,13 @@ mod tests {
             Ok(Some((0, 4)))
         );
 
-        assert!(!ingest_replay(&inventory, &metrics, "engine", Vec::new()));
+        assert!(!ingest_replay(
+            &inventory,
+            &metrics,
+            "engine",
+            Vec::new(),
+            0
+        ));
         assert!(!inventory.read().trusted());
     }
 

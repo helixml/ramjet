@@ -162,6 +162,7 @@ impl SingleEngineCompanionConfig {
                     replay_limit: 10_000,
                     reconnect_min: Duration::from_millis(250),
                     reconnect_max: Duration::from_secs(5),
+                    publisher_capacity: None,
                 },
                 group: None,
             });
@@ -197,6 +198,21 @@ impl SingleEngineCompanionConfig {
                 1,
                 60_000,
             )?,
+            publisher_capacity: match get("RJ_SNAPSHOT_PUBLISHER_BUFFER_STEPS") {
+                None => None,
+                Some(_) => Some(
+                    u64::try_from(parse_usize(
+                        &mut get,
+                        "RJ_SNAPSHOT_PUBLISHER_BUFFER_STEPS",
+                        1,
+                        1,
+                        usize::MAX,
+                    )?)
+                    .map_err(|_| {
+                        invalid("RJ_SNAPSHOT_PUBLISHER_BUFFER_STEPS", "a bounded integer")
+                    })?,
+                ),
+            },
         };
         if owner.reconnect_min > owner.reconnect_max {
             return Err(invalid(
@@ -1529,6 +1545,21 @@ mod tests {
         let debug = format!("{:?}", load(&values));
         assert!(!debug.contains(metrics_path.to_string_lossy().as_ref()));
         assert!(!debug.contains("12004"));
+    }
+
+    #[test]
+    fn publisher_buffer_steps_is_optional_and_bounded() {
+        let files = TestFiles::new();
+        assert_eq!(load(&files.values()).owner.publisher_capacity, None);
+        let mut values = files.values();
+        values.insert("RJ_SNAPSHOT_PUBLISHER_BUFFER_STEPS", "10000".to_owned());
+        assert_eq!(load(&values).owner.publisher_capacity, Some(10_000));
+        for invalid in ["0", "-1", "many"] {
+            values.insert("RJ_SNAPSHOT_PUBLISHER_BUFFER_STEPS", invalid.to_owned());
+            assert!(
+                SingleEngineCompanionConfig::from_lookup(|key| values.get(key).cloned()).is_err()
+            );
+        }
     }
 
     #[tokio::test]

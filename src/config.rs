@@ -207,6 +207,11 @@ pub struct Config {
     pub kv_event_timeout_ms: usize,
     pub kv_event_reconnect_min_ms: usize,
     pub kv_event_reconnect_max_ms: usize,
+    /// The engine publisher's replay ring capacity (vLLM `buffer_steps`).
+    /// Only with it can a replay whose first retained batch is newer than the
+    /// requested start prove that nothing was evicted; see
+    /// `kv_fence::ReplayCoverage`.
+    pub kv_event_publisher_buffer_steps: Option<usize>,
     pub snapshot_route_mode: SnapshotRouteMode,
     pub snapshot_route_sources: Vec<SnapshotRouteSourceConfig>,
     pub snapshot_route_secret_owner_uid: u32,
@@ -473,6 +478,7 @@ struct KvEventSettings {
     timeout_ms: usize,
     reconnect_min_ms: usize,
     reconnect_max_ms: usize,
+    publisher_buffer_steps: Option<usize>,
 }
 
 struct ExactRouteSettings {
@@ -1267,6 +1273,7 @@ impl Config {
             kv_event_timeout_ms: kv_events.timeout_ms,
             kv_event_reconnect_min_ms: kv_events.reconnect_min_ms,
             kv_event_reconnect_max_ms: kv_events.reconnect_max_ms,
+            kv_event_publisher_buffer_steps: kv_events.publisher_buffer_steps,
             snapshot_route_mode: snapshot_route.mode,
             snapshot_route_sources: snapshot_route.sources,
             snapshot_route_secret_owner_uid: snapshot_route.secret_owner_uid,
@@ -1910,6 +1917,10 @@ fn kv_event_settings(
         timeout_ms: positive(get, "RJ_KV_EVENT_TIMEOUT_MS", 5_000)?,
         reconnect_min_ms,
         reconnect_max_ms,
+        publisher_buffer_steps: match get("RJ_KV_EVENT_PUBLISHER_BUFFER_STEPS") {
+            None => None,
+            Some(_) => Some(positive(get, "RJ_KV_EVENT_PUBLISHER_BUFFER_STEPS", 1)?),
+        },
     })
 }
 
@@ -3862,6 +3873,7 @@ mod tests {
         assert_eq!(config.kv_event_timeout_ms, 5_000);
         assert_eq!(config.kv_event_reconnect_min_ms, 250);
         assert_eq!(config.kv_event_reconnect_max_ms, 10_000);
+        assert_eq!(config.kv_event_publisher_buffer_steps, None);
         assert_eq!(config.snapshot_route_mode, SnapshotRouteMode::Off);
         assert!(config.snapshot_route_sources.is_empty());
         assert_eq!(config.snapshot_route_secret_owner_uid, 0);
@@ -4516,6 +4528,23 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn kv_event_publisher_buffer_steps_is_optional_and_positive() {
+        let mut values = HashMap::from([("RJ_KV_EVENT_PUBLISHER_BUFFER_STEPS", "10000")]);
+        let config = Config::from_lookup(|key| values.get(key).map(ToString::to_string)).unwrap();
+        assert_eq!(config.kv_event_publisher_buffer_steps, Some(10_000));
+        for invalid in ["0", "many"] {
+            values.insert("RJ_KV_EVENT_PUBLISHER_BUFFER_STEPS", invalid);
+            assert!(matches!(
+                Config::from_lookup(|key| values.get(key).map(ToString::to_string)),
+                Err(ConfigError::InvalidValue {
+                    key: "RJ_KV_EVENT_PUBLISHER_BUFFER_STEPS",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

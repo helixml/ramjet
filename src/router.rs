@@ -422,9 +422,9 @@ struct Score {
 /// still fail open onto, so fail-open scoring keeps its affinity; a group
 /// with neither reports zero for both.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct PeerOverlap {
-    floor: usize,
-    lead: usize,
+pub(crate) struct PeerOverlap {
+    pub(crate) floor: usize,
+    pub(crate) lead: usize,
 }
 
 /// One pass per membership tier, so scoring stays linear in the upstream
@@ -493,7 +493,7 @@ fn peer_overlaps(
 /// spread, rounded up. A warm peer that trails the leader by a full cap
 /// therefore still outranks a cold one, rather than both collapsing to zero
 /// and letting spillover from a busy leader recompute the shared prompt.
-fn credited_affinity(
+pub(crate) fn credited_affinity(
     basis: AffinityBasis,
     overlap: usize,
     peers: PeerOverlap,

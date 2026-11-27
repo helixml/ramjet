@@ -15,7 +15,7 @@ use thiserror::Error;
 
 use crate::kv_wire::{BlockRemoved, BlockStored, ExternalBlockHash, KvEvent};
 use crate::{
-    kv_fence::{IngestAction, KvEventFence, ReplayAction},
+    kv_fence::{IngestAction, KvEventFence, ReplayAction, ReplayCoverage},
     kv_wire::KvEventBatch,
 };
 
@@ -329,7 +329,14 @@ impl ExactKvIndex {
                 break;
             };
             let child = self.node(child_id);
-            if child.external_hash.as_ref() != Some(external_hash) {
+            // A removed block keeps its node only while descendants remain.
+            // It carries no hash, so the engine may re-store the same tokens
+            // under a new hash; a resident block must keep its own.
+            if child
+                .external_hash
+                .as_ref()
+                .is_some_and(|existing| existing != external_hash)
+            {
                 return Err(ExactIndexError::ConflictingPath);
             }
             if self
@@ -391,6 +398,10 @@ impl ExactKvIndex {
                 continue;
             }
             node.present = false;
+            // The reverse entry was removed above; drop the forward hash too
+            // so a surviving interior node never claims a hash the index no
+            // longer resolves.
+            node.external_hash = None;
             removed += 1;
             self.prune_from(node_id);
         }
@@ -546,8 +557,16 @@ impl ExactKvInventory {
         }
     }
 
+    /// Establish an empty cache boundary (an engine-wide all-blocks clear).
+    ///
+    /// Groups observed without a kind and the learned canonical block sizes
+    /// describe pre-clear state and are rebuilt from post-clear stores. A
+    /// group's attention kind is a property of the engine's cache layout, not
+    /// of its contents, so it survives to keep detecting a conflicting spec.
     pub fn clear(&mut self) {
         self.index.clear();
+        self.unlearned_groups.clear();
+        self.group_block_sizes.clear();
     }
 
     pub fn reset_generation(&mut self) {
@@ -625,7 +644,7 @@ impl ExactKvInventory {
                 })
             }
             KvEvent::AllBlocksCleared => {
-                self.index.clear();
+                self.clear();
                 Ok(ApplyOutcome::Cleared)
             }
         }
@@ -642,9 +661,32 @@ impl ExactKvInventory {
     }
 
     fn apply_batch(&mut self, batch: &KvEventBatch) -> Result<BatchApplySummary, ExactIndexError> {
+        self.apply_events(batch, &batch.events)
+    }
+
+    /// Apply a batch from its last all-blocks clear onward. Everything before
+    /// that clear is discarded by it, so an error or conflict there must not
+    /// abort an otherwise clean post-clear boundary.
+    fn apply_from_last_clear(
+        &mut self,
+        batch: &KvEventBatch,
+    ) -> Result<BatchApplySummary, ExactIndexError> {
+        let start = batch
+            .events
+            .iter()
+            .rposition(|event| matches!(event, KvEvent::AllBlocksCleared))
+            .unwrap_or(0);
+        self.apply_events(batch, &batch.events[start..])
+    }
+
+    fn apply_events(
+        &mut self,
+        batch: &KvEventBatch,
+        events: &[KvEvent],
+    ) -> Result<BatchApplySummary, ExactIndexError> {
         let rank = batch.data_parallel_rank.unwrap_or(0);
         let mut summary = BatchApplySummary::default();
-        for event in &batch.events {
+        for event in events {
             match self.apply_event(rank, event)? {
                 ApplyOutcome::Stored { blocks } => summary.stored_blocks += blocks,
                 ApplyOutcome::Removed { blocks } => summary.removed_blocks += blocks,
@@ -788,6 +830,7 @@ impl SharedExactKvInventory {
 pub(crate) struct FullReplayStage {
     inventory: ExactKvInventory,
     sequences: Vec<u64>,
+    retained_batches: usize,
     summary: BatchApplySummary,
     establishes_boundary: bool,
     error: Option<ExactIndexError>,
@@ -798,21 +841,48 @@ impl FullReplayStage {
         Self {
             inventory: ExactKvInventory::new(limits),
             sequences: Vec::new(),
+            retained_batches: 0,
             summary: BatchApplySummary::default(),
             establishes_boundary: false,
             error: None,
         }
     }
 
+    /// Fold one requested batch into the private scratch index.
+    ///
+    /// An all-blocks clear discards the scratch state it supersedes, including
+    /// any error that state produced: the committed index is exactly the
+    /// post-clear history, and the summary describes only what it contains.
     pub(crate) fn ingest(&mut self, sequence: u64, batch: &KvEventBatch) {
         self.sequences.push(sequence);
-        self.establishes_boundary |= batch.clears_all();
+        if batch.clears_all() {
+            self.establishes_boundary = true;
+            self.error = None;
+            self.summary = BatchApplySummary::default();
+            match self.inventory.apply_from_last_clear(batch) {
+                Ok(applied) => merge_summary(&mut self.summary, applied),
+                Err(error) => self.error = Some(error),
+            }
+            return;
+        }
         if self.error.is_some() {
             return;
         }
         match self.inventory.apply_batch(batch) {
             Ok(applied) => merge_summary(&mut self.summary, applied),
             Err(error) => self.error = Some(error),
+        }
+    }
+
+    /// Record how many batches the publisher returned in total, including
+    /// tail batches beyond the requested interval that were not folded here.
+    pub(crate) fn note_retained_batches(&mut self, retained_batches: usize) {
+        self.retained_batches = self.retained_batches.max(retained_batches);
+    }
+
+    fn coverage(&self) -> ReplayCoverage {
+        ReplayCoverage::Response {
+            retained_batches: self.retained_batches.max(self.sequences.len()),
         }
     }
 
@@ -837,6 +907,14 @@ impl FencedExactKvInventory {
             inventory: ExactKvInventory::new(index_limits),
             revision: 0,
         }
+    }
+
+    /// Declare the publisher's replay ring capacity; see
+    /// [`KvEventFence::with_publisher_capacity`].
+    #[must_use]
+    pub fn with_publisher_capacity(mut self, capacity: Option<u64>) -> Self {
+        self.fence = self.fence.with_publisher_capacity(capacity);
+        self
     }
 
     #[must_use]
@@ -914,6 +992,14 @@ impl FencedExactKvInventory {
 
     /// Validate and apply a complete inclusive replay response.
     ///
+    /// `retained_batches` is the publisher's whole response size, including
+    /// tail batches newer than the requested interval; it is the evidence
+    /// that a missing leading interval was not evicted from the ring.
+    ///
+    /// Batches before the last all-blocks clear are validated for sequence
+    /// order but never applied: the clear discards them, so their content
+    /// cannot affect the recovered boundary.
+    ///
     /// # Errors
     ///
     /// Returns [`ExactIndexError`] when an authoritative replay violates index
@@ -921,13 +1007,20 @@ impl FencedExactKvInventory {
     pub fn ingest_replay(
         &mut self,
         batches: &[(u64, KvEventBatch)],
+        retained_batches: usize,
     ) -> Result<ReplayBatchOutcome, ExactIndexError> {
         let sequences = batches
             .iter()
             .map(|(sequence, _)| *sequence)
             .collect::<Vec<_>>();
-        let establishes_boundary = batches.iter().any(|(_, batch)| batch.clears_all());
-        let outcome = match self.fence.accept_replay(&sequences, establishes_boundary) {
+        let last_clear = batches.iter().rposition(|(_, batch)| batch.clears_all());
+        let coverage = ReplayCoverage::Response {
+            retained_batches: retained_batches.max(batches.len()),
+        };
+        let outcome = match self
+            .fence
+            .accept_replay(&sequences, last_clear.is_some(), coverage)
+        {
             ReplayAction::Invalid => {
                 self.inventory.reset_generation();
                 Ok(ReplayBatchOutcome::Invalid)
@@ -935,8 +1028,14 @@ impl FencedExactKvInventory {
             ReplayAction::RecoveredObserveOnly => Ok(ReplayBatchOutcome::ObserveOnly),
             ReplayAction::Recovered => {
                 let mut summary = BatchApplySummary::default();
-                for (_, batch) in batches {
-                    match self.inventory.apply_batch(batch) {
+                let start = last_clear.unwrap_or(0);
+                for (position, (_, batch)) in batches.iter().enumerate().skip(start) {
+                    let applied = if Some(position) == last_clear {
+                        self.inventory.apply_from_last_clear(batch)
+                    } else {
+                        self.inventory.apply_batch(batch)
+                    };
+                    match applied {
                         Ok(applied) => merge_summary(&mut summary, applied),
                         Err(error) => {
                             self.fence.generation_changed();
@@ -978,20 +1077,22 @@ impl FencedExactKvInventory {
             self.revision = self.revision.wrapping_add(1);
             return Err(error);
         }
-        let outcome = match self
-            .fence
-            .accept_replay(&stage.sequences, stage.establishes_boundary)
-        {
-            ReplayAction::Invalid => {
-                self.inventory.reset_generation();
-                ReplayBatchOutcome::Invalid
-            }
-            ReplayAction::RecoveredObserveOnly => ReplayBatchOutcome::ObserveOnly,
-            ReplayAction::Recovered => {
-                self.inventory = stage.inventory;
-                ReplayBatchOutcome::Applied(stage.summary)
-            }
-        };
+        let coverage = stage.coverage();
+        let outcome =
+            match self
+                .fence
+                .accept_replay(&stage.sequences, stage.establishes_boundary, coverage)
+            {
+                ReplayAction::Invalid => {
+                    self.inventory.reset_generation();
+                    ReplayBatchOutcome::Invalid
+                }
+                ReplayAction::RecoveredObserveOnly => ReplayBatchOutcome::ObserveOnly,
+                ReplayAction::Recovered => {
+                    self.inventory = stage.inventory;
+                    ReplayBatchOutcome::Applied(stage.summary)
+                }
+            };
         if matches!(
             outcome,
             ReplayBatchOutcome::Applied(_) | ReplayBatchOutcome::Invalid
@@ -1510,7 +1611,7 @@ mod tests {
             2,
         ))]);
         assert!(matches!(
-            state.ingest_replay(&[(2, second), (3, third)]).unwrap(),
+            state.ingest_replay(&[(2, second), (3, third)], 0).unwrap(),
             ReplayBatchOutcome::Applied(_)
         ));
         assert!(state.trusted());
@@ -1544,7 +1645,7 @@ mod tests {
             ),
         ];
         assert!(matches!(
-            state.ingest_replay(&replay).unwrap(),
+            state.ingest_replay(&replay, 0).unwrap(),
             ReplayBatchOutcome::Applied(_)
         ));
         assert!(state.trusted());
@@ -1562,7 +1663,7 @@ mod tests {
             LiveBatchOutcome::Replay { .. }
         ));
         assert_eq!(
-            state.ingest_replay(&[(3, batch(Vec::new()))]).unwrap(),
+            state.ingest_replay(&[(3, batch(Vec::new()))], 0).unwrap(),
             ReplayBatchOutcome::Invalid
         );
         assert!(!state.trusted());
@@ -1602,7 +1703,7 @@ mod tests {
             ),
         ];
         assert!(matches!(
-            state.ingest_replay(&replay).unwrap(),
+            state.ingest_replay(&replay, 0).unwrap(),
             ReplayBatchOutcome::Applied(_)
         ));
         assert!(state.trusted());
@@ -1731,5 +1832,296 @@ mod tests {
         );
         assert!(!state.trusted());
         assert_eq!(state.stats(), ExactIndexStats::default());
+    }
+    fn invalid_shape_batch() -> KvEventBatch {
+        batch(vec![KvEvent::BlockStored(store_event(
+            &[9, 10],
+            None,
+            &[1],
+            2,
+        ))])
+    }
+
+    fn stored(hashes: &[u64], parent: Option<u64>, tokens: &[u32]) -> KvEvent {
+        KvEvent::BlockStored(store_event(hashes, parent, tokens, 2))
+    }
+
+    #[test]
+    fn removed_interior_block_drops_its_hash_and_accepts_a_new_one() {
+        let mut index = ExactKvIndex::new(ExactIndexLimits::default());
+        index
+            .store(&store_event(&[10, 11], None, &[1, 2, 3, 4], 2))
+            .unwrap();
+        // The interior block survives as a hashless node for its descendant.
+        assert_eq!(index.remove(&remove_event(&[10])), 1);
+        let interior = index.node(ROOT_NODE).children[&[1, 2][..]];
+        assert!(!index.node(interior).present);
+        assert_eq!(index.node(interior).external_hash, None);
+        assert_eq!(index.stats().external_hashes, 1);
+
+        // The engine re-stores the same tokens under a new hash.
+        assert_eq!(index.store(&store_event(&[20], None, &[1, 2], 2)), Ok(1));
+        assert_eq!(index.node(interior).external_hash, Some(hash(20)));
+        assert_eq!(index.find_longest(&[1, 2, 3, 4]).unwrap().token_ids, 4);
+        assert_eq!(index.stats().external_hashes, 2);
+
+        // The old hash resolves to nothing; the new one removes the block.
+        assert_eq!(index.remove(&remove_event(&[10])), 0);
+        assert_eq!(index.remove(&remove_event(&[20])), 1);
+        assert_eq!(index.find_longest(&[1, 2, 3, 4]).unwrap().token_ids, 0);
+        assert_eq!(index.remove(&remove_event(&[11])), 1);
+        assert_eq!(index.stats(), ExactIndexStats::default());
+    }
+
+    #[test]
+    fn resident_block_still_rejects_a_conflicting_hash() {
+        let mut index = ExactKvIndex::new(ExactIndexLimits::default());
+        index
+            .store(&store_event(&[10, 11], None, &[1, 2, 3, 4], 2))
+            .unwrap();
+        let before = index.stats();
+        assert_eq!(
+            index.store(&store_event(&[20], None, &[1, 2], 2)),
+            Err(ExactIndexError::ConflictingPath)
+        );
+        assert_eq!(index.stats(), before);
+    }
+
+    #[test]
+    fn restore_after_interior_removal_does_not_fence_live_generation() {
+        let mut state = FencedExactKvInventory::new(8, ExactIndexLimits::default());
+        state
+            .ingest_live(0, &batch(vec![stored(&[10, 11], None, &[1, 2, 3, 4])]))
+            .unwrap();
+        state
+            .ingest_live(1, &batch(vec![KvEvent::BlockRemoved(remove_event(&[10]))]))
+            .unwrap();
+        assert!(matches!(
+            state
+                .ingest_live(2, &batch(vec![stored(&[20], None, &[1, 2])]))
+                .unwrap(),
+            LiveBatchOutcome::Applied(_)
+        ));
+        assert!(state.trusted());
+        assert_eq!(
+            state
+                .find_longest(&[1, 2, 3, 4])
+                .unwrap()
+                .unwrap()
+                .token_ids,
+            4
+        );
+    }
+
+    #[test]
+    fn all_blocks_cleared_resets_pre_clear_group_tracking() {
+        let mut inventory = ExactKvInventory::new(ExactIndexLimits::default());
+        // An unlearned group observed before the clear.
+        let mut unlearned = store_event(&[1], None, &[1, 2], 2);
+        unlearned.group_idx = Some(5);
+        inventory
+            .apply_event(0, &KvEvent::BlockStored(unlearned))
+            .unwrap();
+        // A learned main group with a four-token canonical block.
+        let mut learned = store_event(&[2], None, &[1, 2, 3, 4], 4);
+        learned.kv_cache_spec_kind = Some("full_attention".to_owned());
+        inventory
+            .apply_event(0, &KvEvent::BlockStored(learned))
+            .unwrap();
+        assert_eq!(inventory.group_coverage().unlearned_groups, 1);
+        assert_eq!(inventory.group_coverage().main_groups, 1);
+
+        assert_eq!(
+            inventory.apply_event(0, &KvEvent::AllBlocksCleared),
+            Ok(ApplyOutcome::Cleared)
+        );
+        let coverage = inventory.group_coverage();
+        assert_eq!(coverage.unlearned_groups, 0);
+        // The cache layout itself survives a contents clear.
+        assert_eq!(coverage.main_groups, 1);
+        assert_eq!(inventory.stats(), ExactIndexStats::default());
+
+        // Pre-clear block geometry no longer classifies post-clear orphans.
+        let mut orphan = store_event(&[3], Some(99), &[5, 6], 2);
+        orphan.kv_cache_spec_kind = Some("full_attention".to_owned());
+        assert_eq!(
+            inventory.apply_event(0, &KvEvent::BlockStored(orphan)),
+            Ok(ApplyOutcome::Filtered(FilterReason::OrphanedParent))
+        );
+
+        // A conflicting attention kind is still detected after the clear.
+        let mut conflicting = store_event(&[4], None, &[7, 8], 2);
+        conflicting.kv_cache_spec_kind = Some("sliding_window".to_owned());
+        assert_eq!(
+            inventory.apply_event(0, &KvEvent::BlockStored(conflicting)),
+            Err(ExactIndexError::ConflictingGroupKind)
+        );
+    }
+
+    #[test]
+    fn mid_replay_clear_discards_failing_pre_clear_history() {
+        let mut state = FencedExactKvInventory::new(8, ExactIndexLimits::default());
+        state
+            .ingest_live(0, &batch(vec![stored(&[1], None, &[1, 2])]))
+            .unwrap();
+        assert!(matches!(
+            state.ingest_live(4, &batch(Vec::new())).unwrap(),
+            LiveBatchOutcome::Replay {
+                from: 1,
+                through: 4
+            }
+        ));
+        let replay = vec![
+            (1, invalid_shape_batch()),
+            (
+                2,
+                batch(vec![
+                    stored(&[7], None, &[7, 7]),
+                    KvEvent::AllBlocksCleared,
+                    stored(&[3], None, &[3, 4]),
+                ]),
+            ),
+            (3, batch(vec![stored(&[5], Some(3), &[5, 6])])),
+            (4, batch(Vec::new())),
+        ];
+        let ReplayBatchOutcome::Applied(summary) = state.ingest_replay(&replay, 0).unwrap() else {
+            panic!("a clean post-clear boundary must recover");
+        };
+        assert_eq!(summary.clear_events, 1);
+        assert_eq!(summary.stored_blocks, 2);
+        assert!(state.trusted());
+        // Pre-clear blocks, including those stored before the clear in the
+        // clearing batch and the pre-replay live block, are gone.
+        assert_eq!(state.find_longest(&[1, 2]).unwrap().unwrap().token_ids, 0);
+        assert_eq!(state.find_longest(&[7, 7]).unwrap().unwrap().token_ids, 0);
+        assert_eq!(
+            state
+                .find_longest(&[3, 4, 5, 6])
+                .unwrap()
+                .unwrap()
+                .token_ids,
+            4
+        );
+        assert_eq!(state.stats().token_ids, 4);
+    }
+
+    #[test]
+    fn post_clear_replay_error_still_fences() {
+        let mut state = FencedExactKvInventory::new(8, ExactIndexLimits::default());
+        state.ingest_live(0, &batch(Vec::new())).unwrap();
+        state.ingest_live(3, &batch(Vec::new())).unwrap();
+        let replay = vec![
+            (1, batch(vec![KvEvent::AllBlocksCleared])),
+            (2, invalid_shape_batch()),
+            (3, batch(Vec::new())),
+        ];
+        assert_eq!(
+            state.ingest_replay(&replay, 0),
+            Err(ExactIndexError::InconsistentBlockShape)
+        );
+        assert!(!state.trusted());
+    }
+
+    #[test]
+    fn streamed_full_replay_clear_discards_staged_pre_clear_error() {
+        let mut state = FencedExactKvInventory::new(8, ExactIndexLimits::default());
+        state.ingest_live(3, &batch(Vec::new())).unwrap();
+        let mut replay = state.begin_full_replay();
+        replay.ingest(0, &batch(vec![stored(&[1], None, &[1, 2])]));
+        replay.ingest(1, &invalid_shape_batch());
+        replay.ingest(2, &batch(vec![KvEvent::AllBlocksCleared]));
+        replay.ingest(3, &batch(vec![stored(&[2], None, &[3, 4])]));
+        let ReplayBatchOutcome::Applied(summary) = state.commit_full_replay(replay).unwrap() else {
+            panic!("a clean post-clear boundary must commit");
+        };
+        assert_eq!(summary.clear_events, 1);
+        assert_eq!(summary.stored_blocks, 1);
+        assert!(state.trusted());
+        assert_eq!(state.find_longest(&[1, 2]).unwrap().unwrap().token_ids, 0);
+        assert_eq!(state.find_longest(&[3, 4]).unwrap().unwrap().token_ids, 2);
+    }
+
+    #[test]
+    fn streamed_full_replay_error_after_last_clear_still_fences() {
+        let mut state = FencedExactKvInventory::new(8, ExactIndexLimits::default());
+        state.ingest_live(2, &batch(Vec::new())).unwrap();
+        let mut replay = state.begin_full_replay();
+        replay.ingest(0, &batch(vec![KvEvent::AllBlocksCleared]));
+        replay.ingest(1, &invalid_shape_batch());
+        replay.ingest(2, &batch(Vec::new()));
+        assert_eq!(
+            state.commit_full_replay(replay),
+            Err(ExactIndexError::InconsistentBlockShape)
+        );
+        assert!(!state.trusted());
+    }
+
+    #[test]
+    fn full_replay_missing_leading_history_needs_ring_capacity_evidence() {
+        let replayed = || {
+            vec![
+                (2, batch(vec![stored(&[1], None, &[1, 2])])),
+                (3, batch(Vec::new())),
+            ]
+        };
+        // Unknown ring capacity: sequences 0-1 may have been evicted.
+        let mut state = FencedExactKvInventory::new(8, ExactIndexLimits::default());
+        state.ingest_live(3, &batch(Vec::new())).unwrap();
+        assert_eq!(
+            state.ingest_replay(&replayed(), 2).unwrap(),
+            ReplayBatchOutcome::Invalid
+        );
+        assert!(!state.trusted());
+        assert_eq!(state.stats(), ExactIndexStats::default());
+
+        // A full ring (requested plus tail) cannot rule out eviction.
+        let mut state = FencedExactKvInventory::new(8, ExactIndexLimits::default())
+            .with_publisher_capacity(Some(3));
+        state.ingest_live(3, &batch(Vec::new())).unwrap();
+        assert_eq!(
+            state.ingest_replay(&replayed(), 3).unwrap(),
+            ReplayBatchOutcome::Invalid
+        );
+
+        // A response smaller than the ring proves the gap was no-op steps.
+        let mut state = FencedExactKvInventory::new(8, ExactIndexLimits::default())
+            .with_publisher_capacity(Some(4));
+        state.ingest_live(3, &batch(Vec::new())).unwrap();
+        assert!(matches!(
+            state.ingest_replay(&replayed(), 3).unwrap(),
+            ReplayBatchOutcome::Applied(_)
+        ));
+        assert!(state.trusted());
+        assert_eq!(state.find_longest(&[1, 2]).unwrap().unwrap().token_ids, 2);
+    }
+
+    #[test]
+    fn streamed_full_replay_counts_unfolded_tail_as_ring_occupancy() {
+        let staged_replay = |state: &FencedExactKvInventory| {
+            let mut replay = state.begin_full_replay();
+            replay.ingest(2, &batch(vec![stored(&[1], None, &[1, 2])]));
+            replay.ingest(3, &batch(Vec::new()));
+            replay
+        };
+        let mut state = FencedExactKvInventory::new(8, ExactIndexLimits::default())
+            .with_publisher_capacity(Some(3));
+        state.ingest_live(3, &batch(Vec::new())).unwrap();
+        let mut replay = staged_replay(&state);
+        // One tail batch beyond `through` filled the three-entry ring.
+        replay.note_retained_batches(3);
+        assert_eq!(
+            state.commit_full_replay(replay).unwrap(),
+            ReplayBatchOutcome::Invalid
+        );
+
+        let mut state = FencedExactKvInventory::new(8, ExactIndexLimits::default())
+            .with_publisher_capacity(Some(3));
+        state.ingest_live(3, &batch(Vec::new())).unwrap();
+        let replay = staged_replay(&state);
+        assert!(matches!(
+            state.commit_full_replay(replay).unwrap(),
+            ReplayBatchOutcome::Applied(_)
+        ));
+        assert!(state.trusted());
     }
 }

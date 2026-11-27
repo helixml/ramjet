@@ -32,6 +32,27 @@ pub enum ReplayAction {
     Invalid,
 }
 
+/// What a replay response proves about retained history before its first
+/// returned batch.
+///
+/// vLLM answers a replay request with every batch still in its ring buffer
+/// whose sequence is at or after the requested start, in order. Missing
+/// sequence numbers *between* returned batches are therefore no-op scheduler
+/// steps. A missing *leading* interval is ambiguous: it is either no-op steps
+/// or batches the ring evicted. Only the evidence below distinguishes them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplayCoverage {
+    /// A complete response to one replay request. `retained_batches` counts
+    /// every batch the publisher returned, including tail batches newer than
+    /// the requested interval. Eviction of a batch at or after the requested
+    /// start leaves the ring full of newer batches, so a response smaller
+    /// than the publisher's ring capacity proves nothing was evicted.
+    Response { retained_batches: usize },
+    /// Batches that continue a response whose earlier batches were already
+    /// accepted. Nothing can be missing between batches of one response.
+    Continuation,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PendingReplay {
     from: u64,
@@ -46,6 +67,7 @@ pub struct KvEventFence {
     generation: u64,
     replay_limit: u64,
     pending: Option<PendingReplay>,
+    publisher_capacity: Option<u64>,
 }
 
 impl KvEventFence {
@@ -57,7 +79,18 @@ impl KvEventFence {
             generation: 0,
             replay_limit,
             pending: None,
+            publisher_capacity: None,
         }
+    }
+
+    /// Declare the publisher's replay ring capacity (vLLM `buffer_steps`).
+    ///
+    /// Without it, a replay whose first batch is newer than the requested
+    /// start can only be trusted when it also retains an all-blocks clear.
+    #[must_use]
+    pub const fn with_publisher_capacity(mut self, capacity: Option<u64>) -> Self {
+        self.publisher_capacity = capacity;
+        self
     }
 
     #[must_use]
@@ -165,17 +198,27 @@ impl KvEventFence {
     }
 
     /// Validate a replay response before its payloads are committed.
-    pub fn accept_replay(&mut self, sequences: &[u64], establishes_boundary: bool) -> ReplayAction {
+    ///
+    /// The response must end exactly at the requested `through` and be
+    /// strictly increasing. vLLM's sequence tracks scheduler steps while the
+    /// publisher retains only steps that emitted a KV event, so missing
+    /// sequence numbers between returned batches are authoritative no-ops. A
+    /// response beginning after the requested start is accepted only when
+    /// [`Self::leading_edge_proven`] rules out ring-buffer eviction.
+    pub fn accept_replay(
+        &mut self,
+        sequences: &[u64],
+        establishes_boundary: bool,
+        coverage: ReplayCoverage,
+    ) -> ReplayAction {
         let Some(pending) = self.pending else {
             return ReplayAction::Invalid;
         };
-        // vLLM's sequence tracks scheduler steps while the publisher retains
-        // only steps that emitted a KV event. Missing sequence numbers are
-        // therefore authoritative no-ops, not missing replay messages.
-        let valid_bounds = sequences
-            .first()
-            .is_some_and(|first| *first >= pending.from)
-            && sequences.last() == Some(&pending.through);
+        let valid_bounds = sequences.first().is_some_and(|first| {
+            *first == pending.from
+                || (*first > pending.from
+                    && self.leading_edge_proven(establishes_boundary, coverage))
+        }) && sequences.last() == Some(&pending.through);
         let strictly_increasing = sequences.windows(2).all(|pair| pair[0] < pair[1]);
         if !valid_bounds || !strictly_increasing {
             self.pending = None;
@@ -192,6 +235,33 @@ impl KvEventFence {
             ReplayAction::Recovered
         } else {
             ReplayAction::RecoveredObserveOnly
+        }
+    }
+
+    /// Whether the interval before a replay's first returned batch can only
+    /// have been no-op scheduler steps, or no longer matters.
+    ///
+    /// * A retained all-blocks clear makes every earlier batch irrelevant, and
+    ///   an evicted batch is necessarily older than every retained one.
+    /// * A continuation of an accepted response cannot omit a retained batch.
+    /// * A response with fewer batches than the ring holds proves that no
+    ///   batch at or after the requested start was evicted.
+    ///
+    /// Anything else, including an unknown ring capacity, fails closed.
+    const fn leading_edge_proven(
+        &self,
+        establishes_boundary: bool,
+        coverage: ReplayCoverage,
+    ) -> bool {
+        if establishes_boundary {
+            return true;
+        }
+        match coverage {
+            ReplayCoverage::Continuation => true,
+            ReplayCoverage::Response { retained_batches } => match self.publisher_capacity {
+                Some(capacity) => (retained_batches as u64) < capacity,
+                None => false,
+            },
         }
     }
 
@@ -243,6 +313,10 @@ impl KvEventFence {
 mod tests {
     use super::*;
 
+    const fn response(retained_batches: usize) -> ReplayCoverage {
+        ReplayCoverage::Response { retained_batches }
+    }
+
     #[test]
     fn startup_sequence_zero_establishes_authoritative_generation() {
         let mut fence = KvEventFence::new(16);
@@ -263,7 +337,7 @@ mod tests {
         );
         assert!(!fence.trusted());
         assert_eq!(
-            fence.accept_replay(&[0, 1, 2, 3], false),
+            fence.accept_replay(&[0, 1, 2, 3], false, response(4)),
             ReplayAction::Recovered
         );
         assert!(fence.trusted());
@@ -276,7 +350,7 @@ mod tests {
         assert!(fence.prepare_full_replay(3));
         assert!(!fence.trusted());
         assert_eq!(
-            fence.accept_replay(&[0, 1, 2, 3], false),
+            fence.accept_replay(&[0, 1, 2, 3], false, response(4)),
             ReplayAction::Recovered
         );
         assert!(fence.trusted());
@@ -299,7 +373,10 @@ mod tests {
             }
         );
         assert!(!fence.trusted());
-        assert_eq!(fence.accept_replay(&[1, 3], false), ReplayAction::Recovered);
+        assert_eq!(
+            fence.accept_replay(&[1, 3], false, response(2)),
+            ReplayAction::Recovered
+        );
         assert!(fence.trusted());
         assert_eq!(fence.ingest(4, false), IngestAction::Apply);
     }
@@ -315,7 +392,10 @@ mod tests {
                 through: 2
             }
         );
-        assert_eq!(fence.accept_replay(&[1], false), ReplayAction::Invalid);
+        assert_eq!(
+            fence.accept_replay(&[1], false, response(1)),
+            ReplayAction::Invalid
+        );
         assert!(!fence.trusted());
         let generation = fence.generation();
         assert_eq!(fence.ingest(10, false), IngestAction::UnrecoverableGap);
@@ -344,7 +424,7 @@ mod tests {
             }
         );
         assert_eq!(
-            fence.accept_replay(&[11, 12, 13], false),
+            fence.accept_replay(&[11, 12, 13], false, response(3)),
             ReplayAction::RecoveredObserveOnly
         );
         assert!(!fence.trusted());
@@ -363,7 +443,7 @@ mod tests {
         );
         let generation = fence.generation();
         assert_eq!(
-            fence.accept_replay(&[11, 12], true),
+            fence.accept_replay(&[11, 12], true, response(2)),
             ReplayAction::Recovered
         );
         assert!(fence.trusted());
@@ -380,6 +460,110 @@ mod tests {
         assert!(!fence.trusted());
         assert_eq!(fence.next_sequence(), None);
         assert_eq!(fence.ingest(0, true), IngestAction::ResetAndApply);
+        assert!(fence.trusted());
+    }
+
+    #[test]
+    fn startup_replay_missing_leading_history_fails_closed_without_capacity() {
+        let mut fence = KvEventFence::new(16);
+        assert_eq!(
+            fence.ingest(3, false),
+            IngestAction::Replay {
+                from: 0,
+                through: 3
+            }
+        );
+        let generation = fence.generation();
+        // Sequences 0 and 1 may be no-op steps or evicted ring entries; with
+        // no ring capacity the replay cannot tell them apart.
+        assert_eq!(
+            fence.accept_replay(&[2, 3], false, response(2)),
+            ReplayAction::Invalid
+        );
+        assert!(!fence.trusted());
+        assert!(fence.generation() > generation);
+    }
+
+    #[test]
+    fn evicting_ring_cannot_restore_trust() {
+        // A two-entry ring that has evicted sequence 0 returns exactly its
+        // capacity: eviction cannot be ruled out.
+        let mut fence = KvEventFence::new(16).with_publisher_capacity(Some(2));
+        fence.ingest(3, false);
+        assert_eq!(
+            fence.accept_replay(&[2, 3], false, response(2)),
+            ReplayAction::Invalid
+        );
+        assert!(!fence.trusted());
+
+        // A tail newer than `through` also occupies the ring.
+        let mut fence = KvEventFence::new(16).with_publisher_capacity(Some(3));
+        fence.ingest(3, false);
+        assert_eq!(
+            fence.accept_replay(&[2, 3], false, response(3)),
+            ReplayAction::Invalid
+        );
+    }
+
+    #[test]
+    fn under_capacity_response_proves_sparse_leading_steps() {
+        let mut fence = KvEventFence::new(16).with_publisher_capacity(Some(4));
+        fence.ingest(3, false);
+        assert_eq!(
+            fence.accept_replay(&[2, 3], false, response(3)),
+            ReplayAction::Recovered
+        );
+        assert!(fence.trusted());
+        assert_eq!(fence.ingest(4, false), IngestAction::Apply);
+    }
+
+    #[test]
+    fn incremental_gap_with_missing_leading_sequence_fails_closed() {
+        let mut fence = KvEventFence::new(16);
+        fence.ingest(0, true);
+        assert_eq!(
+            fence.ingest(5, false),
+            IngestAction::Replay {
+                from: 1,
+                through: 5
+            }
+        );
+        assert_eq!(
+            fence.accept_replay(&[3, 5], false, response(2)),
+            ReplayAction::Invalid
+        );
+        assert!(!fence.trusted());
+    }
+
+    #[test]
+    fn retained_clear_makes_leading_eviction_irrelevant() {
+        let mut fence = KvEventFence::new(16);
+        fence.ingest(6, false);
+        let generation = fence.generation();
+        assert_eq!(
+            fence.accept_replay(&[4, 5, 6], true, response(3)),
+            ReplayAction::Recovered
+        );
+        assert!(fence.trusted());
+        assert!(fence.generation() > generation);
+    }
+
+    #[test]
+    fn continuation_of_an_accepted_response_keeps_sparse_semantics() {
+        let mut fence = KvEventFence::new(16);
+        fence.ingest(0, true);
+        fence.ingest(1, false);
+        assert_eq!(
+            fence.ingest(4, false),
+            IngestAction::Replay {
+                from: 2,
+                through: 4
+            }
+        );
+        assert_eq!(
+            fence.accept_replay(&[4], false, ReplayCoverage::Continuation),
+            ReplayAction::Recovered
+        );
         assert!(fence.trusted());
     }
 }
